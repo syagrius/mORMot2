@@ -744,6 +744,7 @@ begin
     fSocketClass := THttpClientSocket;
   fSocket := fSocketClass.Open(
     fServer, fPort, nlTcp, fConnectTimeout, fHttps, @fExtendedOptions.TLS);
+    fSocket.UserAgent:=useragent ; // Syagrius.Novelt: User agent was not initialized
   {$ifdef VERBOSECLIENTLOG}
   if LogClass <> nil then
     fSocket.OnLog := LogClass.DoLog; // verbose log
