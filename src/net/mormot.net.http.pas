@@ -108,7 +108,8 @@ function AuthorizationBearer(const AuthToken: RawUtf8): RawUtf8;
 
 /// will remove most usual HTTP headers which are to be recomputed on sending
 // - as used e.g. during TPublicRelay process from mormot.net.relay
-function PurgeHeaders(const headers: RawUtf8): RawUtf8;
+function PurgeHeaders(const headers: RawUtf8; trim: boolean = false;
+  upIgnore: PPAnsiChar = nil): RawUtf8;
 
 /// search, copy and remove a given HTTP header
 // - FindNameValue() makes search&copy, but this function also REMOVES the header
@@ -268,6 +269,8 @@ type
     hrsSendBody,
     hrsResponseDone,
     hrsUpgraded,
+    hrsConnect,
+    hrsSendHeaders,
     hrsErrorPayloadTooLarge,
     hrsErrorRejected,
     hrsErrorMisuse,
@@ -349,6 +352,8 @@ type
       nointern: boolean);
     function ProcessParseLine(var st: TProcessParseLine): boolean;
       {$ifdef HASINLINE} inline; {$endif}
+    function ParseHttp(P: PUtf8Char): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure GetTrimmed(P, P2: PUtf8Char; L: PtrInt; var result: RawUtf8;
       nointern: boolean = false);
       {$ifdef HASINLINE} inline; {$endif}
@@ -427,10 +432,15 @@ type
     /// same as HeaderGetValue('CONTENT-ENCODING'), but retrieved by ParseHeader
     // and mapped into the Compress[] array
     CompressContentEncoding: integer;
-    /// reset this request context to be used without any ProcessInit/Read/Write
-    procedure Clear;
-    /// parse CommandUri into CommandMethod/CommandUri fields
+    /// reset this request context to be used prior to any ProcessInit/Read/Write
+    procedure Reset;
+    /// parse CommandUri into CommandMethod/CommandUri fields on server side
+    // - e.g. from CommandUri = 'GET /uri HTTP/1.1'
     function ParseCommand: boolean;
+    /// parse CommandUri into result fields on server side
+    // - e.g. from CommandUri = 'HTTP/1.1 200 OK'
+    // - returns 0 on parsing error, or the HTTP status (e.g. 200)
+    function ParseResponse(out RespStatus: integer): boolean;
     /// parse a HTTP header text line into Header and fill internal properties
     // - with default HeadersUnFiltered=false, only relevant headers are retrieved:
     // use directly the ContentLength/ContentType/ServerInternalState/Upgrade
@@ -466,14 +476,15 @@ type
     // - and update ResponseFlags and ContentLength properties
     function ValidateRange: boolean;
     /// (re)initialize the HTTP Server state machine for ProcessRead/ProcessWrite
-    procedure ProcessInit(InStream: TStream);
+    procedure ProcessInit;
       {$ifdef HASINLINE} inline; {$endif}
     /// receiving socket entry point of our asynchronous HTTP Server
     // - to be called with the incoming bytes from the socket receive buffer
     // - caller should have checked that current State is in HTTP_REQUEST_READ
     // - returns true if a new State was reached, or false if some more
     // input is needed
-    function ProcessRead(var st: TProcessParseLine): boolean;
+    function ProcessRead(var st: TProcessParseLine;
+      returnOnStateChange: boolean): boolean;
     /// compress Content according to CompressAcceptHeader, adding headers
     // - e.g. 'Content-Encoding: synlz' header if compressed using synlz
     // - and if Content is not '', will add 'Content-Type: ' header
@@ -512,11 +523,13 @@ const
      hrsGetBodyChunkedHexNext,
      hrsGetBodyChunkedData,
      hrsGetBodyChunkedDataVoidLine,
-     hrsGetBodyContentLength];
+     hrsGetBodyContentLength,
+     hrsConnect];
 
   /// when THttpRequestContext.State is expected some ProcessWrite() data
   HTTP_REQUEST_WRITE =
-    [hrsSendBody];
+    [hrsSendBody,
+     hrsSendHeaders];
 
   /// rfProgressiveStatic mode custom HTTP header to supply the expected file size
   STATICFILE_PROGSIZE = 'STATIC-PROGSIZE:';
@@ -618,7 +631,7 @@ type
   THttpServerConnectionIDDynArray = array of THttpServerConnectionID;
 
   /// an opaque connection-specific pointers identifier with a strong type
-  // - each THttpAsyncConnection or THttpServerSocket raw connection instance
+  // - each THttpAsyncServerConnection or THttpServerSocket raw connection instance
   // maintains those two abstract PtrUInt tags, as a fConnectionOpaque field
   // - match TRestServerConnectionOpaque as defined in mormot.rest.core
   THttpServerConnectionOpaque = record
@@ -2390,7 +2403,7 @@ const
     'ACCEPT:',
     nil);
 
-function PurgeHeaders(const headers: RawUtf8): RawUtf8;
+function PurgeHeaders(const headers: RawUtf8; trim: boolean; upIgnore: PPAnsiChar): RawUtf8;
 var
   pos, len: array[byte] of word;
   n, purged, i, l, tot: PtrInt;
@@ -2399,6 +2412,8 @@ begin
   n := 0;
   tot := 0;
   purged := 0;
+  if upIgnore = nil then
+    upIgnore := @TOBEPURGED;
   // put all allowed headers in pos[]/len[]
   P := pointer(headers);
   if length(headers) shr 16 = 0 then // defined as word
@@ -2407,14 +2422,15 @@ begin
       if P^ = #0 then
         break;
       next := GotoNextLine(P);
-      if IdemPPChar(P, @TOBEPURGED) < 0 then
+      if IdemPPChar(P, upIgnore) < 0 then
       begin
         if n = high(len) then
           break;
         pos[n] := P - pointer(headers);
         l := next - P;
         if next = nil then
-          if purged = 0 then
+          if (purged = 0) and
+             not trim then
             break
           else
             l := StrLen(P);
@@ -2427,7 +2443,8 @@ begin
       P := next;
     end;
   // recreate an expurgated headers set
-  if purged = 0 then
+  if (purged = 0) and
+     not trim then
     // nothing to purge
     result := headers
   else if tot = 0 then
@@ -2436,11 +2453,23 @@ begin
   else
   begin
     // allocate at once and append all non-purged headers
+    dec(n);
+    if trim then
+    begin
+      P := PUtf8Char(pointer(headers)) + {%H-}pos[n];
+      l := {%H-}len[n];
+      dec(tot, l);
+      while (l > 0) and
+            (P[l - 1] < ' ') do
+        dec(l); // trim right
+      inc(tot, l);
+      len[n] := l;
+    end;
     FastSetString(result, tot);
     P := pointer(result);
-    for i := 0 to n - 1 do
+    for i := 0 to n do
     begin
-      MoveFast(PByteArray(headers)[{%H-}pos[i]], P^, {%H-}len[i]);
+      MoveFast(PByteArray(headers)[pos[i]], P^, len[i]);
       inc(P, len[i]);
     end;
     assert(P - pointer(result) = tot);
@@ -3047,7 +3076,7 @@ end;
 
 { THttpRequestContext }
 
-procedure THttpRequestContext.Clear;
+procedure THttpRequestContext.Reset;
 begin
   Head.Reset;  // set Len to 0, but keep existing fBuffer
   Process.Reset;
@@ -3055,21 +3084,22 @@ begin
   HeaderFlags := [];
   ResponseFlags := [];
   Options := [];
-  Headers := '';
-  ContentType := '';
+  FastAssignNew(Headers);
+  FastAssignNew(ContentType);
   if Upgrade <> '' then
-    Upgrade := '';
+    FastAssignNew(Upgrade);
   if BearerToken <> '' then
-    BearerToken := '';
+    FastAssignNew(BearerToken);
   if UserAgent <> '' then
-    UserAgent := '';
+    FastAssignNew(UserAgent);
   if Referer <> '' then
-    Referer := '';
+    FastAssignNew(Referer);
   RangeOffset := 0;
   RangeLength := -1;
-  Content := '';
+  FastAssignNew(Content);
   ContentLength := -1;
   ContentLastModified := 0;
+  ContentStream := nil;
   ServerInternalState := 0;
   CompressContentEncoding := -1;
   integer(CompressAcceptHeader) := 0;
@@ -3132,6 +3162,7 @@ begin
   // your network architecture suffers from HTTP request smuggling
   // - much less readable than cascaded IdemPPChar(), but slightly faster ;)
   case PCardinal(P)^ or $20202020 of
+    // content-length/type/encoding
     ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('t') shl 24:
       if PCardinal(P + 4)^ or $20202020 =
         ord('e') + ord('n') shl 8 + ord('t') shl 16 + ord('-') shl 24 then
@@ -3192,6 +3223,7 @@ begin
                   end;
             end;
         end;
+    // host
     ord('h') + ord('o') shl 8 + ord('s') shl 16 + ord('t') shl 24:
       if P[4] = ':' then
       begin
@@ -3211,6 +3243,7 @@ begin
         end;
         // always add to headers - 'host:' sometimes parsed directly
       end;
+    // connection: close/upgrade/keep-alive
     ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('n') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
           ord('e') + ord('c') shl 8 + ord('t') shl 16 + ord('i') shl 24) and
@@ -3257,6 +3290,7 @@ begin
             end;
         end;
       end;
+    // accept-encoding
     ord('a') + ord('c') shl 8 + ord('c') shl 16 + ord('e') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('p') + ord('t') shl 8 + ord('-') shl 16 + ord('e') shl 24) and
@@ -3270,6 +3304,7 @@ begin
           if not HeadersUnFiltered then
             exit;
         end;
+    // user-agent
     ord('u') + ord('s') shl 8 + ord('e') shl 16 + ord('r') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('-') + ord('a') shl 8 + ord('g') shl 16 + ord('e') shl 24) and
@@ -3281,6 +3316,7 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // server-internalstate
     ord('s') + ord('e') shl 8 + ord('r') shl 16 + ord('v') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('e') + ord('r') shl 8 + ord('-') shl 16 + ord('i') shl 24) and
@@ -3298,6 +3334,7 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // expect
     ord('e') + ord('x') shl 8 + ord('p') shl 16 + ord('e') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('c') + ord('t') shl 8 + ord(':') shl 16 + ord(' ') shl 24) and
@@ -3309,6 +3346,7 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // authorization
     ord('a') + ord('u') shl 8 + ord('t') shl 16 + ord('h') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('o') + ord('r') shl 8 + ord('i') shl 16 + ord('z') shl 24) and
@@ -3325,6 +3363,7 @@ begin
           GetTrimmed(P + 22, P2, PLen, BearerToken, {nointern=}true);
         // always allow FindNameValue(..., HEADER_BEARER_UPPER, ...) search
       end;
+    // range
     ord('r') + ord('a') shl 8 + ord('n') shl 16 + ord('g') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
         ord('e') + ord(':') shl 8 + ord(' ') shl 16 + ord('b') shl 24) and
@@ -3359,6 +3398,7 @@ begin
           if not HeadersUnFiltered then
             exit;
         end;
+    // upgrade
     ord('u') + ord('p') shl 8 + ord('g') shl 16 + ord('r') shl 24:
       if PCardinal(P + 4)^ or $00202020 =
         ord('a') + ord('d') shl 8 + ord('e') shl 16 + ord(':') shl 24 then
@@ -3368,6 +3408,7 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // referer
     ord('r') + ord('e') shl 8 + ord('f') shl 16 + ord('e') shl 24:
       if PCardinal(P + 4)^ or $00202020 =
         ord('r') + ord('e') shl 8 + ord('r') shl 16 + ord(':') shl 24 then
@@ -3377,6 +3418,7 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // transfer-encoding
     ord('t') + ord('r') shl 8 + ord('a') shl 16 + ord('n') shl 24:
       if IdemPChar(P + 4, 'SFER-ENCODING: CHUNKED') then
       begin
@@ -3385,6 +3427,15 @@ begin
         if not HeadersUnFiltered then
           exit;
       end;
+    // last-modified
+    ord('l') + ord('a') shl 8 + ord('s') shl 16 + ord('t') shl 24:
+      if (PCardinal(P + 4)^ or $20202020 =
+            ord('-') + ord('m') shl 8 + ord('o') shl 16 + ord('d') shl 24) and
+         (PCardinal(P + 8)^ or $20202020 =
+            ord('i') + ord('f') shl 8 + ord('i') shl 16 + ord('e') shl 24) and
+         (PWord(P + 12)^ or $2020 = ord('d') + ord(':') shl 8) then
+        // 'LAST-MODIFIED: Sat, 10 Feb 2024 10:10:38 GMT'
+        ContentLastModified := HttpDateToUnixTimeBuffer(P + 14);
   end;
   // store meaningful headers into WorkBuffer, if not already there
   if PLen < 0 then
@@ -3421,7 +3472,9 @@ var
   p: PUtf8Char;
   u: RawUtf8;
 begin
-  ProcessInit(aInStream);
+  Reset;
+  State := hrsGetCommand;
+  ContentStream := aInStream;
   Content := aInContent;
   result := false;
   CommandUri := aCommand;
@@ -3439,6 +3492,23 @@ begin
   result := true;
 end;
 
+function THttpRequestContext.ParseHttp(P: PUtf8Char): boolean;
+begin
+  result := false;
+  if (PCardinal(P)^ <>
+       ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) or
+     (PCardinal(P + 4)^ and $ffffff <>
+       ord('/') + ord('1') shl 8 + ord('.') shl 16) then
+    exit;
+  if P[7] <> '1' then
+    include(ResponseFlags, rfHttp10);
+  if not (hfConnectionClose in HeaderFlags) then
+    if not (hfConnectionKeepAlive in HeaderFlags) and // allow HTTP1.0+keepalive
+       (rfHttp10 in ResponseFlags) then // HTTP/1.1 is keep-alive by default
+      include(HeaderFlags, hfConnectionClose); // standard HTTP/1.0
+  result := true;
+end;
+
 var
   _GETVAR, _POSTVAR, _HEADVAR: RawUtf8;
 
@@ -3450,6 +3520,7 @@ begin
   result := false;
   if nfHeadersParsed in HeaderFlags then
     exit;
+  // e.g. from CommandUri = 'GET /uri HTTP/1.1'
   P := pointer(CommandUri);
   if P = nil then
     exit;
@@ -3497,18 +3568,26 @@ begin
   L := P - B;
   MoveFast(B^, pointer(CommandUri)^, L); // in-place extract URI from Command
   FakeLength(CommandUri, L);
-  if (PCardinal(P + 1)^ <>
-       ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) or
-     (PCardinal(P + 5)^ and $ffffff <>
-       ord('/') + ord('1') shl 8 + ord('.') shl 16) then
-    exit;
-  if P[8] <> '1' then
-    include(ResponseFlags, rfHttp10);
-  if not (hfConnectionClose in HeaderFlags) then
-    if not (hfConnectionKeepAlive in HeaderFlags) and // allow HTTP1.0+keepalive
-       (rfHttp10 in ResponseFlags) then // HTTP/1.1 is keep-alive by default
-      include(HeaderFlags, hfConnectionClose); // standard HTTP/1.0
-  result := true;
+  result := ParseHttp(P + 1); // parse HTTP/1.x just after P^ = ' '
+end;
+
+function THttpRequestContext.ParseResponse(out RespStatus: integer): boolean;
+var
+  P: PUtf8Char;
+begin
+  // e.g. from CommandUri = 'HTTP/1.1 200 OK'
+  P := pointer(CommandUri);
+  if (P <> nil) and
+     not (nfHeadersParsed in HeaderFlags) and
+     ParseHttp(P) and
+     (P[8] = ' ') then
+  begin
+    RespStatus := GetCardinal(P + 9);
+    result := (RespStatus >= 200) and
+              (RespStatus <= 599);
+  end
+  else
+    result := false;
 end;
 
 procedure THttpRequestContext.UncompressData;
@@ -3523,11 +3602,11 @@ begin
   end;
 end;
 
-procedure THttpRequestContext.ProcessInit(InStream: TStream);
+procedure THttpRequestContext.ProcessInit;
 begin
-  Clear;
-  ContentStream := InStream;
-  fContentLeft := 0;
+  RangeLength := -1;
+  ContentLength := -1;
+  CompressContentEncoding := -1;
   State := hrsGetCommand;
 end;
 
@@ -3564,7 +3643,8 @@ begin
     result := false; // not enough input
 end;
 
-function THttpRequestContext.ProcessRead(var st: TProcessParseLine): boolean;
+function THttpRequestContext.ProcessRead(
+  var st: TProcessParseLine; returnOnStateChange: boolean): boolean;
 var
   previous: THttpRequestState;
 begin
@@ -3708,7 +3788,8 @@ begin
       State := hrsErrorMisuse; // out of context State for input
     end;
   until (State <> previous) and
-        ((State = hrsGetBodyChunkedHexFirst) or
+        (returnOnStateChange or
+         (State = hrsGetBodyChunkedHexFirst) or
          (State = hrsGetBodyContentLength) or
          (State >= hrsWaitProcessing));
   result := true; // notify the next main state change
@@ -4044,6 +4125,7 @@ begin
   result := hrpSend;
 end;
 
+
 function ToText(st: THttpRequestState): PShortString;
 begin
   result := GetEnumName(TypeInfo(THttpRequestState), ord(st));
@@ -4100,7 +4182,7 @@ end;
 
 procedure THttpSocket.HttpStateReset;
 begin
-  Http.Clear;
+  Http.Reset;
   fBodyRetrieved := false;
 end;
 

@@ -201,6 +201,8 @@ type
     // - by default, blocking connect() timeout is not customizable: this method
     // will call MakeAsync/MakeBlocking and wait for the actual connection
     // - as called by NewSocket() high-level wrapper function
+    // - you can specify ms<0 to make an asynchronous connect() on this address
+    // without waiting yet
     function SocketConnect(socket: TNetSocket; ms: integer): TNetResult;
     /// bind a TNetSocket instance to this network address
     function SocketBind(socket: TNetSocket): TNetResult;
@@ -944,7 +946,7 @@ procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean = false;
 var
   /// global factory for a new TLS encrypted layer for TCrtSocket
   // - on Windows, this unit will set a factory using the system SChannel API
-  // - on other targets, could be set by the mormot.lib.openssl11.pas unit
+  // - could also be overriden e.g. by the mormot.lib.openssl11.pas unit
   NewNetTls: function: INetTls;
 
   /// global callback set to TNetTlsContext.AfterAccept from InitNetTlsContext()
@@ -1274,6 +1276,7 @@ type
     wieRecv,
     wieSend,
     wieAccept,
+    wieConnect,
     wieCustom1,
     wieCustom2,
     wieCustom3,
@@ -1311,7 +1314,8 @@ type
   // - IOCP logic does not match select() or poll/epoll() APIs so it can't
   // inherit from TPollAbstract, and requires its own stand-alone class
   // - will handle wieRecv/wieSend events on a set of subscribed sockets
-  // - it could also track asynchronous AcceptEx() calls as wieAccept event
+  // - wieAccept/wieConnect events would track asynchronous AcceptEx() or
+  // ConnectEx() calls
   // - mormot.net.async will check USE_WINIOCP conditional to use this class
   TWinIocp = class
   protected
@@ -1342,12 +1346,15 @@ type
     // avoid potential WSAENOBUFS errors (the "zero read byte trick")
     // - for wieSend, you would rather specify a buffer to be sent asynchronously
     // and avoid GetNext() to return immediately even if send() would fail
-    // - for wieAccept, you can specify a pre-allocated TNetSocket to use
+    // - for wieAccept, you can specify a pre-allocated TNetSocket (default nil
+    // will allocate one in the method)
+    // - for wieConnect, you need to specify a TNetSocket (not already bound) in
+    // netsock and a TNetAddr in buf/buflen
     function PrepareNext(one: PWinIocpSubscription; event: TWinIocpEvent;
-      buf: pointer = nil; buflen: integer = 0; acceptsock: TNetSocket = nil): boolean;
+      buf: pointer = nil; buflen: integer = 0; netsock: TNetSocket = nil): boolean;
     /// add manually an event to the IOCP queue
     // - it won't make any actual access to a socket, just append an event to
-    // the queue, as regular wieRecv/wieSend/wieAccept or any wieCustom*
+    // the queue, as regular wieRecv/wieSend/wieAccept/wieConnect or any wieCustom*
     function Enqueue(one: PWinIocpSubscription; event: TWinIocpEvent;
       bytes: cardinal = 0): boolean;
     /// pick a pending task from the internal queue within a specified timeout
@@ -1355,6 +1362,7 @@ type
     // - for wieRecv/wieSend, once data is recv/send from result^.Socket,
     // call PrepareNext()
     // - for wieAccept, call then GetNextAccept() and PrepareNext()
+    // - for wieConnect, start using the socket, e.g. with wieRecv/wieSend events
     // - for wieCustom*, it depends on your own custom logic
     function GetNext(timeoutms: cardinal;
       out event: TWinIocpEvent; out bytes: cardinal): PWinIocpSubscription;
@@ -1423,7 +1431,7 @@ type
     // - e.g. from 'https://user:password@server:port/address'
     Password: RawUtf8;
     /// the resource address, including optional parameters
-    // - e.g. '/category/name/10?param=1'
+    // - e.g. 'category/name/10?param=1'
     Address: RawUtf8;
     /// reset all stored information
     procedure Clear;
@@ -2388,6 +2396,8 @@ begin
   if result <> nrOK then
     exit;
   connect(socket.Socket, @Addr, Size); // non-blocking connect() once
+  if ms < 0 then
+    exit; // don't wait now
   socket.MakeBlocking;
   repeat
     status := socket.WaitFor(20, [neWrite, neError, neClosed]);

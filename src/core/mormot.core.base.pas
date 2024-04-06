@@ -3977,6 +3977,7 @@ type
     // the current position with the supplied data
     function Write(const Buffer; Count: Longint): Longint; override;
     /// retrieve the stored content from a given position, as UTF-8 text
+    // - warning: may directly return DataString and reset its value to ''
     procedure GetAsText(StartPos, Len: PtrInt; var Text: RawUtf8);
     /// reset the internal DataString content and the current position
     procedure Clear;
@@ -12072,12 +12073,9 @@ begin
      (StartPos >= L) then
     FastAssignNew(Text) // nothing to return
   else if (StartPos = 0) and
-          (Len >= L) and
+          (Len = L) and
           (PStrCnt(PAnsiChar(pointer(fDataString)) - _STRCNT)^ = 1) then
-  begin
-    FakeLength(fDataString, Len);
-    FastAssignUtf8(Text, fDataString); // fast return fDataString instance
-  end
+    FastAssignUtf8(Text, fDataString) // fast return the fDataString instance
   else
   begin
     dec(L, StartPos);

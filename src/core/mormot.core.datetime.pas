@@ -467,12 +467,14 @@ type
     // - returns true on success
     function FromText(const iso: RawUtf8): boolean;
     /// fill Year/Month/Day and Hour/Minute/Second fields from HTTP-date format
-    // - as defined by https://tools.ietf.org/html/rfc7231#section-7.1.1.1 e.g.
+    // - defined e.g. by https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1
     // $ Sun, 06 Nov 1994 08:49:37 GMT    ; IMF-fixdate
     // $ Sunday, 06-Nov-94 08:49:37 GMT   ; obsolete RFC 850 format
     // $ Sun Nov  6 08:49:37 1994         ; ANSI C's asctime() format
     function FromHttpDate(const httpdate: RawUtf8;
       tolocaltime: boolean = false): boolean;
+    /// fill Year/Month/Day and Hour/Minute/Second fields from HTTP-date PUtf8Char
+    function FromHttpDateBuffer(P: PUtf8Char; tolocaltime: boolean): boolean;
     /// encode the stored date/time as ISO-8601 text with Milliseconds
     function ToText(Expanded: boolean = true; FirstTimeChar: AnsiChar = 'T';
       const TZD: RawUtf8 = ''): RawUtf8;
@@ -608,8 +610,16 @@ function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
 function HttpDateToDateTime(const httpdate: RawUtf8;
   tolocaltime: boolean = false): TDateTime; overload;
 
+/// convert some "HTTP-date" format as defined by RFC 7231 into date/time
+// - wrapper around TSynSystemTime.FromHttpDate() conversion algorithm
+function HttpDateToDateTimeBuffer(httpdate: PUtf8Char; var datetime: TDateTime;
+  tolocaltime: boolean = false): boolean;
+
 /// convert some "HTTP-date" format as defined by RFC 7231 into UTC date/time
 function HttpDateToUnixTime(const httpdate: RawUtf8): TUnixTime;
+
+/// convert some "HTTP-date" format as defined by RFC 7231 into UTC date/time
+function HttpDateToUnixTimeBuffer(httpdate: PUtf8Char): TUnixTime;
 
 type
   THttpDateNowUtc = string[39];
@@ -1637,15 +1647,15 @@ const
     #3'GMT'#4'NZDT'#1'M'#4'IDLE'#4'NZST'#3'NZT'#4'EADT'#3'GST'#3'JST'#3'CCT' +
     #4'WADT'#4'WAST'#3'ZP6'#3'ZP5'#3'ZP4'#2'BT'#3'EET'#4'MEST'#4'MESZ'#3'SST'  +
     #3'FST'#4'CEST'#3'CET'#3'FWT'#3'MET'#4'MEWT'#3'SWT'#2'UT'#3'UTC'#1'Z'  +
-    #2'UT'#3'WET'#1'A'#3'WAT'#3'BST'#2'AT'#3'ADT'#3'AST'#3'EDT'#3'EST'  +
+    #3'WET'#1'A'#3'WAT'#3'BST'#2'AT'#3'ADT'#3'AST'#3'EDT'#3'EST'  +
     #3'CDT'#3'CST'#3'MDT'#3'MST'#3'PDT'#3'PST'#3'YDT'#3'YST'#3'HDT'  +
     #4'AHST'#3'CAT'#3'HST'#4'EAST'#2'NT'#4'IDLW'#1'Y';
 
-  _TZv: array[0..55] of ShortInt = (
+  _TZv: array[0..54] of ShortInt = (
     0, 13, 12, 12, 12, 12, 11, 10, 9, 8,
     8, 7, 6, 5, 4, 3, 2, 2, 2, 2,
     2, 2, 1, 1, 1, 1, 1, 0, 0, 0,
-    0, 0, -1, -1, -1, -2, -3, -4, -4, -5,
+    0, -1, -1, -1, -2, -3, -4, -4, -5,
     -5, -6, -6, -7, -7, -8, -8, -9, -9,
     -10, -10, -10, -10, -11, -12, -12);
 
@@ -1656,6 +1666,10 @@ const
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
 
+  HTML_MONTH_NAMES_32: array[0..11] of array[0..3] of AnsiChar = (
+    'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+    'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC');
+
 function ParseTimeZone(var P: PUtf8Char; var Zone: integer): boolean;
 var
   z: integer;
@@ -1665,31 +1679,38 @@ begin
   if P = nil then
     exit;
   P := GotoNextNotSpace(P);
-  if (P^ = '+') or
-     (P^ = '-') then
+  S := P;
+  if PCardinal(S)^ and $ffffff = // most common case (always for HTTP dates)
+       ord('G') + ord('M') shl 8 + ord('T') shl 16 then
   begin
-    if not (P[1] in ['0'..'9']) or
-       not (P[2] in ['0'..'9']) or
-       not (P[3] in ['0'..'9']) or
-       not (P[4] in ['0'..'9']) then
+    P := GotoNextNotSpace(S + 3);
+    Zone := 0;
+    result := true;
+  end
+  else if (S^ = '+') or
+          (S^ = '-') then
+  begin
+    if not (S[1] in ['0'..'9']) or
+       not (S[2] in ['0'..'9']) or
+       not (S[3] in ['0'..'9']) or
+       not (S[4] in ['0'..'9']) then
       exit;
-    if (P^ = '-') and
-       (PCardinal(P + 1)^ = $30303030) then // '-0000' for current local
+    if (S^ = '-') and
+       (PCardinal(S + 1)^ = $30303030) then // '-0000' for current local
       Zone := TimeZoneLocalBias
     else
     begin
-      Zone := (ord(P[1]) * 10 + ord(P[2]) - (48 + 480)) * 60 +
-              (ord(P[3]) * 10 + ord(P[4]) - (48 + 480));
+      Zone := (ord(S[1]) * 10 + ord(S[2]) - (48 + 480)) * 60 +
+              (ord(S[3]) * 10 + ord(S[4]) - (48 + 480));
       if P^ = '-' then
         Zone := -Zone;
     end;
-    P := GotoNextNotSpace(P + 5);
+    P := GotoNextNotSpace(S + 5);
     result := true;
   end
   else
   begin
     // TODO: enhance TSynTimeZone from mormot.core.search to parse timezones?
-    S := P;
     while (S^ in ['a'..'z', 'A'..'Z']) do
       inc(S);
     z := S - P;
@@ -1716,7 +1737,7 @@ begin
             (GotoNextNotSpace(P)^ = #0);
 end;
 
-function ParseMonth(var P: PUtF8Char; var Month: word): boolean;
+function ParseMonth(var P: PUtf8Char; var Month: word): boolean;
 var
   m: integer;
 begin
@@ -1724,23 +1745,19 @@ begin
   if P = nil then
     exit;
   P := GotoNextNotSpace(P);
-  if (P[0] in ['a'..'z', 'A'..'Z']) and
-     (P[1] in ['a'..'z', 'A'..'Z']) and
-     (P[2] in ['a'..'z', 'A'..'Z']) then
-  begin
-    m := FindShortStringListExact(@HTML_MONTH_NAMES[1], 11, P, 3);
-    if m >= 0 then
-    begin
-      Month := m + 1;
-      inc(P, 3);
-      if P^ = '-' then
-        inc(P) // e.g. '06-Nov-94'
-      else
-        P := GotoNextNotSpace(P);
-      result := true;
-      exit;
-    end;
-  end;
+  m := PCardinal(P)^ and $dfdfdf;
+  if m and $00404040 <> $00404040 then // quick alphabetical guess
+    exit;
+  m := IntegerScanIndex(@HTML_MONTH_NAMES_32, 12, m);
+  if m < 0 then
+    exit;
+  Month := m + 1;
+  inc(P, 3);
+  if P^ = '-' then
+    inc(P) // e.g. '06-Nov-94'
+  else
+    P := GotoNextNotSpace(P);
+  result := true;
 end;
 
 function ParseMonth(const s: RawUtf8; var Month: word): boolean;
@@ -2163,33 +2180,39 @@ begin
   end;
 end;
 
-function TSynSystemTime.FromHttpDate(const httpdate: RawUtf8;
-  tolocaltime: boolean): boolean;
+function TSynSystemTime.FromHttpDateBuffer(
+  P: PUtf8Char; tolocaltime: boolean): boolean;
 var
-  P, S: PUtf8Char;
-  v, len, pnt, zone: integer;
-  H, MI, SS, MS: cardinal;
+  pnt: byte;
+  hasday: boolean;
+  S: PUtf8Char;
+  zone: integer;
+  v, H, MI, SS, MS: cardinal;
   dt, t: TDateTime;
 begin
   // Sun, 06 Nov 1994 08:49:37 GMT    ; RFC 822, updated by RFC 1123
   // Sunday, 06-Nov-94 08:49:37 GMT   ; RFC 850, obsoleted by RFC 1036
   // Sun Nov  6 08:49:37 1994         ; ANSI C's asctime() Format
   Clear;
+  hasday := false;
   zone := maxInt; // invalid
   result := false;
-  if length(httpdate) < 12 then
+  if P = nil then
     exit;
-  P := pointer(httpdate);
   repeat
     P := GotoNextNotSpace(P);
     case P^ of
       'A'..'Z',
       'a'..'z':
-        if not ParseMonth(P, Month) then
-          P := GotoNextSpace(P);
+        if (not hasday) or
+           (not ParseMonth(P, Month)) then
+        begin
+          hasday := true; // first alphabetic word is always the week day text
+          P := GotoNextSpace(P); // also ignore trailing '-'
+        end;
       '0'..'9':
         begin
-          // e.g. '1994', '08:49:37 GMT' or '6'
+          // e.g. '1994' '08:49:37 GMT' or '6'
           pnt := 0;
           S := P;
           repeat
@@ -2198,7 +2221,11 @@ begin
               '0'..'9':
                 ;
               ':':
-                inc(pnt);
+                begin
+                  inc(pnt);
+                  if pnt = 0 then
+                    exit;
+                end;
               '.':
                 if pnt < 2 then
                   break;
@@ -2206,41 +2233,40 @@ begin
               break;
             end;
           until false;
-          len := P - S;
-          if pnt = 2 then
-          begin
-            // e.g. '08:49:37 GMT'
-            if Iso8601ToTimePUtf8Char(S, len, H, MI, SS, MS) then
-            begin
-              Hour := H;
-              Minute := MI;
-              Second := SS;
-              MilliSecond := MS;
-              zone := 0; // GMT by default
-              ParseTimeZone(P, zone);
-            end;
-          end
-          else if pnt = 0 then
-          begin
-            // e.g. '6', '94' or '2014'
-            v := GetInteger(S, P);
-            if v > 0 then
-            begin
-              if (v < 32) and
-                 (Day = 0) then
-                Day := v
-              else if (Year = 0) and
-                      (v <= 9999) and
-                      ((Month > 0) or
-                       (v > 12)) then
+          case pnt of
+            0:
+              // e.g. '6', '94' or '2014'
               begin
-                if v < 32 then
-                  inc(v, 2000)
-                else if v < 1000 then
-                  inc(v, 1900);
-                Year := v;
+                v := GetCardinal(S);
+                if v <> 0 then
+                begin
+                  if (v < 32) and
+                     (Day = 0) then
+                    Day := v
+                  else if (Year = 0) and
+                          (v <= 9999) and
+                          ((v > 12) or
+                           (Month > 0)) then
+                  begin
+                    if v < 32 then
+                      inc(v, 2000)
+                    else if v < 1000 then
+                      inc(v, 1900);
+                    Year := v;
+                  end;
+                end;
               end;
-            end;
+            2:
+              // e.g. '08:49:37 GMT'
+              if Iso8601ToTimePUtf8Char(S, P - S, H, MI, SS, MS) then
+              begin
+                Hour := H;
+                Minute := MI;
+                Second := SS;
+                MilliSecond := MS;
+                zone := 0; // GMT by default
+                ParseTimeZone(P, zone);
+              end;
           end;
           if P^ = '-' then
             inc(P); // e.g. '06-Nov-94'
@@ -2248,9 +2274,9 @@ begin
     else
       P := GotoNextSpace(P);
     end;
-  until P^ = #0;
+  until P^ in [#0, #10, #13]; // end of string or end of line (e.g. HTTP header)
   if (Year = 0) or
-     (Zone = maxInt) or
+     (zone = maxInt) or
      (Month = 0) then
     exit;
   if Day = 0 then
@@ -2277,6 +2303,13 @@ begin
     FromDateTime(dt); // local TDateTime to compute time shift
   end;
   result := true;
+end;
+
+function TSynSystemTime.FromHttpDate(const httpdate: RawUtf8;
+  tolocaltime: boolean): boolean;
+begin
+  result := (length(httpdate) >= 12) and
+            FromHttpDateBuffer(pointer(httpdate), tolocaltime);
 end;
 
 function TSynSystemTime.ToText(Expanded: boolean; FirstTimeChar: AnsiChar;
@@ -2697,12 +2730,33 @@ begin
     result := 0;
 end;
 
+function HttpDateToDateTimeBuffer(httpdate: PUtf8Char; var datetime: TDateTime;
+  tolocaltime: boolean): boolean;
+var
+  T: TSynSystemTime;
+begin
+  PInt64(@datetime)^ := 0;
+  result := (httpdate <> '') and
+            T.FromHttpDateBuffer(httpdate, tolocaltime);
+  if result then
+    datetime := T.ToDateTime;
+end;
+
 function HttpDateToUnixTime(const httpdate: RawUtf8): TUnixTime;
 var
   dt: TDateTime;
 begin
   result := 0;
   if HttpDateToDateTime(httpdate, dt, {tolocaltime=}false) then
+    result := DateTimeToUnixTime(dt);
+end;
+
+function HttpDateToUnixTimeBuffer(httpdate: PUtf8Char): TUnixTime;
+var
+  dt: TDateTime;
+begin
+  result := 0;
+  if HttpDateToDateTimeBuffer(httpdate, dt, {tolocaltime=}false) then
     result := DateTimeToUnixTime(dt);
 end;
 

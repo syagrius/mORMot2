@@ -260,6 +260,8 @@ type
     // - you should never have to call this constructor, but define a global
     // variable holding a reference to a shared instance
     constructor Create; virtual;
+    /// finalize this algorithm
+    destructor Destroy; override;
     /// get maximum possible (worse) compressed size for the supplied length
     // - including the crc32c + algo 9 bytes header
     function CompressDestLen(PlainLen: integer): integer;
@@ -2728,6 +2730,8 @@ type
     /// add some UTF-8 shortstring content to the Buffer, resizing it if needed
     procedure AppendShort(const Text: ShortString);
       {$ifdef HASINLINE}inline;{$endif}
+    /// add some UTF-8 string(s) content to the Buffer, resizing it if needed
+    procedure Append(const Text: array of RawUtf8); overload;
     /// just after Append/AppendShort, append a #13#10 end of line
     procedure AppendCRLF;
       {$ifdef HASINLINE}inline;{$endif}
@@ -5151,6 +5155,13 @@ begin
       [self, fAlgoID, existing]);
   ObjArrayAdd(SynCompressAlgos, self);
   RegisterGlobalShutdownRelease(self);
+end;
+
+destructor TAlgoCompress.Destroy;
+begin
+  if LogCompressAlgo = self then
+    LogCompressAlgo := nil; // avoid GPF at shutdown
+  inherited Destroy;
 end;
 
 class function TAlgoCompress.Algo(const Comp: RawByteString): TAlgoCompress;
@@ -11229,6 +11240,14 @@ end;
 procedure TRawByteStringBuffer.AppendShort(const Text: ShortString);
 begin
   RawAppend(@Text[1], ord(Text[0]));
+end;
+
+procedure TRawByteStringBuffer.Append(const Text: array of RawUtf8);
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(Text) do
+    Append(Text[i]);
 end;
 
 function TRawByteStringBuffer.TryAppend(P: pointer; PLen: PtrInt): boolean;

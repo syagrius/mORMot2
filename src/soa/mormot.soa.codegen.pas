@@ -492,7 +492,7 @@ const
     wVariant,        // oftVariant
     wVariant,        // oftNullable
     wBlob,           // oftBlob
-    wBlob,           // oftBlobDynArray
+    wArray,          // oftBlobDynArray - with specific code below
     wRecord,         // oftBlobCustom
     wRecord,         // oftUtf8Custom
     wUnknown,        // oftMany
@@ -542,7 +542,7 @@ const
     wEnum,     //  ptEnumeration
     wSet,      //  ptSet
     wUnknown,  //  ptClass
-    wUnknown,  //  ptDynArray
+    wArray,    //  ptDynArray - with specific code below
     wUnknown,  //  ptInterface
     wRawUtf8,  //  ptPUtf8Char
     wUnknown); //  ptCustom
@@ -583,6 +583,7 @@ type
     fSOA: variant;
     fSourcePath: TFileNameDynArray;
     fHasAnyRecord: boolean;
+    fNestedId: integer; // for unique nested type names if no RTTI
     function ContextFromRtti(typ: TWrapperType; rtti: TRttiCustom = nil;
       typName: RawUtf8 = ''; const parentName: RawUtf8 = ''): variant;
     function ContextNestedProperties(rtti: TRttiCustom;
@@ -649,13 +650,20 @@ var
   i: PtrInt;
 begin
   SetVariantNull(result);
-  if rtti.Parser in [ptRecord, ptArray, ptClass] then
-  begin
-    TDocVariant.NewFast(result);
-    for i := 0 to rtti.Props.Count - 1 do
-      TDocVariantData(result).AddItem(
-        ContextOneProperty(rtti.Props.List[i], parentName));
+  case rtti.Parser of
+    ptRecord,
+    ptClass:
+      ; // use rtti.Props
+    ptArray,
+    ptDynArray:
+      rtti := rtti.ArrayRtti; // use array item
+  else
+    exit; // no nested properties
   end;
+  TDocVariant.NewFast(result);
+  for i := 0 to rtti.Props.Count - 1 do
+    TDocVariantData(result).AddItem(
+      ContextOneProperty(rtti.Props.List[i], parentName));
 end;
 
 function ClassToWrapperType(c: TClass): TWrapperType;
@@ -733,6 +741,10 @@ var
             else
               info := ContextFromRtti(wUnknown, rtti.ArrayRtti);
           end;
+          // can be used to create static array (dynamic arrays have ItemCount=0)
+          //  array{{#staticMaxIndex}}[0..{{staticMaxIndex}}]{{/staticMaxIndex}} of
+          if rtti.Cache.ItemCount > 0 then
+            _Safe(info)^.AddValue('staticMaxIndex', rtti.Cache.ItemCount-1);
           _Safe(info)^.AddValue('name', typName);
         end;
     end;
@@ -774,7 +786,10 @@ begin
   // set typName/typAsName
   if typName = '' then
     if rtti <> nil then
-      typName := rtti.Name
+      if rcfWithoutRtti in rtti.Flags then // undefined nested fields
+        FormatUtf8('T%%', [parentName, InterlockedIncrement(fNestedId)], typName)
+      else
+        typName := rtti.Name
     else
       typName := TYPES_LANG[lngDelphi, typ];
   typAsName := GetEnumName(TypeInfo(TWrapperType), ord(typ));
@@ -1069,7 +1084,7 @@ begin
       _ObjAddProps([
         'argName',  ParamName^,
         'argType',  ArgTypeName^,
-        'arg.dir',  ord(ValueDirection),
+        'dir',      ord(ValueDirection),
         'dirName',  DIRTODELPHI[ValueDirection],
         'dirNoOut', DIRTOSMS[ValueDirection]], arg);
       if ValueDirection in [imdConst, imdVar] then
@@ -1181,6 +1196,7 @@ function TWrapperContext.ContextOneProperty(const prop: TRttiCustomProp;
 var
   l, level: PtrInt;
   fullName: RawUtf8;
+  isSimple: variant;
 begin
   level := 0;
   if parentName = '' then
@@ -1198,25 +1214,27 @@ begin
     'fullPropName', fullName], result);
   if level > 0 then
     _ObjAddPropU('nestedIdentation', RawUtf8OfChar(' ', level * 2), result);
-  case prop.Value.Parser of
-    ptRecord:
-      _ObjAddProps([
-        'isSimple',    null,
-        'nestedRecord', _ObjFast([
-          'nestedRecord', null,
-          'fields',  ContextNestedProperties(prop.Value, fullName)])], result);
-    ptArray:
-      _ObjAddProps([
-        'isSimple',          null,
-        'nestedRecordArray', _ObjFast([
-          'nestedRecordArray', null,
-          'fields', ContextNestedProperties(prop.Value, fullName)])], result);
-  else
-    if TDocVariantData(result).GetValueIndex('toVariant') < 0 then
-      _ObjAddProp('isSimple', true, result)
+  SetVariantNull(isSimple);
+  if rcfWithoutRtti in prop.Value.Flags then
+    case prop.Value.Parser of
+      ptRecord:
+        _ObjAddProps([
+          'nestedRecord', _ObjFast([
+            'nestedRecord', null,
+            'fields',  ContextNestedProperties(prop.Value, fullName)])], result);
+      ptArray,
+      ptDynArray:
+        _ObjAddProps([
+          'nestedRecordArray', _ObjFast([
+            'nestedRecordArray', null,
+            'fields', ContextNestedProperties(prop.Value, fullName)])], result);
     else
-      _ObjAddProp('isSimple', null, result);
-  end;
+      if not TDocVariantData(result).Exists('toVariant') then
+        isSimple := true;
+    end
+  else if not TDocVariantData(result).Exists('toVariant') then
+    isSimple := true;
+  _ObjAddProp('isSimple', isSimple, result);
 end;
 
 function TWrapperContext.Context: variant;

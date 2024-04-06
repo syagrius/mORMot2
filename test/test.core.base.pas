@@ -5744,6 +5744,8 @@ begin
   CheckEqual(bias, 0);
   Check(ParseTimeZone(' east', bias));
   CheckEqual(bias, -10 * 60);
+  Check(ParseTimeZone('y   ', bias));
+  CheckEqual(bias, -12 * 60);
   Check(ParseTimeZone('gmT ', bias));
   CheckEqual(bias, 0);
   Check(ParseTimeZone('    IDLW    ', bias));
@@ -5755,6 +5757,8 @@ begin
   CheckEqual(m, 1);
   Check(ParseMonth(' DEC ', m));
   CheckEqual(m, 12);
+  Check(ParseMonth(' apr-', m));
+  CheckEqual(m, 4);
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sun, 06 Nov 1994 08:49:37 GMT')), '1994-11-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
@@ -5769,6 +5773,8 @@ begin
     'Sun, 06 Nov 2021 084937 east')), '');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Tue, 15 Nov 1994 12:45:26 Z')), '1994-11-15T12:45:26');
+  CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
+    'Sunday, 06-Nov-94 08:49:37 GMT')), '1994-11-06T08:49:37');
   // validate common TSynTimeZone process
   tz := TSynTimeZone.Create;
   try
@@ -6593,6 +6599,14 @@ begin
   // some HTTP methods
   CheckEqual(PurgeHeaders(''), '');
   CheckEqual(PurgeHeaders('toto'), 'toto');
+  CheckEqual(PurgeHeaders(#13#10), #13#10);
+  CheckEqual(PurgeHeaders('toto'#13#10), 'toto'#13#10);
+  CheckEqual(PurgeHeaders(#13#10, true), '');
+  CheckEqual(PurgeHeaders('toto'#13#10, true), 'toto');
+  CheckEqual(PurgeHeaders('', true), '');
+  CheckEqual(PurgeHeaders('toto', true), 'toto');
+  CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10, true), 'toto');
+  CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10, true), 'toto');
   s := 'toto'#13#10;
   CheckEqual(PurgeHeaders(s), s);
   CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10), s);

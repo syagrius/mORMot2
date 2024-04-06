@@ -2302,12 +2302,17 @@ function DynArray(aTypeInfo: PRttiInfo; var aValue;
 function DynArrayHashOne(Kind: TRttiParserType;
   CaseInsensitive: boolean = false): TDynArrayHashOne;
 
-/// sort any dynamic array, via an external array of indexes
+/// sort any dynamic array, generating an external array of indexes
 // - this function will use the supplied TSynTempBuffer for index storage,
 // so use PIntegerArray(Indexes.buf) to access the values
 // - caller should always make Indexes.Done once finshed
 procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
-  out Indexes: TSynTempBuffer; Compare: TDynArraySortCompare);
+  out Indexes: TSynTempBuffer; Compare: TDynArraySortCompare); overload;
+
+/// sort any dynamic array, via a supplied array of indexes
+// - this function expects Indexes[] to be already allocated and filled
+procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
+  Indexes: PCardinalArray; Compare: TDynArraySortCompare); overload;
 
 /// get the comparison function corresponding to a given standard array type
 // - as used e.g. internally by TDynArray
@@ -8155,13 +8160,20 @@ end;
 
 procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
   out Indexes: TSynTempBuffer; Compare: TDynArraySortCompare);
+begin
+  DynArraySortIndexed(Values, ItemSize, Count,
+    pointer(Indexes.InitIncreasing(Count)), Compare);
+end;
+
+procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
+  Indexes: PCardinalArray; Compare: TDynArraySortCompare);
 var
   QS: TDynArrayQuickSort;
 begin
   QS.Compare := Compare;
   QS.Value := Values;
   QS.ElemSize := ItemSize;
-  QS.Index := pointer(Indexes.InitIncreasing(Count));
+  QS.Index := Indexes;
   QS.QuickSortIndexed(0, Count - 1);
 end;
 
@@ -9528,10 +9540,9 @@ end;
 
 const
   // reduces memory consumption and enhances distribution at hash table growing
-  _PRIMES: array[0..38 {$ifndef DYNARRAYHASH_PO2} + 15 {$endif}] of integer = (
+  _PRIMES: array[0..38 {$ifndef DYNARRAYHASH_PO2} + 13 {$endif}] of integer = (
     {$ifndef DYNARRAYHASH_PO2}
-    31, 127, 251, 499, 797, 1259, 2011, 3203, 5087,
-    8089, 12853, 20399, 81649, 129607, 205759,
+    251, 499, 797, 1259, 2011, 3203, 5087, 8089, 12853, 20399, 81649, 129607, 205759,
     {$endif DYNARRAYHASH_PO2}
     // start after HASH_PO2=2^18=262144 for DYNARRAYHASH_PO2 (poor 64-bit mul)
     326617, 411527, 518509, 653267, 823117, 1037059, 1306601, 1646237,

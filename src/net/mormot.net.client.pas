@@ -291,15 +291,15 @@ type
     procedure OnDownloadingFailed(OnDownloadingID: THttpPartialID);
   end;
 
-  /// THttpClientSocket.Request low-level execution context
-  TTHttpClientSocketRequestParams = record
-    url, method, header: RawUtf8;
+  /// internal low-level execution context for THttpClientSocket.Request
+  THttpClientRequest = record
+    Url, Method, Header: RawUtf8;
     Data: RawByteString;
     DataMimeType: RawUtf8;
-    status, redirected: integer;
+    Status, Redirected: integer;
     InStream, OutStream: TStream;
     KeepAlive: cardinal;
-    retry: set of (rMain, rAuth, rAuthProxy);
+    Retry: set of (rMain, rAuth, rAuthProxy);
     OutStreamInitialPos: Int64;
   end;
 
@@ -313,16 +313,15 @@ type
   // - more complex schemes (like SSPI) could be implemented within the
   // callback - see e.g. THttpClientSocket.AuthorizeSspi class method
   TOnHttpClientSocketAuthorize = function(Sender: THttpClientSocket;
-    var Context: TTHttpClientSocketRequestParams;
-    const Authenticate: RawUtf8): boolean of object;
+    var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean of object;
 
   /// callback used by THttpClientSocket.Request before/after every request
   // - return true to continue execution, false to abort normal process
   TOnHttpClientSocketRequest = function(Sender: THttpClientSocket;
-    var Context: TTHttpClientSocketRequestParams): boolean of object;
+    var Context: THttpClientRequest): boolean of object;
 
-  /// callback used by THttpClientSocket.Request to process any custom protocol
-  TOnHttpClientSocketProtocol = function(
+  /// callback used e.g. by THttpClientSocket.Request to process any custom protocol
+  TOnHttpClientRequest = function(
     var http: THttpRequestContext): integer of object;
 
   /// Socket API based REST and HTTP/1.1 compatible client class
@@ -353,7 +352,7 @@ type
     fRedirectMax: integer;
     fOnAuthorize, fOnProxyAuthorize: TOnHttpClientSocketAuthorize;
     fOnBeforeRequest: TOnHttpClientSocketRequest;
-    fOnProtocolRequest: TOnHttpClientSocketProtocol;
+    fOnProtocolRequest: TOnHttpClientRequest;
     fOnAfterRequest: TOnHttpClientSocketRequest;
     {$ifdef DOMAINRESTAUTH}
     fAuthorizeSspiSpn: RawUtf8;
@@ -361,8 +360,7 @@ type
     procedure RequestSendHeader(const url, method: RawUtf8); virtual;
     procedure RequestClear; virtual;
     function OnAuthorizeDigest(Sender: THttpClientSocket;
-      var Context: TTHttpClientSocketRequestParams;
-      const Authenticate: RawUtf8): boolean;
+      var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
   public
     /// common initialization of all constructors
     // - this overridden method will set the UserAgent with some default value
@@ -395,7 +393,7 @@ type
     /// low-level processing method called from Request()
     // - can be used e.g. when implementing callbacks like OnAuthorize or
     // OnBeforeRequest/OnAfterRequest
-    procedure RequestInternal(var ctxt: TTHttpClientSocketRequestParams); virtual;
+    procedure RequestInternal(var ctxt: THttpClientRequest); virtual;
     /// after an Open(server,port), return 200 if OK, http status error otherwise
     // - get the page data in Content
     function Get(const url: RawUtf8; KeepAlive: cardinal = 0;
@@ -440,13 +438,13 @@ type
     // - match the OnAuthorize: TOnHttpClientSocketAuthorize callback signature
     // - see also ClientForceSpn() and AuthorizeSspiSpn property
     class function AuthorizeSspi(Sender: THttpClientSocket;
-      var Context: TTHttpClientSocketRequestParams; const Authenticate: RawUtf8): boolean;
+      var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
     /// web authentication of the current logged user using Windows Security
     // Support Provider Interface (SSPI) or GSSAPI library on Linux
     // - match the OnProxyAuthorize: TOnHttpClientSocketAuthorize signature
     // - see also ClientForceSpn() and AuthorizeSspiSpn property
     class function ProxyAuthorizeSspi(Sender: THttpClientSocket;
-      var Context: TTHttpClientSocketRequestParams; const Authenticate: RawUtf8): boolean;
+      var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
     /// the Kerberos Service Principal Name, as registered in domain
     // - e.g. 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
     // - used by class procedure AuthorizeSspi/ProxyAuthorizeSspi callbacks
@@ -605,14 +603,14 @@ function ExtractResourceName(const uri: RawUtf8; sanitize: boolean = true): RawU
 { ******************** Additional Client Protocols Support }
 
 var
-  /// raw thread-safe access to <Name:RawUtf8,TOnHttpClientSocketProtocol> pairs
+  /// raw thread-safe access to <Name:RawUtf8,TOnHttpClientRequest> pairs
   NetClientProtocols: TSynDictionary;
 
 /// register a INetClientProtocol
 // - you can unregister a protocol by setting OnRequest = nil
 // - note that the class instance used by OnRequest will be owned by thit unit
 procedure RegisterNetClientProtocol(
-  const Name: RawUtf8; const OnRequest: TOnHttpClientSocketProtocol);
+  const Name: RawUtf8; const OnRequest: TOnHttpClientRequest);
 
 
 { ******************** THttpRequest Abstract HTTP client class }
@@ -1469,7 +1467,7 @@ end;
 { ******************** Additional Client Protocols Support }
 
 procedure RegisterNetClientProtocol(
-  const Name: RawUtf8; const OnRequest: TOnHttpClientSocketProtocol);
+  const Name: RawUtf8; const OnRequest: TOnHttpClientRequest);
 var
   m: TMethod;
 begin
@@ -1511,23 +1509,21 @@ begin
   name[0] := #0;
   P := ClassNameShort(Instance);
   for i := 2 to ord(P^[0]) do
-    if P^[i] in ['A'..'Z'] then
-      if name[0] = #16 then
-        break
-      else
+    if P^[i] in ['A'..'Z'] then // append uppercase alphabetic chars
       begin
         inc(name[0]);
         name[ord(name[0])] := P^[i];
+        if name[0] = #16 then
+          break;
       end;
   // note: the framework would identify 'mORMot' pattern in the user-agent
   // header to enable advanced behavior e.g. about JSON transmission
   vers[0] := #0;
   if Executable.Version.Major <> 0 then
     FormatShort16('/%', [Executable.Version.Major], vers);
-  FormatUtf8(
+  result := FormatUtf8(
     'Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/% %%',
-    [name, copy(SYNOPSE_FRAMEWORK_VERSION, 1, 3), Executable.ProgramName,
-     vers], result);
+    [name, copy(SYNOPSE_FRAMEWORK_VERSION, 1, 3), Executable.ProgramName, vers]);
 end;
 
 
@@ -1686,8 +1682,7 @@ begin
     inherited OpenUri(aUri, aAddress, aTunnel, aTimeOut, aTLSContext);
 end;
 
-procedure THttpClientSocket.RequestInternal(
-  var ctxt: TTHttpClientSocketRequestParams);
+procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
 
   procedure DoRetry(FatalError: integer;
     const Fmt: RawUtf8; const Args: array of const);
@@ -1901,7 +1896,7 @@ function THttpClientSocket.Request(const url, method: RawUtf8;
   KeepAlive: cardinal; const Header: RawUtf8; const Data: RawByteString;
   const DataMimeType: RawUtf8; retry: boolean; InStream, OutStream: TStream): integer;
 var
-  ctxt: TTHttpClientSocketRequestParams;
+  ctxt: THttpClientRequest;
   newuri: TUri;
 begin
   ctxt.url := url;
@@ -2076,8 +2071,6 @@ var
   end;
 
   procedure DoRequestAndFreeStream;
-  var
-    lastmod: RawUtf8;
   begin
     // prepare TStreamRedirect context
     stream.Context := urlfile;
@@ -2121,9 +2114,8 @@ var
     stream.Ended; // notify finished
     parthash := stream.GetHash; // hash updated on each stream.Write()
     FreeAndNil(stream);
-    lastmod := Http.HeaderGetValue('LAST-MODIFIED');
-    if lastmod <> '' then
-      FileSetDateFromUnixUtc(part, HttpDateToUnixTime(lastmod));
+    if Http.ContentLastModified > 0 then
+      FileSetDateFromUnixUtc(part, Http.ContentLastModified);
   end;
 
   procedure AbortAlternateDownloading;
@@ -2371,8 +2363,7 @@ begin
 end;
 
 function THttpClientSocket.OnAuthorizeDigest(Sender: THttpClientSocket;
-  var Context: TTHttpClientSocketRequestParams;
-  const Authenticate: RawUtf8): boolean;
+  var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
 var
   auth: RawUtf8;
   p: PUtf8Char;
@@ -2398,8 +2389,7 @@ end;
 
 // see https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication
 
-procedure DoSspi(Sender: THttpClientSocket;
-  var Context: TTHttpClientSocketRequestParams;
+procedure DoSspi(Sender: THttpClientSocket; var Context: THttpClientRequest;
   const Authenticate, InHeaderUp, OutHeader: RawUtf8);
 var
   sc: TSecContext;
@@ -2435,7 +2425,7 @@ begin
 end;
 
 class function THttpClientSocket.AuthorizeSspi(Sender: THttpClientSocket;
-  var Context: TTHttpClientSocketRequestParams; const Authenticate: RawUtf8): boolean;
+  var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
 begin
   if InitializeDomainAuth then
     // try to setup sspi/gssapi -> SECPKGNAMEHTTP
@@ -2446,7 +2436,7 @@ begin
 end;
 
 class function THttpClientSocket.ProxyAuthorizeSspi(Sender: THttpClientSocket;
-  var Context: TTHttpClientSocketRequestParams; const Authenticate: RawUtf8): boolean;
+  var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
 begin
   if InitializeDomainAuth then
     // try to setup sspi/gssapi -> SECPKGNAMEHTTP
