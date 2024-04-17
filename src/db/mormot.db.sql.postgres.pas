@@ -183,7 +183,8 @@ type
     procedure BindParams;
     /// raise an exception if Col is out of range according to fColumnCount
     // or rowset is not initialized
-    procedure CheckColAndRowset(const Col: integer);
+    procedure CheckColAndRowset(Col: integer);
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// finalize the statement for a given connection
     destructor Destroy; override;
@@ -250,6 +251,9 @@ type
     function ColumnCurrency(Col: integer): currency; override;
     /// return a Column UTF-8 encoded text value of the current Row, first Col is 0
     function ColumnUtf8(Col: integer): RawUtf8; override;
+    /// return a Column UTF-8 text buffer of the current Row, first Col is 0
+    // - returned pointer is likely to last only until next Reset call
+    function ColumnPUtf8(Col: integer): PUtf8Char; override;
     /// return a Column as a blob value of the current Row, first Col is 0
     function ColumnBlob(Col: integer): RawByteString; override;
     /// return one column value into JSON content
@@ -928,13 +932,12 @@ begin
   end;
 end;
 
-procedure TSqlDBPostgresStatement.CheckColAndRowset(const Col: integer);
+procedure TSqlDBPostgresStatement.CheckColAndRowset(Col: integer);
 begin
-  CheckCol(Col);
-  if (fRes = nil) or
+  if (cardinal(Col) >= cardinal(fColumnCount)) or
+     (fRes = nil) or
      (fResStatus <> PGRES_TUPLES_OK) then
-    raise ESqlDBPostgres.CreateUtf8(
-      '%.Execute not called before Column*', [self]);
+    CheckColInvalid(Col);
 end;
 
 destructor TSqlDBPostgresStatement.Destroy;
@@ -1252,6 +1255,12 @@ begin
   PQ.GetRawUtf8(fRes, fCurrentRow, Col, result);
 end;
 
+function TSqlDBPostgresStatement.ColumnPUtf8(Col: integer): PUtf8Char;
+begin
+  CheckColAndRowset(Col);
+  result := PQ.GetValue(fRes, fCurrentRow, Col);
+end;
+
 function TSqlDBPostgresStatement.ColumnBlob(Col: integer): RawByteString;
 var
   P: pointer;
@@ -1288,12 +1297,12 @@ begin
           if ColumnAttr = BOOLOID then // = PQ.ftype(fRes, Col)
             W.Add((P <> nil) and (PUtf8Char(P)^ = 't'))
           else
-            // note: StrLen is slightly faster than PQ.GetLength for small content
-            W.AddNoJsonEscape(P, StrLen(P));
+            // note: StrLen seems slightly faster than PQ.GetLength for small content
+            W.AddShort(P, StrLen(P));
         ftUtf8:
           if (ColumnAttr = JSONOID) or
              (ColumnAttr = JSONBOID) then
-            W.AddNoJsonEscape(P, PQ.GetLength(fRes, fCurrentRow, Col))
+            W.AddShort(P, PQ.GetLength(fRes, fCurrentRow, Col))
           else
           begin
             W.Add('"');
@@ -1413,20 +1422,18 @@ begin
       // wait to have some data pending on the input socket for a task
       repeat
         if fOwner.fConnection = nil then
-          res := []
+          res := [neClosed]
         else
-          res := fOwner.fConnection.Socket.WaitFor(-1, [neRead]);
-      until Terminated or
-            (res = [neRead]) or
-            ((res <> []) and
-             SleepOrTerminated(100)); // sleep(100) on broken connection
+          res := fOwner.fConnection.Socket.WaitFor(-1, [neRead, neError]);
+        if Terminated or
+           (neRead in res) then
+          break;
+        SleepHiRes(10); // loop on broken or not yet established connection
+      until Terminated;
       if Terminated then
         break;
       if not fOwner.fTasks.Pending then // happens e.g. during statement parsing
-        if SleepOrTerminated(10) then
-          break
-        else
-          continue;
+        continue; // no sleep(): just loop to WaitFor() syscall again
       // handle incoming responses from PostgreSQL
       task.OnFinished := nil;
       try

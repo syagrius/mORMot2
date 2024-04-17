@@ -228,6 +228,9 @@ type
     // corresponding TSynMustache.Render*() methods
     constructor Create(Owner: TSynMustache; WR: TJsonWriter;
       SectionMaxCount: integer; const aDocument: variant; OwnWriter: boolean);
+    /// render this reusable rendering context
+    // - wrap PushContext + Owner.RenderContext + Writer.SetText + CancelAll
+    function Render(const aDoc: variant): RawUtf8;
   end;
 
   TSynMustacheContextData = class;
@@ -273,6 +276,12 @@ type
     constructor Create(Owner: TSynMustache; WR: TJsonWriter;
       SectionMaxCount: integer; Value: pointer; ValueRtti: TRttiCustom;
       OwnWriter: boolean);
+    /// render this reusable rendering context
+    // - wrap PushContext + Owner.RenderContext + Writer.SetText + CancelAll
+    function RenderArray(const arr: TDynArray): RawUtf8;
+    /// render this reusable rendering context
+    // - wrap PushContext + Owner.RenderContext + Writer.SetText + CancelAll
+    function RenderRtti(Value: pointer; Rtti: TRttiCustom): RawUtf8;
     /// callback to get data at runtime from a global name
     // - when the Value variable provided to TSynMustache.RenderData is not enough
     property OnGetGlobalData: TOnGetGlobalData
@@ -417,6 +426,14 @@ type
       aTemplate: PUtf8Char; aTemplateLen: integer); overload; virtual;
     /// finalize internal memory
     destructor Destroy; override;
+    /// internal factory calling TSynMustacheContextVariant.Create()
+    // - to call e.g. result.Render() several times
+    function NewMustacheContextVariant(
+      aBufSize: integer = 16384): TSynMustacheContextVariant;
+    /// internal factory calling TSynMustacheContextData.Create()
+    // - to call e.g. result.RenderArray() or result.RenderRtti() several times
+    function NewMustacheContextData(
+      aBufSize: integer = 16384): TSynMustacheContextData;
     /// search some text within the {{mustache}} template text
     function FoundInTemplate(const text: RawUtf8): boolean;
     /// register one Expression Helper callback for a given list of helpers
@@ -821,6 +838,14 @@ begin
   PushContext(TVarData(aDocument)); // weak copy
 end;
 
+function TSynMustacheContextVariant.Render(const aDoc: variant): RawUtf8;
+begin
+  PushContext(TVarData(aDoc));
+  fOwner.RenderContext(self, 0, high(fOwner.fTags));
+  Writer.SetText(result);
+  CancelAll;
+end;
+
 procedure TSynMustacheContextVariant.PushContext(const aDoc: TVarData);
 begin
   if fContextCount >= length(fContext) then
@@ -991,6 +1016,27 @@ begin
   PushContext(Value, ValueRtti);
 end;
 
+function TSynMustacheContextData.RenderArray(const arr: TDynArray): RawUtf8;
+var
+  n: PtrInt;
+begin
+  n := arr.Count;
+  if n <> 0 then
+    DynArrayFakeLength(arr.Value^, n); // as required by RenderContext()
+  PushContext(arr.Value, arr.Info);
+  fOwner.RenderContext(self, 0, high(fOwner.fTags));
+  Writer.SetText(result);
+  CancelAll;
+end;
+
+function TSynMustacheContextData.RenderRtti(Value: pointer; Rtti: TRttiCustom): RawUtf8;
+begin
+  PushContext(Value, Rtti);
+  fOwner.RenderContext(self, 0, high(fOwner.fTags));
+  Writer.SetText(result);
+  CancelAll;
+end;
+
 procedure TSynMustacheContextData.PushContext(Value: pointer; Rtti: TRttiCustom);
 var
   n: PtrInt;
@@ -1112,38 +1158,98 @@ procedure TSynMustacheContextData.AppendValue(ValueSpace: integer;
   const ValueName: RawUtf8; UnEscape: boolean);
 var
   d: pointer;
+  p: PUtf8Char;
   rc: TRttiCustom;
+  l: PtrInt;
   tmp: TVarData;
 begin
   if GetDataFromContext(ValueName, rc, d) then
   begin
-    // direct append the {{###}} found data
+    // we can directly append the {{###}} found data
     if fEscapeInvert then
       UnEscape := not UnEscape;
-    if UnEscape or
-       (rcfIsNumber in rc.Cache.Flags) then
-      // numbers or true/false don't need any HTML escape
-      fWriter.AddRttiCustomJson(d, rc, twNone, [])
-    else
-      case rc.Kind of
-        // try direct UTF-8 and UTF-16 strings rendering
-        rkLString:
-          fWriter.AddHtmlEscape(PPointer(d)^); // faster with no length
-        {$ifdef HASVARUSTRING}
-        rkUString,
-        {$endif HASVARUSTRING}
-        rkWString:
-          fWriter.AddHtmlEscapeW(PPointer(d)^);
-      else
+    case rc.Parser of // FPC generates a jump table for this case statement
+      // try direct UTF-8 and UTF-16 strings (escaped) rendering
+      {$ifndef UNICODE}
+      ptString,
+      {$endif UNICODE}
+      ptRawUtf8,
+      ptRawJson,
+      ptPUtf8Char:
         begin
-          // use a temporary variant for any complex content (including JSON)
-          rc.ValueToVariant(d, tmp, @JSON_[mFastFloat]);
-          if fEscapeInvert then
-            UnEscape := not UnEscape; // AppendVariant() does reverse it
-          AppendVariant(variant(tmp), UnEscape);
-          VarClearProc(tmp);
+          p := PPointer(d)^;
+          if p <> nil then
+            if UnEscape then
+            begin
+              if rc.Parser = ptPUtf8Char then
+                l := mormot.core.base.StrLen(p)
+              else
+                l := PStrLen(p - _STRLEN)^;
+              fWriter.AddNoJsonEscape(p, l);
+            end
+            else
+              fWriter.AddHtmlEscape(p); // faster with no length
         end;
+      {$ifdef UNICODE}
+      ptString,
+      {$endif UNICODE}
+      {$ifdef HASVARUSTRING}
+      ptUnicodeString,
+      {$endif HASVARUSTRING}
+      ptSynUnicode,
+      ptWideString:
+        if UnEscape then
+          fWriter.AddNoJsonEscapeW(PPWord(d)^, 0)
+        else
+          fWriter.AddHtmlEscapeW(PPWideChar(d)^);
+      // unescaped (and unquoted) numbers, date/time, guid or hash
+      ptByte:
+        fWriter.AddU(PByte(d)^);
+      ptWord:
+        fWriter.AddU(PWord(d)^);
+      ptInteger:
+        fWriter.Add(PInteger(d)^);
+      ptCardinal:
+        fWriter.AddU(PCardinal(d)^);
+      ptInt64:
+        fWriter.Add(PInt64(d)^);
+      ptQWord:
+        fWriter.AddQ(PQWord(d)^);
+      ptDouble:
+        fWriter.AddDouble(unaligned(PDouble(d)^));
+      ptCurrency:
+        fWriter.AddCurr64(d);
+      ptBoolean:
+        fWriter.Add(PBoolean(d)^);
+      ptDateTime,
+      ptDateTimeMS:
+        fWriter.AddDateTime(d, 'T', #0, rc.Parser = ptDateTimeMS, {wtime=}true);
+      ptUnixTime:
+        fWriter.AddUnixTime(d);
+      ptUnixMSTime:
+        fWriter.AddUnixMSTime(d, {withms=}true);
+      ptTimeLog:
+        fWriter.AddTimeLog(d);
+      ptGuid:
+        fWriter.Add(PGuid(d), #0);
+      ptHash128,
+      ptHash256,
+      ptHash512:
+        fWriter.AddBinToHexDisplayLower(d, rc.Size);
+    else
+      if rcfIsNumber in rc.Cache.Flags then
+        // ordinals or floats don't need any HTML escape nor quote
+        fWriter.AddRttiCustomJson(d, rc, twNone, [])
+      else
+      begin
+        // use a temporary variant for any complex content (including JSON)
+        rc.ValueToVariant(d, tmp, @JSON_[mFastFloat]);
+        if fEscapeInvert then
+          UnEscape := not UnEscape; // AppendVariant() will reverse it
+        AppendVariant(variant(tmp), UnEscape);
+        VarClearProc(tmp);
       end;
+    end;
   end
   else
   begin
@@ -1730,14 +1836,26 @@ begin
   finally
     Free;
   end;
-  fCachedContextVariant := TSynMustacheContextVariant.Create(self,
-    TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true),
-    SectionMaxCount + 4, Null, true);
-  fCachedContextVariant.CancelAll; // to be reused from a void context
-  fCachedContextData := TSynMustacheContextData.Create(self,
-    TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true),
-    SectionMaxCount + 4, nil, nil, true);
-  fCachedContextData.CancelAll; // to be reused from a void context
+  fCachedContextVariant := NewMustacheContextVariant;
+  fCachedContextData    := NewMustacheContextData;
+end;
+
+function TSynMustache.NewMustacheContextVariant(
+  aBufSize: integer): TSynMustacheContextVariant;
+begin
+  result := TSynMustacheContextVariant.Create(self,
+    TJsonWriter.CreateOwnedStream(aBufSize, {nosharedstream=}true),
+    SectionMaxCount + 4, Null, {ownwriter=}true);
+  result.CancelAll; // to be reused from a void context
+end;
+
+function TSynMustache.NewMustacheContextData(
+  aBufSize: integer): TSynMustacheContextData;
+begin
+  result := TSynMustacheContextData.Create(self,
+    TJsonWriter.CreateOwnedStream(aBufSize, {nosharedstream=}true),
+    SectionMaxCount + 4, nil, nil, {ownwriter=}true);
+  result.CancelAll; // to be reused from a void context
 end;
 
 procedure TSynMustache.RenderContext(Context: TSynMustacheContext;
@@ -1889,7 +2007,7 @@ var
 begin
   n := Value.Count;
   if n <> 0 then
-    DynArrayFakeLength(Value.Value^, n); // as RenderDataRtti() expects
+    DynArrayFakeLength(Value.Value^, n); // as required by RenderDataRtti()
   result := RenderDataRtti(Value.Value, Value.Info,
     OnGetData, Partials, Helpers, OnTranslate, EscapeInvert);
 end;

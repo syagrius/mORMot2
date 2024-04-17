@@ -880,8 +880,8 @@ var
   WindowsDisplayVersion: RawUtf8;
   {$endif OSWINDOWS}
 
-  /// some textual information about the current CPU
-  // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz 3MB cache'
+  /// some textual information about the current CPU and its known cache
+  // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz [3MB]'
   CpuInfoText: RawUtf8;
   /// the on-chip cache size, in bytes, as returned by the OS
   // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
@@ -1329,6 +1329,7 @@ type
     fRawParams, fValues: TRawUtf8DynArray; // for clkParam
     fDesc, fDescDetail: array[clkArg .. clkParam] of RawUtf8;
     fRetrieved: array[clkArg .. clkParam] of TBooleanDynArray;
+    fDescArg: TRawUtf8DynArray;
     fCaseSensitiveNames: boolean;
     fSwitch: array[{long=}boolean] of RawUtf8;
     fLineFeed, fExeDescription: RawUtf8;
@@ -1339,11 +1340,11 @@ type
       const def: RawUtf8 = ''; f: PtrInt = 0): PtrInt;
   public
     /// mark and describe an "arg" value by 0-based index in Args[]
-    function Arg(index: integer;
-      const description: RawUtf8 = ''): boolean; overload;
+    function Arg(index: integer; const description: RawUtf8 = '';
+      optional: boolean = true): boolean; overload;
     /// mark and describe a string/TFileName "arg" value by 0-based index in Args[]
-    function ArgString(index: integer;
-      const description: RawUtf8 = ''): string;
+    function ArgString(index: integer; const description: RawUtf8 = '';
+      optional: boolean = true): string;
     /// mark and describe an "arg" value in Args[]
     function Arg(const name: RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
@@ -1443,6 +1444,9 @@ type
     // - return false if the parameters are valid
     // - otherwise, return true and caller should exit the process
     function ConsoleWriteUnknown(const exedescription: RawUtf8 = ''): boolean;
+    /// define 'h help' and call ConsoleWriteUnknown()
+    // - caller should exit the process if this method returned true
+    function ConsoleHelpFailed(const exedescription: RawUtf8 = ''): boolean;
     /// fill the stored arguments and options from executable parameters
     // - called e.g. at unit inialization to set Executable.CommandLine variable
     // - you can execute it again e.g. to customize the switches characters
@@ -4819,9 +4823,9 @@ var
 // wait 10 microsecond unless SleepHiRes0Yield is forced to true (bad idea)
 // - in respect to RTL's Sleep() function, it will return on ESysEINTR if was
 // interrupted by any OS signal
-// - warning: wait typically the next system timer interrupt on Windows, which
-// is every 16ms by default; as a consequence, never rely on the ms supplied
-// value to guess the elapsed time, but call GetTickCount64
+// - warning: wait typically for the next system timer interrupt on Windows,
+// which is every 16ms by default; as a consequence, never rely on the ms
+// supplied value to guess the elapsed time, but call GetTickCount64
 procedure SleepHiRes(ms: cardinal); overload;
 
 /// similar to Windows sleep() API call, but truly cross-platform and checking
@@ -6759,11 +6763,6 @@ begin
   FindClose(SR);
 end;
 
-function ValidHandle(Handle: THandle): boolean;
-begin
-  result := PtrInt(Handle) > 0;
-end;
-
 function SafePathName(const Path: TFileName): boolean;
 var
   i, o: PtrInt;
@@ -8408,6 +8407,13 @@ begin
         param := 'value';
     end;
     desc := desc + ' <' + param + '>';
+    if (k = clkArg) and
+       (argindex > 0) then
+    begin
+      if argindex > length(fDescArg) then
+        SetLength(fDescArg, argindex);
+      fDescArg[argindex - 1] := param;
+    end;
   end;
   fDesc[k] := fDesc[k] + ' ' + desc;
   j := 1;
@@ -8480,26 +8486,38 @@ begin
   result := -1
 end;
 
-function TExecutableCommandLine.Arg(index: integer; const description: RawUtf8): boolean;
+function TExecutableCommandLine.Arg(index: integer; const description: RawUtf8;
+  optional: boolean): boolean;
+var
+  n: PtrUInt;
 begin
-  result := (self <> nil) and
-            (PtrUInt(index) < PtrUInt(length(fNames[clkArg])));
+  result := self <> nil;
+  if not result then
+    exit;
+  n := length(fNames[clkArg]);
+  result := PtrUInt(index) < n;
   if result then
-    fRetrieved[clkArg][index] := true;
+    fRetrieved[clkArg][index] := true
+  else
+  begin
+    SetLength(fRetrieved[clkArg], n + 1); // to notify missing <arg>
+    if optional then
+      fRetrieved[clkArg][index] := true;
+  end;
   Describe([], clkArg, description, '', index + 1);
 end;
 
 function TExecutableCommandLine.ArgString(index: integer;
-  const description: RawUtf8): string;
+  const description: RawUtf8; optional: boolean): string;
 begin
   result := '';
-  if Arg(index, description) then
+  if Arg(index, description, optional) then
     result := string(Args[0]);
 end;
 
 function TExecutableCommandLine.Arg(const name, description: RawUtf8): boolean;
 begin
-  result := Find([name], clkArg, description) >= 0;
+  result := Arg([name], description);
 end;
 
 function TExecutableCommandLine.Arg(const name: array of RawUtf8;
@@ -8743,18 +8761,19 @@ begin
   for clk := low(fRetrieved) to high(fRetrieved) do
     for i := 0 to length(fRetrieved[clk]) - 1 do
       if not fRetrieved[clk][i] then
-      begin
-        result := result + 'Unexpected ' + SwitchAsText(fNames[clk][i]) + ' ';
-        case clk of
-          clkArg:
-            result := result + 'argument';
-          clkOption:
-            result := result + 'option';
-          clkParam:
-            result := result + fValues[i] + ' parameter';
+        if clk = clkArg then
+          result := result + 'Missing <' + fDescArg[i] + '> argument' + fLineFeed
+        else
+        begin
+          result := result + 'Unexpected ' + SwitchAsText(fNames[clk][i]) + ' ';
+          case clk of
+            clkOption:
+              result := result + 'option';
+            clkParam:
+              result := result + fValues[i] + ' parameter';
+          end;
+          result := result + fLineFeed;
         end;
-        result := result + fLineFeed;
-      end;
 end;
 
 function TExecutableCommandLine.ConsoleWriteUnknown(
@@ -8769,6 +8788,18 @@ begin
   ConsoleWrite(FullDescription(exedescription));
   ConsoleWrite(err, ccLightRed);
   TextColor(ccLightGray);
+end;
+
+function TExecutableCommandLine.ConsoleHelpFailed(
+  const exedescription: RawUtf8): boolean;
+begin
+  if exedescription <> '' then
+    fExeDescription := exedescription;
+  result := Option(['h', 'help'], 'display this help');
+  if result then
+    ConsoleWrite(FullDescription)
+  else
+    result := ConsoleWriteUnknown(exedescription);
 end;
 
 procedure TExecutableCommandLine.Clear;
@@ -9430,7 +9461,7 @@ begin
   {$ifdef CPUINTEL}
   Flags := 0; // non reentrant locks need no additional thread safety
   {$else}
-  LockedDec(Flags, 1); // ARM can be weak-ordered
+  LockedExc(Flags, 0, 1); // ARM can be weak-ordered
   // https://preshing.com/20121019/this-is-why-they-call-it-a-weakly-ordered-cpu
   {$endif CPUINTEL}
 end;

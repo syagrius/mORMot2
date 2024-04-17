@@ -190,8 +190,6 @@ const
   IPV6_JOIN_GROUP        = 12; // add an IP group membership
   IPV6_LEAVE_GROUP       = 13; // drop an IP group membership
 
-  MSG_NOSIGNAL  = 0;
-
   // getnameinfo constants
   NI_MAXHOST	   = 1025;
   NI_MAXSERV	   = 32;
@@ -256,6 +254,7 @@ type
   end;
 
 const
+  MSG_NOSIGNAL  = $00;  // do not generate SIGPIPE (not defined on Windows)
   MSG_OOB       = $01;  // Process out-of-band data
   MSG_PEEK      = $02;  // Peek at incoming messages
 
@@ -657,6 +656,7 @@ begin
 end;
 
 procedure SetTimeVal(ms: cardinal; out tv: TTimeVal);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
   if ms = 0 then
   begin
@@ -692,6 +692,7 @@ begin
   rdp := nil;
   wrp := nil;
   erp := nil;
+  ptv := nil; // infinite timeout
   sock := TSocket(@self);
   if neWrite in scope then
   begin
@@ -707,7 +708,7 @@ begin
   end;
   if (neRead in scope) or
      ((wrp = nil) and
-      (erp = nil)) then // a least one is needed
+      (erp = nil)) then // select() needs at least one descriptor
   begin
     rd.fd_array[0] := sock;
     rd.fd_count := 1;
@@ -717,15 +718,13 @@ begin
   begin
     SetTimeVal(ms, tv);
     ptv := @tv;
-  end
-  else
-    ptv := nil; // infinite timeout
+  end;
   res := select({ignored=}0, rdp, wrp, erp, ptv);
   if res < 0 then
   begin
     if loerr <> nil then
       loerr^ := sockerrno;
-    exit;
+    exit; // returning [neError]
   end;
   result := [];
   if res = 0 then
@@ -738,6 +737,7 @@ begin
       include(result, neError)
     else 
       // FIONREAD is not enough on Windows for graceful disconnection
+      // -> recv() should be called: https://stackoverflow.com/a/1586817/458259
       // -> return neRead and not neClosed if pending=0
       include(result, neRead);
   if (wrp <> nil) and
@@ -2196,8 +2196,8 @@ var
 begin
   repeat
     inc(fDataCount, CheckSocket('recv',
-      Recv(fSocket.Socket, @PByteArray(fData)[fDataCount],
-        length(fData) - fDataCount, MSG_NOSIGNAL)));
+      recv(fSocket.Socket,
+        @PByteArray(fData)[fDataCount], length(fData) - fDataCount, 0)));
     res := ComputeAndSendAnswer;
     if res = SEC_I_INCOMPLETE_CREDENTIALS then
       // check https://stackoverflow.com/a/47479968/458259
@@ -2318,8 +2318,8 @@ begin
     desc.cBuffers := 4;
     desc.pBuffers := @buf[0];
     repeat
-      read := Recv(fSocket.Socket, @PByteArray(fInput)[fInputCount],
-        fInputSize - fInputCount, MSG_NOSIGNAL);
+      read := recv(fSocket.Socket,
+                @PByteArray(fInput)[fInputCount], fInputSize - fInputCount, 0);
       if read <= 0 then
       begin
         if read = 0 then

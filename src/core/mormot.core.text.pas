@@ -304,8 +304,8 @@ type
   /// available global options for a TTextWriter / TTextWriter instance
   // - TTextWriter.WriteObject() method behavior would be set via their own
   // TTextWriterWriteObjectOptions, and work in conjunction with those settings
-  // - twoStreamIsOwned would be set if the associated TStream is owned by
-  // the TTextWriter instance
+  // - twoStreamIsOwned would be set if the associated TStream is owned by the
+  // TTextWriter instance  - as a TRawByteStringStream if twoStreamIsRawByteString
   // - twoFlushToStreamNoAutoResize would forbid FlushToStream to resize the
   // internal memory buffer when it appears undersized - FlushFinal will set it
   // before calling a last FlushToStream
@@ -321,7 +321,7 @@ type
   // - when enumerates and sets are serialized as text into JSON, you may force
   // the identifiers to be left-trimed for all their lowercase characters
   // (e.g. sllError -> 'Error') by setting twoTrimLeftEnumSets: this option
-  // would default to the global TTextWriter.SetDefaultEnumTrim setting
+  // may default to the deprecated global TTextWriter.SetDefaultEnumTrim setting
   // - twoEndOfLineCRLF would reflect the TEchoWriter.EndOfLineCRLF property
   // - twoBufferIsExternal would be set if the temporary buffer is not handled
   // by the instance, but specified at constructor, maybe from the stack
@@ -336,6 +336,7 @@ type
   // - twoNoWriteToStreamException let TTextWriter.WriteToStream silently fail
   TTextWriterOption = (
     twoStreamIsOwned,
+    twoStreamIsRawByteString,
     twoFlushToStreamNoAutoResize,
     twoEnumSetsAsTextInRecord,
     twoEnumSetsAsBooleanInRecord,
@@ -496,8 +497,8 @@ type
     procedure SetStream(aStream: TStream);
     procedure SetBuffer(aBuf: pointer; aBufSize: integer);
     procedure WriteToStream(data: pointer; len: PtrUInt); virtual;
-    procedure InternalSetBuffer(aBuf: PUtf8Char; aBufSize: integer);
-      {$ifdef FPC} inline; {$endif}
+    procedure InternalSetBuffer(aBuf: PUtf8Char; const aBufSize: PtrUInt);
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// direct access to the low-level current position in the buffer
     // - you should not use this field directly
@@ -541,6 +542,7 @@ type
     /// release all internal structures
     // - e.g. free fStream if the instance was owned by this class
     destructor Destroy; override;
+    {$ifndef PUREMORMOT2}
     /// allow to override the default (JSON) serialization of enumerations and
     // sets as text, which would write the whole identifier (e.g. 'sllError')
     // - calling SetDefaultEnumTrim(true) would force the enumerations to
@@ -551,6 +553,7 @@ type
     // in the TTextWriter.CustomOptions property of a given serializer
     // - note that unserialization process would recognize both formats
     class procedure SetDefaultEnumTrim(aShouldTrimEnumsAsText: boolean);
+    {$endif PUREMORMOT2}
 
     /// write pending data, then retrieve the whole text as a UTF-8 string
     function Text: RawUtf8;
@@ -668,7 +671,12 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 chars to the buffer
     // - don't escapes chars according to the JSON RFC
+    // - called by inlined AddNoJsonEscape() if Len >= fTempBufSize
+    procedure AddNoJsonEscapeBig(P: Pointer; Len: PtrInt);
+    /// append some UTF-8 chars to the buffer - inlined for small content
+    // - don't escapes chars according to the JSON RFC
     procedure AddNoJsonEscape(P: Pointer; Len: PtrInt); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 chars to the buffer
     // - don't escapes chars according to the JSON RFC
     procedure AddNoJsonEscapeUtf8(const text: RawByteString);
@@ -712,11 +720,14 @@ type
     /// append an UTF-8 string several times
     procedure AddStrings(const Text: RawUtf8; count: PtrInt); overload;
     /// append a ShortString
-    procedure AddShort(const Text: ShortString);
+    procedure AddShort(const Text: ShortString); overload;
+    /// append a ShortString - or at least a small buffer < 256 chars
+    procedure AddShort(Text: PUtf8Char; TextLen: PtrInt); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// append a TShort8 - Text should be not '', and up to 8 chars long
     // - this method is aggressively inlined, so may be preferred to AddShort()
     // for appending simple UTF-8 constant text
-    procedure AddShorter(const Text: TShort8);
+    procedure AddShorter(const Short8: TShort8);
       {$ifdef HASINLINE}inline;{$endif}
     /// append 'null' as text
     procedure AddNull;
@@ -934,6 +945,8 @@ type
     procedure CancelAll;
     /// same as CancelAll, and also reset the CustomOptions
     procedure CancelAllAsNew;
+    /// same as CancelAll, and also use a new local TTextWriterStackBuffer
+    procedure CancelAllWith(var temp: TTextWriterStackBuffer);
 
     /// count of added bytes to the stream
     // - see PendingBytes for the number of bytes currently in the memory buffer
@@ -1068,7 +1081,8 @@ const
 
   /// TTextWriter JSON serialization options which should be preserved
   // - used e.g. by TTextWriter.CancelAllAsNew to reset its CustomOptions
-  TEXTWRITEROPTIONS_RESET = [twoStreamIsOwned, twoBufferIsExternal];
+  TEXTWRITEROPTIONS_RESET =
+    [twoStreamIsOwned, twoStreamIsRawByteString, twoBufferIsExternal];
 
 type
   TEchoWriter = class;
@@ -2596,7 +2610,7 @@ begin
   begin
     while (S^ <= ' ') and
           (S^ <> #0) do
-      inc(S);
+      inc(S); // trim left space
     len := 0;
     repeat
       c := S^;
@@ -2604,14 +2618,14 @@ begin
       if c = Sep then
         break;
       if c <> #0 then
-      begin
         if len < 254 then // avoid buffer overflow
         begin
           inc(len);
           D[len] := c;
-        end;
-        continue;
-      end;
+          continue;
+        end
+        else
+          len := 0;
       S := nil; // reached #0: end of input
       break;
     until false;
@@ -3509,17 +3523,27 @@ end;
 
 { TTextWriter }
 
+{$ifndef PUREMORMOT2}
 var
   DefaultTextWriterTrimEnum: boolean; // see TTextWriter.SetDefaultEnumTrim()
 
-procedure TTextWriter.InternalSetBuffer(aBuf: PUtf8Char; aBufSize: integer);
+class procedure TTextWriter.SetDefaultEnumTrim(aShouldTrimEnumsAsText: boolean);
 begin
-  fTempBuf := aBuf;
+  DefaultTextWriterTrimEnum := aShouldTrimEnumsAsText;
+end;
+{$endif PUREMORMOT2}
+
+procedure TTextWriter.InternalSetBuffer(aBuf: PUtf8Char; const aBufSize: PtrUInt);
+begin
   fTempBufSize := aBufSize;
-  B := aBuf - 1; // Add() methods will append at B+1
-  BEnd := aBuf + (aBufSize - 16); // -16 to avoid buffer overwrite/overread
+  fTempBuf := aBuf;
+  dec(aBuf);
+  B := aBuf; // Add() methods will append at B+1
+  BEnd := @aBuf[aBufSize - 15]; // BEnd := B-16 to avoid overwrite/overread
+  {$ifndef PUREMORMOT2}
   if DefaultTextWriterTrimEnum then
     Include(fCustomOptions, twoTrimLeftEnumSets);
+  {$endif PUREMORMOT2}
 end;
 
 constructor TTextWriter.Create(aStream: TStream; aBufSize: integer);
@@ -3547,7 +3571,7 @@ begin
     fStream := TextWriterSharedStream
   else
     fStream := TRawByteStringStream.Create; // inlined SetStream()
-  fCustomOptions := [twoStreamIsOwned];
+  fCustomOptions := [twoStreamIsOwned, twoStreamIsRawByteString];
   SetBuffer(aBuf, aBufSize); // aBuf may be nil
 end;
 
@@ -3572,7 +3596,7 @@ begin
     fStream := TextWriterSharedStream
   else
     fStream := TRawByteStringStream.Create; // inlined SetStream()
-  fCustomOptions := [twoStreamIsOwned, twoBufferIsExternal]; // SetBuffer()
+  fCustomOptions := [twoStreamIsOwned, twoStreamIsRawByteString, twoBufferIsExternal];
   InternalSetBuffer(@aStackBuf, SizeOf(aStackBuf));
 end;
 
@@ -3687,19 +3711,12 @@ begin
     '%.WrBase64() unimplemented: use TJsonWriter', [self]);
 end;
 
-procedure TTextWriter.AddShorter(const Text: TShort8);
-var
-  L: PtrInt;
+procedure TTextWriter.AddShorter(const Short8: TShort8);
 begin
-  L := ord(Text[0]);
-  if L > 0 then
-  begin
-    {$ifdef DEBUG} assert(L <= 8); {$endif}
-    if B >= BEnd then
-      FlushToStream;
-    PInt64(B + 1)^ := PInt64(@Text[1])^;
-    inc(B, L);
-  end;
+  if B >= BEnd then
+    FlushToStream;
+  PInt64(B + 1)^ := PInt64(@Short8[1])^;
+  inc(B, ord(Short8[0]));
 end;
 
 procedure TTextWriter.AddNull;
@@ -3759,15 +3776,9 @@ end;
 
 function TTextWriter.GetTextLength: PtrUInt;
 begin
-  if self = nil then
-    result := 0
-  else
+  result := PtrUInt(self);
+  if self <> nil then
     result := PtrUInt(B - fTempBuf + 1) + fTotalFileSize - fInitialStreamPosition;
-end;
-
-class procedure TTextWriter.SetDefaultEnumTrim(aShouldTrimEnumsAsText: boolean);
-begin
-  DefaultTextWriterTrimEnum := aShouldTrimEnumsAsText;
 end;
 
 procedure TTextWriter.SetBuffer(aBuf: pointer; aBufSize: integer);
@@ -3783,6 +3794,7 @@ end;
 
 procedure TTextWriter.SetStream(aStream: TStream);
 begin
+  exclude(fCustomOptions, twoStreamIsRawByteString);
   if fStream <> nil then
     if twoStreamIsOwned in fCustomOptions then
     begin
@@ -3794,14 +3806,15 @@ begin
       end
       else
         FreeAndNilSafe(fStream);
-      Exclude(fCustomOptions, twoStreamIsOwned);
+      exclude(fCustomOptions, twoStreamIsOwned);
     end;
-  if aStream <> nil then
-  begin
-    fStream := aStream;
-    fInitialStreamPosition := fStream.Position;
-    fTotalFileSize := fInitialStreamPosition;
-  end;
+  if aStream = nil then
+    exit;
+  fStream := aStream;
+  fInitialStreamPosition := fStream.Position;
+  fTotalFileSize := fInitialStreamPosition;
+  if aStream.InheritsFrom(TRawByteStringStream) then
+    include(fCustomOptions, twoStreamIsRawByteString);
 end;
 
 procedure TTextWriter.FlushFinal;
@@ -3849,7 +3862,7 @@ procedure TTextWriter.ForceContent(const text: RawUtf8);
 begin
   CancelAll;
   if (fInitialStreamPosition = 0) and
-     fStream.InheritsFrom(TRawByteStringStream) then
+     (twoStreamIsRawByteString in fCustomOptions) then
     TRawByteStringStream(fStream).DataString := text
   else
     fStream.WriteBuffer(pointer(text)^, length(text));
@@ -3858,7 +3871,7 @@ end;
 
 procedure TTextWriter.SetText(var result: RawUtf8; reformat: TTextWriterJsonFormat);
 var
-  Len: cardinal;
+  Len: PtrUInt;
   temp: TTextWriter;
 begin
   FlushFinal;
@@ -3868,7 +3881,7 @@ begin
     result := '';
     exit;
   end;
-  if fStream.InheritsFrom(TRawByteStringStream) then
+  if twoStreamIsRawByteString in fCustomOptions then
     TRawByteStringStream(fStream).GetAsText(fInitialStreamPosition, Len, result)
   else if fStream.InheritsFrom(TCustomMemoryStream) then
     with TCustomMemoryStream(fStream) do
@@ -3910,6 +3923,13 @@ procedure TTextWriter.CancelAllAsNew;
 begin
   CancelAll;
   fCustomOptions := fCustomOptions * TEXTWRITEROPTIONS_RESET;
+end;
+
+procedure TTextWriter.CancelAllWith(var temp: TTextWriterStackBuffer);
+begin
+  if fTotalFileSize <> 0 then
+    fTotalFileSize := fStream.Seek(fInitialStreamPosition, soBeginning);
+  InternalSetBuffer(@temp, SizeOf(temp));
 end;
 
 procedure TTextWriter.CancelLastChar(aCharToCancel: AnsiChar);
@@ -4308,12 +4328,7 @@ begin
   CancelLastComma;
 end;
 
-procedure TTextWriter.AddNoJsonEscape(P: Pointer);
-begin
-  AddNoJsonEscape(P, mormot.core.base.StrLen(PUtf8Char(P)));
-end;
-
-procedure TTextWriter.AddNoJsonEscape(P: Pointer; Len: PtrInt);
+procedure TTextWriter.AddNoJsonEscapeBig(P: Pointer; Len: PtrInt);
 var
   direct: PtrInt;
   D: PUtf8Char;
@@ -4322,7 +4337,6 @@ begin
   if (P <> nil) and
      (Len > 0) then
     if Len < fTempBufSize * 2 then
-    begin
       repeat
         D := B + 1;
         direct := BEnd - D; // guess biggest size available in fTempBuf at once
@@ -4342,8 +4356,7 @@ begin
           inc(PByte(P), direct);
         end;
         FlushToStream;
-      until false;
-    end
+      until false
     else
     begin
       FlushFinal; // no auto-resize if content is really huge
@@ -4356,6 +4369,27 @@ begin
     end;
 end;
 
+procedure TTextWriter.AddNoJsonEscape(P: Pointer; Len: PtrInt);
+begin
+  if (P <> nil) and
+     (Len > 0) then
+    if Len < fTempBufSize then // inlined for small chunk
+    begin
+      if BEnd - B <= Len then
+        FlushToStream;
+      MoveFast(P^, B[1], Len);
+      inc(B, Len);
+    end
+    else
+      AddNoJsonEscapeBig(P, Len); // big chunks
+end;
+
+procedure TTextWriter.AddNoJsonEscape(P: Pointer);
+begin
+  if P <> nil then
+    AddNoJsonEscape(P, mormot.core.base.StrLen(PUtf8Char(P)));
+end;
+
 procedure EngineAppendUtf8(W: TTextWriter; Engine: TSynAnsiConvert;
   P: PAnsiChar; Len: PtrInt);
 var
@@ -4365,7 +4399,7 @@ begin
   Len := Engine.AnsiBufferToUtf8(tmp.Init(Len * 3), P, Len) - PUtf8Char({%H-}tmp.buf);
   W.AddNoJsonEscape(tmp.buf, Len);
   tmp.Done;
-end;{%H-}
+end;
 
 procedure TTextWriter.AddNoJsonEscape(P: PAnsiChar; Len: PtrInt; CodePage: cardinal);
 var
@@ -4595,17 +4629,19 @@ begin
     Add(SepChar);
 end;
 
-procedure TTextWriter.AddShort(const Text: ShortString);
-var
-  L: PtrInt;
+procedure TTextWriter.AddShort(Text: PUtf8Char; TextLen: PtrInt);
 begin
-  L := ord(Text[0]);
-  if L = 0 then
+  if TextLen <= 0 then
     exit;
-  if BEnd - B <= L then
+  if BEnd - B <= TextLen then
     FlushToStream;
-  MoveFast(Text[1], B[1], L);
-  inc(B, L);
+  MoveFast(Text^, B[1], TextLen);
+  inc(B, TextLen);
+end;
+
+procedure TTextWriter.AddShort(const Text: ShortString);
+begin
+  AddShort(@Text[1], ord(Text[0]));
 end;
 
 procedure TTextWriter.AddLine(const Text: ShortString);
@@ -4733,10 +4769,10 @@ end;
 
 procedure TTextWriter.AddTrimLeftLowerCase(Text: PShortString);
 var
-  P: PAnsiChar;
-  L: integer;
+  P: PUtf8Char;
+  L: PtrInt;
 begin
-  L := length(Text^);
+  L := ord(Text^[0]);
   P := @Text^[1];
   while (L > 0) and
         (P^ in ['a'..'z']) do
@@ -4745,9 +4781,11 @@ begin
     dec(L);
   end;
   if L = 0 then
-    AddShort(Text^)
-  else
-    AddNoJsonEscape(P, L);
+  begin
+    L := ord(Text^[0]);
+    P := @Text^[1];
+  end;
+  AddShort(P, L);
 end;
 
 procedure TTextWriter.AddTrimSpaces(const Text: RawUtf8);
@@ -4812,18 +4850,8 @@ var
   L: PtrInt;
 begin
   L := PtrInt(Text);
-  if L = 0 then
-    exit;
-  L := PStrLen(L - _STRLEN)^;
-  if L < fTempBufSize then
-  begin
-    if BEnd - B <= L then
-      FlushToStream;
-    MoveFast(pointer(Text)^, B[1], L);
-    inc(B, L);
-  end
-  else
-    AddNoJsonEscape(pointer(Text), L);
+  if L <> 0 then
+    AddNoJsonEscape(pointer(Text), PStrLen(L - _STRLEN)^);
 end;
 
 procedure TTextWriter.AddSpaced(Text: PUtf8Char; TextLen, Width: PtrInt);
@@ -5093,23 +5121,24 @@ var
 begin
   if Text = nil then
     exit;
-  if Fmt = hfNone then
+  if Fmt <> hfNone then
   begin
-    AddNoJsonEscape(Text, mormot.core.base.StrLen(Text));
-    exit;
-  end;
-  esc := @HTML_ESC[Fmt];
-  repeat
+    esc := @HTML_ESC[Fmt];
     beg := Text;
-    while esc[Text^] = 0 do
+    repeat
+      while esc[Text^] = 0 do
+        inc(Text);
+      AddNoJsonEscape(beg, Text - beg);
+      if Text^ = #0 then
+        exit
+      else
+        AddShorter(HTML_ESCAPED[esc[Text^]]);
       inc(Text);
-    AddNoJsonEscape(beg, Text - beg);
-    if Text^ = #0 then
-      exit
-    else
-      AddShorter(HTML_ESCAPED[esc[Text^]]);
-    inc(Text);
-  until Text^ = #0;
+      beg := Text;
+    until Text^ = #0;
+  end
+  else
+    AddNoJsonEscape(Text, mormot.core.base.StrLen(Text)); // hfNone
 end;
 
 function HtmlEscape(const text: RawUtf8; fmt: TTextWriterHtmlFormat): RawUtf8;
@@ -5121,7 +5150,7 @@ begin
   begin
     W := TTextWriter.CreateOwnedStream(temp);
     try
-      W.AddHtmlEscape(pointer(text), length(text), fmt);
+      W.AddHtmlEscape(pointer(text), fmt);
       W.SetText(result);
     finally
       W.Free;
@@ -9129,7 +9158,7 @@ begin
         {$else}
         WR.AddShort(' [unhandled ');
         {$endif OSWINDOWS}
-        WR.AddNoJSONEScape(extnames[i]);
+        WR.AddNoJsonEscape(extnames[i]);
         WR.AddShort('Exception]');
       end;
     end;

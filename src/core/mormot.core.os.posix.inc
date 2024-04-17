@@ -1421,6 +1421,11 @@ begin
   end;
 end;
 
+function ValidHandle(Handle: THandle): boolean;
+begin
+  result := PtrInt(Handle) >= 0; // 0=StdIn is a valid POSIX file descriptor
+end;
+
 function WaitReadPending(fd, timeout: integer): boolean;
 var
   p: TPollFD; // select() limits process to 1024 sockets in POSIX -> use poll()
@@ -2391,7 +2396,7 @@ begin
   fpsysctl(pointer(@mib), 2, @result, @len, nil, 0);
 end;
 
-function fpsysctlhwstr(hwid: cint; var temp: ShortString): pointer;
+function fpsysctlhwstr(hwid: cint; var temp: ShortString): PUtf8Char;
 var
   mib: array[0..1] of cint;
   len: cint;
@@ -2401,6 +2406,19 @@ begin
   FillCharFast(temp, SizeOf(temp), 0); // ShortString as 0-terminated buffer
   len := SizeOf(temp);
   fpsysctl(pointer(@mib), 2, @temp, @len, nil, 0);
+  if temp[0] <> #0 then
+    result := @temp
+  else
+    result := nil;
+end;
+
+function fpsysctlbynamehwstr(name: PAnsiChar; var temp: ShortString): PUtf8Char;
+var
+  len: cint;
+begin
+  FillCharFast(temp, SizeOf(temp), 0); // ShortString as 0-terminated buffer
+  len := SizeOf(temp);
+  FPsysctlbyname(name, @temp, @len, nil, 0);
   if temp[0] <> #0 then
     result := @temp
   else
@@ -3920,7 +3938,7 @@ var
   tp: timespec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
-  temp: ShortString;
+  temp1, temp2: ShortString;
   {$else}
   hw, cache, cpuinfo: PUtf8Char;
   proccpuinfo, release, prod: RawUtf8;
@@ -3950,13 +3968,15 @@ begin
   {$ifdef OSBSDDARWIN}
   // pure FreeBSD NetBSD MacOS branch
   SystemInfo.dwNumberOfProcessors := fpsysctlhwint(HW_NCPU);
-  beg := fpsysctlhwstr(HW_MACHINE, temp);
-  FastSetString(BiosInfoText, beg, StrLen(beg));
+  beg := fpsysctlhwstr(HW_MACHINE, temp1);
   {$ifdef OSDARWIN}
-  if PosExChar(' ', BiosInfoText) = 0 then
-    BiosInfoText := 'Mac ' + BiosInfoText; // from a Parallels VM
+  if strscan(beg, ' ') = nil then // e.g. from a Parallels VM
+    beg := fpsysctlhwstr(HW_MODEL, temp1);
+  modname := fpsysctlbynamehwstr('machdep.cpu.brand_string', temp2);
   {$endif OSDARWIN}
-  modname := fpsysctlhwstr(HW_MODEL, temp);
+  FastSetString(BiosInfoText, beg, StrLen(beg));
+  if modname = nil then
+    modname := fpsysctlhwstr(HW_MODEL, temp2);
   with uts do
     OSVersionText := sysname + '-' + release + ' ' + version;
   {$ifdef OSDARWIN}
@@ -3965,12 +3985,16 @@ begin
   CpuCache[1].Size     := fpsysctlhwint(HW_L1DCACHESIZE);
   CpuCache[2].LineSize := fpsysctlhwint(HW_CACHELINE);
   CpuCache[2].Size     := fpsysctlhwint(HW_L2CACHESIZE);
-  CpuCacheSize := CpuCache[2].Size;
+  CpuCache[3].LineSize := fpsysctlhwint(HW_CACHELINE);
+  CpuCache[3].Size     := fpsysctlhwint(HW_L3CACHESIZE);
+  CpuCacheSize := CpuCache[3].Size;
+  if CpuCacheSize = 0 then
+    CpuCacheSize := CpuCache[2].Size;
   if CpuCacheSize = 0 then
     CpuCacheSize := CpuCache[1].Size;
   if CpuCacheSize <> 0 then
-    CpuCacheText := 'L1=' + _oskb(CpuCache[1].Size) +
-                   ' L2=' + _oskb(CpuCache[2].Size);
+    _fmt('L1=%s L2=%s L3=%s', [_oskb(CpuCache[1].Size),
+      _oskb(CpuCache[2].Size), _oskb(CpuCache[3].Size)], CpuCacheText);
   SystemMemorySize := fpsysctlhwint(HW_MEMSIZE);
   {$else}
   SystemMemorySize := fpsysctlhwint(HW_PHYSMEM);
@@ -4140,7 +4164,7 @@ begin
   {$endif OSBSDDARWIN}
   SystemInfo.dwPageSize := getpagesize; // call libc API
   if CpuCacheSize <> 0 then
-    CpuInfoText := _oskb(CpuCacheSize) + ' cache';
+    _fmt('[%s]', [_oskb(CpuCacheSize)], CpuInfoText);
   if CpuSockets = 0 then
     CpuSockets := 1;
   SystemInfo.uts.release := uts.Release;

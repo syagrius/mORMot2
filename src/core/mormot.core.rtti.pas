@@ -2904,6 +2904,10 @@ type
 function FindCustomProp(p: PRttiCustomProp; name: pointer; namelen: TStrLen;
   count: integer): PRttiCustomProp;
 
+/// low-level internal function used e.g. by TRttiCustom.GetPrivateSlot()
+// - caller should ensure that slot <> nil
+function FindPrivateSlot(c: TClass; slot: PPointer): pointer;
+
 /// retrieve a (possibly nested) class property RTTI and instance by path
 // - as used e.g. by GetValueObject/SetValueObject wrapper functions
 function GetInstanceByPath(var Instance: TObject; const Path: RawUtf8;
@@ -7275,7 +7279,7 @@ begin
   repeat
     // inlined IdemPropNameUSameLenNotNull(p, name, namelen)
     p1 := pointer(result^.Name);
-    if (p1 <> nil) and // Name='' after NameChange()
+    if (p1 <> nil) and // Name may be '' after NameChange()
        (PStrLen(p1 - _STRLEN)^ = namelen) then
     begin
       l := @p1[namelen - SizeOf(cardinal)];
@@ -8186,7 +8190,7 @@ begin
        (rc.Props.CountNonVoid = 0) then
       exit;
     GetNextItemShortString(FullName, @n, PathDelim);
-    if n[0] in [#0, #254] then
+    if n[0] = #0 then
       exit;
     result := FindCustomProp(
       pointer(rc.Props.List), @n[1], ord(n[0]), rc.Props.Count);
@@ -8487,7 +8491,6 @@ begin
 end;
 
 function FindPrivateSlot(c: TClass; slot: PPointer): pointer;
-  {$ifdef HASINLINE}inline;{$endif}
 var
   n: integer;
 begin
@@ -8516,16 +8519,6 @@ begin
   fPrivateSlotsSafe.UnLock;
 end;
 
-function TRttiCustom.ComputeFakeObjArrayRtti(aItemClass: TClass): TBytes;
-begin
-  if Kind <> rkDynArray then
-    raise ERttiException.CreateUtf8('ComputeFakeArrayRtti %?', [Name]);
-  SetLength(result, InstanceSize);
-  MoveFast(pointer(self)^, pointer(result)^, InstanceSize);  // weak copy
-  TRttiCustom(pointer(result)).fObjArrayClass := aItemClass; // overwrite class
-  TRttiCustom(pointer(result)).fArrayRtti := Rtti.RegisterClass(aItemClass);
-end; // no need to set other fields like Name
-
 function TRttiCustom.SetPrivateSlot(aObject: TObject): pointer;
 begin
   fPrivateSlotsSafe.Lock;
@@ -8544,6 +8537,16 @@ begin
     fPrivateSlotsSafe.UnLock;
   end;
 end;
+
+function TRttiCustom.ComputeFakeObjArrayRtti(aItemClass: TClass): TBytes;
+begin
+  if Kind <> rkDynArray then
+    raise ERttiException.CreateUtf8('ComputeFakeArrayRtti %?', [Name]);
+  SetLength(result, InstanceSize);
+  MoveFast(pointer(self)^, pointer(result)^, InstanceSize);  // weak copy
+  TRttiCustom(pointer(result)).fObjArrayClass := aItemClass; // overwrite class
+  TRttiCustom(pointer(result)).fArrayRtti := Rtti.RegisterClass(aItemClass);
+end; // no need to set other fields like Name
 
 
 { TRttiCustomList }

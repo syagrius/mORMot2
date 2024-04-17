@@ -4664,8 +4664,8 @@ begin
   repeat
     if vt < varFirstCustom then
       exit; // we need a complex type to lookup
-    GetNextItemShortString(FullName, @n, PathDelim); // n ends with #0
-    if n[0] in [#0, #254] then
+    GetNextItemShortString(FullName, @n, PathDelim); // n will end with #0
+    if n[0] = #0 then
       exit;
     if vt = VarType then
       handler := self
@@ -4720,7 +4720,7 @@ begin
   result := GetEnumName(TypeInfo(TDocVariantKind), ord(kind));
 end;
 
-procedure NeedJsonEscape(const Value: variant; var Json: RawUtf8;
+procedure __VariantSaveJsonEscape(const Value: variant; var Json: RawUtf8;
   Escape: TTextWriterKind);
 var
   temp: TTextWriterStackBuffer;
@@ -4751,7 +4751,7 @@ begin
     if (vt >= varFirstCustom) or
        ((Escape <> twNone) and
         not (vt in [varEmpty..varDate, varBoolean, varShortInt..varWord64])) then
-      NeedJsonEscape(PVariant(V)^, result, Escape)
+      __VariantSaveJsonEscape(PVariant(V)^, result, Escape)
     else
       VariantToUtf8(PVariant(V)^, result, dummy); // no escape for simple values
   end
@@ -5008,7 +5008,7 @@ begin
         repeat
           if checkExtendedPropName and
              JsonPropNameValid(nam^) then
-            W.AddNoJsonEscape(nam^, PStrLen(nam^ - _STRLEN)^)
+            W.AddShort(nam^, PStrLen(nam^ - _STRLEN)^)
           else
           begin
             W.Add('"');
@@ -8062,7 +8062,7 @@ function TDocVariantData.InternalNextPath(
   var aCsv: PUtf8Char; aName: PShortString; aPathDelim: AnsiChar): PtrInt;
 begin
   GetNextItemShortString(aCsv, aName, aPathDelim);
-  if (aName^[0] in [#0, #254]) or
+  if (aName^[0] = #0) or
      (VCount = 0) then
     result := -1
   else
@@ -8639,7 +8639,7 @@ begin
       begin
         if (dvoSerializeAsExtendedJson in VOptions) and
            JsonPropNameValid(nam^) then
-          W.AddNoJsonEscape(nam^, PStrLen(nam^ - _STRLEN)^)
+          W.AddShort(nam^, PStrLen(nam^ - _STRLEN)^)
         else
         begin
           W.Add('"');

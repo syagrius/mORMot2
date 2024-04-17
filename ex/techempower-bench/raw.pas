@@ -13,6 +13,7 @@ program raw;
 
 {.$define USE_SQLITE3}
 // may be defined to use a SQLite3 database instead of external PostgresSQL DB
+// - note that /rawfortunes and /async* won't work
 
 {.$define WITH_LOGS}
 // logging is fine for debugging, less for benchmarking ;)
@@ -61,8 +62,8 @@ type
   end;
   TWorlds = array of TWorldRec;
   TFortune = packed record
-    id: integer;
-    message: RawUtf8;
+    id: PtrUInt;
+    message: PUtf8Char;
   end;
   TFortunes = array of TFortune;
 
@@ -165,7 +166,7 @@ begin
 end;
 
 function GetQueriesParamValue(ctxt: THttpServerRequest;
-  const search: RawUtf8 = 'QUERIES='): cardinal;
+  const search: RawUtf8 = 'QUERIES='): cardinal; inline;
 begin
   if not ctxt.UrlParam(search, result) or
      (result = 0) then
@@ -216,7 +217,7 @@ begin
   if fStore.Server.Cache.SetCache(TOrmCachedWorld) then
     fStore.Server.Cache.FillFromQuery(TOrmCachedWorld, '', []);
   fCachedWorldsTable := fStore.Orm.Cache.Table(TOrmCachedWorld);
-  fStore.RetrieveListObjArray(fRawCache, TOrmCachedWorld, 'order by id', []);
+  fStore.Orm.RetrieveListObjArray(fRawCache, TOrmCachedWorld, 'order by id', []);
   // initialize the mustache template for /fortunes
   fTemplate := TSynMustache.Parse(FORTUNES_TPL);
   // setup the HTTP server
@@ -370,22 +371,29 @@ var
   arr: TDynArray;
   n: integer;
   f: ^TFortune;
+  mus: TSynMustacheContextData;
 begin
   result := HTTP_BADREQUEST;
+  {$ifndef USE_SQLITE3}
   if stmt = nil then
+  {$endif USE_SQLITE3}
+    // stmt.ColumnPUtf8 and stmt.Connection.GetThreadOwned won't work on SQLite3
     exit;
   arr.Init(TypeInfo(TFortunes), list, @n);
   while stmt.Step do
   begin
     f := arr.NewPtr;
     f.id := stmt.ColumnInt(0);
-    f.message := stmt.ColumnUtf8(1);
+    f.message := stmt.ColumnPUtf8(1);
   end;
   f := arr.NewPtr;
   f.id := 0;
   f.message := FORTUNES_MESSAGE;
   arr.Sort(FortuneCompareByMessage);
-  ctxt.OutContent := fTemplate.RenderDataArray(arr);
+  mus := stmt.Connection.GetThreadOwned(TSynMustacheContextData);
+  if mus = nil then
+    mus := stmt.Connection.SetThreadOwned(fTemplate.NewMustacheContextData);
+  ctxt.OutContent := mus.RenderArray(arr);
   ctxt.OutContentType := HTML_CONTENT_TYPE;
   result := HTTP_SUCCESS;
 end;
@@ -812,8 +820,8 @@ begin
   // register some RTTI for records JSON serialization
   Rtti.RegisterFromText([
     TypeInfo(TMessageRec), 'message:PUtf8Char',
-    TypeInfo(TWorldRec),   'id,randomNumber:integer',
-    TypeInfo(TFortune),    'id:integer message:RawUtf8']);
+    TypeInfo(TWorldRec),   'id,randomNumber:cardinal',
+    TypeInfo(TFortune),    'id:PtrUInt message:PUtf8Char']);
 
   // compute default execution context from HW information
   cpuCount := CurrentCpuSet(cpuMask); // may run from a "taskset" command

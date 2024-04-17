@@ -778,6 +778,10 @@ type
     function ColumnCurrency(Col: integer): currency; overload;
     /// return a Column UTF-8 encoded text value of the current Row, first Col is 0
     function ColumnUtf8(Col: integer): RawUtf8; overload;
+    /// return a Column UTF-8 text buffer of the current Row, first Col is 0
+    // - low-level function: may return nil if not supported by the provider
+    // - returned pointer is likely to last only until next Step or Reset call
+    function ColumnPUtf8(Col: integer): PUtf8Char;
     /// return a Column text value as RTL string of the current Row, first Col is 0
     function ColumnString(Col: integer): string; overload;
     /// return a Column as a blob value of the current Row, first Col is 0
@@ -1261,7 +1265,7 @@ type
     fUseCache, fStoreVoidStringAsNull, fLogSqlStatementOnException,
     fRollbackOnDisconnect, fReconnectAfterConnectionError,
     fEnsureColumnNameUnique, fFilterTableViewSchemaName,
-    fNoBlobBindArray: boolean;
+    fNoBlobBindArray, fIsThreadSafe: boolean;
     {$ifndef UNICODE}
     fVariantWideString: boolean;
     {$endif UNICODE}
@@ -1941,7 +1945,6 @@ type
     fProperties: TSqlDBConnectionProperties;
     fErrorException: ExceptClass;
     fErrorMessage: RawUtf8;
-    fTransactionCount: integer;
     fServerTimestampOffset: TDateTime;
     fCacheSafe: TOSLightLock; // protect fCache - warning: not reentrant!
     fCache: TRawUtf8List; // statements cache
@@ -1949,9 +1952,11 @@ type
     fCacheLastIndex: integer;
     fTotalConnectionCount: integer;
     fInternalProcessActive: integer;
-    fRollbackOnDisconnect: boolean;
+    fTransactionCount: integer;
     fLastAccessTicks: Int64;
     fOnProcess: TOnSqlDBProcess;
+    fOwned: TObjectDynArray;
+    fRollbackOnDisconnect: boolean;
     function IsOutdated(tix: Int64): boolean; // do not make virtual nor inline
     function GetInTransaction: boolean; virtual;
     function GetServerTimestamp: TTimeLog;
@@ -1966,6 +1971,15 @@ type
     constructor Create(aProperties: TSqlDBConnectionProperties); reintroduce; virtual;
     /// release memory and connection
     destructor Destroy; override;
+    /// retrieve one object owned by a thread-safe connection instance
+    // - may be used e.g. to reuse some internal processing objects
+    // - returns nil if SetThreadOwned() was not previously called
+    function GetThreadOwned(aClass: TClass): pointer;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// register one object owned by a thread-safe connection instance
+    // - returns the supplied aObject instance as a fluid-interface mechanism
+    // - raise an ESqlDBException if not a TSqlDBConnectionPropertiesThreadSafe
+    function SetThreadOwned(aObject: TObject): pointer;
 
     /// connect to the specified database
     // - should raise an Exception on error
@@ -2462,6 +2476,10 @@ type
     function ColumnCurrency(Col: integer): currency; overload; virtual; abstract;
     /// return a Column UTF-8 encoded text value of the current Row, first Col is 0
     function ColumnUtf8(Col: integer): RawUtf8; overload; virtual; abstract;
+    /// return a Column UTF-8 text buffer of the current Row, first Col is 0
+    // - default implementation returning nil, i.e. not supported by this provider
+    // - returned pointer is likely to last only until next Step or Reset call
+    function ColumnPUtf8(Col: integer): PUtf8Char; virtual;
     /// return a Column text value as RTL string of the current Row, first Col is 0
     // - this default implementation will call ColumnUtf8
     function ColumnString(Col: integer): string; overload; virtual;
@@ -6097,6 +6115,11 @@ begin
     result := fColumnCount;
 end;
 
+function TSqlDBStatement.ColumnPUtf8(Col: integer): PUtf8Char;
+begin
+  result := nil; // not supported by this class yet
+end;
+
 function TSqlDBStatement.ColumnBlobBytes(Col: integer): TBytes;
 begin
   RawByteStringToBytes(ColumnBlob(Col), result);
@@ -6510,16 +6533,14 @@ begin
                 W.Add('"');
             end;
           ftUtf8:
+            if not Tab then
             begin
-              if not Tab then
-              begin
-                W.Add('"');
-                W.AddJsonEscape(V.VText);
-                W.Add('"');
-              end
-              else
-                W.AddNoJsonEscape(V.VText, StrLen(V.VText));
-            end;
+              W.Add('"');
+              W.AddJsonEscape(V.VText);
+              W.Add('"');
+            end
+            else
+              W.AddNoJsonEscape(V.VText, StrLen(V.VText));
           ftBlob:
             W.AddShorter(BLOB[Tab]);  // ForceBlobAsNull should be true
         else
@@ -7329,10 +7350,34 @@ begin
     Disconnect;
   except
     on E: Exception do
-      SynDBLog.Add.Log(sllError, 'e=%', [E]);
+      SynDBLog.Add.Log(sllError, 'Destroy: Disconnect raised %', [E], self);
   end;
+  ObjArrayClear(fOwned, {continueonexc=}true);
   inherited;
   fCacheSafe.Done;
+end;
+
+function TSqlDBConnection.GetThreadOwned(aClass: TClass): pointer;
+begin
+  if (self = nil) or
+     not fProperties.fIsThreadSafe then
+    result := nil
+  else
+  begin
+    result := pointer(fOwned);
+    if result <> nil then
+      result := FindPrivateSlot(aClass, result); // reuse logic from RTTI
+  end;
+end;
+
+function TSqlDBConnection.SetThreadOwned(aObject: TObject): pointer;
+begin
+  if (self = nil) or
+     not fProperties.fIsThreadSafe then
+    raise ESqlDBException.CreateUtf8('Unsupported %.SetThreadOwned', [self]);
+  result := aObject;
+  if result <> nil then
+    PtrArrayAdd(fOwned, aObject);
 end;
 
 function TSqlDBConnection.IsOutdated(tix: Int64): boolean;
@@ -7481,13 +7526,13 @@ begin
       begin
         // fast lookup of the requested SQL in cache
         if (fCacheLast = cachedsql) and
-           (fCache.Strings[fCacheLastIndex] = cachedsql) then
+           fCache.EqualValueAt(fCacheLastIndex, cachedsql) then
           ndx := fCacheLastIndex // no need to use the hash lookup
         else
           ndx := fCache.IndexOf(cachedsql); // O(1) hash lookup from fNoDuplicate
         if ndx >= 0 then
         begin
-          stmt := fCache.Objects[ndx];
+          stmt := fCache.ObjectPtr[ndx];
           if stmt.RefCount = 1 then
           begin
             // this statement is not currently in use and can be returned
@@ -7765,6 +7810,7 @@ end;
 constructor TSqlDBConnectionPropertiesThreadSafe.Create(
   const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
 begin
+  fIsThreadSafe := true;
   fConnectionPool := TSynObjectListLightLocked.Create;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
 end;

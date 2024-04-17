@@ -225,6 +225,7 @@ type
     Count: integer;
     Items: array of TPollAsyncConnection;
   end;
+  PPollAsyncConnections = ^TPollAsyncConnections;
 
   /// possible options for low-level TPollAsyncSockets process
   // - as translated from homonymous high-level acoWritePollOnly
@@ -2019,7 +2020,7 @@ begin
           begin
             // seen after accept() or from ab -> leverage this thread
             recved := SizeOf(temp);
-            if connection.fSocket.WaitFor(retryms, [neRead]) = [neRead] then
+            if neRead in connection.fSocket.WaitFor(retryms, [neRead, neError]) then
               res := connection.Recv(@temp, recved);
             wf := 'wf ';
           end
@@ -2119,7 +2120,7 @@ begin
     {$ifdef USE_WINIOCP}
     if ((connection.fSecure = nil) or // ensure TLS won't actually block
         (ifWriteWait in connection.fInternalFlags) or
-        (neWrite in connection.Socket.WaitFor(0, [neWrite]))) and
+        (neWrite in connection.Socket.WaitFor(0, [neWrite, neError]))) and
        connection.WaitLock({writer=}true, {timeout=}20) then
        // allow to wait a little since we are in a single W thread
     {$else}
@@ -2656,7 +2657,8 @@ begin
     exit;
   (aConnection as TAsyncConnection).fLastOperation := fLastOperationMS; // in ms
   with fClients.fWaitingWrite do
-    PtrArrayDelete(Items, aConnection, Safe, @Count);
+    if Count <> 0 then
+      PtrArrayDelete(Items, aConnection, Safe, @Count);
   with fGC[1] do // add to 1st generation
     ObjArrayAdd(Items, aConnection, Safe, @Count);
 end;
@@ -3551,7 +3553,7 @@ begin
       begin
         len := 1;
         touchandgo.Send(@len, len);    // release epoll_wait() in R0 thread
-        ev := touchandgo.WaitFor(100, [neRead]);
+        ev := touchandgo.WaitFor(100, [neRead, neError]);
         DoLog(sllTrace, 'Shutdown epoll WaitFor=%', [byte(ev)], self);
         SleepHiRes(1);
       end;
@@ -4156,7 +4158,7 @@ begin
     end;
     // start async events subscription and connection
     {$ifdef USE_WINIOCP}
-    aConnection.fInternalFlags := [ifWriteWait];
+    include(aConnection.fInternalFlags, ifWriteWait);
     if aConnection.fIocp = nil then
       aConnection.fIocp := fOwner.fIocp.Subscribe(aConnection.fSocket, tag);
     if fOwner.fIocp.PrepareNext(aConnection.fIocp, wieConnect) then
@@ -4741,6 +4743,7 @@ begin
     end;
   end;
 end;
+
 
 { THttpAsyncConnections }
 

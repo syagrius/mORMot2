@@ -42,6 +42,7 @@ const
   WSAEINVAL        = ESysEINVAL;
   WSAEMFILE        = ESysEMFILE;
   WSAECONNREFUSED  = ESysECONNREFUSED;
+  WSAEINPROGRESS   = ESysEINPROGRESS;
 
   {$ifdef OSLINUX}
   SOCK_NONBLOCK = O_NONBLOCK; // see net.h
@@ -364,7 +365,7 @@ function getpeername(s: integer; name: PSockAddr; var namelen: tsocklen): intege
 
 {$endif SOCKDIRECTSYSCALL}
 
-{$ifdef OSDARWIN}
+{$ifdef OSDARWIN2}
 // circumvent linking issue on Mac OSX
 function poll(fds: PPollFD; nfds, timeout: integer): integer; inline;
 begin
@@ -590,6 +591,8 @@ var
   p: TPollFD; // select() limits p.fd<FD_SETSIZE=1024 on POSIX -> use poll()
   // https://moythreads.com/wordpress/2009/12/22/select-system-call-limitation
 begin
+  if loerr <> nil then
+    loerr^ := 0;
   result := [neError];
   if @self = nil then
     exit;
@@ -599,8 +602,7 @@ begin
     p.events := POLLIN or POLLPRI;
   if neWrite in scope then
     p.events := p.events or POLLOUT;
-  if neError in scope then
-    p.events := p.events or POLLERR;
+  // POLLERR and POLLHUP are ignored in p.events: implicit [neError]
   p.revents := 0;
   res := poll(@p, 1, ms);
   if res < 0 then
@@ -608,7 +610,7 @@ begin
     res := sockerrno;
     if loerr <> nil then
       loerr^ := res;
-    if res = WSATRY_AGAIN then
+    if res = ESysEAGAIN then
       // timeout, not a true error
       result := [];
     exit;
@@ -621,7 +623,7 @@ begin
   if p.revents and POLLERR <> 0 then
     include(result, neError);
   if p.revents and POLLHUP <> 0 then
-    include(result, neClosed);
+    include(result, neClosed); // may return neClosed + neRead e.g. on HTTP/1.0
 end;
 
 
