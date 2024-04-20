@@ -1504,9 +1504,7 @@ begin
     if (aCustomOffset and (SystemInfo.dwPageSize - 1)) <> 0 then
       raise EOSException.CreateFmt(
         'DoMap(aCustomOffset=%d) incompatible with dwPageSize=%d',
-        [aCustomOffset, SystemInfo.dwPageSize])
-    else
-      aCustomOffset := aCustomOffset div SystemInfo.dwPageSize;
+        [aCustomOffset, SystemInfo.dwPageSize]);
   fBuf := fpmmap(nil, fBufSize, PROT_READ, MAP_SHARED, fFile, aCustomOffset);
   if fBuf = MAP_FAILED then
   begin
@@ -4022,14 +4020,16 @@ begin
   else
     // return e.g. 'Raspberry Pi 3 Model B Rev 1.2'
     prod := GetSysFile('/proc/device-tree/model');
-  FindNameValue(StringFromFile('/etc/os-release'), 'PRETTY_NAME=', release);
+  FindNameValue(StringFromFile('/etc/os-release', true),
+    'PRETTY_NAME=', release);
   if (release <> '') and
      (release[1] = '"') then
     release := copy(release, 2, length(release) - 2);
   TrimSelf(release);
   if release = '' then
   begin
-    FindNameValue(StringFromFile('/etc/lsb-release'), 'DISTRIB_DESCRIPTION=', release);
+    FindNameValue(StringFromFile('/etc/lsb-release', true),
+      'DISTRIB_DESCRIPTION=', release);
     if (release <> '') and
        (release[1] = '"') then
       release := copy(release, 2, length(release) - 2);
@@ -4042,7 +4042,7 @@ begin
        (FindNext(SR) = 0) then
       release := SR.Name;
     release := split(release, '-');
-    dist := split(StringFromFile('/etc/' + SR.Name), #10);
+    dist := split(StringFromFile('/etc/' + SR.Name, true), #10);
     if (dist <> '') and
        (PosExChar('=', dist) = 0) and
        (PosExChar(' ', dist) > 0) then

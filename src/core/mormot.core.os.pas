@@ -3631,7 +3631,8 @@ type
     // - if aCustomSize and aCustomOffset are specified, the corresponding
     // map view if created (by default, will map whole file)
     function Map(aFile: THandle; aCustomSize: PtrUInt = 0;
-      aCustomOffset: Int64 = 0; aFileOwned: boolean = false): boolean; overload;
+      aCustomOffset: Int64 = 0; aFileOwned: boolean = false;
+      aFileSize: Int64 = -1): boolean; overload;
     /// map the file specified by its name
     // - file will be closed when UnMap will be called
     function Map(const aFileName: TFileName): boolean; overload;
@@ -7618,7 +7619,7 @@ end;
 { TMemoryMap }
 
 function TMemoryMap.Map(aFile: THandle; aCustomSize: PtrUInt;
-  aCustomOffset: Int64; aFileOwned: boolean): boolean;
+  aCustomOffset: Int64; aFileOwned: boolean; aFileSize: Int64): boolean;
 var
   Available: Int64;
 begin
@@ -7629,8 +7630,10 @@ begin
   {$endif OSWINDOWS}
   fFileLocal := aFileOwned;
   fFile := aFile;
-  fFileSize := mormot.core.os.FileSize(fFile);
-  if fFileSize = 0 then
+  if aFileSize < 0 then
+    aFileSize := mormot.core.os.FileSize(fFile);
+  fFileSize := aFileSize;
+  if aFileSize = 0 then
   begin
     result := true; // handle 0 byte file without error (but no memory map)
     exit;
@@ -7693,9 +7696,8 @@ begin
   F := FileOpen(aFileName, fmOpenReadShared);
   if not ValidHandle(F) then
     exit;
-  if Map(F) then
-    result := true
-  else
+  result := Map(F);
+  if not result then
     FileClose(F);
   fFileLocal := result;
 end;
