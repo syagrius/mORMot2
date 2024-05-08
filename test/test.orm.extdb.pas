@@ -946,20 +946,20 @@ var
     R: TOrmPeopleExt;
   begin
     RExt.ClearProperties;
-    Check(RHist.HistoryGet(aIndex, Event, Timestamp, RExt));
-    Check(Event = aEvent);
-    Check(Timestamp >= Start);
+    Check(RHist.HistoryGet(aIndex, Event, Timestamp, RExt), 'get1');
+    Check(Event = aEvent, 'event');
+    CheckUtf8(Timestamp >= Start, '%>=%', [TimeStamp, Start]);
     if Event = heDelete then
       exit;
-    Check(RExt.ID = 400);
-    Check(RExt.FirstName = 'Franz36');
-    Check(RExt.YearOfBirth = aYOB);
+    CheckEqual(RExt.ID, 400, 'rext');
+    CheckEqual(RExt.FirstName, 'Franz36');
+    CheckEqual(RExt.YearOfBirth, aYOB);
     R := RHist.HistoryGet(aIndex) as TOrmPeopleExt;
-    if CheckFailed(R <> nil) then
+    if CheckFailed(R <> nil, 'get2') then
       exit;
-    Check(R.ID = 400);
-    Check(R.FirstName = 'Franz36');
-    Check(R.YearOfBirth = aYOB);
+    CheckEqual(R.ID, 400, 'r');
+    CheckEqual(R.FirstName, 'Franz36');
+    CheckEqual(R.YearOfBirth, aYOB);
     R.Free;
   end;
 
@@ -969,7 +969,7 @@ var
   begin
     RHist := TOrmMyHistory.CreateHistory(aExternalClient.Orm, TOrmPeopleExt, 400);
     try
-      Check(RHist.HistoryCount = 504);
+      CheckEqual(RHist.HistoryCount, 504, 'HistoryCount');
       HistoryCheck(0, 1797, heAdd);
       HistoryCheck(1, 1828, heUpdate);
       HistoryCheck(2, 1515, heUpdate);
@@ -995,9 +995,9 @@ begin
       MapAutoKeywordFields <> nil);
   Check(OrmMapExternal(fExternalModel, TOrmOnlyBlob, fProperties, 'OnlyBlobExternal') <> nil);
   Check(OrmMapExternal(fExternalModel, TOrmTestJoin, fProperties, 'TestJoinExternal') <> nil);
-  Check(OrmMapExternal(fExternalModel, TOrmASource, fProperties, 'SourceExternal') <> nil);
-  Check(OrmMapExternal(fExternalModel, TOrmADest, fProperties, 'DestExternal') <> nil);
-  Check(OrmMapExternal(fExternalModel, TOrmADests, fProperties, 'DestsExternal') <> nil);
+  Check(OrmMapExternal(fExternalModel, TOrmASource,  fProperties, 'SourceExternal')   <> nil);
+  Check(OrmMapExternal(fExternalModel, TOrmADest,    fProperties, 'DestExternal')     <> nil);
+  Check(OrmMapExternal(fExternalModel, TOrmADests,   fProperties, 'DestsExternal')    <> nil);
   DeleteFile('testExternal.db3'); // need a file for backup testing
   if TrackChanges and
      StaticVirtualTableDirect then

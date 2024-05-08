@@ -3598,7 +3598,7 @@ begin
   begin
     if Compress[CompressContentEncoding].Func(Content, false) = '' then
       // invalid content
-      raise EHttpSocket.CreateUtf8('% UncompressData failed',
+      EHttpSocket.RaiseUtf8('% UncompressData failed',
         [Compress[CompressContentEncoding].Name]);
     ContentLength := length(Content); // uncompressed Content-Length
   end;
@@ -3967,7 +3967,7 @@ begin
     MaxSize := ContentLength;
   if MaxSize <= 0 then
     // paranoid check of the server logic
-    raise EHttpSocket.CreateUtf8('ProcessWrite: len=%', [MaxSize]);
+    EHttpSocket.RaiseUtf8('ProcessWrite: len=%', [MaxSize]);
   if ContentStream <> nil then
   begin
     Process.Reserve(MaxSize);
@@ -4228,7 +4228,7 @@ begin
       readln(SockIn^, line);
       err := ioresult;
       if err <> 0 then
-        raise EHttpSocket.CreateUtf8('%.GetHeader error=%', [self, err]);
+        EHttpSocket.RaiseUtf8('%.GetHeader error=%', [self, err]);
       {$I+}
       if line[0] = #0 then
         break; // HTTP headers end with a void line
@@ -4266,7 +4266,7 @@ begin
   Http.Content := '';
   if DestStream <> nil then
     if (cardinal(Http.CompressContentEncoding) < cardinal(length(Http.Compress))) then
-      raise EHttpSocket.CreateUtf8('%.GetBody(%) does not support compression',
+      EHttpSocket.RaiseUtf8('%.GetBody(%) does not support compression',
         [self, DestStream]);
   {$I-}
   // direct read bytes, as indicated by Content-Length or Chunked
@@ -4280,7 +4280,7 @@ begin
         readln(SockIn^, chunkline); // use of a static PChar is faster
         err := ioresult;
         if err <> 0 then
-          raise EHttpSocket.CreateUtf8('%.GetBody chunked ioresult=%', [self, err]);
+          EHttpSocket.RaiseUtf8('%.GetBody chunked ioresult=%', [self, err]);
         len32 := HttpChunkToHex32(chunkline); // get chunk length in hexa
       end
       else
@@ -4361,7 +4361,7 @@ begin
   begin
     err := ioresult;
     if err <> 0 then
-      raise EHttpSocket.CreateUtf8('%.GetBody ioresult2=%', [self, err]);
+      EHttpSocket.RaiseUtf8('%.GetBody ioresult2=%', [self, err]);
   end;
   {$I+}
 end;
@@ -5073,7 +5073,7 @@ begin
     exit; // format will be supplied later
   err := Parse(aFormat);
   if err <> '' then
-    raise EHttpLogger.CreateUtf8('%.Create: %', [self, err]);
+    EHttpLogger.RaiseUtf8('%.Create: %', [self, err]);
 end;
 
 constructor THttpLogger.CreateWithFile(const aFileName: TFileName;
@@ -5243,7 +5243,7 @@ begin
   h := OnlyChar(LowerCase(aHost), ['a'..'z', '0'..'9', '.', '%']);
   if (h = '') or
      (fWriterSingle <> nil) then
-    raise EHttpLogger.CreateUtf8('Unexpected %.DefineHost(%)', [self, aHost]);
+    EHttpLogger.RaiseUtf8('Unexpected %.DefineHost(%)', [self, aHost]);
   fWriterHostSafe.Lock;
   try
     if fWriterHost = nil then
@@ -5287,18 +5287,17 @@ begin
     exit;
   err := Parse(aFormat);
   if err <> '' then
-    raise EHttpLogger.CreateUtf8('%.SetFormat: % in [%]', [self, err, aFormat]);
+    EHttpLogger.RaiseUtf8('%.SetFormat: % in [%]', [self, err, aFormat]);
 end;
 
 procedure THttpLogger.SetDestFolder(const aFolder: TFileName);
 begin
   if (fWriterHost <> nil) or
      (fWriterSingle <> nil) then
-    raise EHttpLogger.CreateUtf8(
-      'Impossible to set %.DestFolder once started', [self]);
+    EHttpLogger.RaiseUtf8('Impossible to set %.DestFolder once started', [self]);
   fDestFolder := EnsureDirectoryExists(aFolder, EHttpLogger);
   if not IsDirectoryWritable(fDestFolder, [idwExcludeWinSys]) then
-    raise EHttpLogger.CreateUtf8('Not writable %.DestFolder = %', [self, aFolder]);
+    EHttpLogger.RaiseUtf8('Not writable %.DestFolder = %', [self, aFolder]);
 end;
 
 function THttpLogger.Parse(const aFormat: RawUtf8): RawUtf8;
@@ -5422,7 +5421,7 @@ begin
     if Context.State <> hrsResponseDone then // for error.log
     begin
       wr.AddString(HTTP_STATE[Context.State]);
-      wr.Add(' ');
+      wr.AddDirect(' ');
     end;
     repeat
       case v^ of // compile as a fast lookup table jump on FPC
@@ -5498,9 +5497,9 @@ begin
         hlvRequest:
           begin
             wr.AddString(RawUtf8(Context.Method));
-            wr.Add(' ');
+            wr.AddDirect(' ');
             wr.AddString(RawUtf8(Context.Url)); // full request = not normalized
-            wr.Add(' ');
+            wr.AddDirect(' ');
             wr.AddShorter(HTTP[hsrHttp10 in Context.Flags]);
           end;
         hlvRequest_Hash:
@@ -5709,7 +5708,7 @@ begin
           end;
         end
     else
-      raise EHttpAnalyzer.CreateUtf8('Invalid %.UniqueDepth=%', [self, value]);
+      EHttpAnalyzer.RaiseUtf8('Invalid %.UniqueDepth=%', [self, value]);
     end;
 end;
 
@@ -6070,10 +6069,10 @@ end;
 procedure THttpAnalyzer.SetDestFolder(const Value: TFileName);
 begin
   if fDestFolder <> '' then
-    raise EHttpAnalyzer.CreateUtf8('%.DestFolder can be set once', [self]);
+    EHttpAnalyzer.RaiseUtf8('%.DestFolder can be set once', [self]);
   fDestFolder := EnsureDirectoryExists(Value, EHttpAnalyzer);
   if not IsDirectoryWritable(fDestFolder, [idwExcludeWinSys]) then
-    raise EHttpAnalyzer.CreateUtf8('Not writable %.DestFolder = %', [self, Value]);
+    EHttpAnalyzer.RaiseUtf8('Not writable %.DestFolder = %', [self, Value]);
 end;
 
 procedure THttpAnalyzer.DoGet(Period: THttpAnalyzerPeriod;
@@ -6326,19 +6325,19 @@ begin
         t.AddIsoDate(w) // time part is irrelevant
       else
         t.AddIsoDateTime(w, {ms=}false, {first=}' ');
-      w.Add(',');
+      w.AddComma;
       w.AddString(HTTP_PERIOD[p^.Period]);
-      w.Add(',');
+      w.AddComma;
       w.AddString(HTTP_SCOPE[p^.Scope]);
-      w.Add(',');
+      w.AddComma;
       w.AddQ(p^.State.Count);
-      w.Add(',');
-      w.AddQ(p^.State.Time);
-      w.Add(',');
+      w.AddComma;
+      w.AddU(p^.State.Time);
+      w.AddComma;
       w.AddU(p^.State.UniqueIP);
-      w.Add(',');
+      w.AddComma;
       w.AddQ(p^.State.Read);
-      w.Add(',');
+      w.AddComma;
       w.AddQ(p^.State.Write);
       w.AddCR;
       inc(p);
@@ -6375,9 +6374,9 @@ begin
   w := TTextDateWriter.Create(Dest, @tmp, SizeOf(tmp));
   try
     if existing = 0 then
-      w.Add('[', #10) // open new JSON array
+      w.AddDirect('[', #10) // open new JSON array
     else
-      w.Add(',', #10); // append
+      w.AddDirect(',', #10); // append
     n := length(State);
     p := pointer(State);
     repeat
@@ -6395,21 +6394,21 @@ begin
       w.AddShorter(',"c":');
       w.AddQ(p^.State.Count);
       w.AddShorter(',"t":');
-      w.AddQ(p^.State.Time);
+      w.AddU(p^.State.Time);
       w.AddShorter(',"i":');
       w.AddU(p^.State.UniqueIP);
       w.AddShorter(',"r":');
       w.AddQ(p^.State.Read);
       w.AddShorter(',"w":');
       w.AddQ(p^.State.Write);
-      w.Add('}');
+      w.AddDirect('}');
       dec(n);
       if n = 0 then
         break;
-      w.Add(',', #10);
+      w.AddDirect(',', #10);
       inc(p);
     until false;
-    w.Add(']'); // close the JSON array
+    w.AddDirect(']'); // close the JSON array
     w.FlushFinal;
   finally
     w.Free;
@@ -6549,8 +6548,8 @@ function THttpMetrics.RangeToPeriodIndex(period: THttpAnalyzerPeriod;
 begin
   // caller should have made Safe.Lock and insured period in hapHour..hapMonth
   if not (period in [hapHour..hapMonth]) then
-    raise EHttpMetrics.CreateUtf8(
-      'Unexpected %. RangeToPeriodIndex(%)', [self, HTTP_PERIOD[period]]);
+    EHttpMetrics.RaiseUtf8('Unexpected %. RangeToPeriodIndex(%)',
+      [self, HTTP_PERIOD[period]]);
   if fPeriodLastCount < fCount then
     CreatePeriodIndex; // refresh indexes if needed
   with fPeriod[period] do // use hapHour .. hapMonth index
@@ -6729,7 +6728,7 @@ begin
     repeat
       diff := s^.Date - prevdate; // delta encoding of the increasing Date field
       if diff < 0 then
-        raise EHttpMetrics.CreateUtf8('%.SaveToWriter: unsorted dates', [self]);
+        EHttpMetrics.RaiseUtf8('%.SaveToWriter: unsorted dates', [self]);
       w := ToVarUInt32(diff, Dest.DirectWriteReserve(SizeOf(s^) * 2));
       prevdate := s^.Date;
       w^ := ord(s^.Period) - 1 + ord(s^.Scope) shl 3; // Period+Scope as 1 byte

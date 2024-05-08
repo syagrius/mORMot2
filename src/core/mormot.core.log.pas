@@ -646,6 +646,7 @@ type
     fRotateFileCount: cardinal;
     fRotateFileSizeKB: cardinal;
     fRotateFileDailyAtHour: integer;
+    function GetLog: TSynLog; // from inlined Add (calls CreateSynLog if needed)
     function CreateSynLog: TSynLog;
     procedure EnsureAutoFlushRunning;
     procedure SetDestinationPath(const value: TFileName);
@@ -669,9 +670,9 @@ type
     destructor Destroy; override;
 
     /// retrieve the corresponding log file of this thread and family
-    // - creates the TSynLog if not already existing for this current thread
-    // - not worth inlining: TSynLog.Add will directly check fGlobalLog
-    function SynLog: TSynLog;
+    // - calls GetLog if needed (e.g. at startup or if fGlobalLog is not set)
+    function Add: TSynLog;
+      {$ifdef HASINLINE} inline; {$endif}
     /// register one object and one echo callback for remote logging
     // - aClient is typically a mORMot's TRestHttpClient or a TSynLogCallbacks
     // instance as defined in this unit
@@ -950,6 +951,14 @@ type
       read fEndOfLineCRLF write fEndOfLineCRLF;
   end;
 
+  /// available options for TSynLogThreadRecursion.MethodNameLocal
+  // - define if the method name is local, i.e. shall not be displayed at Leave()
+  TSynLogThreadMethodName = (
+    mnAlways,
+    mnEnter,
+    mnLeave,
+    mnEnterOwnMethodName);
+
   /// TSynLogThreadContext will define a dynamic array of such information
   // - used by TSynLog.Enter methods to handle recursivity calls tracing
   TSynLogThreadRecursion = record
@@ -961,7 +970,7 @@ type
     /// internal reference count used at this recursion level by TSynLog._AddRef
     RefCount: integer;
     /// if the method name is local, i.e. shall not be displayed at Leave()
-    MethodNameLocal: (mnAlways, mnEnter, mnLeave, mnEnterOwnMethodName);
+    MethodNameLocal: TSynLogThreadMethodName;
     {$ifdef ISDELPHI}
     /// the caller address, ready to display stack trace dump if needed
     Caller: PtrUInt;
@@ -1266,10 +1275,12 @@ type
     // - may be used to log Enter/Leave stack from non-pascal code
     // - each call to ManualEnter should be followed by a matching ManualLeave
     // - aMethodName should be a not nil constant text
-    procedure ManualEnter(aMethodName: PUtf8Char; aInstance: TObject = nil);
+    procedure ManualEnter(aMethodName: PUtf8Char; aInstance: TObject = nil;
+      aMethodNameLocal: TSynLogThreadMethodName =  mnEnter);
     /// manual low-level ISynLog release after TSynLog.Enter execution
     // - each call to ManualEnter should be followed by a matching ManualLeave
     procedure ManualLeave;
+      {$ifdef HASINLINE}inline;{$endif}
     /// low-level latest value returned by QueryPerformanceMicroSeconds()
     // - is only accurate after Enter() or if HighResolutionTimestamp is set
     function LastQueryPerformanceMicroSeconds: Int64;
@@ -3445,11 +3456,10 @@ var
 
   procedure AddHex;
   begin
-    if AllowNotCodeAddr then
-    begin
-      W.AddPointer(aAddressAbsolute);
-      W.Add(' ');
-    end;
+    if not AllowNotCodeAddr then
+      exit;
+    W.AddPointer(aAddressAbsolute);
+    W.AddDirect(' ');
   end;
 
 begin
@@ -3488,16 +3498,16 @@ begin
         W.AddString(debug.Units[u].Symbol.Name)
       else
         W.AddString(debug.Units[u].FileName);
-      W.Add(' ');
+      W.AddDirect(' ');
     end;
     if s >= 0 then
       W.AddString(debug.Symbols[s].Name);
-    W.Add(' ');
+    W.AddDirect(' ');
     if Line > 0 then
     begin
-      W.Add('(');
-      W.Add(Line);
-      W.Add(')', ' ');
+      W.AddDirect('(');
+      W.AddU(Line);
+      W.AddDirect(')', ' ');
     end;
     result := true;
   end
@@ -3883,7 +3893,7 @@ begin
   if fHandleExceptions and
      (GlobalCurrentHandleExceptionSynLog = nil) then
   begin
-    SynLog; // force GlobalCurrentHandleExceptionSynLog assignment
+    GetLog; // force GlobalCurrentHandleExceptionSynLog assignment
     RawExceptionIntercept(SynLogException);
   end;
   {$endif NOEXCEPTIONINTERCEPT}
@@ -4098,7 +4108,17 @@ begin
   end;
 end;
 
-function TSynLogFamily.SynLog: TSynLog;
+function TSynLogFamily.Add: TSynLog;
+begin
+  result := nil;
+  if self = nil then
+    exit;
+  result := fGlobalLog;  // <>nil for ptMergedInOneFile/ptIdentifiedInOneFile
+  if result = nil then
+    result := GetLog; // call sub-proc for ptOneFilePerThread or once at startup
+end;
+
+function TSynLogFamily.GetLog: TSynLog;
 begin
   if self <> nil then
   begin
@@ -4264,7 +4284,7 @@ end;
 
 procedure TSynLogFamily.OnThreadEnded(Sender: TThread);
 begin
-  SynLog.NotifyThreadEnded;
+  Add.NotifyThreadEnded;
 end;
 
 
@@ -4329,7 +4349,7 @@ begin
   result := lf.fGlobalLog;
   // <>nil for ptMergedInOneFile and ptIdentifiedInOneFile (most common case)
   if result = nil then
-    result := lf.SynLog; // ptOneFilePerThread or at startup
+    result := lf.GetLog; // ptOneFilePerThread or at startup
 end;
 
 class function TSynLog.FamilyCreate: TSynLogFamily;
@@ -4349,7 +4369,7 @@ begin
     if (rtticustom = nil) or
        (vmt <> rtticustom) then
       // TSynLog.Family / TSynLog.Add expect TRttiCustom in the first slot
-      raise ESynLogException.CreateUtf8(
+      ESynLogException.RaiseUtf8(
         '%.FamilyCreate: vmtAutoTable=% not %', [self, vmt, rtticustom]);
     {$endif NOPATCHVMT}
     Rtti.RegisterSafe.Lock;
@@ -4360,7 +4380,7 @@ begin
           // registered by a background thread
           exit
         else
-          raise ESynLogException.CreateUtf8( // paranoid
+          ESynLogException.RaiseUtf8( // paranoid
             '%.FamilyCreate: PrivateSlot=%', [self, result]);
       // create the TSynLogFamily instance associated with this TSynLog class
       result := TSynLogFamily.Create(self); // stored in SynLogFamily[]
@@ -4837,7 +4857,8 @@ begin
   result := log;
 end;
 
-procedure TSynLog.ManualEnter(aMethodName: PUtf8Char; aInstance: TObject);
+procedure TSynLog.ManualEnter(aMethodName: PUtf8Char; aInstance: TObject;
+  aMethodNameLocal: TSynLogThreadMethodName);
 var
   r: PSynLogThreadRecursion;
 begin
@@ -4852,7 +4873,7 @@ begin
     // inlined TSynLog.Enter
     r^.Instance := aInstance;
     r^.MethodName := aMethodName;
-    r^.MethodNameLocal := mnEnter;
+    r^.MethodNameLocal := aMethodNameLocal;
     // inlined TSynLog._AddRef
     if sllEnter in fFamily.Level then
     begin
@@ -5036,9 +5057,9 @@ begin
       LogHeader(sllInfo);
       fWriter.AddShort('SetThreadName ');
       fWriter.AddPointer(PtrUInt(fThreadID)); // as hexadecimal
-      fWriter.Add(' ');
-      fWriter.AddQ(PtrUInt(fThreadID));       // as decimal
-      fWriter.Add('=');
+      fWriter.AddDirect(' ');
+      fWriter.AddU(PtrUInt(fThreadID));       // as decimal
+      fWriter.AddDirect('=');
       fWriter.AddString(n);
       LogTrailer(sllInfo);
     finally
@@ -5101,14 +5122,14 @@ begin
     if logRemoteDisable in fInternalFlags then
     begin
       mormot.core.os.LeaveCriticalSection(GlobalThreadLock);
-      raise ESynLogException.CreateUtf8('Nested %.DisableRotemoteLog', [self]);
+      ESynLogException.RaiseUtf8('Nested %.DisableRotemoteLog', [self]);
     end;
     include(fInternalFlags, logRemoteDisable);
   end
   else
   begin
     if not (logRemoteDisable in fInternalFlags) then
-      raise ESynLogException.CreateUtf8('Missing %.DisableRotemoteLog(true)', [self]);
+      ESynLogException.RaiseUtf8('Missing %.DisableRotemoteLog(true)', [self]);
     // DisableRemoteLog(false) -> add to events, and quit the global mutex
     exclude(fInternalFlags, logRemoteDisable);
     fWriterEcho.EchoAdd(fFamily.fEchoRemoteEvent);
@@ -5250,7 +5271,7 @@ var
       fWriter.AddShorter(LOG_LEVEL_TEXT[sllNewRun]);
     end
     else
-      fWriter.Add(#10);
+      fWriter.AddDirect(#10);
   end;
 
 begin
@@ -5391,7 +5412,7 @@ var
   msg: PUtf8Char;
 {$endif OSWINDOWS}
 begin
-  fWriter.Add(' ', '"');
+  fWriter.AddDirect(' ', '"');
   {$ifdef OSWINDOWS}
   msg := WinErrorConstant(Error);
   if msg <> nil then
@@ -5403,8 +5424,8 @@ begin
   {$endif OSWINDOWS}
     fWriter.AddOnSameLine(pointer(GetErrorText(Error)));
   fWriter.AddShorter('" (');
-  fWriter.Add(Error);
-  fWriter.Add(')', ' ');
+  fWriter.AddU(Error);
+  fWriter.AddDirect(')', ' ');
 end;
 
 procedure TSynLog.LogCurrentTime;
@@ -5422,7 +5443,7 @@ begin
     time.FromNow(fFamily.LocalTimestamp);
     time.AddLogTime(fWriter);
     if fFamily.ZonedTimestamp then
-      fWriter.Add('Z');
+      fWriter.AddDirect('Z');
   end;
 end;
 
@@ -5530,9 +5551,9 @@ begin
         fWriter.AddShorter(LOG_LEVEL_TEXT[sllInfo]);
         fWriter.AddShort('SetThreadName ');
         fWriter.AddPointer(PtrUInt(c^.ID));
-        fWriter.Add(' ');
-        fWriter.AddQ(PtrUInt(c^.ID));
-        fWriter.Add('=');
+        fWriter.AddDirect(' ');
+        fWriter.AddU(PtrUInt(c^.ID));
+        fWriter.AddDirect('=');
         fWriter.AddString(c^.ThreadName);
         fWriterEcho.AddEndOfLine(sllInfo);
       end;
@@ -5635,7 +5656,7 @@ begin
       fWriter.AddInstancePointer(Instance, ' ', fFamily.WithUnitName,
         fFamily.WithInstancePointer);
     fWriter.AddOnSameLine(pointer(aName));
-    fWriter.Add('=');
+    fWriter.AddDirect('=');
     fWriter.AddTypedJson(@aValue, aTypeInfo, [woDontStoreVoid]);
     LogTrailer(Level);
   finally
@@ -5850,7 +5871,7 @@ begin
   depth := fFamily.StackTraceLevel;
   if depth <> 0 then
     try
-      fWriter.Add(' ');
+      fWriter.AddDirect(' ');
       for i := 0 to CaptureBacktrace(2, length(frames), @frames[0]) - 1 do
         if (i = 0) or
            (frames[i] <> frames[i - 1]) then
@@ -5968,7 +5989,7 @@ begin
       n := RtlCaptureStackBackTrace(2, fFamily.StackTraceLevel, @BackTrace, nil);
       if n <> 0 then
       begin
-        fWriter.Add(' ');
+        fWriter.AddDirect(' ');
         for i := 0 to n - 1 do
           if TDebugFile.Log(fWriter, BackTrace[i], false) then
             inc(logged);
@@ -6018,7 +6039,7 @@ begin
     for i := 0 to high(SynLogFamily) do
       if SynLogFamily[i].fHandleExceptions then
       begin
-        result := SynLogFamily[i].SynLog;
+        result := SynLogFamily[i].Add;
         exit;
       end;
   end
@@ -6129,7 +6150,7 @@ begin
       if DefaultSynLogExceptionToStr(log.fWriter, Ctxt) then
         goto fin;
 adr:  // regular exception context log with its stack trace
-      log.fWriter.Add(' ', '['); // fThreadContext^.ThreadName may be ''
+      log.fWriter.AddDirect(' ', '['); // fThreadContext^.ThreadName may be ''
       log.fWriter.AddShort(CurrentThreadNameShort^);
       log.fWriter.AddShorter('] at ');
       try

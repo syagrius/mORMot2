@@ -1946,20 +1946,25 @@ type
       var aDefaultIndex: PtrInt): TOrmPropInfo; overload;
     /// find an item in the list using O(log(n)) binary search
     // - returns -1 if not found
-    function IndexByName(const aName: RawUtf8): integer; overload;
+    // - this function returns an integer, as expected by TOnGetFieldIndex event
+    // e.g. for TSelectStatement.Create()
+    function IndexByName(const aName: RawUtf8): integer;
       {$ifdef HASINLINE}inline;{$endif}
     /// find an item in the list using O(log(n)) binary search
     // - returns -1 if not found
-    function IndexByName(aName: PUtf8Char): PtrInt; overload;
+    function IndexByNameU(aName: PUtf8Char): PtrInt;
+    /// check if an item exists in the list
+    function Exists(const aName: RawUtf8): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
     /// find an item by name in the list, including RowID/ID
     // - will identify 'ID' / 'RowID' field name as -1
     // - raise an EOrmException if not found in the internal list
-    function IndexByNameOrExcept(const aName: RawUtf8): integer;
+    function IndexByNameOrExcept(const aName: RawUtf8): PtrInt;
     /// find an item by name in the list, including RowID/ID
     // - will identify 'ID' / 'RowID' field name as -1
     // - raise an EOrmException if not found in the internal list
     // - aName is not defined as "const aName" since it is made an ASCIIZ
-    function IndexByNameOrExceptShort(aName: ShortString): integer;
+    function IndexByNameOrExceptShort(aName: ShortString): PtrInt;
     /// find one or several items by name in the list, including RowID/ID
     // - will identify 'ID' / 'RowID' field name as -1
     // - raise an EOrmException if not found in the internal list
@@ -1971,7 +1976,7 @@ type
     // instead of IndexByNameOrExcept('Address_Country')
     // - won't identify 'ID' / 'RowID' field names, just List[].
     // - raise an EOrmException if not found in the internal list
-    function IndexByNameUnflattenedOrExcept(const aName: RawUtf8): integer;
+    function IndexByNameUnflattenedOrExcept(const aName: RawUtf8): PtrInt;
     /// fill a TRawUtf8DynArray instance from the field names
     // - excluding ID
     procedure NamesToRawUtf8DynArray(var Names: TRawUtf8DynArray);
@@ -3470,7 +3475,7 @@ begin
             W.CancelLastComma;
             W.AddShort(' where ');
             W.AddString(UpdateIDFieldName);
-            W.Add('=', '?'); // last param is ID
+            W.AddDirect('=', '?'); // last param is ID
           end;
         end;
       ooInsert:
@@ -3481,7 +3486,7 @@ begin
             W.AddShort(' default values')
           else
           begin
-            W.Add(' ', '(');
+            W.AddDirect(' ', '(');
             for f := 0 to Decoder.FieldCount - 1 do
             begin
               // append 'COL1,COL2'
@@ -3511,12 +3516,11 @@ begin
                 dec(MultiInsertRowCount);
               end;
             end;
-            W.CancelLastComma;
-            W.Add(')');
+            W.CancelLastComma(')');
           end;
         end;
     else
-      raise EJsonObjectDecoder.CreateUtf8('Unexpected EncodeAsSqlPrepared(%)',
+      EJsonObjectDecoder.RaiseUtf8('Unexpected EncodeAsSqlPrepared(%)',
         [ord(Occasion)]);
     end;
     W.SetText(result);
@@ -4030,7 +4034,7 @@ constructor TOrmPropInfo.Create(const aName: RawUtf8;
   aFieldWidth, aPropertyIndex: integer);
 begin
   if aName = '' then
-    raise EOrmException.CreateUtf8('Void name for %.Create', [self]);
+    EOrmException.RaiseUtf8('Void name for %.Create', [self]);
   if aAuxiliaryRTreeField in aAttributes then
     // '_NormalField' -> 'NormalField'
     fName := copy(aName, 2, MaxInt)
@@ -4361,7 +4365,7 @@ begin
   fPropType := aPropInfo^.TypeInfo;
   fPropRtti := Rtti.RegisterType(fPropType) as TRttiJson;
   if fPropRtti = nil then
-    raise EOrmException.CreateUtf8('%.Create(%): unknown type',
+    EOrmException.RaiseUtf8('%.Create(%): unknown type',
       [self, aPropInfo^.Name^]);
   if aPropInfo.Setter(nil, @call) = rpcField then
     fSetterIsFieldPropOffset := PtrInt(call.Data);
@@ -4410,7 +4414,7 @@ var
 
 begin
   if aPropInfo = nil then
-    raise EOrmException.CreateUtf8('Invalid %.CreateFrom(nil) call', [self]);
+    EOrmException.RaiseUtf8('Invalid %.CreateFrom(nil) call', [self]);
   aType := aPropInfo^.TypeInfo;
   aOrmFieldType := GetOrmFieldType(aType); // guess from RTTI
   C := nil;
@@ -4515,7 +4519,7 @@ begin
       FlattenedPropNameSet;
   end
   else if pilRaiseEOrmExceptionIfNotHandled in aOptions then
-    raise EOrmException.CreateUtf8(
+    EOrmException.RaiseUtf8(
       '%.CreateFrom: Unhandled %/% type for property %',
       [self, ToText(aOrmFieldType)^, ToText(aType^.Kind)^, aPropInfo^.Name^]);
 end;
@@ -6333,7 +6337,7 @@ begin
     fSqlDBFieldType := ftUtf8; // matches GetFieldSqlVar() below
   end;
   if fGetterIsFieldPropOffset = 0 then
-    raise EOrmException.CreateUtf8('%.Create(%) should be a field, not a getter!',
+    EOrmException.RaiseUtf8('%.Create(%) should be a field, not a getter!',
       [self, fPropType^.Name]);
 end;
 
@@ -6794,7 +6798,7 @@ begin
   fOffset := PtrUInt(aProperty);
   if (Assigned(aData2Text) and (not Assigned(aText2Data))) or
      (Assigned(aText2Data) and (not Assigned(aData2Text))) then
-    raise EOrmException.CreateUtf8(
+    EOrmException.RaiseUtf8(
       'Invalid %.Create: expecting both Data2Text/Text2Data', [self]);
   fData2Text := aData2Text;
   fText2Data := aText2Data;
@@ -6827,7 +6831,7 @@ constructor TOrmPropInfoRecordRtti.Create(aRecordInfo: PRttiInfo;
 begin
   if (aRecordInfo = nil) or
      not (aRecordInfo^.Kind in rkRecordTypes) then
-    raise EOrmException.CreateUtf8(
+    EOrmException.RaiseUtf8(
       '%.Create: Invalid type information for %', [self, aName]);
   inherited Create(aName, oftBlobCustom, aAttributes, aFieldWidth,
     aPropertyIndex, aPropertyPointer, aData2Text, aText2Data);
@@ -6966,7 +6970,7 @@ constructor TOrmPropInfoRecordFixedSize.Create(aRecordSize: cardinal;
   aData2Text: TOnSqlPropInfoRecord2Text; aText2Data: TOnSqlPropInfoRecord2Data);
 begin
   if integer(aRecordSize) <= 0 then
-    raise EOrmException.CreateUtf8('%.Create: invalid % record size',
+    EOrmException.RaiseUtf8('%.Create: invalid % record size',
       [self, aRecordSize]);
   fRecordSize := aRecordSize;
   inherited Create(aName, oftBlobCustom, aAttributes, aFieldWidth,
@@ -7109,7 +7113,7 @@ end;
 procedure TOrmPropInfoCustomJson.SetCustomParser(aCustomParser: TRttiJson);
 begin
   if aCustomParser = nil then
-    raise EOrmException.CreateUtf8(
+    EOrmException.RaiseUtf8(
       '%.SetCustomParser: Invalid type information for %', [self, Name]);
   fCustomParser := aCustomParser;
 end;
@@ -7299,13 +7303,13 @@ begin
   // check that this property is not an ID/RowID (handled separately)
   if IsRowID(pointer(aItem.Name)) and
      not (pilAllowIDFields in fOptions) then
-    raise EOrmException.CreateUtf8(
+    EOrmException.RaiseUtf8(
       '%.Add: % should not include a [%] published property',
         [self, fTable, aItem.Name]);
   // check that this property name is not already defined
   for f := 0 to fCount - 1 do
     if PropNameEquals(fList[f].Name, aItem.Name) then
-      raise EOrmException.CreateUtf8(
+      EOrmException.RaiseUtf8(
         '%.Add: % has duplicated name [%]', [self, fTable, aItem.Name]);
   // add to the internal list
   result := fCount;
@@ -7319,7 +7323,7 @@ end;
 function TOrmPropInfoList.GetItem(aIndex: PtrInt): TOrmPropInfo;
 begin
   if PtrUInt(aIndex) >= PtrUInt(fCount) then
-    raise EOrmException.CreateUtf8('Invalid TOrmPropInfoList index %', [aIndex]);
+    EOrmException.RaiseUtf8('Invalid TOrmPropInfoList index %', [aIndex]);
   result := fList[aIndex];
 end;
 
@@ -7373,7 +7377,7 @@ function TOrmPropInfoList.ByRawUtf8Name(const aName: RawUtf8): TOrmPropInfo;
 var
   i: PtrInt;
 begin
-  i := IndexByName(pointer(aName));
+  i := IndexByNameU(pointer(aName));
   if i < 0 then
     result := nil
   else
@@ -7384,7 +7388,7 @@ function TOrmPropInfoList.ByName(aName: PUtf8Char): TOrmPropInfo;
 var
   i: PtrInt;
 begin
-  i := IndexByName(aName);
+  i := IndexByNameU(aName);
   if i < 0 then
     result := nil
   else
@@ -7402,11 +7406,11 @@ begin
     result := fList[i];
     if IdemPropNameU(result.Name, aName, aNameLen) then
     begin
-      inc(aDefaultIndex); // is likely to be in proper order
+      inc(aDefaultIndex);   // is likely to be in proper order
       exit;
     end;
   end;
-  i := IndexByName(aName); // fast O(log(n)) binary search
+  i := IndexByNameU(aName); // fast O(log(n)) binary search
   if i < 0 then
     result := nil
   else
@@ -7416,7 +7420,7 @@ begin
   end;
 end;
 
-function TOrmPropInfoList.IndexByName(aName: PUtf8Char): PtrInt;
+function TOrmPropInfoList.IndexByNameU(aName: PUtf8Char): PtrInt;
 var
   cmp, L, R: PtrInt;
   s: PByteArray;
@@ -7476,32 +7480,37 @@ end;
 
 function TOrmPropInfoList.IndexByName(const aName: RawUtf8): integer;
 begin
-  result := IndexByName(pointer(aName));
+  result := IndexByNameU(pointer(aName));
 end;
 
-function TOrmPropInfoList.IndexByNameOrExceptShort(aName: ShortString): integer;
+function TOrmPropInfoList.Exists(const aName: RawUtf8): boolean;
+begin
+  result := IndexByNameU(pointer(aName)) >= 0;
+end;
+
+function TOrmPropInfoList.IndexByNameOrExceptShort(aName: ShortString): PtrInt;
 begin
   if IsRowIDShort(aName) then
     result := -1
   else
   begin
     aName[ord(aName[0]) + 1] := #0; // make ASCIIZ
-    result := IndexByName(@aName[1]); // fast O(log(n)) binary search
+    result := IndexByNameU(@aName[1]); // fast O(log(n)) binary search
     if result < 0 then
-      raise EOrmException.CreateUtf8(
+      EOrmException.RaiseUtf8(
         '%.IndexByNameOrExceptShort(%): unkwnown in %', [self, aName, fTable]);
   end;
 end;
 
-function TOrmPropInfoList.IndexByNameOrExcept(const aName: RawUtf8): integer;
+function TOrmPropInfoList.IndexByNameOrExcept(const aName: RawUtf8): PtrInt;
 begin
   if IsRowID(pointer(aName)) then
     result := -1
   else
   begin
-    result := IndexByName(pointer(aName)); // fast O(log(n)) binary search
+    result := IndexByNameU(pointer(aName)); // fast O(log(n)) binary search
     if result < 0 then
-      raise EOrmException.CreateUtf8(
+      EOrmException.RaiseUtf8(
         '%.IndexByNameOrExcept(%): unkwnown field in %', [self, aName, fTable]);
   end;
 end;
@@ -7512,10 +7521,10 @@ var
   i: PtrInt;
 begin
   if high(aNames) <> high(aIndexes) then
-    raise EOrmException.CreateUtf8('%.IndexesByNamesOrExcept(?)', [self]);
+    EOrmException.RaiseUtf8('%.IndexesByNamesOrExcept(?)', [self]);
   for i := 0 to high(aNames) do
     if aIndexes[i] = nil then
-      raise EOrmException.CreateUtf8('%.IndexesByNamesOrExcept(aIndexes[%]=nil)',
+      EOrmException.RaiseUtf8('%.IndexesByNamesOrExcept(aIndexes[%]=nil)',
         [self, aNames[i]])
     else
       aIndexes[i]^ := IndexByNameOrExcept(aNames[i]);
@@ -7544,7 +7553,7 @@ begin
   end;
 end;
 
-function TOrmPropInfoList.IndexByNameUnflattenedOrExcept(const aName: RawUtf8): integer;
+function TOrmPropInfoList.IndexByNameUnflattenedOrExcept(const aName: RawUtf8): PtrInt;
 begin
   if pilSubClassesFlattening in fOptions then
   begin
@@ -7556,7 +7565,7 @@ begin
   else
   begin
     // direct - and faster - O(log(n)) binary search
-    result := IndexByName(pointer(aName));
+    result := IndexByNameU(pointer(aName));
     if result >= 0 then
       exit;
   end;
@@ -7895,7 +7904,7 @@ begin
     dec(Value, PtrUInt(fDataStart));
     if (PtrInt(PtrUInt(Value)) > MaxInt) or
        (PtrInt(PtrUInt(Value)) < -MaxInt) then
-      raise EOrmTable.CreateUtf8('%.Results[%] set overflow: all PUtf8Char ' +
+      EOrmTable.RaiseUtf8('%.Results[%] set overflow: all PUtf8Char ' +
         'should be in a [-2GB..+2GB] 32-bit range (value=% start=%) - ' +
         'consider forcing NOPOINTEROFFSET conditional for your project'
         // FPCMM_MEDIUM32BIT may be incompatible with TOrmTable for data >256KB
@@ -7958,7 +7967,7 @@ function TOrmTableAbstract.FieldIndexExisting(const FieldName: RawUtf8): PtrInt;
 begin
   result := FieldIndex(Pointer(FieldName));
   if result < 0 then
-    raise EOrmTable.CreateUtf8('%.FieldIndexExisting("%")', [self, FieldName]);
+    EOrmTable.RaiseUtf8('%.FieldIndexExisting("%")', [self, FieldName]);
 end;
 
 function TOrmTableAbstract.FieldIndex(const FieldNames: array of RawUtf8;
@@ -7970,10 +7979,10 @@ begin
   if high(FieldNames) < 0 then
     exit;
   if high(FieldNames) <> high(FieldIndexes) then
-    raise EOrmTable.CreateUtf8('%.FieldIndex() argument count', [self]);
+    EOrmTable.RaiseUtf8('%.FieldIndex() argument count', [self]);
   for i := 0 to high(FieldNames) do
     if FieldIndexes[i] = nil then
-      raise EOrmTable.CreateUtf8('%.FieldIndex() FieldIndexes["%"]=nil',
+      EOrmTable.RaiseUtf8('%.FieldIndex() FieldIndexes["%"]=nil',
         [self, FieldNames[i]])
     else
     begin
@@ -7991,10 +8000,10 @@ begin
   if high(FieldNames) < 0 then
     exit;
   if high(FieldNames) <> high(FieldIndexes) then
-    raise EOrmTable.CreateUtf8('%.FieldIndexExisting() argument count', [self]);
+    EOrmTable.RaiseUtf8('%.FieldIndexExisting() argument count', [self]);
   for i := 0 to high(FieldNames) do
     if FieldIndexes[i] = nil then
-      raise EOrmTable.CreateUtf8('%.FieldIndexExisting() FieldIndexes["%"]=nil',
+      EOrmTable.RaiseUtf8('%.FieldIndexExisting() FieldIndexes["%"]=nil',
         [self, FieldNames[i]])
     else
       FieldIndexes[i]^ := FieldIndexExisting(FieldNames[i]);
@@ -8342,7 +8351,7 @@ var
   f: PtrInt;
 begin
   if length(DBTypes) <> fFieldCount then
-    raise EOrmTable.CreateUtf8('%.SetFieldTypes(DBTypes?)', [self]);
+    EOrmTable.RaiseUtf8('%.SetFieldTypes(DBTypes?)', [self]);
   for f := 0 to fFieldCount - 1 do
     SetFieldType(f, DBTOFIELDTYPE[DBTypes[f]]);
 end;
@@ -8377,7 +8386,7 @@ var
 begin
   if Assigned(fQueryColumnTypes) and
      (fFieldCount <> length(fQueryColumnTypes)) then
-    raise EOrmTable.CreateUtf8('%.CreateWithColumnTypes() called ' +
+    EOrmTable.RaiseUtf8('%.CreateWithColumnTypes() called ' +
       'with % column types, whereas the result has % columns',
       [self, length(fQueryColumnTypes), fFieldCount]);
   SetLength(fFieldType, fFieldCount);
@@ -8857,13 +8866,13 @@ begin
   end;
   W.AddColumns(RowLast - RowFirst + 1); // write or init field names (see JSON Expand)
   if W.Expand then
-    W.Add('[');
+    W.AddDirect('[');
   // write rows data
   o := fFieldCount * RowFirst;
   for r := RowFirst to RowLast do
   begin
     if W.Expand then
-      W.Add('{');
+      W.AddDirect('{');
     for f := 0 to FieldCount - 1 do
     begin
       U := GetResults(o);
@@ -8889,9 +8898,9 @@ begin
           ftUtf8,
           ftBlob:
             begin
-str:          W.Add('"');
+str:          W.AddDirect('"');
               W.AddJsonEscape(U, 0); // Len=0 is slightly faster
-              W.Add('"');
+              W.AddDirect('"');
             end;
         else
           if IsStringJson(U) then // fast and safe enough to guess from value
@@ -8905,7 +8914,7 @@ str:          W.Add('"');
     W.CancelLastComma;
     if W.Expand then
     begin
-      W.Add('}', ',');
+      W.AddDirect('}', ',');
       if r <> RowLast then
         W.AddCR; // make expanded json more human readable
     end
@@ -9736,7 +9745,7 @@ begin
   quicksort.FieldCount := FieldCount;
   quicksort.IndexMax := high(Fields);
   if quicksort.IndexMax > high(quicksort.Index) then
-    raise EOrmTable.CreateUtf8('%.SortField(): too many Fields[]', [self]);
+    EOrmTable.RaiseUtf8('%.SortField(): too many Fields[]', [self]);
   for i := 0 to quicksort.IndexMax do
     with quicksort.Index[i] do
     begin
@@ -9843,11 +9852,11 @@ function TOrmTableAbstract.FieldBuffer(
 begin
   if (self = nil) or
      (PtrUInt(FieldIndex) >= PtrUInt(fFieldCount)) then
-    raise EOrmTable.CreateUtf8('%.FieldBuffer(%): invalid index',
+    EOrmTable.RaiseUtf8('%.FieldBuffer(%): invalid index',
       [self, FieldIndex]);
   if (fStepRow = 0) or
      (fStepRow > fRowCount) then
-    raise EOrmTable.CreateUtf8('%.FieldBuffer(%): no previous Step',
+    EOrmTable.RaiseUtf8('%.FieldBuffer(%): no previous Step',
       [self, FieldIndex]);
   inc(FieldIndex, fStepRow * FieldCount);
   result := GetResults(FieldIndex);
@@ -9866,11 +9875,11 @@ var
 begin
   i := FieldIndex(FieldName);
   if i < 0 then
-    raise EOrmTable.CreateUtf8('%.FieldBuffer(%): unknown field',
+    EOrmTable.RaiseUtf8('%.FieldBuffer(%): unknown field',
       [self, FieldName]);
   if (fStepRow = 0) or
      (fStepRow > fRowCount) then
-    raise EOrmTable.CreateUtf8('%.FieldBuffer(%): no previous Step',
+    EOrmTable.RaiseUtf8('%.FieldBuffer(%): no previous Step',
       [self, FieldName]);
   inc(i, fStepRow * FieldCount);
   result := GetResults(i);
@@ -9942,10 +9951,10 @@ function TOrmTableAbstract.Field(FieldIndex: PtrInt): variant;
 begin
   if (self = nil) or
      (PtrUInt(FieldIndex) >= PtrUInt(fFieldCount)) then
-    raise EOrmTable.CreateUtf8('%.Field(%): invalid index', [self, FieldIndex]);
+    EOrmTable.RaiseUtf8('%.Field(%): invalid index', [self, FieldIndex]);
   if (fStepRow = 0) or
      (fStepRow > fRowCount) then
-    raise EOrmTable.CreateUtf8('%.Field(%): no previous Step',
+    EOrmTable.RaiseUtf8('%.Field(%): no previous Step',
       [self, FieldIndex]);
   GetVariant(fStepRow, FieldIndex, result);
 end;
@@ -9956,7 +9965,7 @@ var
 begin
   i := FieldIndex(FieldName);
   if i < 0 then
-    raise EOrmTable.CreateUtf8('%.Field(%): unknown field', [self, FieldName]);
+    EOrmTable.RaiseUtf8('%.Field(%): unknown field', [self, FieldName]);
   result := Field(i);
 end;
 
@@ -10280,7 +10289,7 @@ begin
     if NoException then
       exit
     else
-      raise EOrmTable.CreateUtf8('Invalid %.% call', [self, Name]);
+      EOrmTable.RaiseUtf8('Invalid %.% call', [self, Name]);
   r := rv.VRow;
   if r < 0 then
   begin
@@ -10290,7 +10299,7 @@ begin
        if NoException then
          exit
        else
-        raise EOrmTable.CreateUtf8('%.%: no previous Step', [self, Name]);
+        EOrmTable.RaiseUtf8('%.%: no previous Step', [self, Name]);
   end;
   f := rv.VTable.FieldIndex(PUtf8Char(Name));
   if f >= 0 then
@@ -11075,7 +11084,7 @@ begin
   try
     if sfoExtendedJson in Format then
       W.CustomOptions := W.CustomOptions + [twoForceJsonExtended];
-    W.Add('{');
+    W.AddDirect('{');
     if (decoded <> 0) and
        (sfoPutIDFirst in Format) then
       W.AddPropInt64('ID', decoded);
@@ -11100,8 +11109,7 @@ begin
     if (decoded <> 0) and
        (sfoPutIDLast in Format) then
       W.AddPropInt64('ID', decoded);
-    W.CancelLastComma;
-    W.Add('}');
+    W.CancelLastComma('}');
     W.SetText(JsonObject);
   finally
     W.Free;
@@ -11158,7 +11166,7 @@ function TOrmPropertiesAbstract.IsFieldName(PropName: PUtf8Char): boolean;
 begin
   result := (PropName <> nil) and
             (IsRowID(PropName) or
-             (Fields.IndexByName(PropName) >= 0));
+             (Fields.IndexByNameU(PropName) >= 0));
 end;
 
 const
@@ -11267,7 +11275,7 @@ begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
       exit;
-    ndx := Fields.IndexByName(@n[1]);
+    ndx := Fields.IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
     FieldBitSet(Bits, ndx);
@@ -11312,7 +11320,7 @@ begin
       withID := true;
       continue;
     end;
-    ndx := Fields.IndexByName(@n[1]);
+    ndx := Fields.IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
     FieldBitSet(Bits, ndx);
@@ -11347,7 +11355,7 @@ begin
     exit;
   for f := 0 to high(aFields) do
   begin
-    ndx := Fields.IndexByName(aFields[f]);
+    ndx := Fields.IndexByNameU(aFields[f]);
     if ndx < 0 then
       exit; // invalid field name
     FieldBitSet(Bits, ndx);
@@ -11381,7 +11389,7 @@ begin
     exit;
   for f := 0 to high(aFields) do
   begin
-    ndx := Fields.IndexByName(pointer(aFields[f]));
+    ndx := Fields.IndexByNameU(pointer(aFields[f]));
     if ndx < 0 then
       exit; // invalid field name
     FieldBitSet(Bits, ndx);
@@ -11455,7 +11463,7 @@ begin
     exit;
   for f := 0 to high(aFields) do
   begin
-    ndx := Fields.IndexByName(pointer(aFields[f]));
+    ndx := Fields.IndexByNameU(pointer(aFields[f]));
     if ndx < 0 then
       exit; // invalid field name
     AddFieldIndex(Indexes, ndx);
@@ -11486,7 +11494,7 @@ begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
       exit;
-    ndx := Fields.IndexByName(@n[1]);
+    ndx := Fields.IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
     AddFieldIndex(Indexes, ndx);

@@ -294,8 +294,7 @@ type
     // - this method could have been declared as protected, since it should
     // never be called outside the TRestServer.Uri() method workflow
     // - should set Call, and Method members
-    constructor Create(aServer: TRestServer;
-      const aCall: TRestUriParams); reintroduce; virtual;
+    procedure Prepare(aServer: TRestServer; const aCall: TRestUriParams);
     /// finalize the execution context
     destructor Destroy; override;
 
@@ -1083,10 +1082,10 @@ type
   // !            Hexa8(Timestamp)+url))
   TRestServerAuthenticationSignedUri = class(TRestServerAuthenticationUri)
   protected
-    fNoTimestampCoherencyCheck: boolean;
     fTimestampCoherencySeconds: cardinal;
     fTimestampCoherencyTicks: cardinal;
     fComputeSignature: TOnRestAuthenticationSignedUriComputeSignature;
+    fNoTimestampCoherencyCheck: boolean;
     procedure SetNoTimestampCoherencyCheck(value: boolean);
     procedure SetTimestampCoherencySeconds(value: cardinal);
     procedure SetAlgorithm(value: TRestAuthenticationSignedUriAlgo);
@@ -2789,21 +2788,43 @@ end;
 
 { TRestServerUriContext }
 
-constructor TRestServerUriContext.Create(aServer: TRestServer;
+procedure TRestServerUriContext.Prepare(aServer: TRestServer;
   const aCall: TRestUriParams);
+var
+  fam: TSynLogFamily;
+  tmp: pointer;
 begin
-  inherited Create(aCall);
+  // setup the state machine
+  fCall := @aCall;
+  fMethod := ToMethod(aCall.Method);
+  if aCall.InBody <> '' then
+    aCall.InBodyType(fInputContentType, {guessjsonifnone=}false);
   fServer := aServer;
   fThreadServer := PerThreadRunningContextAddress;
   fThreadServer^.Request := self;
   fMethodIndex := -1;
+  // initialize optional logging
+  fam := fServer.LogFamily;
+  if (fam = nil) or
+     not (sllEnter in fam.Level) then
+    exit;
+  fLog := fam.Add; // TSynLog instance for the current thread
+  tmp := nil; // same logic than Enter() but with no ISynLog involved
+  FormatUtf8('URI % % in=%', [aCall.Method, aCall.Url, KB(aCall.InBody)],
+    RawUtf8(tmp));
+  fLog.ManualEnter(tmp, fServer, mnEnterOwnMethodName);
+  if fServer.StatLevels <> [] then // get start timestamp from log
+    fMicroSecondsStart := fLog.LastQueryPerformanceMicroSeconds;
 end;
 
 destructor TRestServerUriContext.Destroy;
 begin
   if fThreadServer <> nil then
     fThreadServer^.Request := nil;
-  inherited Destroy;
+  //inherited Destroy; not needed
+  fLog.ManualLeave;
+  if fJwtContent <> nil then
+    Dispose(fJwtContent);
 end;
 
 procedure TRestServerUriContext.SetOutSetCookie(const aOutSetCookie: RawUtf8);
@@ -2949,10 +2970,11 @@ begin
           s := a^.RetrieveSession(self); // retrieve from URI or cookie
           if s <> nil then
           begin
-            if (Log <> nil) and
+            if Assigned(fLog) and
+               (sllUserAuth in Server.fLogLevel) and
                (s.RemoteIP <> '') and
                (s.RemoteIP <> '127.0.0.1') then
-              Log.Log(sllUserAuth, '%/% %',
+              fLog.Log(sllUserAuth, '%/% %',
                 [s.User.LogonName, s.ID, s.RemoteIP], self);
             exit;
           end;
@@ -2977,8 +2999,8 @@ var
   txt: PShortString;
 begin
   txt := ToText(Reason);
-  if Log <> nil then
-    Log.Log(sllUserAuth, 'AuthenticationFailed(%) for % (session=%)',
+  if Assigned(fLog) then
+    fLog.Log(sllUserAuth, 'AuthenticationFailed(%) for % (session=%)',
       [txt^, Call^.Url, Session], self);
   // 401 HTTP_UNAUTHORIZED must include a WWW-Authenticate header, so return 403
   fCall^.OutStatus := HTTP_FORBIDDEN;
@@ -2993,9 +3015,9 @@ procedure TRestServerUriContext.ExecuteCommand;
 
   procedure TimeOut;
   begin
-    Server.InternalLog('TimeOut %.Execute(%) after % ms',
+    fServer.InternalLog('TimeOut %.Execute(%) after % ms',
       [self, ToText(Command)^,
-       Server.fAcquireExecution[Command].LockedTimeOut], sllServer);
+       fServer.fAcquireExecution[Command].LockedTimeOut], sllServer);
     if Call <> nil then
       Call^.OutStatus := HTTP_TIMEOUT; // 408 Request Time-out
   end;
@@ -3006,7 +3028,7 @@ var
   ms, current: cardinal;
   exec: PRestAcquireExecution;
 begin
-  exec := @Server.fAcquireExecution[Command];
+  exec := @fServer.fAcquireExecution[Command];
   ms := exec^.LockedTimeOut;
   if ms = 0 then
     ms := 10000; // never wait forever = 10 seconds max
@@ -3020,12 +3042,11 @@ begin
     execOrmWrite:
       begin
         // special behavior to handle transactions at writing
-        method := ExecuteOrmWrite;
         endtix := TickCount64 + ms;
         while true do
-          if exec^.Safe.TryLockMS(ms, @Server.fShutdownRequested) then
+          if exec^.Safe.TryLockMS(ms, @fServer.fShutdownRequested) then
             try
-              current := TRestOrm(Server.fOrmInstance).TransactionActiveSession;
+              current := TRestOrm(fServer.fOrmInstance).TransactionActiveSession;
               if (current = 0) or
                  (current = Session) then
               begin
@@ -3038,7 +3059,7 @@ begin
                 break;   // will handle Mode<>amLocked below
               end;
               // if we reached here, there is a transaction on another session
-              tix := GetTickCount64; // not self.TickCount64 which is fixed
+              tix := GetTickCount64; // not self.TickCount64 which is cached
               if tix > endtix then
               begin
                 TimeOut; // we were not able to acquire the transaction
@@ -3053,6 +3074,7 @@ begin
               TimeOut;
               exit;
             end;
+        method := ExecuteOrmWrite;
       end;
   else
     raise EOrmException.CreateUtf8('Unexpected Command=% in %.Execute',
@@ -3060,13 +3082,13 @@ begin
   end;
   if exec^.Mode = amBackgroundOrmSharedThread then
     if (Command = execOrmWrite) and
-       (Server.fAcquireExecution[execOrmGet].Mode = amBackgroundOrmSharedThread) then
+       (fServer.fAcquireExecution[execOrmGet].Mode = amBackgroundOrmSharedThread) then
       fCommand := execOrmGet; // both ORM read+write will share the read thread
   case exec^.Mode of
     amUnlocked:
       method;
     amLocked:
-      if exec^.Safe.TryLockMS(ms, @Server.fShutdownRequested) then
+      if exec^.Safe.TryLockMS(ms, @fServer.fShutdownRequested) then
         try
           method;
         finally
@@ -3080,8 +3102,8 @@ begin
     amBackgroundOrmSharedThread:
       begin
         if exec^.Thread = nil then
-          exec^.Thread := Server.Run.NewBackgroundThreadMethod('% % %',
-            [self, Server.fModel.Root, ToText(Command)^]);
+          exec^.Thread := fServer.Run.NewBackgroundThreadMethod('% % %',
+            [self, fServer.fModel.Root, ToText(Command)^]);
         BackgroundExecuteThreadMethod(method, exec^.Thread);
       end;
   end;
@@ -3136,14 +3158,14 @@ const
   COMMANDTEXT: array[TRestServerUriContextCommand] of string[15] = (
     '?', 'Method', 'Interface', 'Read', 'Write');
 begin
-  if sllServer in fLog.GenericFamily.Level then
+  if sllServer in fServer.LogLevel then
     fLog.Log(sllServer, '% % % % %=% out=% in %', [SessionUserName,
       RemoteIPNotLocal, COMMANDTEXT[fCommand], fCall.Method,
       UriWithoutInlinedParams, fCall.OutStatus, KB(fCall.OutBody),
       MicroSecToString(fMicroSecondsElapsed)]);
   if (fCall.OutBody <> '') and
      not (optNoLogOutput in fServiceExecutionOptions) and
-     (sllServiceReturn in fLog.GenericFamily.Level) and
+     (sllServiceReturn in fServer.LogLevel) and
      (fCall.OutHead = '') or
       IsHtmlContentTypeTextual(pointer(fCall.OutHead)) then
     fLog.Log(sllServiceReturn, fCall.OutBody, self, MAX_SIZE_RESPONSE_LOG);
@@ -3155,7 +3177,7 @@ var
   fakeid: PtrInt;
 begin
   if not Assigned(Server.OnNotifyCallback) then
-    raise EServiceException.CreateUtf8('% does not implement callbacks for %',
+    EServiceException.RaiseUtf8('% does not implement callbacks for %',
       [Server, ParamInterfaceInfo.Name]);
   // Par is the callback ID transmitted from the client side
   fakeid := Ctxt.ParseInteger;
@@ -3263,13 +3285,13 @@ begin
   else
   begin
     if ForceServiceResultAsJsonObjectWithoutResult then
-      raise EServiceException.CreateUtf8('%.ServiceResultEnd(ID=%) with ' +
+      EServiceException.RaiseUtf8('%.ServiceResultEnd(ID=%) with ' +
         'ForceServiceResultAsJsonObjectWithoutResult', [self, ID]);
     WR.AddShorter(JSONSEND_WITHID[ForceServiceResultAsJsonObject]);
     WR.Add(ID); // only used in sicClientDriven mode
   end;
   if not ForceServiceResultAsJsonObjectWithoutResult then
-    WR.Add('}');
+    WR.AddDirect('}');
 end;
 
 procedure TRestServerUriContext.ServiceResult(const Name, JsonValue: RawUtf8);
@@ -3355,7 +3377,7 @@ begin
   else
     // TServiceFactoryServer.ExecuteMethod() will use ServiceMethod(Index)
     if ServiceMethod = nil then
-      raise EServiceException.CreateUtf8('%.InternalExecuteSoaByInterface: ' +
+      EServiceException.RaiseUtf8('%.InternalExecuteSoaByInterface: ' +
         'ServiceMethodIndex=% and ServiceMethod=nil', [self, ServiceMethodIndex]);
   end;
   if (Session > CONST_AUTHENTICATION_NOT_USED) and
@@ -3394,15 +3416,15 @@ begin
         include(fServiceExecutionOptions, optNoLogOutput);
     end;
     // log method call and parameter values (if worth it)
-    if (Log <> nil) and
-       (sllServiceCall in Log.GenericFamily.Level) and
+    if Assigned(fLog) and
+       (sllServiceCall in fServer.LogLevel) and
        (ServiceParameters <> nil) and
        (PWord(ServiceParameters)^ <> ord('[') + ord(']') shl 8) then
      if optNoLogInput in ServiceExecutionOptions then
-       Log.Log(sllServiceCall, '%{}',
+       fLog.Log(sllServiceCall, '%{}',
          [ServiceMethod^.InterfaceDotMethodName], Server)
      else
-       Log.Log(sllServiceCall, '%%',
+       fLog.Log(sllServiceCall, '%%',
          [ServiceMethod^.InterfaceDotMethodName, ServiceParameters], Server);
     // OnMethodExecute() callback event
     if Assigned(TServiceFactoryServer(Service).OnMethodExecute) then
@@ -3831,7 +3853,7 @@ begin
         TRestOrmServer(Server.fOrmInstance).RefreshInternalStateFromStatic;
       end
   else
-    raise EOrmException.CreateUtf8('Unexpected %.ExecuteOrmGet(method=%)',
+    EOrmException.RaiseUtf8('Unexpected %.ExecuteOrmGet(method=%)',
       [self, ToText(Method)]);
   end;
 end;
@@ -4088,7 +4110,7 @@ begin
     if n >= max then
     begin
       if n >= MAX_INPUT * 2 then
-        raise EParsingException.CreateUtf8(
+        EParsingException.RaiseUtf8(
           'Security Policy: Accept up to % parameters for %.FillInput',
           [MAX_INPUT * 2, self]);
       inc(max, NextGrow(max));
@@ -4118,9 +4140,9 @@ begin
   end
   else
     DynArrayFakeLength(fInput, n); // SetLength() would make a realloc()
-  if (Log <> nil) and
+  if Assigned(fLog) and
      (LogInputIdent <> '') then
-    Log.Add.Log(sllDebug, LogInputIdent, TypeInfo(TRawUtf8DynArray), fInput, self);
+    fLog.Add.Log(sllDebug, LogInputIdent, TypeInfo(TRawUtf8DynArray), fInput, self);
 end;
 
 function TRestServerUriContext.GetInputInt(const ParamName: RawUtf8): Int64;
@@ -4131,7 +4153,7 @@ begin
   GetInputByName(ParamName, 'Int', v);
   result := GetInt64(pointer(v), err);
   if err <> 0 then
-    raise EParsingException.CreateUtf8('%.InputInt[%]: ''%'' is not an integer',
+    EParsingException.RaiseUtf8('%.InputInt[%]: ''%'' is not an integer',
       [self, ParamName, v]);
 end;
 
@@ -4143,7 +4165,7 @@ begin
   GetInputByName(ParamName, 'Double', v);
   result := GetExtended(pointer(v), err);
   if err <> 0 then
-    raise EParsingException.CreateUtf8('%.InputDouble[%]: ''%'' is not a float',
+    EParsingException.RaiseUtf8('%.InputDouble[%]: ''%'' is not a float',
       [self, ParamName, v]);
 end;
 
@@ -4191,7 +4213,7 @@ var
 begin
   i := GetInputNameIndex(ParamName);
   if i < 0 then
-    raise EParsingException.CreateUtf8('%: missing Input%[%]',
+    EParsingException.RaiseUtf8('%: missing Input%[%]',
       [self, InputName, ParamName]);
   result := fInput[i * 2 + 1];
 end;
@@ -4283,7 +4305,7 @@ var
 begin
   i := GetInputNameIndex(ParamName);
   if i < 0 then
-    raise EParsingException.CreateUtf8('%: missing InputString[%]',
+    EParsingException.RaiseUtf8('%: missing InputString[%]',
       [self, ParamName]);
   Utf8ToStringVar(fInput[i * 2 + 1], result);
 end;
@@ -4376,12 +4398,12 @@ end;
 class procedure TRestServerUriContext.UriComputeRoutes(
   Router: TRestRouter; Server: TRestServer);
 begin
-  raise EParsingException.CreateUtf8('Unexpected %.UriComputeRoutes', [self]);
+  EParsingException.RaiseUtf8('Unexpected %.UriComputeRoutes', [self]);
 end;
 
 procedure TRestServerUriContext.ExecuteSoaByInterface;
 begin
-  raise EParsingException.CreateUtf8('Unexpected %.ExecuteSoaByInterface', [self]);
+  EParsingException.RaiseUtf8('Unexpected %.ExecuteSoaByInterface', [self]);
 end;
 
 function TRestServerUriContext.AuthenticationBearerToken: RawUtf8;
@@ -4464,7 +4486,8 @@ procedure TRestServerUriContext.Error(const ErrorMessage: RawUtf8;
   Status: integer; CacheControlMaxAge: integer);
 begin
   inherited Error(ErrorMessage, Status, CacheControlMaxAge);
-  Server.InternalLog('%.Error: %', [ClassType, fCall^.OutBody], sllDebug);
+  if sllDebug in fServer.LogLevel then
+    fServer.InternalLog('%.Error: %', [ClassType, fCall^.OutBody], sllDebug);
 end;
 
 
@@ -4551,7 +4574,7 @@ var
 begin
   WR := TJsonWriter.CreateOwnedStream(temp);
   try // convert URI parameters into the expected ordered json array
-    WR.Add('[');
+    WR.AddDirect('[');
     m := ServiceMethod;
     ilow := 0;
     a := @m^.Args[m^.ArgsInFirst];
@@ -4574,8 +4597,7 @@ begin
       end;
       inc(a);
     end;
-    WR.CancelLastComma;
-    WR.Add(']');
+    WR.CancelLastComma(']');
     WR.SetText(fCall^.InBody); // input Body contains new generated input JSON
   finally
     WR.Free;
@@ -4594,8 +4616,7 @@ begin
   // here Ctxt.Service and ServiceMethod(Index) are set
   if (Server.Services = nil) or
      (Service = nil) then
-    raise EServiceException.CreateUtf8(
-      '%.ExecuteSoaByInterface invalid call', [self]);
+    EServiceException.RaiseUtf8('%.ExecuteSoaByInterface invalid call', [self]);
   //  URI as '/Model/Interface.Method[/ClientDrivenID]'
   if fCall^.InBody <> '' then
   begin
@@ -4678,8 +4699,7 @@ begin
   // here Ctxt.Service is set (not ServiceMethodIndex yet)
   if (Server.Services = nil) or
      (Service = nil) then
-    raise EServiceException.CreateUtf8(
-      '%.ExecuteSoaByInterface invalid call', [self]);
+    EServiceException.RaiseUtf8('%.ExecuteSoaByInterface invalid call', [self]);
   tmp.Init(fCall^.InBody);
   try
     JsonDecode(tmp.buf, @RPC_NAMES, length(RPC_NAMES), @values, true);
@@ -4760,8 +4780,9 @@ begin
       fConnectionID := aCtxt.Call^.LowLevelConnectionID;
       aCtxt.SetRemoteIP(fRemoteIP);
       fRemoteOsVersion := aCtxt.SessionOS;
-      if aCtxt.Log <> nil then
-        aCtxt.Log.Log(sllUserAuth,
+      if Assigned(aCtxt.fLog) and
+         (sllUserAuth in aCtxt.Server.fLogLevel) then
+        aCtxt.fLog.Log(sllUserAuth,
           'New [%] session %/% created at %/% running % {%}',
           [User.GroupRights.Ident, User.LogonName, fID, fRemoteIP,
            aCtxt.Call^.LowLevelConnectionID, aCtxt.GetUserAgent,
@@ -4772,8 +4793,7 @@ begin
     User.GroupRights.Free;
     User.GroupRights := GID;
   end;
-  raise ESecurityException.CreateUtf8(
-    'Invalid %.Create(%,%)', [self, aCtxt, aUser]);
+  ESecurityException.RaiseUtf8('Invalid %.Create(%,%)', [self, aCtxt, aUser]);
 end;
 
 destructor TAuthSession.Destroy;
@@ -4866,8 +4886,8 @@ constructor TAuthSession.CreateFrom(var Read: TFastReader; Server: TRestServer;
   tix: Int64);
 begin
   if Read.NextByte <> TAUTHSESSION_MAGIC then
-    raise ESecurityException.CreateUtf8(
-      '%.CreateFrom() with invalid format on % %', [self, Server, Server.Model.Root]);
+    ESecurityException.RaiseUtf8('%.CreateFrom() with invalid format on % %',
+      [self, Server, Server.Model.Root]);
   fID := Read.VarUInt32;
   fUser := Server.AuthUserClass.Create;
   fUser.IDValue := Read.VarUInt32;
@@ -4970,14 +4990,16 @@ begin
   if (result = nil) or
      (result.IDValue = 0) then
   begin
-    fServer.InternalLog('%.LogonName=% not found',
-      [fServer.fAuthUserClass, aUserName], sllUserAuth);
+    if sllUserAuth in fServer.LogLevel then
+      fServer.InternalLog('%.LogonName=% not found',
+        [fServer.fAuthUserClass, aUserName], sllUserAuth);
     FreeAndNil(result);
   end
   else if not result.CanUserLog(Ctxt) then
   begin
-    fServer.InternalLog('%.CanUserLog(%) returned FALSE -> rejected',
-      [result, aUserName], sllUserAuth);
+    if sllUserAuth in fServer.LogLevel then
+      fServer.InternalLog('%.CanUserLog(%) returned FALSE -> rejected',
+        [result, aUserName], sllUserAuth);
     FreeAndNil(result);
   end;
 end;
@@ -5032,16 +5054,18 @@ end;
 
 function TRestServerAuthenticationUri.RetrieveSession(
   Ctxt: TRestServerUriContext): TAuthSession;
+var
+  sigpos: PtrInt;
 begin
   result := nil;
-  if (Ctxt = nil) or
-     (Ctxt.UriSessionSignaturePos = 0) then
+  if Ctxt = nil then
     exit;
+  sigpos := Ctxt.UriSessionSignaturePos;
   // expected format is 'session_signature='Hexa8(SessionID)'...
-  if (Ctxt.UriSessionSignaturePos > 0) and
-     (Ctxt.UriSessionSignaturePos + (18 + 8) <= length(Ctxt.Call^.Url)) and
-     HexDisplayToCardinal(PAnsiChar(pointer(Ctxt.Call^.Url)) +
-       Ctxt.UriSessionSignaturePos + 18, Ctxt.fSession) then
+  if (sigpos > 0) and
+     (sigpos + (18 + 8) <= length(Ctxt.Call^.Url)) and
+     HexDisplayToBin(PAnsiChar(pointer(Ctxt.Call^.Url)) + sigpos + 18,
+       @Ctxt.fSession, SizeOf(Ctxt.fSession)) then
     result := fServer.LockedSessionAccess(Ctxt);
 end;
 
@@ -5093,18 +5117,18 @@ function TRestServerAuthenticationSignedUri.RetrieveSession(
 var
   ts, sign, minticks, expectedsign: cardinal;
   P: PAnsiChar;
-  len: integer;
+  len: PtrInt;
 begin
   result := inherited RetrieveSession(Ctxt);
   if result = nil then
     // no valid session ID in session_signature
     exit;
-  if Ctxt.UriSessionSignaturePos + (18 + 8 + 8 + 8) > length(Ctxt.Call^.Url) then
+  len := Ctxt.UriSessionSignaturePos - 1;
+  if len >= length(Ctxt.Call^.Url) - (18 + 8 + 8 + 8) then
   begin
     result := nil;
     exit;
   end;
-  len := Ctxt.UriSessionSignaturePos - 1;
   P := @Ctxt.Call^.Url[len + (20 + 8)]; // points to Hexa8(Timestamp)
   minticks := result.fLastTimestamp - fTimestampCoherencyTicks;
   if HexDisplayToBin(P, @ts, SizeOf(ts)) and
@@ -5121,13 +5145,15 @@ begin
         result.fLastTimestamp := ts;
       exit;
     end
-    else
-      Ctxt.Log.Log(sllUserAuth, 'Invalid Signature: expected %, got %',
+    else if Assigned(Ctxt.fLog) and
+            (sllUserAuth in fServer.fLogLevel) then
+      Ctxt.fLog.Log(sllUserAuth, 'Invalid Signature: expected %, got %',
         [CardinalToHexShort(expectedsign),
          CardinalToHexShort(sign)], self);
   end
-  else
-    Ctxt.Log.Log(sllUserAuth, 'Invalid Timestamp: expected >=%, got %',
+  else if Assigned(Ctxt.fLog) and
+          (sllUserAuth in fServer.fLogLevel) then
+    Ctxt.fLog.Log(sllUserAuth, 'Invalid Timestamp: expected >=%, got %',
       [minticks, Int64(ts)], self);
   result := nil; // indicates invalid signature
 end;
@@ -5378,7 +5404,7 @@ begin
     exit;
   if GetUserPassFromInHead(Ctxt, usrpwd, usr, pwd) then
     if usr = result.User.LogonName then
-      with Ctxt.Server.AuthUserClass.Create do
+      with fServer.AuthUserClass.Create do
       try
         PasswordPlain := pwd; // compute SHA-256 hash of the supplied password
         if PasswordHashHexa = result.User.PasswordHashHexa then
@@ -5575,7 +5601,7 @@ begin
     end;
     // 2nd call: user was authenticated -> release used context
     ServerSspiAuthUser(fSspiAuthContext[ndx], username);
-    if sllUserAuth in fServer.fLogFamily.Level then
+    if sllUserAuth in fServer.fLogLevel then
       fServer.InternalLog('% Authentication success for %',
         [SecPackageName(fSspiAuthContext[ndx]), username], sllUserAuth);
     // now client is authenticated -> create a session for aUserName
@@ -5622,7 +5648,7 @@ end;
 constructor TRestServerMonitor.Create(aServer: TRestServer);
 begin
   if aServer = nil then
-    raise EOrmException.CreateUtf8('%.Create(nil)', [self]);
+    EOrmException.RaiseUtf8('%.Create(nil)', [self]);
   inherited Create(aServer.Model.Root);
   fServer := aServer;
   SetLength(fPerTable[false], length(aServer.Model.Tables));
@@ -5766,7 +5792,7 @@ var
   g: TSynMonitorUsageGranularity;
 begin
   if aStorage = nil then
-    raise EOrmException.CreateUtf8('%.Create(nil)', [self]);
+    EOrmException.RaiseUtf8('%.Create(nil)', [self]);
   if aProcessIDShift < 0 then
     aProcessIDShift := 16 { see TSynUniqueIdentifierProcess }
   else if aProcessIDShift > 40 then
@@ -5817,7 +5843,7 @@ begin
     if rec.Gran = mugHour then
       fComment := rec.Comment;
     if rec.Process <> fProcessID then
-      fLog.SynLog.Log(sllWarning, 'LoadDB(%,%) received Process=%, expected %',
+      fLog.Add.Log(sllWarning, 'LoadDB(%,%) received Process=%, expected %',
         [ID, ToText(Gran)^, rec.Process, fProcessID], self);
     result := true;
   end
@@ -5923,7 +5949,7 @@ var
 begin
   if (aFrom < low(fTree)) or
      (aFrom > high(fTree)) then
-    raise ERestTree.CreateUtf8('%.Setup(%)?', [self, ToText(aFrom)]);
+    ERestTree.RaiseUtf8('%.Setup(%)?', [self, ToText(aFrom)]);
   if fTree[aFrom] = nil then
     fTree[aFrom] := TRadixTreeParams.Create(TRestTreeNode, [rtoCaseInsensitiveUri]);
   uri := fOwner.Model.Root;
@@ -5933,7 +5959,7 @@ begin
   if result = nil then
     exit;
   if result.Data.Node <> rnNone then
-    raise ERestTree.CreateUtf8('%.Setup(m%,''%'',%) already exists as %',
+    ERestTree.RaiseUtf8('%.Setup(m%,''%'',%) already exists as %',
       [self, ToText(aFrom), aUri, ToText(aNode)^, ToText(result.Data.Node)^]);
   inc(fTreeCount[aFrom]);
   inc(fNodeCount[aNode]);
@@ -5957,7 +5983,7 @@ begin
     rnInterfaceClientID:
       result.Data.Command := execSoaByInterface;
   else
-    raise ERestTree.CreateUtf8('%.Setup(%)?', [self, ToText(aNode)^]);
+    ERestTree.RaiseUtf8('%.Setup(%)?', [self, ToText(aNode)^]);
   end;
 end;
 
@@ -5979,7 +6005,7 @@ begin
          (n.Data.Command = execSoaByMethod) then
       begin
         if aMethodIndex >= length(fOwner.fPublishedMethod) then
-          raise ERestException.CreateUtf8('%.Setup method?', [self]);
+          ERestException.RaiseUtf8('%.Setup method?', [self]);
         if aMethodIndex = fOwner.fPublishedMethodBatchIndex then
           n.Data.Command := execOrmWrite; // BATCH is run as ORM write
       end;
@@ -6115,7 +6141,7 @@ end;
 constructor TRestServer.Create(aModel: TOrmModel; aHandleUserAuthentication: boolean);
 begin
   if aModel = nil then
-    raise EOrmException.CreateUtf8('%.Create(Model=nil)', [self]);
+    EOrmException.RaiseUtf8('%.Create(Model=nil)', [self]);
   // setup the associated ORM model
   fStatLevels := SERVERDEFAULTMONITORLEVELS;
   fAuthUserClass := TAuthUser;
@@ -6205,7 +6231,7 @@ procedure TRestServer.SetOrmInstance(aORM: TRestOrmParent);
 begin
   inherited SetOrmInstance(aORM);
   if not aORM.GetInterface(IRestOrmServer, fServer) then
-    raise ERestException.CreateUtf8(
+    ERestException.RaiseUtf8(
       '%.SetOrmInstance(%) is not an IRestOrmServer', [self, aORM]);
 end;
 
@@ -6448,7 +6474,7 @@ begin
     exit;
   end;
   if fStatUsage <> nil then
-    raise EModelException.CreateUtf8('%.StatUsage should be set once', [self]);
+    EModelException.RaiseUtf8('%.StatUsage should be set once', [self]);
   fStatUsage := usage;
   fStatUsage.Track(fStats, 'rest');
 end;
@@ -6692,7 +6718,7 @@ begin
           begin
             W.AddShort(READWRITE[rw]);
             Stats.fPerTable[rw, i].ComputeDetailsTo(W);
-            W.Add('}', ',');
+            W.AddDirect('}', ',');
           end;
         W.CancelLastComma;
         W.AddShorter(']},');
@@ -6701,7 +6727,7 @@ begin
       Stats.UnLock;
     end;
     W.CancelLastComma;
-    W.Add(']', ',');
+    W.AddDirect(']', ',');
   end;
   if withmethods in Flags then
   begin
@@ -6714,10 +6740,10 @@ begin
         begin
           W.Add('{"%":', [Name]);
           Stats.ComputeDetailsTo(W);
-          W.Add('}', ',');
+          W.AddDirect('}', ',');
         end;
     W.CancelLastComma;
-    W.Add(']', ',');
+    W.AddDirect(']', ',');
   end;
   if withinterfaces in Flags then
   begin
@@ -6730,10 +6756,10 @@ begin
           begin
             W.Add('{"%":', [InterfaceFactory.Methods[i].InterfaceDotMethodName]);
             Stats[i].ComputeDetailsTo(W);
-            W.Add('}', ',');
+            W.AddDirect('}', ',');
           end;
     W.CancelLastComma;
-    W.Add(']', ',');
+    W.AddDirect(']', ',');
   end;
   if (withsessions in Flags) and
      (fSessions <> nil) then
@@ -6753,7 +6779,7 @@ begin
           begin
             W.Add('{"%":', [fPublishedMethod[i].Name]);
             a.fMethods[i].ComputeDetailsTo(W);
-            W.Add('}', ',');
+            W.AddDirect('}', ',');
           end;
         W.CancelLastComma;
         W.AddShort('],"interfaces":[');
@@ -6762,7 +6788,7 @@ begin
           begin
             W.Add('{"%":', [Services.InterfaceMethod[i].InterfaceDotMethodName]);
             a.fInterfaces[i].ComputeDetailsTo(W);
-            W.Add('}', ',');
+            W.AddDirect('}', ',');
           end;
         W.CancelLastComma;
         W.AddShorter(']},');
@@ -6771,10 +6797,9 @@ begin
       fSessions.Safe.ReadOnlyUnLock;
     end;
     W.CancelLastComma;
-    W.Add(']', ',');
+    W.AddDirect(']', ',');
   end;
-  W.CancelLastComma;
-  W.Add('}');
+  W.CancelLastComma('}');
 end;
 
 function TRestServer.GetServiceMethodStat(
@@ -6796,7 +6821,7 @@ procedure TRestServer.SetOnNotifyCallback(const event: TOnRestServerClientCallba
 begin
   if Assigned(fOnNotifyCallback) and
      Assigned(event) then
-    raise ERestException.CreateUtf8(
+    ERestException.RaiseUtf8(
       '%.OnNotifyCallback(%) set twice: only a single WS server can be assigned',
       [self, ClassNameShort(TObject(TMethod(event).Data))^]);
   fOnNotifyCallback := event;
@@ -6809,7 +6834,7 @@ begin
     if aServicesRouting <> fServicesRouting then
       if (aServicesRouting = nil) or
          (aServicesRouting = TRestServerUriContext) then
-        raise EServiceException.CreateUtf8(
+        EServiceException.RaiseUtf8(
           'Unexpected %.SetRoutingClass(%)', [self, aServicesRouting])
       else
       begin
@@ -6953,8 +6978,10 @@ begin
       a := fSessions.List[i];
       if a.User.IDValue = User.IDValue then
       begin
-        InternalLog('User.LogonName=% already connected from %/%',
-          [a.User.LogonName, a.RemoteIP, Ctxt.Call^.LowLevelConnectionID], sllUserAuth);
+        if sllUserAuth in fLogLevel then
+          InternalLog('User.LogonName=% already connected from %/%',
+            [a.User.LogonName, a.RemoteIP, Ctxt.Call^.LowLevelConnectionID],
+            sllUserAuth);
         Ctxt.AuthenticationFailed(afSessionAlreadyStartedForThisUser);
         exit; // user already connected
       end;
@@ -6965,10 +6992,11 @@ begin
     if OnSessionCreate(self, Session, Ctxt) then
     begin
       // callback returning TRUE aborts session creation
-      InternalLog('Session aborted by OnSessionCreate() callback ' +
-        'for User.LogonName=% (connected from %/%) - clients=%, sessions=%',
-        [User.LogonName, Session.RemoteIP, Ctxt.Call^.LowLevelConnectionID,
-         fStats.GetClientsCurrent, fSessions.Count], sllUserAuth);
+      if sllUserAuth in fLogLevel then
+        InternalLog('Session aborted by OnSessionCreate() callback ' +
+          'for User.LogonName=% (connected from %/%) - clients=%, sessions=%',
+          [User.LogonName, Session.RemoteIP, Ctxt.Call^.LowLevelConnectionID,
+           fStats.GetClientsCurrent, fSessions.Count], sllUserAuth);
       Ctxt.AuthenticationFailed(afSessionCreationAborted);
       User := nil;
       FreeAndNil(Session);
@@ -7048,13 +7076,14 @@ begin
         ClearConnectionOpaque(a.fConnectionOpaque)
       else
         ClearConnectionOpaque(Ctxt.Call^.LowLevelConnectionOpaque);
-    if Ctxt = nil then
-      InternalLog('Deleted deprecated session %:%/% soaGC=%',
-        [a.User.LogonName, a.ID, fSessions.Count, soa], sllUserAuth)
-    else
-      InternalLog('Deleted session %:%/% from %/% soaGC=%',
-        [a.User.LogonName, a.ID, fSessions.Count, a.RemoteIP,
-         Ctxt.Call^.LowLevelConnectionID, soa], sllUserAuth);
+    if sllUserAuth in fLogLevel then
+      if Ctxt = nil then
+        InternalLog('Deleted deprecated session %:%/% soaGC=%',
+          [a.User.LogonName, a.ID, fSessions.Count, soa], sllUserAuth)
+      else
+        InternalLog('Deleted session %:%/% from %/% soaGC=%',
+          [a.User.LogonName, a.ID, fSessions.Count, a.RemoteIP,
+           Ctxt.Call^.LowLevelConnectionID, soa], sllUserAuth);
     if Assigned(OnSessionClosed) then
       OnSessionClosed(self, a, Ctxt);
     fSessions.Delete(aSessionIndex);
@@ -7065,6 +7094,7 @@ end;
 function TRestServer.SessionDeleteDeprecated(tix: cardinal): integer;
 var
   i: PtrInt;
+  log: ISynLog;
 begin
   // TRestServer.Uri() runs this method every second
   fSessionsDeprecatedTix := tix;
@@ -7079,13 +7109,20 @@ begin
       if tix > TAuthSession(fSessions.List[i]).TimeOutTix then
       begin
         if result = 0 then
+        begin
+          log := fLogClass.Enter(self, 'SessionDeleteDeprecated');
           fSessions.Safe.WriteLock; // upgrade the lock (seldom)
+        end;
         LockedSessionDelete(i, nil);
         inc(result);
       end;
   finally
     if result <> 0 then
+    begin
       fSessions.Safe.WriteUnlock;
+      if Assigned(log) then
+        log.Log(sllTrace, 'SessionDeleteDeprecated=%', [result], self);
+    end;
     fSessions.Safe.ReadWriteUnLock;
   end;
 end;
@@ -7108,9 +7145,10 @@ begin
           result.fConnectionID := Ctxt.Call^.LowLevelConnectionID
         else if result.ConnectionID <> Ctxt.Call^.LowLevelConnectionID then
         begin
-          InternalLog('Session % from % rejected, since created from %/%',
-           [Ctxt.Session, Ctxt.Call^.LowLevelConnectionID,
-            result.RemoteIP, result.ConnectionID], sllUserAuth);
+          if sllUserAuth in fLogLevel then
+            InternalLog('Session % from % rejected, since created from %/%',
+             [Ctxt.Session, Ctxt.Call^.LowLevelConnectionID,
+              result.RemoteIP, result.ConnectionID], sllUserAuth);
           exit;
         end;
       // found the session: assign it to the request Ctxt
@@ -7156,14 +7194,13 @@ begin
   try
     fSessions.Safe.ReadOnlyLock;
     try
-      W.Add('[');
+      W.AddDirect('[');
       for i := 0 to fSessions.Count - 1 do
       begin
         W.WriteObject(fSessions.List[i]);
         W.AddComma;
       end;
-      W.CancelLastComma;
-      W.Add(']');
+      W.CancelLastComma(']');
       W.SetText(RawUtf8(result));
     finally
       fSessions.Safe.ReadOnlyUnLock;
@@ -7252,12 +7289,12 @@ begin
   if m = [] then
     m := aMethods; // use (default) supplied methods
   if aMethodName = '' then
-    raise EServiceException.CreateUtf8('%.ServiceMethodRegister('''')', [self]);
+    EServiceException.RaiseUtf8('%.ServiceMethodRegister('''')', [self]);
   // register the method to the internal list
   obj := TMethod(aEvent).Data;
   if not (rsoNoTableURI in fOptions) and
      (Model.GetTableIndex(aMethodName) >= 0) then
-    raise EServiceException.CreateUtf8('Published method name %.% ' +
+    EServiceException.RaiseUtf8('Published method name %.% ' +
       'conflicts with a Table in the Model!', [obj, aMethodName]);
   with PRestServerMethod(fPublishedMethods.AddUniqueName(aMethodName,
     'Duplicated published method name %.%', [obj, aMethodName], @result))^ do
@@ -7467,18 +7504,18 @@ begin
   tc := fStats.NotifyThreadCount(1);
   id := GetCurrentThreadId;
   if Sender = nil then
-    raise ERestException.CreateUtf8('%.BeginCurrentThread(nil)', [self]);
+    ERestException.RaiseUtf8('%.BeginCurrentThread(nil)', [self]);
   InternalLog('BeginCurrentThread(%) root=% ThreadID=% ''%'' ThreadCount=%',
     [Sender.ClassType, fModel.Root, {%H-}pointer(id), CurrentThreadNameShort^, tc]);
   if Sender.ThreadID <> id then
-    raise ERestException.CreateUtf8(
+    ERestException.RaiseUtf8(
       '%.BeginCurrentThread(Thread.ID=%) and CurrentThreadID=% should match',
       [self, {%H-}pointer(Sender.ThreadID), {%H-}pointer(id)]);
   with PServiceRunningContext(PerThreadRunningContextAddress)^ do
     if RunningThread <> Sender then
       // e.g. if length(TRestHttpServer.fRestServers)>1
       if RunningThread <> nil then
-        raise ERestException.CreateUtf8('%.BeginCurrentThread() twice', [self])
+        ERestException.RaiseUtf8('%.BeginCurrentThread() twice', [self])
       else
         // set the current TThread info
         RunningThread := Sender;
@@ -7496,11 +7533,11 @@ begin
   tc := fStats.NotifyThreadCount(-1);
   id := GetCurrentThreadId;
   if Sender = nil then
-    raise ERestException.CreateUtf8('%.EndCurrentThread(nil)', [self]);
+    ERestException.RaiseUtf8('%.EndCurrentThread(nil)', [self]);
   InternalLog('EndCurrentThread(%) ThreadID=% ''%'' ThreadCount=%',
     [Sender.ClassType, {%H-}pointer(id), CurrentThreadNameShort^, tc]);
   if Sender.ThreadID <> id then
-    raise ERestException.CreateUtf8(
+    ERestException.RaiseUtf8(
       '%.EndCurrentThread(%.ID=%) should match CurrentThreadID=%',
       [self, Sender, {%H-}pointer(Sender.ThreadID), {%H-}pointer(id)]);
   if Services <> nil then
@@ -7515,7 +7552,7 @@ begin
     if RunningThread <> nil then
       // e.g. if length(TRestHttpServer.fRestServers)>1
       if RunningThread <> Sender then
-        raise ERestException.CreateUtf8(
+        ERestException.RaiseUtf8(
           '%.EndCurrentThread(%) should match RunningThread=%',
           [self, Sender, RunningThread])
       else        // reset the TThread info
@@ -7531,7 +7568,6 @@ var
   tix: Int64;
   tix32: cardinal;
   outcomingfile: boolean;
-  log: ISynLog;
 begin
   if fShutdownRequested then
   begin
@@ -7539,10 +7575,6 @@ begin
     exit;
   end;
   // 1. pre-request preparation
-  if (fLogFamily <> nil) and
-     (sllEnter in fLogFamily.Level) then
-    log := fLogClass.Enter('URI % % in=%',
-      [Call.Method, Call.Url, KB(Call.InBody)], self);
   if fRouter = nil then
     ComputeRoutes; // thread-safe (re)initialize once if needed
   if Assigned(OnStartUri) then
@@ -7550,16 +7582,16 @@ begin
     Call.OutStatus := OnStartUri(Call);
     if Call.OutStatus <> HTTP_SUCCESS then
     begin
-      if log <> nil then
-        log.Log(sllServer, 'Uri: rejected by OnStartUri(% %)=%',
+      fLogClass.Add.Log(sllServer, 'Uri: rejected by OnStartUri(% %)=%',
           [Call.Method, Call.Url, Call.OutStatus], self);
       exit;
     end;
   end;
   // 2. request initialization
   Call.OutStatus := HTTP_BADREQUEST; // default error code is 400 BAD REQUEST
-  ctxt := fServicesRouting.Create(self, Call);
+  ctxt := fServicesRouting.Create;
   try
+    ctxt.Prepare(self, Call);
     if (fIPBan <> nil) and
        ctxt.IsRemoteIPBanned then
     begin
@@ -7567,12 +7599,6 @@ begin
       exit;
     end;
     // 3. setup the statistics
-    if log <> nil then
-    begin
-      ctxt.fLog := log.Instance;
-      if StatLevels <> [] then // get start timestamp from log
-        ctxt.fMicroSecondsStart := ctxt.fLog.LastQueryPerformanceMicroSeconds;
-    end;
     if StatLevels <> [] then
     begin
       if ctxt.fMicroSecondsStart = 0 then
@@ -7673,7 +7699,8 @@ begin
     if ctxt.OutSetCookie <> '' then
       ctxt.OutHeadFromCookie;
     // paranoid check of the supplied output headers
-    if not (rsoHttpHeaderCheckDisable in fOptions) and
+    if (Call.OutHead <> '') and
+       not (rsoHttpHeaderCheckDisable in fOptions) and
        IsInvalidHttpHeader(pointer(Call.OutHead), length(Call.OutHead)) then
       ctxt.Error('Unsafe HTTP header rejected [%]',
         [EscapeToShort(Call.OutHead)], HTTP_SERVERERROR);
@@ -7681,7 +7708,7 @@ begin
     // 9. gather statistics and log execution
     if ctxt.fMicroSecondsStart <> 0 then
       ctxt.ComputeStatsAfterCommand;
-    if log <> nil then
+    if ctxt.fLog <> nil then
       ctxt.LogFromContext;
     // 10. finalize execution context
     if Assigned(OnAfterUri) then
@@ -7810,8 +7837,9 @@ begin
           for i := 0 to Services.Count - 1 do
             inc(count, TServiceFactoryServer(Services.InterfaceList[i].Service).
               RenewSession(Ctxt));
-        InternalLog('Renew % authenticated session % from %: count=%',
-          [Model.Root, Ctxt.Session, Ctxt.RemoteIPNotLocal, count], sllUserAuth);
+        if sllUserAuth in fLogLevel then
+          InternalLog('Renew % authenticated session % from %: count=%',
+            [Model.Root, Ctxt.Session, Ctxt.RemoteIPNotLocal, count], sllUserAuth);
         Ctxt.Returns(['count', count]);
       end
       else if (fServices <> nil) and
@@ -7826,9 +7854,10 @@ begin
           old := GetInt64(pointer(Ctxt.Call^.InBody));
           count := (fServices as TServiceContainerServer).
             FakeCallbackReplaceConnectionID(old, Ctxt.Call^.LowLevelConnectionID);
-          InternalLog('%: Connection % replaced by % from % on %',
-            [Model.Root, old, Ctxt.Call^.LowLevelConnectionID,
-             Ctxt.RemoteIPNotLocal, Plural('interface', count)], sllHTTP);
+          if sllHTTP in fLogLevel then
+            InternalLog('%: Connection % replaced by % from % on %',
+              [Model.Root, old, Ctxt.Call^.LowLevelConnectionID,
+               Ctxt.RemoteIPNotLocal, Plural('interface', count)], sllHTTP);
           Ctxt.Returns(['count', count]);
         end;
     mPUT:

@@ -2299,6 +2299,8 @@ begin
       dec(B.Bulk[j]);
     end;
     Check(CompareMem(@A.Bulk, @B.Bulk, i));
+    Check(CompareMemSmall(@A.Bulk, @B.Bulk, i));
+    Check(CompareMemFixed(@A.Bulk, @B.Bulk, i));
   end;
   for i := 0 to High(B.Bulk) do
     Check(CompareMemSmall(@A.Bulk, @B.Bulk, i));
@@ -3198,7 +3200,7 @@ begin
   if buf <> nil then
     while len > 0 do
     begin
-      result := crc32ctab[0, byte(result xor ord(buf^))] xor (result shr 8);
+      result := crc32ctab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
       dec(len);
       inc(buf);
     end;
@@ -3465,7 +3467,13 @@ begin
       LecuyerEncrypt(i, s2);
       CheckEqual(s2, S, 'LecuyerEncrypt');
     end;
+  Check(crc32fast(0, @crc32tab, 5) = $DF4EC16C, 'crc32a');
+  Check(crc32fast(0, @crc32tab, 1024) = $6FCF9E13, 'crc32b');
+  Check(crc32fast(0, @crc32tab, 1024 - 5) = $70965738, 'crc32c');
+  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 1), 2) = $41D912FF, 'crc32d');
+  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 3), 1024 - 5) = $E5FAEC6C, 'crc32e');
   Test(crc32creference, 'pas');
+  Test(crc32cinlined, 'inl');
   Test(crc32cfast, 'fast');
   {$ifdef CPUINTEL}
   {$ifndef OSDARWIN}
@@ -3476,7 +3484,7 @@ begin
   {$ifdef CPUX64}
   if (cfSSE42 in CpuFeatures) and
      (cfAesNi in CpuFeatures) then
-    Test(crc32c, 'sse42+aesni'); // use SSE4.2+pclmulqdq instructions on x64
+    Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
   {$endif CPUX64}
   {$else}
   if @crc32c <> @crc32cfast then
@@ -6034,8 +6042,8 @@ begin
   CurrentRawSid(s2, wttThread);
   Check(SidCompare(pointer(s1), pointer(s2)) = 0);
   s := RawSidToText(s1);
-  CheckUtf8(IdemPChar(pointer(s), 'S-1-5-'), s);
-  // domain users are S-1-5-21-*, but LOCAL_SYSTEM is S-1-5-18
+  CheckUtf8(IdemPChar(pointer(s), 'S-1-'), s);
+  // domain users are S-1-5-21-*, but LOCAL_SYSTEM S-1-5-18 and AD user S-1-12
   sids := CurrentGroupsSid;
   Check(sids <> nil);
   known := CurrentKnownGroups;

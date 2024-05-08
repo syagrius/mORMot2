@@ -957,7 +957,7 @@ begin
   FillCharFast(self, SizeOf(self), 0); // may be bigger than pthread struct
   {$ifdef OSPTHREADSLIB}
   if not Assigned(pthread_mutex_init) then
-    EOSException.Create('TOSLightLock.Init: no pthread_mutex_init')
+    raise EOSException.Create('TOSLightLock.Init: no pthread_mutex_init')
   else // no recursive attribute -> fast mutex
   {$endif OSPTHREADSLIB}
     pthread_mutex_init(@fMutex, nil);
@@ -1594,7 +1594,7 @@ begin
   {$ifdef HASEVENTFD}
   if fFD <> 0 then
   begin
-    LinuxEventFDWrite(fFD, 1); // release the lock
+    LinuxEventFDWrite(fFD, 1); // release the lock or do nothing
     fpClose(fFD);
   end
   else
@@ -3913,6 +3913,7 @@ end;
 {$L ..\..\static\aarch64-linux\armv8.o} // ARMv8 crc32c Linux code
 
 function crc32carm64(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal; external;
+function crc32arm64(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal; external;
 function crc32cby4arm64(crc, value: cardinal): cardinal; external;
 procedure crc32blockarm64(crc128, data128: PBlock128); external;
 procedure crc32blocksarm64(crc128, data128: PBlock128; count: integer); external;
@@ -4262,7 +4263,7 @@ begin
     try
       if (crc32cby4arm64(0, 1) = 3712330424) and
          (crc32carm64(0, @SystemInfo, SizeOf(SystemInfo)) =
-          crc32cfast(0, @SystemInfo, SizeOf(SystemInfo))) then
+           crc32cfast(0, @SystemInfo, SizeOf(SystemInfo))) then
       begin
         crc32c := @crc32carm64;
         DefaultHasher := @crc32carm64;
@@ -4271,6 +4272,9 @@ begin
         crcblock := @crc32blockarm64;
         crcblocks := @crc32blocksarm64;
       end;
+      if crc32arm64(0, @SystemInfo, SizeOf(SystemInfo)) =
+          crc32fast(0, @SystemInfo, SizeOf(SystemInfo)) then
+        crc32 := @crc32arm64;
     except
       exclude(CpuFeatures, ahcCrc32); // crc32 was actually not supported
     end;

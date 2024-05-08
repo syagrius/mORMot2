@@ -1215,7 +1215,7 @@ begin
           bSHAKE256:
             SHAKE256.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
         else
-          raise ESynCrypto.CreateUtf8('Unexpected %', [TXT[b]]);
+          ESynCrypto.RaiseUtf8('Unexpected %', [TXT[b]]);
         end;
         Check((b >= bRC4) or
               (dig.d0 <> 0) or
@@ -1461,7 +1461,7 @@ var
   P: PAnsiChar;
   msg: string;
   unalign: PtrInt;
-  exp321, exp322, exp323, exp324: cardinal;
+  exp321, exp322, exp323, exp324, exp325: cardinal;
   exp641, exp642: QWord;
   hasher: TSynHasher;
 begin
@@ -1471,6 +1471,7 @@ begin
   exp322 := 0;
   exp323 := 0;
   exp324 := 0;
+  exp325 := 0;
   exp641 := 0;
   exp642 := 0;
   for unalign := 0 to HASHALIGN - 1 do
@@ -1483,6 +1484,7 @@ begin
     Check(Hash32Test(P, @xxHash32, exp323));
     if Assigned(AesNiHash32) then
       Check(Hash32Test(P, @AesNiHash32, exp324));
+    Check(Hash32Test(P, @crc32fast, exp325));
     Check(Hash64Test(P, @crc32cTwice, exp641));
     if Assigned(AesNiHash64) then
       Check(Hash64Test(P, @AesNiHash64, exp642));
@@ -2971,10 +2973,14 @@ begin
     CheckEqual(c3.GetAuthorityKey, c1.GetSubjectKey);
     Check(c3.IsAuthorizedBy(c1), 'isauthby1');
     Check(not c3.IsAuthorizedBy(c3), 'isauthby2');
-    Check(c3.Verify(nil) = cvUnknownAuthority, 'Verify(nil)');
-    Check(c3.Verify(c1) = cvValidSigned, 'cvValidSigned1');
-    Check(c3.Verify(c2) = cvValidSigned, 'cvValidSigned2');
-    Check(c3.Verify(c3) = cvUnknownAuthority, 'Verify(c3)');
+    cv := c3.Verify(nil);
+    CheckUtf8(cv = cvUnknownAuthority, 'c3.Verify(nil)=%', [ToText(cv)^]);
+    cv := c3.Verify(c1);
+    CheckUtf8(cv = cvValidSigned, 'c3.Verify(c1)=%', [ToText(cv)^]);
+    cv := c3.Verify(c2);
+    CheckUtf8(cv = cvValidSigned, 'c3.Verify(c2)=%', [ToText(cv)^]);
+    cv := c3.Verify(c3);
+    CheckUtf8(cv = cvUnknownAuthority, 'c3.Verify(c3)=%', [ToText(cv)^]);
     n := '0123456789012345012345678901234'; // not a 16-byte multiple length
     r := c3.Encrypt(n);
     if r <> '' then // not all algorithms support encryption (RSA+ES256 only)

@@ -757,6 +757,10 @@ type
     // - will WriteLock/block only on connection add/remove
     property ConnectionLock: TRWLock
       read fConnectionLock;
+    /// direct access to the class instantiated for each connection
+    // - as supplied to the constructor, but may be overriden just after startup
+    property ConnectionClass: TAsyncConnectionClass
+      read fConnectionClass write fConnectionClass;
     /// direct access to the internal AsyncConnectionsThread`s
     property Threads: TAsyncConnectionsThreads
       read fThreads;
@@ -1066,6 +1070,7 @@ type
     fHeadersMaximumSize: integer;
     fConnectionClass: TAsyncConnectionClass;
     fConnectionsClass: THttpAsyncConnectionsClass;
+    fRequestClass: THttpServerRequestClass;
     fInterning: PRawUtf8InterningSlot;
     fInterningTix: cardinal;
     fExecuteEvent: TSynEvent;
@@ -1093,6 +1098,9 @@ type
     /// access async connections to any remote HTTP server
     // - will reuse the threads pool and sockets polling of this instance
     function Clients: THttpAsyncClientConnections;
+    /// the class used for each THttpServerRequest instances
+    property RequestClass: THttpServerRequestClass
+      read fRequestClass write fRequestClass;
   published
     /// initial capacity of internal per-connection Headers buffer
     // - 2 KB by default is within the mormot.core.fpcx64mm SMALL blocks limit
@@ -2538,7 +2546,7 @@ begin
             fOwner.fThreadReadPoll.ReleaseEvent; // atpReadPoll lock above
           end;
       else
-        raise EAsyncConnections.CreateUtf8('%.Execute: unexpected fProcess=%',
+        EAsyncConnections.RaiseUtf8('%.Execute: unexpected fProcess=%',
           [self, ord(fProcess)]);
       end;
     {$endif USE_WINIOCP}
@@ -2568,7 +2576,7 @@ begin
     [aConnectionClass, ProcessName, aThreadPoolCount], self);
   if (aConnectionClass = TAsyncConnection) or
      (aConnectionClass = nil) then
-    raise EAsyncConnections.CreateUtf8('Unexpected %.Create(%)',
+    EAsyncConnections.RaiseUtf8('Unexpected %.Create(%)',
       [self, aConnectionClass]);
   if aThreadPoolCount <= 0 then
     aThreadPoolCount := 1;
@@ -2666,11 +2674,12 @@ end;
 function OneGC(var gen, dst: TPollAsyncConnections; lastms, oldms: cardinal): PtrInt;
 var
   c: TAsyncConnection;
-  i: PtrInt;
+  i, d: PtrInt;
 begin
   result := 0;
   if gen.Count = 0 then
     exit;
+  d := dst.Count;
   oldms := lastms - oldms;
   for i := 0 to gen.Count - 1 do
   begin
@@ -2678,10 +2687,10 @@ begin
     if c.fLastOperation <= oldms then // AddGC() set c.fLastOperation as ms
     begin
       // release after timeout
-      if dst.Count >= length(dst.Items) then
-        SetLength(dst.Items, dst.Count + gen.Count - i);
-      dst.Items[dst.Count] := c;
-      inc(dst.Count);
+      if d >= length(dst.Items) then
+        SetLength(dst.Items, d + gen.Count - i);
+      dst.Items[d] := c;
+      inc(d);
     end
     else
     begin
@@ -2693,6 +2702,7 @@ begin
     end;
   end;
   gen.Count := result; // don't resize gen.Items[] to avoid realloc
+  dst.Count := d;
 end;
 
 procedure TAsyncConnections.DoGC;
@@ -2839,7 +2849,7 @@ begin
   if res = nrOk then
     res := client.MakeAsync;
   if res <> nrOK then
-    raise EAsyncConnections.CreateUtf8('%: %:% connection failure (%)',
+    EAsyncConnections.RaiseUtf8('%: %:% connection failure (%)',
       [self, fThreadClients.Address, fThreadClients.Port, ToText(res)^]);
   // create and register the async connection as in TAsyncServer.Execute
   if not ConnectionCreate(client, addr, result) then
@@ -3162,7 +3172,7 @@ begin
      (aHandle <= 0) then
     exit;
   if acoNoConnectionTrack in fOptions then
-    raise EAsyncConnections.CreateUtf8(
+    EAsyncConnections.RaiseUtf8(
       'Unexpected %.ConnectionFindAndLock(%)', [self, aHandle]);
   fConnectionLock.Lock(aLock);
   {$ifdef HASFASTTRYFINALLY}
@@ -3492,7 +3502,7 @@ var
   tix: Int64;
 begin
   if self = nil then
-    raise EAsyncConnections.CreateUtf8(
+    EAsyncConnections.RaiseUtf8(
       'TAsyncServer.WaitStarted(%) with self=nil', [seconds]);
   tix := mormot.core.os.GetTickCount64 + seconds * 1000; // never wait forever
   repeat
@@ -3502,12 +3512,12 @@ begin
       esRunning:
         exit;
       esFinished:
-        raise EAsyncConnections.CreateUtf8('%.Execute aborted as %',
+        EAsyncConnections.RaiseUtf8('%.Execute aborted as %',
           [self, fExecuteMessage]);
     end;
     SleepHiRes(1); // warning: waits typically 1-15 ms on Windows
     if mormot.core.os.GetTickCount64 > tix then
-      raise EAsyncConnections.CreateUtf8(
+      EAsyncConnections.RaiseUtf8(
         '%.WaitStarted timeout after % seconds', [self, seconds]);
   until false;
 end;
@@ -3591,7 +3601,7 @@ begin
   // slow TLS processs is done from ProcessRead in a sub-thread
   if (fServer = nil) or
      (Sender.fSecure <> nil) then // paranoid
-    raise EAsyncConnections.CreateUtf8('Unexpected %.OnFirstReadDoTls', [self]);
+    EAsyncConnections.RaiseUtf8('Unexpected %.OnFirstReadDoTls', [self]);
   if not fServer.TLS.Enabled then  // if not already done in WaitStarted()
   begin
     fGC[1].Safe.Lock; // load certificates once from first connected thread
@@ -3652,7 +3662,7 @@ begin
     // BIND + LISTEN (TLS is done later)
     fServer := TCrtSocket.Bind(fSockPort, nlTcp, 5000, acoReusePort in Options);
     if not fServer.SockIsDefined then // paranoid check
-      raise EAsyncConnections.CreateUtf8('%.Execute: bind failed', [self]);
+      EAsyncConnections.RaiseUtf8('%.Execute: bind failed', [self]);
     SetExecuteState(esRunning);
     {$ifdef USE_WINIOCP}
     fIocpAccept := fIocp.Subscribe(fServer.Sock, 0);
@@ -3669,7 +3679,7 @@ begin
       if fClients.fWrite.Subscribe(fServer.Sock, [pseRead], {tag=}0) then
         fClients.fWrite.PollForPendingEvents(0) // actually subscribe
       else
-        raise EAsyncConnections.CreateUtf8('%.Execute: accept subscribe', [self]);
+        EAsyncConnections.RaiseUtf8('%.Execute: accept subscribe', [self]);
     {$endif USE_WINIOCP}
     // main socket accept/send processing loop
     start := 0;
@@ -4611,7 +4621,7 @@ begin
   if fRequest = nil then
   begin
     // created once, if not rejected by OnBeforeBody
-    fRequest := THttpServerRequest.Create(
+    fRequest := fServer.fRequestClass.Create(
       fServer, fConnectionID, fReadThread, fRequestFlags, GetConnectionOpaque);
     fRequest.OnAsyncResponse := AsyncResponse;
   end
@@ -4823,6 +4833,8 @@ begin
     fConnectionClass := THttpAsyncServerConnection;
   if fConnectionsClass = nil then
     fConnectionsClass := THttpAsyncConnections;
+  if fRequestClass = nil then
+    fRequestClass := THttpServerRequest; // may be overriden later
   // bind and start the actual thread-pooled connections async server
   fAsync := fConnectionsClass.Create(aPort, OnStart, OnStop,
     fConnectionClass, fProcessName, TSynLog, aco, ServerThreadPoolCount);

@@ -596,7 +596,7 @@ begin
   fRestServer := aRestServer;
   inherited Create(aRestServer, aInterface, aInstanceCreation, aContractExpected);
   if fRestServer.MethodAddress(ShortString(InterfaceUri)) <> nil then
-    raise EServiceException.CreateUtf8(
+    EServiceException.RaiseUtf8(
       '%.Create: I% URI already exposed by %.% published method',
       [self, InterfaceUri, fRestServer, InterfaceUri]);
   fImplementationClass := aImplementationClass;
@@ -604,11 +604,11 @@ begin
   begin
     fImplementationClassKind := ickFake;
     if aSharedInstance = nil then
-      raise EServiceException.CreateUtf8('%.Create: no Shared Instance for %/I%',
+      EServiceException.RaiseUtf8('%.Create: no Shared Instance for %/I%',
         [self, fImplementationClass, fInterfaceUri]);
     if (aSharedInstance as TInterfacedObjectFake).
         Factory.InterfaceTypeInfo <> aInterface then
-      raise EServiceException.CreateUtf8(
+      EServiceException.RaiseUtf8(
         '%.Create: shared % instance does not implement I%',
         [self, fImplementationClass, fInterfaceUri]);
   end
@@ -625,12 +625,12 @@ begin
     fImplementationClassInterfaceEntry := fImplementationClass.
       GetInterfaceEntry(fInterface.InterfaceIID);
     if fImplementationClassInterfaceEntry = nil then
-      raise EServiceException.CreateUtf8('%.Create: % does not implement I%',
+      EServiceException.RaiseUtf8('%.Create: % does not implement I%',
         [self, fImplementationClass, fInterfaceUri]);
   end;
   if (fInterface.MethodIndexCallbackReleased >= 0) and
      (InstanceCreation <> sicShared) then
-    raise EServiceException.CreateUtf8(
+    EServiceException.RaiseUtf8(
       '%.Create: I%() should be run as sicShared for CallbackReleased method', [self,
       fInterface.Methods[fInterface.MethodIndexCallbackReleased].InterfaceDotMethodName]);
   // initialize the shared instance or client driven parameters
@@ -642,14 +642,14 @@ begin
         else if aSharedInstance.InheritsFrom(fImplementationClass) then
           fSharedInstance := aSharedInstance
         else
-          raise EServiceException.CreateUtf8(
+          EServiceException.RaiseUtf8(
             '%.Create: % shared instance does not inherit from %',
             [self, aSharedInstance, fImplementationClass]);
         if fImplementationClassKind <> ickFake then
           if (fSharedInstance = nil) or
              not GetInterfaceFromEntry(fSharedInstance,
                fImplementationClassInterfaceEntry, fSharedInterface) then
-            raise EServiceException.CreateUtf8(
+            EServiceException.RaiseUtf8(
               '%.Create: % is no implementation of I%',
               [self, fSharedInstance, fInterfaceUri]);
       end;
@@ -680,7 +680,7 @@ procedure TServiceFactoryServer.SetTimeoutSecInt(value: cardinal);
 begin
   if (self = nil) or
      (InstanceCreation in SERVICE_IMPLEMENTATION_NOID) then
-    raise EServiceException.CreateUtf8('%.SetTimeoutSecInt(%) with %',
+    EServiceException.RaiseUtf8('%.SetTimeoutSecInt(%) with %',
       [self, value, ToText(InstanceCreation)^]);
   fInstanceTimeOut := value;
 end;
@@ -1048,10 +1048,11 @@ function TServiceFactoryServer.RetrieveInstance(Ctxt: TRestServerUriContext;
     finally
       fInstances.Safe.WriteUnLock;
     end;
-    fRestServer.InternalLog(
-      '%.RetrieveInstance: new I%(%) % instance (id=%) count=%',
-      [ClassType, fInterfaceUri, pointer(Inst.Instance),
-       ToText(fInstanceCreation)^, Inst.InstanceID, fInstances.Count], sllDebug);
+    if sllDebug in fRestServer.LogLevel then
+      fRestServer.InternalLog(
+        '%.RetrieveInstance: new I%(%) % instance (id=%) count=%',
+        [ClassType, fInterfaceUri, pointer(Inst.Instance),
+         ToText(fInstanceCreation)^, Inst.InstanceID, fInstances.Count], sllDebug);
   end;
 
 var
@@ -1078,10 +1079,11 @@ begin
             P := @fInstance[i]; // fInstance[i] due to Delete(i) below
             if tix > P^.LastAccess then
             begin
-              fRestServer.InternalLog('%.RetrieveInstance: deleted I% % ' +
-                'instance (id=%) after % minutes timeout',
-                [ClassType, fInterfaceUri, P^.Instance, P^.InstanceID,
-                 fInstanceTimeOut div 60], sllInfo);
+              if sllInfo in fRestServer.LogLevel then
+                fRestServer.InternalLog('%.RetrieveInstance: deleted I% % ' +
+                  'instance (id=%) after % minutes timeout',
+                  [ClassType, fInterfaceUri, P^.Instance, P^.InstanceID,
+                   fInstanceTimeOut div 60], sllInfo);
               InstanceFreeGC(P^.Instance);
               fInstances.DynArray.Delete(i);
             end;
@@ -1178,9 +1180,8 @@ begin
         dummyObj := nil;
         if not TServiceContainerServer(fResolver).TryResolve(
             fInterface.InterfaceTypeInfo, dummyObj) then
-          raise EInterfaceFactory.CreateUtf8(
-            'ickFromInjectedResolver: TryResolve(%) failed',
-            [fInterface.InterfaceName]);
+          EInterfaceFactory.RaiseUtf8(
+           'ickFromInjectedResolver: TryResolve(%) failed', [fInterface.InterfaceName]);
         result := TInterfacedObject(ObjectFromInterface(IInterface(dummyObj)));
         // RefCount=1 after TryResolve() -> adjust
         dec(TInjectableObjectRest(result).fRefCount);
@@ -1222,7 +1223,7 @@ begin
                    not ArgRtti.ValueIsVoid(Sender.Values[a]) then
                 begin
                   W.AddShort(ParamName^); // in JSON_FAST_EXTENDED format
-                  W.Add(':');
+                  W.AddDirect(':');
                   if rcfSpi in ArgRtti.Flags then
                     W.AddShorter('"****",')
                   else
@@ -1257,7 +1258,7 @@ begin
                   // write up to 1KB of result binary as Base64 text
                   W.AddShort(',result:"');
                   W.WrBase64(pointer(content), len, false);
-                  W.Add('"');
+                  W.AddDirect('"');
                 end;
               end
             else
@@ -1268,7 +1269,7 @@ begin
                      not ArgRtti.ValueIsVoid(Sender.Values[a]) then
                   begin
                     W.AddShort(ParamName^);
-                    W.Add(':');
+                    W.AddDirect(':');
                     if rcfSpi in ArgRtti.Flags then
                       W.AddShorter('"****",')
                     else
@@ -1284,9 +1285,9 @@ begin
         begin
           W.AddShort('},Output:{');
           W.AddClassName(Sender.LastException.ClassType);
-          W.Add(':', '"');
+          W.AddDirect(':', '"');
           W.AddJsonEscapeString(Sender.LastException.Message);
-          W.Add('"');
+          W.AddDirect('"');
         end;
     end;
 end;
@@ -1323,7 +1324,7 @@ begin
     [integer(Ctxt.Session), Ctxt.SessionUser, TimeLogNowUtc, timeEnd]);
   ip := Ctxt.RemoteIPNotLocal;
   if ip = nil then
-    W.Add('}', ',')
+    W.AddDirect('}', ',')
   else
   begin
     W.AddShorter(',IP:"');
@@ -1655,7 +1656,7 @@ begin
     exit;
   end;
   if not Assigned(fServer.OnNotifyCallback) then
-    raise EServiceException.CreateUtf8(
+    EServiceException.RaiseUtf8(
       '%(%) does not support callbacks for I%',
       [fServer, fServer.Model.Root, aMethod.InterfaceDotMethodName]);
   if fReleasedOnClientSide then
@@ -1711,8 +1712,9 @@ begin
      (fFakeCallbacks.Count <> 0) then
   begin
     call.Init;
-    ctxt := TRestServerUriContext.Create(fRestServer, call);
+    ctxt := TRestServerUriContext.Create;
     try
+      ctxt.Prepare(fRestServer, call);
       fake := pointer(fFakeCallbacks.List);
       for i := 1 to fFakeCallbacks.Count do
       begin
@@ -1751,7 +1753,7 @@ begin
   if aSharedImplementation <> nil then
     if (aSharedImplementation.ClassType <> aImplementationClass) or
        (aInstanceCreation <> sicShared) then
-      raise EServiceException.CreateUtf8('%.AddImplementation: invalid % class',
+      EServiceException.RaiseUtf8('%.AddImplementation: invalid % class',
         [self, aSharedImplementation]);
   CheckInterface(aInterfaces);
   SetLength(uid, length(aInterfaces));
@@ -1780,7 +1782,7 @@ begin
   end;
   for j := 0 to high(uid) do
     if uid[j] <> nil then
-      raise EServiceException.CreateUtf8('%.AddImplementation: % not found in %',
+      EServiceException.RaiseUtf8('%.AddImplementation: % not found in %',
         [self, aInterfaces[j]^.RawName, aImplementationClass]);
   // register this implementation class
   for j := 0 to high(aInterfaces) do
@@ -1954,7 +1956,8 @@ begin
     FormatUtf8('[%,"%"]',
       [PtrInt(PtrUInt(fake.fFakeInterface)), fake.Factory.InterfaceName], params);
     Ctxt.ServiceParameters := pointer(params);
-    withlog := fake.canlog; // before ExcuteMethod which may free fake instance
+    withlog := (sllDebug in fRestServer.LogLevel) and
+               fake.CanLog; // before ExcuteMethod which may free fake instance
     fake._AddRef; // ExecuteMethod() calls fake._Release on its parameter
     fake.fService.ExecuteMethod(Ctxt);
     if withlog then
@@ -1979,8 +1982,9 @@ begin
      (fFakeCallbacks.Count = 0) then
     exit;
   call.Init;
-  ctxt := TRestServerUriContext.Create(fRestServer, call){%H-};
+  ctxt := TRestServerUriContext.Create;
   try
+    ctxt.Prepare(fRestServer, call);
     fFakeCallbacks.Safe.WriteLock; // may include a nested WriteLock (reentrant)
     try
       fake := pointer(fFakeCallbacks.List);
@@ -2025,8 +2029,9 @@ begin
        length(fCallbackNamesSorted) - 1, params[0].Name.Text) < 0) then
     exit;
   if not params[0].Name.Idem('ISynLogCallback') then // avoid stack overflow
-    fRestServer.InternalLog('%.ReleaseFakeCallback(%,"%") remote call',
-      [ClassType, fakeID, params[0].Name.Text], sllDebug);
+    if sllDebug in fRestServer.LogLevel then
+      fRestServer.InternalLog('%.ReleaseFakeCallback(%,"%") remote call',
+        [ClassType, fakeID, params[0].Name.Text], sllDebug);
   fFakeCallbacks.Safe.WriteLock; // may include a nested WriteLock (reentrant)
   try
     fake := FakeCallbackFind(pointer(fFakeCallbacks.List), fFakeCallbacks.Count,
@@ -2314,12 +2319,12 @@ constructor TServiceRecordVersionCallback.Create(aSlave: TRestServer;
   aMaster: TRestClientUri; aTable: TOrmClass; const aOnNotify: TOnBatchWrite);
 begin
   if aSlave = nil then
-    raise EServiceException.CreateUtf8('%.Create(%): Slave=nil',
+    EServiceException.RaiseUtf8('%.Create(%): Slave=nil',
       [self, aTable]);
   fSlave := aSlave;
   fRecordVersionField := aTable.OrmProps.RecordVersionField;
   if fRecordVersionField = nil then
-    raise EServiceException.CreateUtf8('%.Create: % has no TRecordVersion field',
+    EServiceException.RaiseUtf8('%.Create: % has no TRecordVersion field',
       [self, aTable]);
   fTable := aTable;
   fTableIndex := fSlave.Model.GetTableIndexExisting(aTable);
@@ -2337,7 +2342,7 @@ begin
   if (Revision < current) or
      ((Revision = current) and
       (Event <> ooInsert)) then
-    raise EServiceException.CreateUtf8(
+    EServiceException.RaiseUtf8(
       '%.SetCurrentRevision(%) on %: previous was %',
       [self, Revision, fTable, current]);
   fSlave.SetRecordVersionMax(fTableIndex, Revision);
@@ -2417,7 +2422,7 @@ end;
 
 procedure TServiceRecordVersionCallback.CurrentFrame(isLast: boolean);
 
-  procedure Error(const msg: RawUtf8);
+  procedure Error(const msg: shortstring);
   begin
     fRest.InternalLog('%.CurrentFrame(%) on %: %',
       [self, isLast, fTable, msg], sllError);

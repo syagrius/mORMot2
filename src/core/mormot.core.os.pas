@@ -8747,7 +8747,7 @@ begin
     for clk := low(fDescDetail) to high(fDescDetail) do
       if fDescDetail[clk] <> '' then
       begin
-        if clk in [low(CLK_TXT) .. high(CLK_TXT)] then
+        if clk in [low(CLK_DESCR) .. high(CLK_DESCR)] then
           result := result + fLineFeed +
                     CLK_DESCR[clk] + CASE_DESCR[CaseSensitiveNames];
         result := result + fLineFeed + fDescDetail[clk];
@@ -8797,7 +8797,7 @@ function TExecutableCommandLine.ConsoleHelpFailed(
 begin
   if exedescription <> '' then
     fExeDescription := exedescription;
-  result := Option(['h', 'help'], 'display this help');
+  result := Option(['?', 'h', 'help'], 'display this help');
   if result then
     ConsoleWrite(FullDescription)
   else
@@ -8844,12 +8844,13 @@ begin
     s := fRawParams[i];
     if s <> '' then
       if CompareMemSmall(pointer(s), pointer(LongSwitch), length(LongSwitch)) then
-        swlen[i] := length(LongSwitch)
+        swlen[i] := length(LongSwitch)  // start with LongSwitch
       else if CompareMemSmall(pointer(s), pointer(ShortSwitch), length(ShortSwitch)) then
-        swlen[i] := length(ShortSwitch)
+        swlen[i] := length(ShortSwitch) // start with ShortSwitch
       {$ifdef OSWINDOWS}
-      else while s[swlen[i] + 1] = '-' do
-        inc(swlen[i]); // allow -v --verbose on Windows for cross-platform run
+      else
+        while s[swlen[i] + 1] = '-' do
+          inc(swlen[i]); // allow -v --verbose on Windows for cross-platform run
       {$endif OSWINDOWS}
   end;
   i := 0;
