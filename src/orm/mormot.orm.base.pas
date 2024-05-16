@@ -5724,7 +5724,7 @@ begin
     end;
   end;
   fPropInfo.SetLongStrProp(Instance, tmp{%H-});
-  result := True;
+  result := true;
 end;
 
 procedure TOrmPropInfoRttiAnsi.GetFieldSqlVar(Instance: TObject;
@@ -5788,28 +5788,38 @@ begin
 end;
 
 procedure TOrmPropInfoRttiRawUtf8.SetBinary(Instance: TObject; var Read: TFastReader);
+var
+  l: PtrInt;
 begin
-  fPropInfo.SetLongStrProp(Instance, Read.VarUtf8);
+  l := Read.VarUInt32;
+  SetValue(Instance, Read.Next(l), l, true);
 end;
 
 function TOrmPropInfoRttiRawUtf8.SetFieldSqlVar(Instance: TObject;
   const aValue: TSqlVar): boolean;
 var
-  tmp: RawUtf8;
+  p: pointer;
+  l: PtrInt;
 begin
   case aValue.VType of
     ftNull:
-      ; // leave tmp=''
+      begin
+        p := nil;
+        l := 0;
+      end;
     ftUtf8:
-      FastSetString(tmp, aValue.VText, StrLen(aValue.VText));
+      begin
+        p := aValue.VText;
+        l := StrLen(p);
+      end;
   else
     begin
       result := inherited SetFieldSqlVar(Instance, aValue);
       exit;
     end;
   end;
-  fPropInfo.SetLongStrProp(Instance, tmp{%H-});
-  result := True;
+  SetValue(Instance, p, l, true);
+  result := true;
 end;
 
 procedure TOrmPropInfoRttiRawUtf8.GetFieldSqlVar(Instance: TObject;
@@ -5857,11 +5867,10 @@ begin
         result := Utf8IComp(p1, p2) // default SYSTEMNOCASE collation
     else
       result := StrComp(p1, p2);
-    if fGetterIsFieldPropOffset = 0 then
-    begin
-      FastAssignNew(p1);
-      FastAssignNew(p2);
-    end;
+    if fGetterIsFieldPropOffset <> 0 then
+      exit;
+    FastAssignNew(p1);
+    FastAssignNew(p2);
   end;
 end;
 
@@ -6307,7 +6316,7 @@ begin
     end;
   end;
   fPropInfo.SetUnicodeStrProp(Instance, tmp{%H-});
-  result := True;
+  result := true;
 end;
 
 procedure TOrmPropInfoRttiUnicode.GetFieldSqlVar(Instance: TObject;
@@ -10823,6 +10832,7 @@ begin
   result := nil;
   if (@self = nil) or
      not CacheEnable or
+     (Value = nil) or
      (TimeOutMS <> 0) then // by safety: TimeOutMS may delete the instance
     exit;
   i := SortFind(Value, aID, Count);
