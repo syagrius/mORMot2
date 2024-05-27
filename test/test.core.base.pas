@@ -6779,6 +6779,7 @@ procedure TTestCoreBase._TSynLogFile;
   procedure Test(const LOG: RawUtf8; ExpectedDate: TDateTime);
   var
     L: TSynLogFile;
+    o: TLogProcSortOrder;
   begin
     L := TSynLogFile.Create(pointer(LOG), length(LOG));
     try
@@ -6808,8 +6809,10 @@ procedure TTestCoreBase._TSynLogFile;
       Check(L.EventLevel[2] = sllLeave);
       if CheckFailed(L.LogProcCount = 1) then
         exit;
-      Check(L.LogProc[0].Index = 0);
-      Check(L.LogProc[0].Time = 10020006);
+      CheckEqual(L.LogProc[0].Index, 0);
+      CheckEqual(L.LogProc[0].Time, 10020006);
+      for o := low(o) to high(o) do
+        L.LogProcSort(o);
     finally
       L.Free;
     end;
@@ -6988,15 +6991,6 @@ begin
   finally
     gen.Free;
   end;
-end;
-
-function HashAnsiString(Item: PAnsiChar; Hasher: THasher): cardinal;
-begin
-  Item := PPointer(Item)^; // passed by reference
-  if Item = nil then
-    result := 0
-  else
-    result := Hasher(0, Item, PStrLen(Item - _STRLEN)^);
 end;
 
 {  TSynDictionary perf numbers on increasing integers or random guid strings

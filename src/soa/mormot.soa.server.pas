@@ -813,12 +813,29 @@ begin
 end;
 
 procedure TServiceFactoryServer.InstanceFree(Obj: TInterfacedObject);
-var
-  start, stop: Int64;
+
+  procedure DoRelease;
+  var
+    start, stop: Int64;
+    timeout: boolean;
+  begin
+    timeout := (optFreeTimeout in fAnyOptions) and
+               (fRestServer.ServiceReleaseTimeoutMicrosec > 0);
+    if timeout then // release should be fast enough
+      QueryPerformanceMicroSeconds(start);
+    IInterface(Obj)._Release;
+    if not timeout then
+      exit;
+    QueryPerformanceMicroSeconds(stop);
+    dec(stop, start{%H-});
+    if stop > fRestServer.ServiceReleaseTimeoutMicrosec then
+      fRestServer.Internallog('%.InstanceFree: I%._Release took %',
+        [ClassType, InterfaceUri, MicroSecToString(stop)], sllWarning);
+  end;
+
 begin
   if Obj <> nil then
   try
-    QueryPerformanceMicroSeconds(start);
     if (optFreeInMainThread in fAnyOptions) and
        (GetCurrentThreadID <> MainThreadID) then
       BackgroundExecuteInstanceRelease(Obj, nil)
@@ -829,7 +846,7 @@ begin
     begin
       GlobalInterfaceExecuteMethod.Lock;
       try
-        IInterface(Obj)._Release;
+        DoRelease;
       finally
         GlobalInterfaceExecuteMethod.UnLock;
       end;
@@ -838,18 +855,13 @@ begin
     begin
       fExecuteLock.Lock;
       try
-        IInterface(Obj)._Release;
+        DoRelease;
       finally
         fExecuteLock.UnLock;
       end;
     end
     else
-      IInterface(Obj)._Release;
-    QueryPerformanceMicroSeconds(stop);
-    dec(stop, start);
-    if stop > 500 then
-      fRestServer.Internallog('%.InstanceFree: I%._Release took %',
-        [ClassType, InterfaceUri, MicroSecToString(stop)], sllWarning);
+      DoRelease;
   except
     on E: Exception do
       fRestServer.Internallog('%.InstanceFree: ignored % exception ' +

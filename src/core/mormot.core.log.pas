@@ -1565,16 +1565,17 @@ type
     fHeaderLinesCount: integer;
     fHeaders: RawUtf8;
     /// method profiling data
-    fLogProcCurrent: PSynLogFileProcArray;
     fLogProcCurrentCount: integer;
-    fLogProcNatural: TSynLogFileProcDynArray;
     fLogProcNaturalCount: integer;
+    fLogProcCurrent: PSynLogFileProcArray;
+    fLogProcNatural: TSynLogFileProcDynArray;
     fLogProcMerged: TSynLogFileProcDynArray;
     fLogProcMergedCount: integer;
     fLogProcIsMerged: boolean;
     fLogProcStack: array of array of cardinal;
     fLogProcStackCount: array of integer;
     fLogProcSortInternalOrder: TLogProcSortOrder;
+    fLogProcSortInternalComp: function(A, B: PtrInt): PtrInt of object;
     /// used by ProcessOneLine//GetLogLevelTextMap
     fLogLevelsTextMap: array[TSynLogLevel] of cardinal;
     fIntelCPU: TIntelCpuFeatures;
@@ -1590,7 +1591,11 @@ type
     /// compute fLevels[] + fLogProcNatural[] for each .log line during initial reading
     procedure ProcessOneLine(LineBeg, LineEnd: PUtf8Char); override;
     /// called by LogProcSort method
-    function LogProcSortComp(A, B: PtrInt): PtrInt;
+    function LogProcSortCompByName(A, B: PtrInt): PtrInt;
+    function LogProcSortCompByOccurrence(A, B: PtrInt): PtrInt;
+    function LogProcSortCompByTime(A, B: PtrInt): PtrInt;
+    function LogProcSortCompByProperTime(A, B: PtrInt): PtrInt;
+    function LogProcSortCompDefault(A, B: PtrInt): PtrInt;
     procedure LogProcSortInternal(L, R: PtrInt);
   public
     /// initialize internal structure
@@ -5512,15 +5517,15 @@ begin
       for i := fFamily.fRotateFileCount - 2 downto 1 do
         // e.g. xxx.8.synlz -> xxx.9.synlz
         RenameFile(FN[i - 1], FN[i]);
-      // compress the current .log file into FN[0] = xxx.1.synlz
+      // compress the current FN[0] .log file into xxx.1.log/.synlz
       if LogCompressAlgo = nil then
-        // no compression
+        // no compression: quickly rename FN[0] into xxx.1.log
         RenameFile(fFileName, FN[0])
       else if (AutoFlushThread <> nil) and
               (AutoFlushThread.fToCompress = '') and
               RenameFile(fFileName, FN[0]) then
       begin
-        // background compression
+        // background compression of FN[0] into xxx.1.synlz
         AutoFlushThread.fToCompress := FN[0];
         AutoFlushThread.fEvent.SetEvent;
       end
@@ -6646,7 +6651,7 @@ begin
     if fLevels[i] <> sllNone then
     begin
       fLevels[aCount] := fLevels[i];
-      fLines[aCount] := fLines[i];
+      fLines[aCount]  := fLines[i];
       if fThreads <> nil then
         fThreads[aCount] := fThreads[i];
       if fLevels[i] = sllEnter then
@@ -6751,6 +6756,7 @@ var
   i: PtrInt;
   j, Level: integer;
   TSEnter, TSLeave: Int64;
+  fp, fpe: PSynLogFileProc;
   OK: boolean;
 begin
   // 1. calculate fLines[] + fCount and fLevels[] + fLogProcNatural[] from .log content
@@ -6883,12 +6889,15 @@ begin
     end;
     // 4. compute customer-side profiling
     SetLength(fLogProcNatural, fLogProcNaturalCount);
-    for i := 0 to fLogProcNaturalCount - 1 do
-      if fLogProcNatural[i].Time >= 99000000 then
+    fp := pointer(fLogProcNatural);
+    fpe := @fLogProcNatural[fLogProcNaturalCount];
+    while PAnsiChar(fp) < PAnsiChar(fpe) do
+    begin
+      if fp^.Time >= 99000000 then
       begin
-        // 99.xxx.xxx means over range -> compute
+        // 99.xxx.xxx means over range -> compute from nested calls
         Level := 0;
-        j := fLogProcNatural[i].index;
+        j := fp^.Index;
         repeat
           inc(j);
           if j = fCount then
@@ -6901,18 +6910,15 @@ begin
               begin
                 if fFreq = 0 then
                   // adjust huge seconds timing from date/time column
-                  fLogProcNatural[i].Time := Round(
-                    (EventDateTime(j) - EventDateTime(fLogProcNatural[i].index))
-                     * 86400000000.0) +
-                    fLogProcNatural[i].Time mod 1000000
+                  fp^.Time := Round(
+                    (EventDateTime(j) -
+                     EventDateTime(fp^.Index)) * 86400000000.0) +
+                    fp^.Time mod 1000000
                 else
                 begin
-                  HexDisplayToBin(fLines[fLogProcNatural[i].index],
-                    @TSEnter, SizeOf(TSEnter));
-                  HexDisplayToBin(fLines[j],
-                    @TSLeave, SizeOf(TSLeave));
-                  fLogProcNatural[i].Time :=
-                    ((TSLeave - TSEnter) * (1000 * 1000)) div fFreq;
+                  HexDisplayToBin(fLines[fp^.Index], @TSEnter, SizeOf(TSEnter));
+                  HexDisplayToBin(fLines[j],         @TSLeave, SizeOf(TSLeave));
+                  fp^.Time := ((TSLeave - TSEnter) * (1000 * 1000)) div fFreq;
                 end;
                 break;
               end
@@ -6921,6 +6927,8 @@ begin
           end;
         until false;
       end;
+      inc(fp);
+    end;
     i := 0;
     while i < fLogProcNaturalCount do
     begin
@@ -6964,9 +6972,22 @@ procedure TSynLogFile.LogProcSort(Order: TLogProcSortOrder);
 begin
   if (fLogProcNaturalCount <= 1) or
      (Order = fLogProcSortInternalOrder) then
-    Exit;
+    exit;
   fLogProcSortInternalOrder := Order;
-  LogProcSortInternal(0, LogProcCount - 1);
+  case Order of
+    soByName:
+      fLogProcSortInternalComp := LogProcSortCompByName;
+    soByOccurrence:
+      fLogProcSortInternalComp := LogProcSortCompByOccurrence;
+    soByTime:
+      fLogProcSortInternalComp := LogProcSortCompByTime;
+    soByProperTime:
+      fLogProcSortInternalComp := LogProcSortCompByProperTime;
+  else
+    fLogProcSortInternalComp := LogProcSortCompDefault;
+  end;
+  LogProcSortInternal(0, fLogProcCurrentCount - 1);
+  fLogProcSortInternalComp := nil;
 end;
 
 function StrICompLeftTrim(Str1, Str2: PUtf8Char): PtrInt;
@@ -6985,28 +7006,37 @@ begin
     if (C1 <> C2) or
        (C1 < 32) then
       break;
-    Inc(Str1);
-    Inc(Str2);
+    inc(Str1);
+    inc(Str2);
   until false;
   result := C1 - C2;
 end;
 
-function TSynLogFile.LogProcSortComp(A, B: PtrInt): PtrInt;
+function TSynLogFile.LogProcSortCompByName(A, B: PtrInt): PtrInt;
 begin
-  case fLogProcSortInternalOrder of
-    soByName:
-      result := StrICompLeftTrim(
-        PUtf8Char(fLines[LogProc[A].index]) + fLineTextOffset,
-        PUtf8Char(fLines[LogProc[B].index]) + fLineTextOffset);
-    soByOccurrence:
-      result := LogProc[A].index - LogProc[B].index;
-    soByTime:
-      result := LogProc[B].Time - LogProc[A].Time;
-    soByProperTime:
-      result := LogProc[B].ProperTime - LogProc[A].ProperTime;
-  else
-    result := A - B;
-  end;
+  result := StrICompLeftTrim(
+    PUtf8Char(fLines[LogProc[A].Index]) + fLineTextOffset,
+    PUtf8Char(fLines[LogProc[B].Index]) + fLineTextOffset);
+end;
+
+function TSynLogFile.LogProcSortCompByOccurrence(A, B: PtrInt): PtrInt;
+begin
+  result := LogProc[A].Index - LogProc[B].Index;
+end;
+
+function TSynLogFile.LogProcSortCompByTime(A, B: PtrInt): PtrInt;
+begin
+  result := LogProc[B].Time - LogProc[A].Time;
+end;
+
+function TSynLogFile.LogProcSortCompByProperTime(A, B: PtrInt): PtrInt;
+begin
+  result := LogProc[B].ProperTime - LogProc[A].ProperTime;
+end;
+
+function TSynLogFile.LogProcSortCompDefault(A, B: PtrInt): PtrInt;
+begin
+  result := A - B;
 end;
 
 procedure LogProcSortExchg(var P1, P2: TSynLogFileProc);
@@ -7029,9 +7059,9 @@ begin
       J := R;
       P := (L + R) shr 1;
       repeat
-        while LogProcSortComp(I, P) < 0 do
+        while fLogProcSortInternalComp(I, P) < 0 do
           inc(I);
-        while LogProcSortComp(J, P) > 0 do
+        while fLogProcSortInternalComp(J, P) > 0 do
           dec(J);
         if I <= J then
         begin
@@ -7362,8 +7392,8 @@ end;
 
 procedure TSynLogFile.SetLogProcMerged(const Value: boolean);
 var
-  i: integer;
-  P: ^TSynLogFileProc;
+  i: PtrInt;
+  P: PSynLogFileProc;
   O: TLogProcSortOrder;
 begin
   fLogProcIsMerged := Value;
@@ -7383,14 +7413,14 @@ begin
         with fLogProcMerged[fLogProcMergedCount] do
         begin
           repeat
-            index := P^.index;
+            index := P^.Index;
             inc(Time, P^.Time);
             inc(ProperTime, P^.ProperTime);
             inc(i);
             inc(P);
           until (i >= fLogProcNaturalCount) or
-            (StrICompLeftTrim(PUtf8Char(fLines[LogProc[i - 1].index]) + 22,
-             PUtf8Char(fLines[P^.index]) + 22) <> 0);
+            (StrICompLeftTrim(PUtf8Char(fLines[LogProc[i - 1].Index]) + 22,
+                              PUtf8Char(fLines[P^.Index]) + 22) <> 0);
         end;
         inc(fLogProcMergedCount);
       until i >= fLogProcNaturalCount;

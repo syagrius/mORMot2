@@ -2086,6 +2086,8 @@ function ParserTypeToTypeInfo(pt: TRttiParserType;
 function TypeInfoToDynArrayTypeInfo(ElemInfo: PRttiInfo;
   ExpectExactElemInfo: boolean; ParserType: PRttiParserType = nil): PRttiInfo;
 
+/// internal function used e.g. for enumerations and set
+function ItemSizeToDynArrayKind(size: integer): TRttiParserType;
 
 
 { ************** RTTI-based Registration for Custom JSON Parsing }
@@ -2413,6 +2415,7 @@ type
     fSetRandom: TRttiCustomRandom;
     fPrivateSlots: TObjectDynArray;
     fPrivateSlotsSafe: TLightLock;
+    fArrayFirstFieldSize: integer;
     // used by mormot.core.json.pas
     fBinarySize: integer;
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
@@ -2492,12 +2495,6 @@ type
     /// fill a value from random - including strings and nested types
     procedure ValueRandom(Data: pointer);
       {$ifdef HASINLINE}inline;{$endif}
-    /// TOnDynArrayHashOne callback used as fallback for unsupported items
-    // - here DefaultHasher() is always used over Size bytes
-    function ValueFullHash(const Elem): cardinal;
-    /// TOnDynArraySortCompare callback used as fallback for unsupported items
-    // - simple per-byte comparison over Size bytes
-    function ValueFullCompare(const A, B): integer;
     /// how many iterations could be done one a given value
     // - returns -1 if the value is not iterable, or length(DynArray) or
     // TRawUtf8List.Count or TList.Count or TSynList.Count
@@ -2597,6 +2594,9 @@ type
     // - equals ArrayRtti.Parser if ArrayRtti.Kind is not rkRecordTypes
     property ArrayFirstField: TRttiParserType
       read fArrayFirstField;
+    /// best guess of first field bytes size for a rkDynArray
+    property ArrayFirstFieldSize: integer
+      read fArrayFirstFieldSize;
     /// store the number of bytes for hexadecimal serialization for rcfBinary
     // - used when rcfBinary is defined in Flags; equals 0 if disabled (default)
     property BinarySize: integer
@@ -6718,8 +6718,7 @@ begin
   end;
 end;
 
-function SizeToDynArrayKind(size: integer): TRttiParserType;
-  {$ifdef HASINLINE}inline;{$endif}
+function ItemSizeToDynArrayKind(size: integer): TRttiParserType;
 begin  // rough estimation
   case size of
     1:
@@ -6809,7 +6808,7 @@ begin
       // guess from RTTI of nested record(s)
       if ElemInfo = nil then
       begin
-        result := SizeToDynArrayKind(ElemSize);
+        result := ItemSizeToDynArrayKind(ElemSize);
         if result = ptNone then
           FieldSize := ElemSize;
       end
@@ -6827,7 +6826,7 @@ begin
         offset := fields.Fields^.Offset;
         if offset <> 0 then
         begin
-          result := SizeToDynArrayKind(offset);
+          result := ItemSizeToDynArrayKind(offset);
           if result = ptNone then
             FieldSize := offset;
         end
@@ -7867,10 +7866,13 @@ begin
            (fArrayFirstField = ptNone) then
           if fArrayRtti.Kind in rkRecordOrDynArrayTypes then
             // guess first field (using fProps[0] would break compatibility)
-            fArrayFirstField := GuessItemTypeFromDynArrayInfo(
-              aInfo, fCache.ItemInfo, fCache.ItemSize, {exacttype=}false, dummy)
+            fArrayFirstField := GuessItemTypeFromDynArrayInfo(aInfo,
+              fCache.ItemInfo, fCache.ItemSize, {exacttype=}false, fArrayFirstFieldSize)
           else
+          begin
             fArrayFirstField := fArrayRtti.Parser;
+            fArrayFirstFieldSize := fArrayRtti.Cache.Size;
+          end;
       end;
     rkArray:
       begin
@@ -8094,16 +8096,6 @@ end;
 procedure TRttiCustom.ValueRandom(Data: pointer);
 begin
   fSetRandom(Data, self); // handle most simple kind of values from RTTI
-end;
-
-function TRttiCustom.ValueFullHash(const Elem): cardinal;
-begin
-  result := DefaultHasher(0, @Elem, fCache.ItemSize);
-end;
-
-function TRttiCustom.ValueFullCompare(const A, B): integer;
-begin
-  result := MemCmp(@A, @B, fCache.ItemSize); // use SSE2 asm on Intel/AMD
 end;
 
 function TRttiCustom.ValueIterateCount(Data: pointer): integer;

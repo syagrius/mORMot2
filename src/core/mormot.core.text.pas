@@ -1049,6 +1049,13 @@ function HtmlEscape(const text: RawUtf8;
 function HtmlEscapeString(const text: string;
   fmt: TTextWriterHtmlFormat = hfAnyWhere): RawUtf8;
 
+/// check if some UTF-8 text would need XML escaping
+function NeedsXmlEscape(text: PUtf8Char): boolean;
+
+/// escape some UTF-8 text into XML
+// - just a wrapper around TTextWriter.AddXmlEscape() process
+function XmlEscape(const text: RawUtf8): RawUtf8;
+
 /// escape as \xx hexadecimal some chars from a set into a pre-allocated buffer
 // - dest^ should have at least srclen * 3 bytes, for \## trios
 function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
@@ -5222,69 +5229,6 @@ begin
       AddNoJsonEscape(Text, mormot.core.base.StrLen(Text)); // hfNone
 end;
 
-function HtmlEscape(const text: RawUtf8; fmt: TTextWriterHtmlFormat): RawUtf8;
-var
-  temp: TTextWriterStackBuffer;
-  W: TTextWriter;
-begin
-  if NeedsHtmlEscape(pointer(text), fmt) then
-  begin
-    W := TTextWriter.CreateOwnedStream(temp);
-    try
-      W.AddHtmlEscape(pointer(text), fmt);
-      W.SetText(result);
-    finally
-      W.Free;
-    end;
-  end
-  else
-    result := text;
-end;
-
-function HtmlEscapeString(const text: string; fmt: TTextWriterHtmlFormat): RawUtf8;
-var
-  temp: TTextWriterStackBuffer;
-  W: TTextWriter;
-begin
-  {$ifdef UNICODE}
-  if fmt = hfNone then
-  {$else}
-  if not NeedsHtmlEscape(pointer(text), fmt) then // work for any AnsiString
-  {$endif UNICODE}
-  begin
-    StringToUtf8(text, result);
-    exit;
-  end;
-  W := TTextWriter.CreateOwnedStream(temp);
-  try
-    W.AddHtmlEscapeString(text, fmt);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
-end;
-
-function NeedsHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat): boolean;
-var
-  esc: PAnsiCharToByte;
-begin
-  if (Text <> nil) and
-     (Fmt <> hfNone) then
-  begin
-    result := true;
-    esc := @HTML_ESC[Fmt];
-    repeat
-      if esc[Text^] <> 0 then
-        if Text^ = #0 then
-          break
-        else
-          exit;
-      inc(Text);
-    until false;
-  end;
-  result := false;
-end;
-
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; TextLen: PtrInt;
   Fmt: TTextWriterHtmlFormat);
 var
@@ -5349,54 +5293,28 @@ end;
 
 var
   XML_ESC: TAnsiCharToByte;
+const
+  XML_ESCAPED: array[1..9] of string[7] = (
+    '&#x09;', '&#x0a;', '&#x0d;', '&lt;', '&gt;', '&amp;', '&quot;', '&apos;', '');
 
 procedure TTextWriter.AddXmlEscape(Text: PUtf8Char);
 var
-  i, beg: PtrInt;
+  beg: PUtf8Char;
   esc: PAnsiCharToByte;
 begin
   if Text = nil then
     exit;
   esc := @XML_ESC;
-  i := 0;
   repeat
-    if esc[Text[i]] = 0 then
-    begin
-      beg := i;
-      repeat // it is faster to handle all not-escaped chars at once
-        inc(i);
-      until esc[Text[i]] <> 0;
-      AddNoJsonEscape(Text + beg, i - beg);
-    end;
-    repeat
-      case Text[i] of
-        #0:
-          exit;
-        #1..#8, #11, #12, #14..#31:
-          ; // ignore invalid character - see http://www.w3.org/TR/xml/#NT-Char
-        #9, #10, #13:
-          begin
-            // characters below ' ', #9 e.g. -> // '&#x09;'
-            AddShorter('&#x');
-            AddByteToHex(ord(Text[i]));
-            AddDirect(';');
-          end;
-        '<':
-          AddShorter('&lt;');
-        '>':
-          AddShorter('&gt;');
-        '&':
-          AddShorter('&amp;');
-        '"':
-          AddShorter('&quot;');
-        '''':
-          AddShorter('&apos;');
-      else
-        break; // should match XML_ESC[] lookup table
-      end;
-      inc(i);
-    until false;
-  until false;
+    beg := Text;
+    while esc[Text^] = 0 do
+      inc(Text);
+    AddNoJsonEscape(beg, Text - beg);
+    if Text^ = #0 then
+      exit;
+    AddShorter(XML_ESCAPED[esc[Text^]]);
+    inc(Text);
+  until Text^ = #0;
 end;
 
 
@@ -5575,6 +5493,104 @@ end;
 procedure ConsoleObject(Value: TObject; Options: TTextWriterWriteObjectOptions);
 begin
   ConsoleWrite(ObjectToJson(Value, Options));
+end;
+
+function HtmlEscape(const text: RawUtf8; fmt: TTextWriterHtmlFormat): RawUtf8;
+var
+  temp: TTextWriterStackBuffer;
+  W: TTextWriter;
+begin
+  if NeedsHtmlEscape(pointer(text), fmt) then
+  begin
+    W := TTextWriter.CreateOwnedStream(temp);
+    try
+      W.AddHtmlEscape(pointer(text), fmt);
+      W.SetText(result);
+    finally
+      W.Free;
+    end;
+  end
+  else
+    result := text;
+end;
+
+function HtmlEscapeString(const text: string; fmt: TTextWriterHtmlFormat): RawUtf8;
+var
+  temp: TTextWriterStackBuffer;
+  W: TTextWriter;
+begin
+  {$ifdef UNICODE}
+  if fmt = hfNone then
+  {$else}
+  if not NeedsHtmlEscape(pointer(text), fmt) then // work for any AnsiString
+  {$endif UNICODE}
+  begin
+    StringToUtf8(text, result);
+    exit;
+  end;
+  W := TTextWriter.CreateOwnedStream(temp);
+  try
+    W.AddHtmlEscapeString(text, fmt);
+    W.SetText(result);
+  finally
+    W.Free;
+  end;
+end;
+
+function NeedsHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat): boolean;
+var
+  esc: PAnsiCharToByte;
+begin
+  if (Text <> nil) and
+     (Fmt <> hfNone) then
+  begin
+    result := true;
+    esc := @HTML_ESC[Fmt];
+    while true do
+      if esc[Text^] = 0 then
+        inc(Text) // fast process of unescaped plain text
+      else if Text^ = #0 then
+        break     // no escape needed
+      else
+        exit;     // needs XML escape
+  end;
+  result := false;
+end;
+
+function XmlEscape(const text: RawUtf8): RawUtf8;
+var
+  temp: TTextWriterStackBuffer;
+  W: TTextWriter;
+begin
+  if NeedsXmlEscape(pointer(text)) then
+  begin
+    W := TTextWriter.CreateOwnedStream(temp);
+    try
+      W.AddXmlEscape(pointer(text));
+      W.SetText(result);
+    finally
+      W.Free;
+    end;
+  end
+  else
+    result := text;
+end;
+
+function NeedsXmlEscape(text: PUtf8Char): boolean;
+var
+  esc: PAnsiCharToByte;
+begin
+  result := true;
+  esc := @XML_ESC;
+  if Text <> nil then
+    while true do
+      if esc[Text^] = 0 then
+        inc(Text) // fast process of unescaped plain text
+      else if Text^ = #0 then
+        break     // no escape needed
+      else
+        exit;     // needs XML escape
+  result := false;
 end;
 
 function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
@@ -10319,7 +10335,27 @@ begin
   end;
   for c := #0 to #127 do
   begin
-    XML_ESC[c] := ord(c in [#0..#31, '<', '>', '&', '"', '''']);
+    case c of // follow XML_ESCAPED[] content
+      #0, #9:
+        v := 1;
+      #10:
+        v := 2;
+      #13:
+        v := 3;
+      '<':
+        v := 4;
+      '>':
+        v := 5;
+      '&':
+        v := 6;
+      '"':
+        v := 7;
+      '''':
+        v := 8;
+      #1..#8, #11, #12, #14..#31:
+        v := 9; // ignore invalid character - see http://www.w3.org/TR/xml/#NT-Char
+    end;
+    XML_ESC[c] := v;
     case c of // HTML_ESCAPED: array[1..4] = '&lt;', '&gt;', '&amp;', '&quot;'
       #0,
       '<':

@@ -714,6 +714,8 @@ type
     // - just a wrapper to check that CryptPublicKey[aAlgo] factory do exist
     class function Supports(aAlgo: TCryptAsymAlgo): boolean;
     /// initialize this JWT instance from a supplied public key and algorithm
+    // - aPublicKey is expected to be a public key in PEM or DER format, but
+    // a private key with no password encryption is also accepted here
     // - if no aPublicKey is supplied, it will generate a new key pair and the
     // PublicKey/PrivateKey properties could be used for proper persistence
     // (warning: generating a key pair could be very slow with RSA/RSAPSS)
@@ -1087,7 +1089,7 @@ begin
        not CompareMem(pointer(fHeaderB64), tok, headerlen) then
       exit;
   end;
-  // 2. extract the payload
+  // 2. extract the payload and signature
   Jwt.result := jwtWrongFormat;
   if toklen > JWT_MAXSIZE then
     exit;
@@ -1715,8 +1717,15 @@ begin
               [self, ToText(fKeyAlgo)^]);
   end
   else if not fPublicKey.Load(fKeyAlgo, aPublicKey) then
-    EJwtException.RaiseUtf8('%.Create: impossible to load this % key',
-            [self, ToText(fKeyAlgo)^]);
+  begin
+    // is not a public key: try to load a private key here
+    fPrivateKey := CryptPrivateKey[fKeyAlgo].Create;
+    if not fPrivateKey.Load(fKeyAlgo, nil, aPublicKey, '') or
+       // and generate the associated public key from this private key
+       not fPublicKey.Load(fKeyAlgo, fPrivateKey.ToSubjectPublicKey) then
+      EJwtException.RaiseUtf8('%.Create: impossible to load this % key',
+        [self, ToText(fKeyAlgo)^]);
+  end;
   inherited Create(fAlgorithm, aClaims, aAudience, aExpirationMinutes,
     aIDIdentifier, aIDObfuscationKey, aIDObfuscationKeyNewKdf);
 end;
@@ -1749,15 +1758,18 @@ begin
   sig := fPrivateKey.Sign(fAsymAlgo, headpayload); // = encrypt with private key
   if sig = '' then
     EJwtException.RaiseUtf8('%.ComputeSignature: % Sign failed', [self, fAlgorithm]);
-  result := BinToBase64Uri(pointer(sig), length(sig));
+  result := GetSignatureSecurityRaw(fAsymAlgo, sig); // into base-64 encoded raw
 end;
 
 procedure TJwtCrypt.CheckSignature(const headpayload: RawUtf8;
   const signature: RawByteString; var jwt: TJwtContent);
+var
+  der: RawByteString;
 begin
   if not Assigned(fPublicKey) then
     EJwtException.RaiseUtf8('%.CheckSignature requires a public key', [self]);
-  if fPublicKey.Verify(fAsymAlgo, headpayload, signature) then // = decrypt
+  der := SetSignatureSecurityRaw(fAsymAlgo, signature);
+  if fPublicKey.Verify(fAsymAlgo, headpayload, der) then // = decrypt
     jwt.result := jwtValid
   else
     jwt.result := jwtInvalidSignature;

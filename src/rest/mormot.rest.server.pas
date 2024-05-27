@@ -294,7 +294,7 @@ type
     // - this method could have been declared as protected, since it should
     // never be called outside the TRestServer.Uri() method workflow
     // - should set Call, and Method members
-    procedure Prepare(aServer: TRestServer; const aCall: TRestUriParams);
+    procedure Prepare(aServer: TRestServer; const aCall: TRestUriParams); virtual;
     /// finalize the execution context
     destructor Destroy; override;
 
@@ -1800,6 +1800,7 @@ type
     fRouter: TRestRouter;
     fRouterSafe: TRWLightLock;
     fOnNotifyCallback: TOnRestServerClientCallback;
+    fServiceReleaseTimeoutMicrosec: integer;
     procedure SetNoAjaxJson(const Value: boolean);
     function GetNoAjaxJson: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2227,6 +2228,11 @@ type
     // - NEVER set the abstract TRestServerUriContext class on this property
     property ServicesRouting: TRestServerUriContextClass
       read fServicesRouting write SetRoutingClass;
+    /// maximum time allowed to release an interface service instance
+    // - equals 500 microseconds by default - 0 would disable any measurement
+    // - should be enabled for each given interface by setting optFreeTimeout
+    property ServiceReleaseTimeoutMicrosec: integer
+      read fServiceReleaseTimeoutMicrosec write fServiceReleaseTimeoutMicrosec;
     /// retrieve detailed statistics about a method-based service use
     // - will return a reference to the actual alive item: caller should
     // not free the returned instance
@@ -2932,6 +2938,7 @@ begin
      (Server.fSessions <> nil) and
      not IsRemoteAdministrationExecute then
   begin
+    // some kind of requests may have been marked to by-pass authentication
     fSession := CONST_AUTHENTICATION_SESSION_NOT_STARTED;
     if // /auth + /timestamp are e.g. allowed methods without signature
        ((MethodIndex >= 0) and
@@ -2944,15 +2951,15 @@ begin
         (Method in Server.BypassOrmAuthentication)) then
       // no need to check the sessions
       exit;
+    // TAuthSession instance may have been stored at connection level
     if (rsoSessionInConnectionOpaque in Server.Options) and
        (Call^.LowLevelConnectionOpaque <> nil) then
     begin
-      // TAuthSession instance may have been stored at connection level
-      // to avoid signature parsing and session lookup
       s := pointer(Call^.LowLevelConnectionOpaque^.ValueInternal);
       if s <> nil then
         if s.InheritsFrom(Server.fSessionClass) then
         begin
+          // safely avoid signature parsing and session lookup
           SessionAssign(s);
           exit;
         end
@@ -5141,8 +5148,9 @@ begin
     if HexDisplayToBin(P + 8, @sign, SizeOf(sign)) and
        ({%H-}sign = expectedsign) then
     begin
-      if ts > result.fLastTimestamp then
-        result.fLastTimestamp := ts;
+      if not fNoTimestampCoherencyCheck then
+        if ts > result.fLastTimestamp then
+          result.fLastTimestamp := ts;
       exit;
     end
     else if Assigned(Ctxt.fLog) and
@@ -5154,7 +5162,7 @@ begin
   else if Assigned(Ctxt.fLog) and
           (sllUserAuth in fServer.fLogLevel) then
     Ctxt.fLog.Log(sllUserAuth, 'Invalid Timestamp: expected >=%, got %',
-      [minticks, Int64(ts)], self);
+      [Int64(minticks), Int64(ts)], self);
   result := nil; // indicates invalid signature
 end;
 
@@ -6171,6 +6179,7 @@ begin
     fOptions := [rsoNoTableURI, rsoNoInternalState]; // no table/state to send
   fAssociatedServices := TServicesPublishedInterfacesList.Create(0);
   fServicesRouting := TRestServerRoutingRest;
+  fServiceReleaseTimeoutMicrosec := 500;
   UriPagingParameters := PAGINGPARAMETERS_YAHOO;
   fStats := TRestServerMonitor.Create(self);
   // initialize TRest
