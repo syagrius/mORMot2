@@ -285,7 +285,10 @@ type
   TUriMatchName = object
   {$endif USERECORDWITHMETHODS}
   public
-    Path, Name: TValuePUtf8Char;
+    /// the full URI path
+    Path: TValuePUtf8Char;
+    /// its resource name, as decoded by ParsePath from the Path value
+    Name: TValuePUtf8Char;
     /// to be called once Path has been populated to compute Name
     procedure ParsePath;
   end;
@@ -2925,7 +2928,7 @@ var
 begin
   Name := Path;
   i := Name.Len;
-  while i > 0 do // retrieve
+  while i > 0 do // retrieve last
   begin
     dec(i);
     if Name.Text[i] <> '/' then
@@ -4443,7 +4446,7 @@ begin
         result := LoadFrom(P, PLen);
       bdDiff:
         if fStore <> '' then
-          result := ZeroDecompressOr(pointer(P), Pointer(fStore), PLen, head.size);
+          result := ZeroDecompressOr(pointer(P), pointer(fStore), PLen, head.size);
       bdUpToDate:
         result := true;
     end;
@@ -4684,7 +4687,7 @@ begin
   end
   else
   begin
-    sp := Pointer(ToVarUInt32(curlen, PByte(sp)));
+    sp := pointer(ToVarUInt32(curlen, PByte(sp)));
     PInteger(sp)^ := curofs;
     inc(sp, curofssize);
   end;
