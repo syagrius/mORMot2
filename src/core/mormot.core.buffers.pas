@@ -2701,7 +2701,7 @@ type
   TRawByteStringBuffer = object
   {$endif USERECORDWITHMETHODS}
   private
-    fBuffer: RawUtf8; /// actual storage, with length(fBuffer) as Capacity
+    fBuffer: RawUtf8; // actual storage, with length(fBuffer) as Capacity
     fLen: PtrInt;
     procedure RawAppend(P: pointer; PLen: PtrInt);
       {$ifdef HASINLINE}inline;{$endif}
@@ -2749,6 +2749,7 @@ type
     procedure Reserve(const WorkingBuffer: RawByteString); overload;
     /// similar to delete(fBuffer, 1, FirstBytes)
     procedure Remove(FirstBytes: PtrInt);
+      {$ifdef HASINLINE}inline;{$endif}
     /// move up to Count bytes from the internal Buffer into another place
     // - returns how many bytes were available to be copied into Dest^
     // - then remove the copied bytes from the internal Buffer/Len storage
@@ -2758,10 +2759,6 @@ type
     // - don't move any byte, but just update the given Pos index
     function ExtractAt(var Dest: PAnsiChar; var Count: PtrInt;
       var Pos: PtrInt): PtrInt;
-    /// similar to insert(P/PLen, fBuffer, Position + 1)
-    // - could optionally include a #13#10 pattern between the two
-    procedure Insert(P: pointer; PLen: PtrInt; Position: PtrInt = 0;
-      CRLF: boolean = false);
     /// retrieve the current Buffer/Len content as RawUtf8 text
     // - with some optional overhead for faster reallocmem at concatenation
     // - won't force Len to 0: caller should call Reset if done with it
@@ -11149,10 +11146,7 @@ end;
 procedure TRawByteStringBuffer.RawRealloc(needed: PtrInt);
 begin
   if fLen = 0 then // buffer from scratch (fBuffer may be '' or not)
-  begin
-    inc(needed, 128); // small overhead at first
-    FastSetString(fBuffer, needed); // no realloc
-  end
+    FastSetString(fBuffer, needed + 128) // no realloc + small initial overhead
   else
   begin
     inc(needed, needed shr 3 + 2048); // generous overhead on resize
@@ -11160,11 +11154,14 @@ begin
   end;
 end;
 
+const
+  APPEND_OVERLOAD = 24; // for AppendCRLF or IndexByte() read overflow
+
 procedure TRawByteStringBuffer.RawAppend(P: pointer; PLen: PtrInt);
 var
   needed: PtrInt;
 begin
-  needed := fLen + PLen + 2;
+  needed := fLen + PLen + APPEND_OVERLOAD;
   if needed > length(fBuffer) then
     RawRealloc(needed);
   MoveFast(P^, PByteArray(fBuffer)[fLen], PLen);
@@ -11221,10 +11218,22 @@ end;
 
 procedure TRawByteStringBuffer.Append(const Text: array of RawUtf8);
 var
-  i: PtrInt;
+  needed, i, l: PtrInt;
 begin
+  needed := 0;
   for i := 0 to high(Text) do
-    Append(Text[i]);
+    inc(needed, length(Text[i]));
+  if needed = 0 then
+    exit;
+  inc(needed, fLen + APPEND_OVERLOAD);
+  if needed > length(fBuffer) then
+    RawRealloc(needed);
+  for i := 0 to high(Text) do
+  begin
+    l := length(Text[i]);
+    MoveFast(pointer(Text[i])^, PByteArray(fBuffer)[fLen], l);
+    inc(fLen, l);
+  end;
 end;
 
 function TRawByteStringBuffer.TryAppend(P: pointer; PLen: PtrInt): boolean;
@@ -11242,6 +11251,7 @@ end;
 procedure TRawByteStringBuffer.Reserve(MaxSize: PtrInt);
 begin
   fLen := 0;
+  inc(MaxSize, APPEND_OVERLOAD);
   if MaxSize > length(fBuffer) then
     RawRealloc(MaxSize);
 end;
@@ -11296,19 +11306,6 @@ begin
   end;
   inc(Dest, result);
   dec(Count, result);
-end;
-
-procedure TRawByteStringBuffer.Insert(P: pointer; PLen: PtrInt;
-  Position: PtrInt; CRLF: boolean);
-begin
-  inc(PLen, 2 * ord(CRLF));
-  if PLen + fLen > length(fBuffer) then
-    RawRealloc(PLen + fLen); // need more space
-  MoveFast(pointer(fBuffer)^, PByteArray(fBuffer)[PLen], fLen);
-  dec(PLen, 2 * ord(CRLF));
-  MoveFast(P^, pointer(fBuffer)^, PLen);
-  if CRLF then
-    PWord(@PByteArray(fBuffer)[PLen])^ := $0a0d;
 end;
 
 procedure TRawByteStringBuffer.AsText(out Text: RawUtf8; Overhead: PtrInt;

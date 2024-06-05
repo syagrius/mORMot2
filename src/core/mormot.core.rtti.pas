@@ -715,6 +715,8 @@ type
     Flags: TRttiCacheFlags;
     /// for rkHasRttiOrdTypes/rcfHasRttiOrd, equals Info^.RttiOrd
     RttiOrd: TRttiOrd;
+    /// if > 0, this type should be serialized as hexadecimal string
+    BinarySize: byte;
     /// corresponding TRttiVarData.VType
     // - rkEnumeration,rkSet,rkDynArray,rkClass,rkInterface,rkRecord,rkArray are
     // identified as varAny with TVarData.VAny pointing to the actual value, and
@@ -2086,7 +2088,7 @@ function ParserTypeToTypeInfo(pt: TRttiParserType;
 function TypeInfoToDynArrayTypeInfo(ElemInfo: PRttiInfo;
   ExpectExactElemInfo: boolean; ParserType: PRttiParserType = nil): PRttiInfo;
 
-/// internal function used e.g. for enumerations and set
+/// internal function used e.g. for enumerations and sets
 function ItemSizeToDynArrayKind(size: integer): TRttiParserType;
 
 
@@ -2400,11 +2402,10 @@ type
   TRttiCustom = class
   protected
     fCache: TRttiCache;
-    fParser: TRttiParserType;
-    fParserComplex: TRttiParserComplexType;
-    fValueRtlClass: TRttiValueClass;
-    fArrayFirstField: TRttiParserType;
-    fFlags: TRttiCustomFlags;
+    fParser: TRttiParserType;                 // 8-bit
+    fParserComplex: TRttiParserComplexType;   // 8-bit
+    fValueRtlClass: TRttiValueClass;          // 8-bit
+    fFlags: TRttiCustomFlags;                 // 32-bit
     fPrivateSlot: pointer;
     fArrayRtti: TRttiCustom;
     fFinalize: TRttiFinalizer;
@@ -2413,11 +2414,8 @@ type
     fProps: TRttiCustomProps;
     fOwnedRtti: array of TRttiCustom; // for SetPropsFromText(NoRegister=true)
     fSetRandom: TRttiCustomRandom;
-    fPrivateSlots: TObjectDynArray;
-    fPrivateSlotsSafe: TLightLock;
-    fArrayFirstFieldSize: integer;
     // used by mormot.core.json.pas
-    fBinarySize: integer;
+    fArrayFirstField, fArrayFirstFieldSort: TRttiParserType;
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
     fJsonSave: pointer; // contains a TRttiJsonSave - used if fJsonWriter=nil
     fJsonReader, fJsonWriter: TMethod; // TOnRttiJsonRead/TOnRttiJsonWrite
@@ -2426,9 +2424,10 @@ type
     fAutoDestroyClasses,
     fAutoCreateObjArrays,
     fAutoResolveInterfaces: PRttiCustomPropDynArray;
-    // used by NoRttiSetAndRegister()
-    fNoRttiInfo: TByteDynArray;
-    // customize class process
+    fPrivateSlots: TObjectDynArray;
+    fPrivateSlotsSafe: TLightLock;
+    fNoRttiInfo: TByteDynArray; // used by NoRttiSetAndRegister()
+    // used to customize the class process
     fValueClass: TClass;
     fObjArrayClass: TClass;
     fCollectionItem: TCollectionItemClass;
@@ -2437,7 +2436,7 @@ type
     procedure SetValueClass(aClass: TClass; aInfo: PRttiInfo); virtual;
     // for TRttiCustomList.RegisterObjArray/RegisterBinaryType/RegisterFromText
     function SetObjArray(Item: TClass): TRttiCustom;
-    function SetBinaryType(BinarySize: integer): TRttiCustom;
+    function SetBinaryType(BinSize: integer): TRttiCustom;
     procedure SetPropsFromText(var P: PUtf8Char;
       ExpectedEnd: TRttiCustomFromTextExpectedEnd; NoRegister: boolean);
     // initialize from fProps, with no associated RTTI - and calls DoRegister()
@@ -2594,13 +2593,14 @@ type
     // - equals ArrayRtti.Parser if ArrayRtti.Kind is not rkRecordTypes
     property ArrayFirstField: TRttiParserType
       read fArrayFirstField;
-    /// best guess of first field bytes size for a rkDynArray
-    property ArrayFirstFieldSize: integer
-      read fArrayFirstFieldSize;
+    /// best guess of first field type for a rkDynArray
+    // - equals ArrayFirstField or an ordinal type matching the enum/set type
+    property ArrayFirstFieldSort: TRttiParserType
+      read fArrayFirstFieldSort;
     /// store the number of bytes for hexadecimal serialization for rcfBinary
     // - used when rcfBinary is defined in Flags; equals 0 if disabled (default)
-    property BinarySize: integer
-      read fBinarySize;
+    property BinarySize: byte
+      read fCache.BinarySize;
     /// store the class of this type, i.e. contains Cache.Info.RttiClass.RttiClass
     property ValueClass: TClass
       read fValueClass;
@@ -7816,7 +7816,7 @@ end;
 
 procedure TRttiCustom.FromRtti(aInfo: PRttiInfo);
 var
-  dummy: integer;
+  siz: integer;
   pt: TRttiParserType;
   pct: TRttiParserComplexType;
   item: PRttiInfo;
@@ -7851,7 +7851,7 @@ begin
           begin
             // on Delphi 7-2009, recognize at least the most common types
             pt := GuessItemTypeFromDynArrayInfo(aInfo, nil,
-              fCache.ItemSize, {exacttype=}true, dummy, @pct);
+              fCache.ItemSize, {exacttype=}true, siz, @pct);
             item := ParserTypeToTypeInfo(pt, pct);
           end
           else if item.Kind = rkClass then
@@ -7864,15 +7864,25 @@ begin
         fArrayRtti := Rtti.RegisterType(item);
         if (fArrayRtti <> nil) and
            (fArrayFirstField = ptNone) then
+        begin
           if fArrayRtti.Kind in rkRecordOrDynArrayTypes then
             // guess first field (using fProps[0] would break compatibility)
             fArrayFirstField := GuessItemTypeFromDynArrayInfo(aInfo,
-              fCache.ItemInfo, fCache.ItemSize, {exacttype=}false, fArrayFirstFieldSize)
+              fCache.ItemInfo, fCache.ItemSize, {exacttype=}false, siz)
           else
           begin
             fArrayFirstField := fArrayRtti.Parser;
-            fArrayFirstFieldSize := fArrayRtti.Cache.Size;
+            siz := fArrayRtti.Cache.Size;
           end;
+          if fArrayFirstField in [ptNone, ptEnumeration, ptSet] then
+          begin
+            if siz = 0 then
+              siz := fCache.Size;
+            fArrayFirstFieldSort := ItemSizeToDynArrayKind(siz);
+          end
+          else
+            fArrayFirstFieldSort := fArrayFirstField;
+        end;
       end;
     rkArray:
       begin
@@ -8251,24 +8261,26 @@ end;
 var
   RttiArrayCount: integer;
 
-function TRttiCustom.SetBinaryType(BinarySize: integer): TRttiCustom;
+function TRttiCustom.SetBinaryType(BinSize: integer): TRttiCustom;
 begin
   if self <> nil then
   begin
-    if BinarySize < 0 then
+    if BinSize < 0 then
     begin
-      BinarySize := 0;
+      BinSize := 0;
       exclude(fFlags, rcfBinary);
       if not (Kind in rkStringTypes) then
         exclude(fFlags, rcfJsonString);
     end
     else
     begin
-      if BinarySize = 0 then
-        BinarySize := fCache.Size;
+      if BinSize = 0 then
+        BinSize := fCache.Size;
       fFlags := fFlags + [rcfBinary, rcfJsonString];
     end;
-    fBinarySize := BinarySize;
+    if BinSize > high(fCache.BinarySize) then // stored as a byte
+      ERttiException.RaiseUtf8('%.SetBinaryType(%)', [self, BinSize]);
+    fCache.BinarySize := BinSize;
     SetParserType(Parser, ParserComplex); // notify format change (e.g. for json)
   end;
   result := self;
@@ -9137,6 +9149,7 @@ function TRttiCustomList.RegisterFromText(DynArrayOrRecord: PRttiInfo;
   const RttiDefinition: RawUtf8): TRttiCustom;
 var
   P: PUtf8Char;
+  da, prop: TRttiCustom;
   rttisize: integer;
 begin
   if (DynArrayOrRecord = nil) or
@@ -9145,15 +9158,17 @@ begin
   RegisterSafe.Lock;
   try
     result := RegisterType(DynArrayOrRecord);
-    if result.Kind = rkDynArray then
-      if result.ArrayRtti = nil then
-      begin
-        result.fArrayRtti := RegisterFromText('', RttiDefinition);
-        result := result.fArrayRtti;
-        exit;
-      end
-      else
-        result := result.ArrayRtti;
+    da := result;
+    if result.Kind <> rkDynArray then
+      da := nil
+    else if result.ArrayRtti = nil then
+    begin
+      result.fArrayRtti := RegisterFromText('', RttiDefinition);
+      result := result.fArrayRtti;
+      exit;
+    end
+    else
+      result := result.ArrayRtti;
     result.PropsClear; // reset to the Base64 serialization if RttiDefinition=''
     P := pointer(RttiDefinition);
     if P <> nil then
@@ -9168,6 +9183,17 @@ begin
     else if result.Kind in rkRecordTypes then
       result.Props.SetFromRecordExtendedRtti(result.Info); // only for Delphi 2010+
     result.SetParserType(result.Parser, result.ParserComplex);
+    if (da <> nil) and
+       (da.fArrayFirstField = ptNone) and
+       (result.Props.Count <> 0) then
+    begin
+      prop := result.Props.List[0].Value;
+      da.fArrayFirstField := prop.Parser;
+      if prop.parser in [ptNone, ptEnumeration, ptSet] then
+        da.fArrayFirstFieldSort := ItemSizeToDynArrayKind(prop.Size);
+      if da.fArrayFirstFieldSort = ptNone then
+        da.fArrayFirstFieldSort := da.fArrayFirstField;
+    end;
   finally
     RegisterSafe.UnLock;
   end;

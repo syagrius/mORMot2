@@ -816,10 +816,10 @@ function GetMainMacAddress(out Mac: TMacAddress;
 
 type
   /// results of THttpServerSocket.GetRequest virtual method
-  // - return grError if the socket was not connected any more, or grException
-  // if any exception occurred during the process
+  // - grClosed is returned if the socket was disconnected/closed by the client
+  // - grException is returned if any exception occurred during the process
   // - grOversizedPayload is returned when MaximumAllowedContentLength is reached
-  // - grRejected is returned when OnBeforeBody returned not 200
+  // - grRejected on invalid input, or when OnBeforeBody returned not 200
   // - grIntercepted is returned e.g. from OnHeaderParsed as valid result
   // - grTimeout is returned when HeaderRetrieveAbortDelay is reached
   // - grHeaderReceived is returned for GetRequest({withbody=}false)
@@ -828,7 +828,7 @@ type
   // - grUpgraded indicates that this connection was upgraded e.g. as WebSockets
   // - grBanned is triggered by the hsoBan40xIP option
   THttpServerSocketGetRequestResult = (
-    grError,
+    grClosed,
     grException,
     grOversizedPayload,
     grRejected,
@@ -1166,9 +1166,9 @@ type
     /// if we should search for local .gz cached file when serving static files
     property RegisterCompressGzStatic: boolean
       read GetRegisterCompressGzStatic write SetRegisterCompressGzStatic;
-    /// how many invalid HTTP headers have been rejected
-    property StatHeaderErrors: integer
-      index grError read GetStat;
+    /// how many HTTP connections have been closed
+    property StatHeaderClosed: integer
+      index grClosed read GetStat;
     /// how many invalid HTTP headers raised an exception
     property StatHeaderException: integer
       index grException read GetStat;
@@ -1411,7 +1411,7 @@ type
 
   /// each THttpPeerCacheSettings.Options item
   // - pcoCacheTempSubFolders will create 16 sub-folders (from first 0-9/a-z
-  // hash nibble) within CacheTempPath to reduce folder fragmentation
+  // hash nibble) within CacheTempPath to reduce filesystem fragmentation
   // - pcoUseFirstResponse will accept the first positive response, and don't
   // wait for the BroadcastTimeoutMS delay for all responses to be received
   // - pcoTryLastPeer will first check the latest peer with HTTP/TCP before
@@ -1419,14 +1419,16 @@ type
   // can be forced by TWGetAlternateOptions from a given WGet() call
   // - pcoBroadcastNotAlone will disable broadcasting for up to one second if
   // no response at all was received within BroadcastTimeoutMS delay
+  // - pcoNoServer disable the local UDP/HTTP servers and acts as a pure client
   // - pcoSelfSignedHttps enables HTTPS communication with a self-signed server
-  // (warning: this option should be set on all peers)
+  // (warning: this option should be set on all peers, clients and servers)
   // - pcoVerboseLog will log all details, e.g. raw UDP frames
   THttpPeerCacheOption = (
     pcoCacheTempSubFolders,
     pcoUseFirstResponse,
     pcoTryLastPeer,
     pcoBroadcastNotAlone,
+    pcoNoServer,
     pcoSelfSignedHttps,
     pcoVerboseLog);
 
@@ -1511,7 +1513,8 @@ type
     /// location of the temporary cached files, available for remote requests
     // - the files are cached using their THttpPeerCacheHash values as filename
     // - this folder will be purged according to CacheTempMaxMB/CacheTempMaxMin
-    // - if this value is '', temporary caching would be disabled
+    // - if this value equals '', or pcoNoServer is defined in Options,
+    // temporary caching would be disabled
     property CacheTempPath: TFileName
       read fCacheTempPath write fCacheTempPath;
     /// above how many bytes the peer network should be asked for a temporary file
@@ -1534,7 +1537,8 @@ type
     /// location of the permanent cached files, available for remote requests
     // - in respect to CacheTempPath, this folder won't be purged
     // - the files are cached using their THttpPeerCacheHash values as filename
-    // - if this value is '', permanent caching would be disabled
+    // - if this value equals '', or pcoNoServer is defined in Options,
+    // permanent caching would be disabled
     property CachePermPath: TFileName
       read fCachePermPath write fCachePermPath;
     /// above how many bytes the peer network should be asked for a permanent file
@@ -4267,13 +4271,13 @@ var
   cltaddr: TNetAddr;
   cltservsock: THttpServerSocket;
   res: TNetResult;
-  banlen, tix, bantix: integer;
+  banlen, sec, bansec, i: integer;
   tix64: QWord;
 begin
   // THttpServerGeneric thread preparation: launch any OnHttpThreadStart event
   fExecuteState := esBinding;
   NotifyThreadStart(self);
-  bantix := 0;
+  bansec := 0;
   // main server process loop
   try
     // BIND + LISTEN (TLS is done later)
@@ -4308,15 +4312,15 @@ begin
       begin
         // call fBanned.DoRotate exactly every second
         tix64 := mormot.core.os.GetTickCount64;
-        tix := tix64 div 1000;
+        sec := tix64 div 1000;
+        if bansec <> 0 then
+          for i := bansec + 1 to sec do // as many DoRotate as elapsed seconds
+            fBanned.DoRotate // update internal THttpAcceptBan lists
         {$ifdef OSPOSIX} // Windows would require some activity - not an issue
-        if bantix = 0 then
-          fSock.ReceiveTimeout := 1000 // accept() to exit after one second
         else
-        {$endif OSPOSIX}
-        if bantix <> tix then
-          fBanned.DoRotate; // update internal THttpAcceptBan lists
-        bantix := tix;
+          fSock.ReceiveTimeout := 1000 // accept() to exit after one second
+        {$endif OSPOSIX};
+        bansec := sec;
       end;
       if res = nrRetry then // accept() timeout after 1 or 5 seconds
       begin
@@ -4356,8 +4360,9 @@ begin
                   include(cltservsock.Http.HeaderFlags, hfConnectionClose);
                   Process(cltservsock, 0, self);
                 end;
-              grIntercepted:
-                ; // handled by OnHeaderParsed event -> no ban
+              grClosed,      // e.g. gracefully disconnected
+              grIntercepted: // handled by OnHeaderParsed event -> no ban
+                ;
             else
               if fBanned.BanIP(cltaddr.IP4) then // e.g. after grTimeout
                 IncStat(grBanned);
@@ -4427,8 +4432,6 @@ begin
      Terminated then
     // we didn't get the request = socket read error
     exit; // -> send will probably fail -> nothing to send back
-if Assigned(ClientSock.OnLog) then
-ClientSock.OnLog(sllCustom1, 'Process: headers=%', [ClientSock.Http.Headers], self);
   // compute and send back the response
   if Assigned(fOnAfterResponse) then
     QueryPerformanceMicroSeconds(started);
@@ -4437,8 +4440,6 @@ ClientSock.OnLog(sllCustom1, 'Process: headers=%', [ClientSock.Http.Headers], se
   try
     // compute the response
     req.Prepare(ClientSock.Http, ClientSock.fRemoteIP, fAuthorize);
-if Assigned(ClientSock.OnLog) then
-ClientSock.OnLog(sllCustom1, 'Process: DoRequest=%', [req], self);
     DoRequest(req);
     output := req.SetupResponse(
       ClientSock.Http, fCompressGz, fServerSendBufferSize);
@@ -4449,8 +4450,6 @@ ClientSock.OnLog(sllCustom1, 'Process: DoRequest=%', [req], self);
       exit;
     if hfConnectionClose in ClientSock.Http.HeaderFlags then
       ClientSock.fKeepAliveClient := false;
-if Assigned(ClientSock.OnLog) then
-ClientSock.OnLog(sllCustom1, 'Process=%: send back len=%', [req.RespStatus, output.Len], self);      
     if ClientSock.TrySndLow(output.Buffer, output.Len) then // header[+body]
       while not Terminated do
       begin
@@ -4603,7 +4602,8 @@ begin
         if Assigned(fServer.Sock.OnLog) then
           fServer.Sock.OnLog(sllTrace, 'Task: close after GetRequest=% from %',
               [ToText(aHeaderResult)^, fRemoteIP], self);
-        if fServer.fBanned.BanIP(fRemoteIP) then
+        if (aHeaderResult <> grClosed) and
+           fServer.fBanned.BanIP(fRemoteIP) then
           fServer.IncStat(grBanned);
       end;
     end;
@@ -4636,11 +4636,11 @@ var
   status, tix32: cardinal;
   noheaderfilter, http10: boolean;
 begin
-  result := grError;
   try
     // use SockIn with 1KB buffer if not already initialized: 2x faster
     CreateSockIn;
     // abort now with no exception if socket is obviously broken
+    result := grClosed;
     if fServer <> nil then
     begin
       if (SockInPending(100) < 0) or
@@ -4655,9 +4655,10 @@ begin
     SockRecvLn(Http.CommandResp);
     P := pointer(Http.CommandResp);
     if P = nil then
-      exit; // broken
+      exit; // connection is likely to be broken or closed
     GetNextItem(P, ' ', Http.CommandMethod); // 'GET'
     GetNextItem(P, ' ', Http.CommandUri);    // '/path'
+    result := grRejected;
     if PCardinal(P)^ <>
          ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24 then
       exit;
@@ -4671,7 +4672,6 @@ begin
     begin
       SockSendFlush('HTTP/1.0 400 Bad Request'#13#10 +
         'Content-Length: 16'#13#10#13#10'Rejected Headers');
-      result := grRejected;
       exit;
     end;
     fServer.ParseRemoteIPConnID(Http.Headers, fRemoteIP, fRemoteConnectionID);
@@ -4832,6 +4832,7 @@ procedure THttpServerResp.Execute;
     keepaliveendtix, beforetix, headertix, tix: Int64;
     pending: TCrtSocketPending;
     res: THttpServerSocketGetRequestResult;
+    banned: boolean;
   begin
     {$ifdef SYNCRTDEBUGLOW}
     try
@@ -4927,12 +4928,14 @@ procedure THttpServerResp.Execute;
                       exit;
                 else
                   begin
+                    banned := (res <> grClosed) and
+                              fServer.fBanned.BanIP(fServerSock.RemoteIP);
+                    if banned then
+                      fServer.IncStat(grBanned);
                     if Assigned(fServer.Sock.OnLog) then
                       fServer.Sock.OnLog(sllTrace,
-                        'Execute: close after GetRequest=% from %',
-                        [ToText(res)^, fServerSock.RemoteIP], self);
-                    if fServer.fBanned.BanIP(fServerSock.RemoteIP) then
-                      fServer.IncStat(grBanned);
+                        'Execute: close after GetRequest=% from % (ban=%)',
+                        [ToText(res)^, fServerSock.RemoteIP, banned], self);
                     exit;
                   end;
                 end;
@@ -5413,15 +5416,16 @@ begin
         begin
           fOwner.MessageInit(pcfResponseNone, fMsg.Seq, resp);
           resp.Hash := fMsg.Hash;
-          if integer(fOwner.fHttpServer.ConnectionsActive) >
-                      fOwner.Settings.LimitClientCount then
-            resp.Kind := pcfResponseOverloaded
-          else if fOwner.LocalFileName(
-                           fMsg, [], nil, @resp.Size) = HTTP_SUCCESS then
-            resp.Kind := pcfResponseFull
-          else if fOwner.PartialFileName(
-                           fMsg, nil, nil, @resp.Size) = HTTP_SUCCESS then
-            resp.Kind := pcfResponsePartial;
+          if not (pcoNoServer in fOwner.Settings.Options) then
+            if integer(fOwner.fHttpServer.ConnectionsActive) >
+                        fOwner.Settings.LimitClientCount then
+              resp.Kind := pcfResponseOverloaded
+            else if fOwner.LocalFileName(
+                             fMsg, [], nil, @resp.Size) = HTTP_SUCCESS then
+              resp.Kind := pcfResponseFull
+            else if fOwner.PartialFileName(
+                             fMsg, nil, nil, @resp.Size) = HTTP_SUCCESS then
+              resp.Kind := pcfResponsePartial;
           DoSendResponse;
         end;
       pcfPong,
@@ -5624,12 +5628,15 @@ begin
   if Assigned(log) then
     log.Log(sllTrace, 'Create: started %', [fUdpServer], self);
   // start the local HTTP/HTTPS server on this interface
-  StartHttpServer(aHttpServerClass, aHttpServerThreadCount, fIpPort);
-  fHttpServer.ServerName := Executable.ProgramName;
-  fHttpServer.OnBeforeBody := OnBeforeBody;
-  fHttpServer.OnRequest := OnRequest;
-  if Assigned(log) then
-    log.Log(sllDebug, 'Create: started %', [fHttpServer], self);
+  if not (pcoNoServer in fSettings.Options) then
+  begin
+    StartHttpServer(aHttpServerClass, aHttpServerThreadCount, fIpPort);
+    fHttpServer.ServerName := Executable.ProgramName;
+    fHttpServer.OnBeforeBody := OnBeforeBody;
+    fHttpServer.OnRequest := OnRequest;
+    if Assigned(log) then
+      log.Log(sllDebug, 'Create: started %', [fHttpServer], self);
+  end;
 end;
 
 procedure THttpPeerCache.StartHttpServer(
@@ -5667,7 +5674,10 @@ end;
 
 function THttpPeerCache.CurrentConnections: integer;
 begin
-  result := fHttpServer.ConnectionsActive;
+  if pcoNoServer in fSettings.Options then
+    result := 0
+  else
+    result := fHttpServer.ConnectionsActive;
 end;
 
 destructor THttpPeerCache.Destroy;
@@ -5846,7 +5856,6 @@ begin
   // validate WGet caller context
   if (self = nil) or
      (fSettings = nil) or
-     (fHttpServer = nil) or
      (Sender = nil) or
      (Params.Hash = '') or
      not Params.Hasher.InheritsFrom(TStreamRedirectSynHasher) or
@@ -5868,7 +5877,8 @@ begin
   req.RangeStart := Sender.RangeStart;
   req.RangeEnd := Sender.RangeEnd;
   // always check if we don't already have this file cached locally
-  if LocalFileName(req, [lfnSetDate], @fn, @req.Size) = HTTP_SUCCESS then
+  if not (pcoNoServer in fSettings.Options) and
+     (LocalFileName(req, [lfnSetDate], @fn, @req.Size) = HTTP_SUCCESS) then
   begin
     l.Log(sllDebug, 'OnDownload: from local %', [fn], self);
     local := TFileStreamEx.Create(fn, fmOpenReadShared);
@@ -6041,6 +6051,8 @@ var
   i: PtrInt;
   dir: TFindFilesDynArray;
 begin
+  if pcoNoServer in fSettings.Options then
+    exit;
   // the supplied downloaded source file should be big enough
   sourcesize := FileSize(Partial);
   if (sourcesize = 0) or // paranoid
