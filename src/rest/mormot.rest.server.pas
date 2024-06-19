@@ -493,11 +493,11 @@ type
     procedure ReturnFileFromFolder(const FolderName: TFileName;
       Handle304NotModified: boolean = true;
       const DefaultFileName: TFileName = 'index.html';
-      const Error404Redirect: RawUtf8 = ''; CacheControlMaxAge: integer = 0); override;
+      const Error404Redirect: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0); override;
     /// use this method to send back an error to the caller
     // - overriden method with additional logging
     procedure Error(const ErrorMessage: RawUtf8 = '';
-      Status: integer = HTTP_BADREQUEST; CacheControlMaxAge: integer = 0); override;
+      Status: integer = HTTP_BADREQUEST; CacheControlMaxAgeSec: integer = 0); override;
 
     /// the associated TRestServer instance which executes its URI method
     property Server: TRestServer
@@ -4472,7 +4472,7 @@ end;
 procedure TRestServerUriContext.ReturnFileFromFolder(
   const FolderName: TFileName; Handle304NotModified: boolean;
   const DefaultFileName: TFileName; const Error404Redirect: RawUtf8;
-  CacheControlMaxAge: integer);
+  CacheControlMaxAgeSec: integer);
 var
   fn: RawUtf8;
   fileName: TFileName;
@@ -4486,13 +4486,13 @@ begin
       Utf8ToFileName(fn, filename);
   end;
   inherited ReturnFileFromFolder(FolderName, Handle304NotModified,
-    fileName, Error404Redirect, CacheControlMaxAge);
+    fileName, Error404Redirect, CacheControlMaxAgeSec);
 end;
 
 procedure TRestServerUriContext.Error(const ErrorMessage: RawUtf8;
-  Status: integer; CacheControlMaxAge: integer);
+  Status: integer; CacheControlMaxAgeSec: integer);
 begin
-  inherited Error(ErrorMessage, Status, CacheControlMaxAge);
+  inherited Error(ErrorMessage, Status, CacheControlMaxAgeSec);
   if sllDebug in fServer.LogLevel then
     fServer.InternalLog('%.Error: %', [ClassType, fCall^.OutBody], sllDebug);
 end;
@@ -4744,7 +4744,7 @@ end;
 procedure TAuthSession.ComputeProtectedValues(tix: Int64);
 begin
   // here User.GroupRights and fPrivateKey should have been set
-  fTimeOutShr10 := (QWord(User.GroupRights.SessionTimeout) * (1000 * 60)) shr 10;
+  fTimeOutShr10 := User.GroupRights.SessionTimeout * (MilliSecsPerMin shr 10);
   fTimeOutTix := tix shr 10 + fTimeOutShr10;
   fAccessRights := User.GroupRights.OrmAccessRights;
   FormatUtf8('%+%', [fID, fPrivateKey], fPrivateSalt);
@@ -5140,7 +5140,7 @@ begin
   minticks := result.fLastTimestamp - fTimestampCoherencyTicks;
   if HexDisplayToBin(P, @ts, SizeOf(ts)) and
      (fNoTimestampCoherencyCheck or
-      (integer(minticks) < 0) or // <0 just after login
+      (integer(minticks) < 0) or // <0 just after computer startup
       ({%H-}ts >= minticks)) then
   begin
     expectedsign := fComputeSignature(result.fPrivateSaltHash,

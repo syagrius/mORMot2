@@ -43,6 +43,13 @@ uses
 
 { ****************** Some Cross-System Type and Constant Definitions }
 
+type
+  /// allow to customize the possible line feeds
+  TLineFeed = (
+    lfSystem,
+    lfCR,
+    lfCRLF);
+
 const
   {$ifdef OSWINDOWS}
   /// operating-system dependent Line Feed characters (#13#10 or #10)
@@ -63,6 +70,8 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = false;
   {$endif OSWINDOWS}
+  /// convert a TLineFeed value into its UTF-8 text representation
+  LINE_FEED: array[TLineFeed] of string[3] = (CRLF, #10, #13#10);
 
   /// human-friendly alias to open a file for exclusive writing
   fmShareRead      = fmShareDenyWrite;
@@ -82,8 +91,8 @@ const
 
   /// a convenient array constant to open a file for writing without exclusion
   fmCreateOrRewrite: array[{rewrite=}boolean] of cardinal = (
-   fmCreateShared,
-   fmOpenWriteShared);
+    fmCreateShared,
+    fmOpenWriteShared);
 
 const
   /// void HTTP Status Code (not a standard value, for internal use only)
@@ -531,6 +540,19 @@ function SidToKnown(const text: RawUtf8): TWellKnownSid; overload;
 
 /// recognize some well-known SIDs from the supplied SID dynamic array
 function SidToKnownGroups(const sids: PSids): TWellKnownSids;
+
+const // some time conversion constants with Milli/Micro/NanoSec resolution
+  SecsPerHour          = 60;   // missing in oldest Delphi
+  MilliSecsPerSec      = 1000;
+  MilliSecsPerSecShl   = 10; // 1 shl 10 = 1024 = rough approximation of 1000
+  MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
+  MilliSecsPerHour     = MilliSecsPerMin  * MinsPerHour;
+  MilliSecsPerDay      = MilliSecsPerHour * HoursPerDay;
+  MicroSecsPerMilliSec = 1000;
+  MicroSecsPerSec      = MicroSecsPerMilliSec * MilliSecsPerSec;
+  NanoSecsPerMicroSec  = 1000;
+  NanoSecsPerMilliSec  = NanoSecsPerMicroSec  * MicroSecsPerMilliSec;
+  NanoSecsPerSec       = NanoSecsPerMilliSec  * MilliSecsPerSec;
 
 
 { ****************** Gather Operating System Information }
@@ -2769,7 +2791,8 @@ type
   /// handle for Slim Reader/Writer (SRW) locks in exclusive mode
   TOSLightMutex = pointer;
 
-/// a wrapper around FileTimeToLocalFileTime/FileTimeToSystemTime Windows APIs
+/// a wrapper calling SystemTimeToTzSpecificLocalTime Windows API
+// - note: FileTimeToLocalFileTime is not to be involved here
 // - only used by mormot.lib.static for proper SQlite3 linking on Windows
 procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
 
@@ -3219,6 +3242,10 @@ function SafeFileNameU(const FileName: RawUtf8): boolean;
 // - see MakePath() from mormot.core.text.pas to concatenate path items
 function NormalizeFileName(const FileName: TFileName): TFileName;
 
+/// ensure all \ / path delimiters are normalized into the current OS expectation
+// - this function works in-place on an UTF-8 string instance
+procedure NormalizeFileNameU(var FileName: RawUtf8);
+
 /// add some " before and after if FileName has some space within
 // - could be used when generating command line parameters
 function QuoteFileName(const FileName: TFileName): TFileName;
@@ -3326,9 +3353,10 @@ function FileSeek64(Handle: THandle; const Offset: Int64;
 // - return false if FileName was not found
 // - return true and set FileSize and FileTimestampUtc if found - note that
 // no local time conversion is done, so timestamp won't match FileAge()
+// - if FileName is a folder/directory, then returned FileSize equals -1
 // - use a single Operating System call, so is faster than FileSize + FileAge
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
-  out FileTimestampUtc: TUnixMSTime): boolean;
+  out FileTimestampUtc: TUnixMSTime): boolean; overload;
 
 /// get low-level file information, in a cross-platform way
 // - returns true on success
@@ -3339,6 +3367,12 @@ function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
 // as failover on such systems (probably the latest file metadata writing)
 function FileInfoByHandle(aFileHandle: THandle; FileId, FileSize: PInt64;
   LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean;
+
+/// get low-level file information, in a cross-platform way
+// - is a wrapper around FileInfoByHandle() function
+// - returns true on success
+function FileInfoByName(const FileName: TFileName; FileId, FileSize: PInt64;
+  LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean; overload;
 
 /// check if a given file is likely to be an executable
 // - will check the DOS/WinPE executable header in its first bytes on Windows
@@ -3364,9 +3398,9 @@ function CopyFile(const Source, Target: TFileName;
 function FileSymLink(const SymLink, Target: TFileName): boolean;
 
 /// prompt the user for an error message to notify an unexpected issue
-// - in practice, text encoding is expected to be plain 7-bit ASCII
-// - on Windows, will use Writeln() on a (newly allocated if needed) console
-// - on POSIX, will use Writeln(StdErr)
+// - in practice, text encoding is better to be plain 7-bit ASCII
+// - on Windows, will allocate a console if needed and write to STD_ERROR_HANDLE
+// - on POSIX, will send the output to StdErrorHandle (=2)
 procedure DisplayFatalError(const title, msg: RawUtf8);
 
 /// prompt the user for an error message to notify an unexpected issue
@@ -3378,7 +3412,6 @@ procedure DisplayError(const fmt: string; const args: array of const);
 // - the returned timestamp is in local time, not UTC
 // - this method would use the F.Timestamp field available since Delphi XE2
 function SearchRecToDateTime(const F: TSearchRec): TDateTime;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// get a file UTC date and time, from a FindFirst/FindNext search
 // - SearchRecToDateTime(), SearchRecToWindowsTime() and F.TimeStamp, which have
@@ -4025,6 +4058,11 @@ procedure ParseHex(p: PAnsiChar; b: PByte; n: integer);
 /// internal function just wrapping fppoll(POLLIN or POLLPRI)
 function WaitReadPending(fd, timeout: integer): boolean;
 
+type
+  /// optional callback used by PosixFileNames()
+  // - same signature as mormot.core.search MatchAnyP()
+  TOnPosixFileName = function(opaque: pointer; name: PUtf8Char; namelen: PtrInt): boolean;
+
 /// POSIX-only function calling directly getdents/getdents64 syscall
 // - could be used when FindFirst/FindNext are an overkill, e.g. to quickly
 // cache all file names of a folder in memory, optionally with its sub-folders
@@ -4033,7 +4071,11 @@ function WaitReadPending(fd, timeout: integer): boolean;
 // that Recursive is handled and only DT_REG files are retrieved; non-compliant
 // file systems (or Linux Kernel older than 2.6.4) won't support the Recursive
 // search, and may return some false positives, like symlinks or nested folders
-function PosixFileNames(const Folder: TFileName; Recursive: boolean): TRawUtf8DynArray;
+// - an optional callback can be supplied, used e.g. by the FileNames() function
+// in mormot.core.search to efficiently implement name mask search with a TMatch
+function PosixFileNames(const Folder: TFileName; Recursive: boolean;
+  OnFile: TOnPosixFileName = nil; OnFileOpaque: pointer = nil;
+  ExcludesDir: boolean = false): TRawUtf8DynArray;
 
 {$endif OSWINDOWS}
 
@@ -6734,7 +6776,7 @@ end;
 
 function NowUtc: TDateTime;
 begin
-  result := UnixMSTimeUtcFast / Int64(MSecsPerDay) + Int64(UnixDelta);
+  result := UnixMSTimeUtcFast / Int64(MilliSecsPerDay) + Int64(UnixDelta);
 end;
 
 function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
@@ -6769,6 +6811,19 @@ const
 function WindowsFileTime64ToUnixMSTime(WinTime: QWord): TUnixMSTime;
 begin
   result := (Int64(WinTime) - UnixFileTimeDelta) div FileTimePerMs;
+end;
+
+function FileInfoByName(const FileName: TFileName; FileId, FileSize: PInt64;
+  LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean;
+var
+  h: THandle;
+begin
+  result := false;
+  h := FileOpenSequentialRead(FileName); // = plain fpOpen() on POSIX
+  if not ValidHandle(h) then
+    exit;
+  result := FileInfoByHandle(h, FileId, FileSize, LastWriteAccess, FileCreateDateTime);
+  FileClose(h);
 end;
 
 function DirectorySize(const FileName: TFileName; Recursive: boolean;
@@ -6854,8 +6909,32 @@ begin
 end;
 
 function NormalizeFileName(const FileName: TFileName): TFileName;
+var
+  i, j: PtrInt;
 begin
-  result := StringReplace(FileName, InvertedPathDelim, PathDelim, [rfReplaceAll]);
+  result := FileName;
+  j := Pos(InvertedPathDelim, result);
+  if j <> 0 then
+    for i := j to length(result) do
+      if result[i] = InvertedPathDelim then
+        result[i] := PathDelim;
+end;
+
+procedure NormalizeFileNameU(var FileName: RawUtf8);
+var
+  i: PtrInt;
+  p: PAnsiChar;
+begin
+  i := PosExChar(InvertedPathDelim, FileName);
+  if i = 0 then
+    exit;
+  p := UniqueRawUtf8(FileName);
+  inc(p, i - 1);
+  repeat
+    if p^ = InvertedPathDelim then
+      p^ := PathDelim;
+    inc(p);
+  until p^ = #0;
 end;
 
 function QuoteFileName(const FileName: TFileName): TFileName;
@@ -6868,21 +6947,29 @@ begin
     result := FileName;
 end;
 
+procedure DisplayFatalError(const title, msg: RawUtf8);
+const
+  CRLFU: RawUtf8 = CRLF; // avoid any unexpected code page issue
+var
+  u: RawUtf8;
+begin
+  if title <> '' then
+  begin
+    SetLength(u, length(Title) + 1);
+    FillCharFast(pointer(u)^, length(u), ord('-'));
+    u := CRLFU + title + CRLFU + u + CRLFU + CRLFU + msg + CRLFU;
+  end
+  else
+    u := msg + CRLFU;
+  ConsoleErrorWrite(u);
+end;
+
 procedure DisplayError(const fmt: string; const args: array of const);
 var
   msg: string;
 begin
   msg := Format(fmt, args);
   DisplayFatalError('', RawUtf8(msg));
-end;
-
-function SearchRecToDateTime(const F: TSearchRec): TDateTime;
-begin
-  {$ifdef ISDELPHIXE}
-  result := F.Timestamp; // use new API
-  {$else}
-  result := FileDateToDateTime(F.Time);
-  {$endif ISDELPHIXE}
 end;
 
 function SearchRecToDateTimeUtc(const F: TSearchRec): TDateTime;
@@ -7067,40 +7154,39 @@ function StringFromFile(const FileName: TFileName; HasNoSize: boolean): RawByteS
 var
   h: THandle;
   size: Int64;
-  read, pos: integer;
+  read, pos: PtrInt;
   tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
 begin
   result := '';
   if FileName = '' then
     exit;
   h := FileOpenSequentialRead(FileName); // = plain fpOpen() on POSIX
-  if ValidHandle(h) then
+  if not ValidHandle(h) then
+    exit;
+  if HasNoSize then
   begin
-    if HasNoSize then
+    pos := 0;
+    repeat
+      read := FileRead(h, tmp, SizeOf(tmp)); // fill per 32KB local buffer
+      if read <= 0 then
+        break;
+      SetLength(result, pos + read); // in-place resize
+      MoveFast(tmp, PByteArray(result)^[pos], read);
+      inc(pos, read);
+    until false;
+  end
+  else
+  begin
+    size := FileSize(h);
+    if (size < MaxInt) and // 2GB seems big enough for a RawByteString
+       (size > 0) then
     begin
-      pos := 0;
-      repeat
-        read := FileRead(h, tmp, SizeOf(tmp)); // fill per 32KB local buffer
-        if read <= 0 then
-          break;
-        SetLength(result, pos + read); // in-place resize
-        MoveFast(tmp, PByteArray(result)^[pos], read);
-        inc(pos, read);
-      until false;
-    end
-    else
-    begin
-      size := FileSize(h);
-      if (size < MaxInt) and // 2GB seems big enough for a RawByteString
-         (size > 0) then
-      begin
-        FastSetString(RawUtf8(result), size); // assume CP_UTF8 for FPC RTL bug
-        if not FileReadAll(h, pointer(result), size) then
-          result := ''; // error reading
-      end;
+      FastSetString(RawUtf8(result), size); // assume CP_UTF8 for FPC RTL bug
+      if not FileReadAll(h, pointer(result), size) then
+        result := ''; // error reading
     end;
-    FileClose(h);
   end;
+  FileClose(h);
 end;
 
 function StringFromFirstFile(const FileName: array of TFileName): RawByteString;
@@ -8423,7 +8509,7 @@ begin
         begin
           j := 50;
           for i := 50 downto 1 do
-            if param[i] = '|' then
+            if param[i] in [',', '|'] then
             begin
               j := i;
               break;
@@ -8790,7 +8876,10 @@ begin
     for i := 0 to length(fRetrieved[clk]) - 1 do
       if not fRetrieved[clk][i] then
         if clk = clkArg then
-          result := result + 'Missing <' + fDescArg[i] + '> argument' + fLineFeed
+          if fDescArg = nil then
+            result := result + 'Unexpected "' + fRawParams[i] + '" argument' + fLineFeed
+          else
+            result := result + 'Missing <' + fDescArg[i]+ '> argument' + fLineFeed
         else
         begin
           result := result + 'Unexpected ' + SwitchAsText(fNames[clk][i]) + ' ';

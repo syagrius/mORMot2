@@ -580,25 +580,25 @@ type
       {$ifdef HASINLINE}inline;{$endif}
 
     /// append one ASCII char to the buffer
-    procedure Add(c: AnsiChar); overload;
+    procedure Add(const c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append one ASCII char to the buffer with no buffer check
     // - to be called after a regular Add(), within the 16 bytes buffer overhead
-    procedure AddDirect(c: AnsiChar); overload;
+    procedure AddDirect(const c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append one ASCII char to the buffer with no buffer check
     // - to be called after a regular Add(), within the 16 bytes buffer overhead
-    procedure AddDirect(c1, c2: AnsiChar); overload;
+    procedure AddDirect(const c1, c2: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append one comma (',') character
     // - to be called after a regular Add(), within the 16 bytes buffer overhead
     procedure AddComma;
       {$ifdef HASINLINE}inline;{$endif}
     /// append one ASCII char to the buffer, if not already there as LastChar
-    procedure AddOnce(c: AnsiChar); overload;
+    procedure AddOnce(const c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append two chars to the buffer
-    procedure Add(c1, c2: AnsiChar); overload;
+    procedure Add(const c1, c2: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     {$ifdef CPU32} // already implemented by Add(Value: PtrInt) method on CPU64
     /// append a 64-bit signed integer Value as text
@@ -914,10 +914,13 @@ type
     /// write some #0 ended UTF-8 text, according to the specified format
     // - use overriden TJsonWriter version instead!
     procedure Add(P: PUtf8Char; Len: PtrInt; Escape: TTextWriterKind); overload; virtual;
+    /// prepare direct access to the internal output buffer
+    // - return nil if Len is too big to fit in the current buffer size
+    // - return the position to write text, and increase the instance position
+    function AddPrepare(Len: PtrInt): pointer;
     /// write some data Base64 encoded
     // - use overriden TJsonWriter version instead!
     procedure WrBase64(P: PAnsiChar; Len: PtrUInt; withMagic: boolean); virtual;
-
     /// serialize as JSON the given object
     // - use overriden TJsonWriter version instead!
     procedure WriteObject(Value: TObject;
@@ -1748,7 +1751,8 @@ function FormatVariant(const Format: RawUtf8; const Args: array of const): varia
 function Make(const Args: array of const): RawUtf8; overload;
 
 /// concatenate several arguments into an UTF-8 string
-procedure Make(const Args: array of const; var Result: RawUtf8); overload;
+procedure Make(const Args: array of const; var Result: RawUtf8;
+  const IncludeLast: RawUtf8 = ''); overload;
 
 /// concatenate several arguments into a RTL string
 function MakeString(const Args: array of const): string;
@@ -2184,6 +2188,10 @@ function BinToHexDisplayLowerShort16(Bin: Int64; BinBytes: PtrInt): TShort16;
 // - warning: here binary size is in bits (typically 1..64), not bytes
 procedure BinBitsToHexDisplayLowerShort16(Bin: Int64; BinBits: PtrInt;
   var Result: TShort16);
+
+/// trim right '0' chars in a text buffer - e.g. from BinToHexLower()
+function TrimMinDisplayHex(Text: PUtf8Char; TextLen: PtrInt): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fast conversion from binary data into hexa lowercase chars, ready to be
 // used as a convenient TFileName prefix
@@ -3668,7 +3676,7 @@ begin
   result := B - fTempBuf + 1;
 end;
 
-procedure TTextWriter.Add(c: AnsiChar);
+procedure TTextWriter.Add(const c: AnsiChar);
 begin
   if B >= BEnd then
     FlushToStream; // may rewind B -> not worth any local PUtf8Char variable
@@ -3676,13 +3684,13 @@ begin
   inc(B);
 end;
 
-procedure TTextWriter.AddDirect(c: AnsiChar);
+procedure TTextWriter.AddDirect(const c: AnsiChar);
 begin
   B[1] := c;
   inc(B);
 end;
 
-procedure TTextWriter.AddDirect(c1, c2: AnsiChar);
+procedure TTextWriter.AddDirect(const c1, c2: AnsiChar);
 begin
   PCardinal(B + 1)^ := byte(c1) + PtrUInt(byte(c2)) shl 8;
   inc(B, 2); // with proper constant propagation above when inlined
@@ -3694,7 +3702,7 @@ begin
   inc(B);
 end;
 
-procedure TTextWriter.Add(c1, c2: AnsiChar);
+procedure TTextWriter.Add(const c1, c2: AnsiChar);
 begin
   if B >= BEnd then
     FlushToStream;
@@ -3790,6 +3798,17 @@ begin
     FlushToStream;
   PCardinal(B + 1)^ := NULL_LOW;
   inc(B, 4);
+end;
+
+function TTextWriter.AddPrepare(Len: PtrInt): pointer;
+begin
+  result := nil;
+  if Len >= fTempBufSize - 16 then
+    exit;
+  if BEnd - B <= Len then
+    FlushToStream;
+  result := B + 1;
+  inc(B, Len);
 end;
 
 procedure TTextWriter.WriteObject(Value: TObject;
@@ -4042,7 +4061,7 @@ begin
     result := #0;
 end;
 
-procedure TTextWriter.AddOnce(c: AnsiChar);
+procedure TTextWriter.AddOnce(const c: AnsiChar);
 begin
   if (B >= fTempBuf) and
      (B^ = c) then
@@ -4719,7 +4738,7 @@ begin
     AddPointer(PtrUInt(Instance));
     AddDirect(')');
   end;
-  if SepChar<>#0 then
+  if SepChar <> #0 then
     AddDirect(SepChar);
 end;
 
@@ -8527,11 +8546,11 @@ end;
 procedure TFormatUtf8.DoAdd(Arg: PVarRec; ArgCount: integer);
 begin
   L := 0;
-  if ArgCount <= 0 then
-    exit
-  else if ArgCount > length(blocks) then
-    TooManyArgs;
   last := @blocks;
+  if ArgCount <= 0 then
+    exit;
+  if ArgCount > length(blocks) then
+    TooManyArgs;
   repeat
     inc(L, VarRecToTempUtf8(Arg^, last^));
     inc(Arg);
@@ -8901,11 +8920,14 @@ begin
   f.Write(pointer(result));
 end;
 
-procedure Make(const Args: array of const; var Result: RawUtf8);
+procedure Make(const Args: array of const; var Result: RawUtf8;
+  const IncludeLast: RawUtf8);
 var
   f: TFormatUtf8;
 begin
   {%H-}f.DoAdd(@Args[0], length(Args));
+  if IncludeLast <> '' then
+    f.Add(IncludeLast);
   FastSetString(result, f.L);
   f.Write(pointer(result));
 end;
@@ -8980,7 +9002,7 @@ procedure ConsoleWrite(const Args: array of const;
 var
   tmp: RawUtf8;
 begin
-  Append(tmp, Args);
+  Make(Args, tmp);
   ConsoleWrite(tmp, Color, NoLineFeed);
 end;
 
@@ -9015,6 +9037,11 @@ var
   hi, rem: cardinal;
   u: TUnits;
 begin
+  if bytes < 0 then
+  begin
+    result[0] := #0;
+    exit;
+  end;
   if bytes < 1 shl 10 - (1 shl 10) div 10 then
   begin
     FormatShort16(TXT[nospace, b], [integer(bytes)], result);
@@ -9129,12 +9156,12 @@ end;
 
 function SecToString(S: QWord): TShort16;
 begin
-  MicroSecToString(S * 1000000, result);
+  MicroSecToString(S * MicroSecsPerSec, result);
 end;
 
 function MilliSecToString(MS: QWord): TShort16;
 begin
-  MicroSecToString(MS * 1000, result);
+  MicroSecToString(MS * MicroSecsPerMilliSec, result);
 end;
 
 function MicroSecToString(Micro: QWord): TShort16;
@@ -9203,7 +9230,7 @@ begin
   if Int64(Nano) <= 0 then
     PCardinal(@result)^ := 3 + ord('0') shl 8 + ord('n') shl 16 + ord('s') shl 24
   else if Nano > 9900 then
-    MicroSecToString(Nano div 1000, result)
+    MicroSecToString(Nano div NanoSecsPerMicroSec, result)
   else if Nano >= 1000 then
     By100ToTwoDigitString(
       {$ifdef CPU32} PCardinal(@Nano)^ {$else} Nano {$endif} div 10, 'us', result)
@@ -9650,6 +9677,14 @@ begin
   BinToHexDisplayLower(Bin, pointer(result), BinBytes);
 end;
 {$endif UNICODE}
+
+function TrimMinDisplayHex(Text: PUtf8Char; TextLen: PtrInt): PtrInt;
+begin
+  while (TextLen <> 0) and
+        (Text[TextLen - 1] = '0') do
+    dec(TextLen);
+  result := TextLen;
+end;
 
 procedure PointerToHex(aPointer: pointer; var result: RawUtf8);
 begin

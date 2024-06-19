@@ -586,20 +586,6 @@ end;
 {$endif NODIRECTTHREADMANAGER}
 
 const
-  HoursPerDay = 24;
-  MinsPerHour = 60;
-  SecsPerMin  = 60;
-  MinsPerDay  = HoursPerDay * MinsPerHour;
-  SecsPerDay  = MinsPerDay  * SecsPerMin;
-  SecsPerHour = MinsPerHour * SecsPerMin;
-  MilliSecsPerSec = 1000;
-  MicroSecsPerSec = 1000000;
-  MicroSecsPerMilliSec = 1000;
-  NanoSecsPerMicroSec  = 1000;
-  NanoSecsPerMilliSec  = 1000000;
-  NanoSecsPerSec       = 1000000000;
-
-const
   // Date Translation - see http://en.wikipedia.org/wiki/Julian_day
   D0 = 1461;
   D1 = 146097;
@@ -1226,6 +1212,11 @@ begin
   result := DateTimeToWindowsFileTime(FileDateToDateTime(F.Time));
 end;
 
+function SearchRecToDateTime(const F: TSearchRec): TDateTime;
+begin
+  result := FileDateToDateTime(F.Time);
+end;
+
 function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
 begin
   result := F.Time; // raw POSIX FileDate is already in UTC seconds
@@ -1312,7 +1303,10 @@ begin
             (fpStat(pointer(FileName), st) = 0);
   if not result then
     exit;
-  FileSize := st.st_size;
+  if FpS_ISDIR(st.st_mode) then
+    FileSize := -1
+  else
+    FileSize := st.st_size;
   StatTimeMS(st, FileTimestampUtc);
 end;
 
@@ -1456,18 +1450,10 @@ begin
   result := FpPoll(@p, 1, timeout) > 0;
 end;
 
-{$I-}
-procedure DisplayFatalError(const title, msg: RawUtf8);
-var
-  err: ^Text;
+procedure ConsoleErrorWrite(const text: RawUtf8);
 begin
-  err := @StdErr;
-  if title <> '' then
-    writeln(err^, Executable.ProgramName, ': ', title);
-  writeln(err^, Executable.ProgramName, ': ', msg);
-  ioresult;
+  FileWriteAll(StdErrorHandle, pointer(Text), length(Text)); // assume UTF-8
 end;
-{$I+}
 
 function FileOpenSequentialRead(const FileName: TFileName): integer;
 begin
@@ -1891,7 +1877,7 @@ var
 begin
   TextColorCmd(Color, c);
   if c[0] <> #0 then
-    fpwrite(StdOutputHandle, @c[1], ord(c[0])); // single syscall
+    fpwrite(StdOut, @c[1], ord(c[0])); // single syscall
 end;
 
 procedure TextBackground(Color: TConsoleColor);
@@ -1919,7 +1905,7 @@ begin
     TextColorAppend(ccLightGray, s);
   // display whole line in a single syscall
   ConsoleCriticalSection.Lock;
-  FileWriteAll(StdOutputHandle, pointer(s), length(s)); // UTF-8 console
+  FileWriteAll(StdOut, pointer(s), length(s)); // UTF-8 console
   ConsoleCriticalSection.UnLock;
 end;
 
@@ -2311,7 +2297,8 @@ const
   DT_SOCK     = 12;
   DT_WHT      = 14;
 
-function PosixFileNames(const Folder: TFileName; Recursive: boolean): TRawUtf8DynArray;
+function PosixFileNames(const Folder: TFileName; Recursive: boolean;
+  OnFile: TOnPosixFileName; OnFileOpaque: pointer; ExcludesDir: boolean): TRawUtf8DynArray;
 var
   n: PtrInt;
   root: TFileName;
@@ -2322,42 +2309,57 @@ var
     ent: pDirent;
     sublen, entlen: PtrInt;
     fn: RawUtf8;
+    withsub: boolean;
   begin
-    dir := FpOpendir(root + subpath); // (much) faster alternative to FindFirst()
+    dir := FpOpendir(root + subpath); // much faster alternative to FindFirst()
     if dir = nil then
       exit;
     sublen := length(subpath);
-    if sublen <> 0 then
-      inc(sublen);
     repeat
       ent := FpReaddir(dir^); // FPC RTL use getdents64 syscall on Linux and BSD :)
       if ent = nil then
         break;
-      // fn := [subpath + '/'] + ent^.d_name
+      // handle this entry type
       entlen := StrLen(@ent^.d_name);
-      FastSetString(fn, sublen + entlen);
-      if sublen <> 0 then
-      begin
-        MoveFast(pointer(subpath)^, pointer(fn)^, sublen - 1);
-        PByteArray(fn)[sublen - 1] := ord('/');
-      end;
-      MoveFast(ent^.d_name, PByteArray(fn)[sublen], entlen);
-      // handle this entry
-      case ent.d_type of
+      case ent^.d_type of
         DT_UNKNOWN, // assume modern FS over BSD or Linux Kernel >= 2.6.4
         DT_REG:
-          begin
-            if n = 0 then // generous initial result capacity
-              SetLength(result, 128)
-            else if n = length(result) then
-              SetLength(result, NextGrow(n));
-            result[n] := fn;
-            inc(n);
-          end;
+          if Assigned(OnFile) and
+             not OnFile(OnFileOpaque, ent^.d_name, entlen) then
+            continue // e.g. no MatchAnyP()
+          else
+            withsub := not ExcludesDir;
         DT_DIR:
           if Recursive and
-             (ent^.d_name[0] <> '.')  then
-            DoFolder(fn);
+             (ent^.d_name[0] <> '.') then
+            withsub := true // DoFolder(fn) requires full nested path
+          else
+            continue;
+      else
+        continue; // not a real file (e.g. link, sysproc or blockdev)
+      end;
+      // compute file/folder name
+      if withsub and
+         (sublen <> 0) then // fn := subpath + '/' + d_name
+      begin
+        FastSetString(fn, sublen + entlen + 1);
+        MoveFast(pointer(subpath)^, pointer(fn)^, sublen);
+        PByteArray(fn)[sublen] := ord('/');
+        MoveFast(ent^.d_name, PByteArray(fn)[sublen + 1], entlen);
+      end
+      else
+        FastSetString(fn, @ent^.d_name, entlen); // fn := d_name
+      // handle this entry
+      if ent^.d_type = DT_DIR then
+        DoFolder(fn)
+      else
+      begin
+        if n = 0 then // generous initial result capacity
+          SetLength(result, 128)
+        else if n = length(result) then
+          SetLength(result, NextGrow(n));
+        result[n] := fn;
+        inc(n);
       end;
     until false;
     FpClosedir(dir^);

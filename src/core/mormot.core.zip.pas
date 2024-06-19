@@ -3245,8 +3245,9 @@ begin
     if aOldLogFileName = '' then
       // last call with '' to eventually close the current .zip
       FreeAndNilSafe(EventArchiveZipWrite)
-    else if not FileInfoByName(aOldLogFileName, fsize, ftime) then
-      // this file does not exist
+    else if not FileInfoByName(aOldLogFileName, fsize, ftime) or
+            (fsize < 0) then
+      // this file does not exist (or is a folder)
       exit
     else if fsize = 0 then
       // just delete a void aOldLogFileName (not from TSynLog, but anyway)
@@ -3880,10 +3881,10 @@ end;
 
 procedure InitializeUnit;
 begin
-  AlgoDeflate := TAlgoDeflate.Create;
+  AlgoDeflate     := TAlgoDeflate.Create;
   AlgoDeflateFast := TAlgoDeflateFast.Create;
-  AlgoGZ := TAlgoGZ.Create;
-  AlgoGZFast := TAlgoGZFast.Create;
+  AlgoGZ          := TAlgoGZ.Create;
+  AlgoGZFast      := TAlgoGZFast.Create;
   // libdeflate: when memory is cheap, use it rather than the CPU
   {$ifdef LIBDEFLATESTATIC}
   {$ifdef CPU64}

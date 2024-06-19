@@ -2372,7 +2372,7 @@ type
     function GetODSDocument(withColumnTypes: boolean = false): RawByteString;
     /// append the table content as a HTML <table> ... </table>
     procedure GetHtmlTable(Dest: TJsonWriter); overload;
-    /// save the table as a <html><body><table> </table></body></html> content
+    /// save the table as a <!DOCTYPE html><html><body><table> </table></body></html> content
     function GetHtmlTable(const Header: RawUtf8 = '<head><style>table,th,td' +
       '{border: 1px solid black;border-collapse: collapse;}th,td{padding: 5px;' +
       'font-family: sans-serif;}</style></head>'#10): RawUtf8; overload;
@@ -5321,7 +5321,7 @@ end;
 function TOrmPropInfoRttiDateTime.CompareValue(Item1, Item2: TObject;
   CaseInsensitive: boolean): integer;
 const
-  PRECISION: array[boolean] of double = (1 / SecsPerDay, 1 / MSecsPerDay);
+  PRECISION: array[boolean] of double = (1 / SecsPerDay, 1 / MilliSecsPerDay);
 var
   V1, V2: double;
 begin
@@ -9289,7 +9289,7 @@ var
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
-    W.AddShorter('<html>');
+    W.AddShort('<!DOCTYPE html><html>');
     W.AddString(Header);
     W.AddShorter('<body>'#10);
     GetHtmlTable(W);
@@ -10425,7 +10425,7 @@ begin
         n := fCount;
       end;
       fID[n] := aID;
-      fTix[n] := GetTickCount64 shr 10;
+      fTix[n] := GetTickCount64 shr MilliSecsPerSecShl;
       inc(fCount);
     finally
       fSafe.WriteUnLock;
@@ -10510,7 +10510,7 @@ begin
      (fCount = 0) or
      (MinutesFromNow = 0) then
     exit; // nothing to purge
-  old := GetTickCount64 shr 10; // as seconds
+  old := GetTickCount64 shr MilliSecsPerSecShl; // as seconds
   if old - fLastPurge < 60 then
     exit; // no need to purge more than once per minute
   fLastPurge := old;

@@ -1349,6 +1349,9 @@ type
     pcfBearer);
 
   /// store a hash value and its algorithm, for THttpPeerCacheMessage.Hash
+  // - we store and compare in our implementation the algorithm in addition to
+  // the hash, to avoid any potential attack about (unlikely) hash collisions
+  // between algorithms, and allow any change of algo restrictions in the future
   THttpPeerCacheHash = packed record
     /// the algorithm used for Hash
     Algo: THashAlgo;
@@ -1393,7 +1396,7 @@ type
     Timestamp: cardinal;
     /// number of background download connections currently on this server
     Connections: word;
-    /// the binary Hash (and algo) of the requested file content
+    /// up to 512-bit of binary Hash (and algo) of the requested file content
     Hash: THttpPeerCacheHash;
     /// the known full size of this file
     Size: Int64;
@@ -2956,7 +2959,7 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
     progsizeHeader: RawUtf8; // for rfProgressiveStatic mode
     h: THandle;
   begin
-    ExtractHeader(fOutCustomHeaders, 'CONTENT-TYPE:', fOutContentType);
+    ExtractOutContentType;
     Utf8ToFileName(OutContent, fn);
     OutContent := '';
     ExtractHeader(fOutCustomHeaders, STATICFILE_PROGSIZE, progsizeHeader);
@@ -3155,7 +3158,7 @@ begin
     if fLogger = nil then // <> nil from THttpApiServer.CreateClone
     begin
       fLogger := THttpLogger.Create;
-      fLogger.Format := LOGFORMAT_COMBINED; // same default output as nginx
+      fLogger.Parse(LOGFORMAT_COMBINED); // default nginx-like format
     end;
     fOnAfterResponse := fLogger.Append;   // redirect requests to the logger
   end;
@@ -3208,6 +3211,8 @@ begin
   result := nil;
   if self = nil then
     exit;
+  if fFavIconRouted then
+    another.Get('/favicon.ico', GetFavIcon); // let SetFavIcon() continue
   GlobalLock; // paranoid thread-safety
   try
     result := fRoute;
@@ -3237,10 +3242,13 @@ function THttpServerGeneric.GetFavIcon(Ctxt: THttpServerRequestAbstract): cardin
 begin
   if fFavIcon = '' then
     result := HTTP_NOTFOUND
+  else if FindNameValue(pointer(Ctxt.InHeaders), 'IF-NONE-MATCH:') <> nil then
+    result := HTTP_NOTMODIFIED
   else
   begin
     Ctxt.OutContent := fFavIcon;
     Ctxt.OutContentType := 'image/x-icon';
+    Ctxt.OutCustomHeaders := 'Etag: "ok"';
     result := HTTP_SUCCESS;
   end;
 end;
@@ -3589,6 +3597,7 @@ begin
   begin
     FileFromString(PrivKeyCertPfx, certfile); // use pre-computed key
     keypass := 'pass';
+    // warning: will work with SSPI but NOT with OpenSSL
   end
   else
   begin
@@ -5099,7 +5108,7 @@ var
   n: cardinal;
 begin
   FillCharFast(aMsg, SizeOf(aMsg) - SizeOf(aMsg.Padding), 0);
-  RandomBytes(@aMsg.Padding, SizeOf(aMsg.Padding));
+  RandomBytes(@aMsg.Padding, SizeOf(aMsg.Padding)); // Lecuyer is enough
   if aSeq = 0 then
     aSeq := InterlockedIncrement(fFrameSeq);
   aMsg.Seq := aSeq;
@@ -5933,7 +5942,7 @@ begin
   if (pcoBroadcastNotAlone in fSettings.Options) or
      (waoBroadcastNotAlone in Params.AlternateOptions) then
   begin
-    tix := (GetTickCount64 shr 10) + 1; // 1024 ms resolution
+    tix := (GetTickCount64 shr MilliSecsPerSecShl) + 1; // 1024 ms resolution
     brdcst := (fBroadcastTix <> tix);   // reenable broadcasting after 1s delay
   end;
   if brdcst then
@@ -6600,8 +6609,8 @@ var
     try
       resp^.SetStatus(StatusCode, outstat);
       logdata^.ProtocolStatus := StatusCode;
-      FormatUtf8('<html><body style="font-family:verdana;"><h1>Server Error %: %</h1><p>',
-        [StatusCode, outstat], msg);
+      FormatUtf8('<!DOCTYPE html><html><body style="font-family:verdana;">' +
+        '<h1>Server Error %: %</h1><p>', [StatusCode, outstat], msg);
       if E <> nil then
         msg := FormatUtf8('%% Exception raised:<br>', [msg, E]);
       msg := msg + HtmlEscape(ErrorMsg) + ('</p><p><small>' + XPOWEREDVALUE);

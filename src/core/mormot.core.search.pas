@@ -55,7 +55,7 @@ type
     Name: TFileName;
     /// the matching file attributes
     Attr: integer;
-    /// the matching file size
+    /// the matching file size, -1 for a folder if ffoIncludeFolder option is set
     Size: Int64;
     /// the matching file local date/time
     Timestamp: TDateTime;
@@ -65,6 +65,7 @@ type
     function ToText: ShortString;
   end;
   {$A+}
+  PFindFiles = ^TFindFiles;
 
   /// result list, as returned by FindFiles()
   TFindFilesDynArray = array of TFindFiles;
@@ -73,10 +74,12 @@ type
   // - ffoSortByName will sort the result files by extension then name
   // - ffoExcludesDir won't include the path in TFindFiles.Name
   // - ffoSubFolder will search within nested folders
+  // - ffoIncludeFolder will add the nested folders
   TFindFilesOption = (
     ffoSortByName,
     ffoExcludesDir,
-    ffoSubFolder);
+    ffoSubFolder,
+    ffoIncludeFolder);
   /// the optional features of FindFiles()
   TFindFilesOptions = set of TFindFilesOption;
 
@@ -88,7 +91,8 @@ function FindFiles(const Directory: TFileName;
   Options: TFindFilesOptions = []): TFindFilesDynArray;
 
 /// search for matching file names
-// - just a wrapper around FindFilesDynArrayToFileNames(FindFiles())
+// - on Windows, just a wrapper around FindFilesDynArrayToFileNames(FindFiles())
+// - on POSIX, calls PosixFileNames() if possible, with fast TMatch mask lookup
 function FileNames(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; Options: TFindFilesOptions = [];
   const IgnoreFileName: TFileName = ''): TFileNameDynArray; overload;
@@ -103,6 +107,11 @@ function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNam
 
 /// sort a FindFiles() result list by its TFindFiles[].Timestamp field
 procedure FindFilesSortByTimestamp(var Files: TFindFilesDynArray);
+
+/// compute the HTML index page corresponding to a local folder
+procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
+  out Html: RawUtf8);
+
 
 type
   /// one optional feature of SynchFolders()
@@ -340,11 +349,12 @@ function MatchAdd(const One: TMatch; var Several: TMatchDynArray): boolean;
 function MatchNew(var Several: TMatchDynArray): PMatch;
 
 /// returns TRUE if Match=nil or if any Match[].Match(Text) is TRUE
-function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean; overload;
+function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// returns TRUE if Match=nil or if any Match[].Match(Text, TextLen) is TRUE
-function MatchAny(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean; overload;
+// - same signature as the TOnPosixFileName callback
+function MatchAnyP(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean;
 
 /// apply the CSV-supplied glob patterns to an array of RawUtf8
 // - any text not matching the pattern will be deleted from the array
@@ -1575,23 +1585,41 @@ implementation
 procedure TFindFiles.FromSearchRec(const Directory: TFileName; const F: TSearchRec);
 begin
   Name := Directory + TFileName(F.Name);
-  {$ifdef OSWINDOWS}
-  {$ifdef HASINLINE} // FPC or Delphi 2006+
-  Size := F.Size;
-  {$else} // F.Size was limited to 32-bit on older Delphi
-  PInt64Rec(@Size)^.Lo := F.FindData.nFileSizeLow;
-  PInt64Rec(@Size)^.Hi := F.FindData.nFileSizeHigh;
-  {$endif HASINLINE}
-  {$else}
-  Size := F.Size;
-  {$endif OSWINDOWS}
   Attr := F.Attr;
+  if Attr and faDirectory <> 0 then // may happen with ffoIncludeFolder option
+    Size := -1
+  else
+  begin
+    {$ifdef OSWINDOWS}
+    {$ifdef HASINLINE} // FPC or Delphi 2006+
+    Size := F.Size;
+    {$else} // F.Size was limited to 32-bit on older Delphi
+    PInt64Rec(@Size)^.Lo := F.FindData.nFileSizeLow;
+    PInt64Rec(@Size)^.Hi := F.FindData.nFileSizeHigh;
+    {$endif HASINLINE}
+    {$else}
+    Size := F.Size;
+    {$endif OSWINDOWS}
+  end;
   Timestamp := SearchRecToDateTime(F);
 end;
 
 function TFindFiles.ToText: ShortString;
 begin
   FormatShort('% % %', [Name, KB(Size), DateTimeToFileShort(Timestamp)], result);
+end;
+
+function SortDynArrayFindFiles(const A, B): integer;
+begin
+  if TFindFiles(A).Size < 0 then
+    if TFindFiles(B).Size < 0 then
+      result := SortDynArrayFileName(A, B) // both are folders
+    else
+      result := -1                         // folders first
+  else if TFindFiles(B).Size < 0 then
+    result := 1                           // files last
+  else
+    result := SortDynArrayFileName(A, B); // both are files
 end;
 
 function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
@@ -1611,12 +1639,14 @@ var
   begin
     fold := dir + folder;
     name := fold + Mask;
-    if FindFirst(name, faAnyfile - faDirectory, F) = 0 then
+    if FindFirst(name, faAnyfile, F) = 0 then
     begin
       repeat
-        if SearchRecValidFile(F) and
-           ((IgnoreFileName = '') or
-            (AnsiCompareFileName(F.Name, IgnoreFileName) <> 0)) then
+        if (SearchRecValidFile(F) and
+            ((IgnoreFileName = '') or
+             (AnsiCompareFileName(F.Name, IgnoreFileName) <> 0))) or
+           ((ffoIncludeFolder in Options) and
+            SearchRecValidFolder(F)) then
         begin
           if ffoExcludesDir in Options then
             ff.FromSearchRec(folder, F)
@@ -1648,7 +1678,7 @@ begin
     CsvToRawUtf8DynArray(pointer(StringToUtf8(Mask)), masks, ';');
   if masks <> nil then
   begin
-    // recursive calls for each masks[]
+    // recursive calls for each masks[], optionally sorted by mask
     if ffoSortByName in Options then
       QuickSortRawUtf8(masks, length(masks), nil,
         {$ifdef OSWINDOWS} @StrIComp {$else} @StrComp {$endif});
@@ -1667,7 +1697,7 @@ begin
     SearchFolder('');
     if (ffoSortByName in Options) and
        (da.Count > 1) then
-      da.Sort(SortDynArrayFileName);
+      da.Sort(SortDynArrayFindFiles);
   end;
   if count <> 0 then
     DynArrayFakeLength(result, count);
@@ -1675,9 +1705,38 @@ end;
 
 function FileNames(const Directory, Mask: TFileName;
   Options: TFindFilesOptions; const IgnoreFileName: TFileName): TFileNameDynArray;
+{$ifdef OSPOSIX}
+var
+  m: TMatchDynArray;
+  cb: TOnPosixFileName;
+{$endif OSPOSIX}
 begin
-  result := FindFilesDynArrayToFileNames(
-    FindFiles(Directory, Mask, IgnoreFileName, Options));
+  {$ifdef OSPOSIX}
+  if (Options * [ffoIncludeFolder] = []) and
+     ((Options * [ffoSortByName] = []) or
+      (PosExChar(';', Mask) = 0)) then // sort on multi-mask not yet implemented
+  begin
+    // use much faster PosixFileNames() low-level function over TMatchDynArray
+    cb := nil;
+    if Mask <> FILES_ALL then
+    begin
+      cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
+      SetMatchs(Mask, {caseinsens=}false, m, ';');
+    end;
+    result := PosixFileNames(Directory,
+      ffoSubFolder in Options, cb, pointer(m), ffoExcludesDir in Options);
+    if result = nil then
+      exit;
+    if IgnoreFileName <> '' then
+      DeleteRawUtf8(result, FindRawUtf8(result, IgnoreFileName));
+    if ffoSortByName in Options then
+      QuickSortRawUtf8(result, length(result));
+  end
+  else
+  {$endif OSPOSIX}
+    // use regular FindFirst/FindNext and transient TFindFilesDynArray resultset
+    result := FindFilesDynArrayToFileNames(
+      FindFiles(Directory, Mask, IgnoreFileName, Options));
 end;
 
 function FileNames(const Path: array of const; const Mask: TFileName;
@@ -1745,7 +1804,7 @@ begin
             (DefaultHasher(0, pointer(s), fdst.Size) = HashFile(dstfn))) then
           continue;
         FileFromString(s, dstfn);
-        FileSetDateFromUnixUtc(dstfn, reftime div MSecsPerSec);
+        FileSetDateFromUnixUtc(dstfn, reftime div MilliSecsPerSec);
         inc(result);
         if sfoWriteFileNameToConsole in Options then
           ConsoleWrite('synched %', [dstfn]);
@@ -1810,6 +1869,73 @@ begin
   until (FindNext(sr) <> 0);
   FindClose(sr);
 end;
+
+procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
+  out Html: RawUtf8);
+const
+  _DIR: array[boolean] of string[7] = ('[dir]', '&nbsp;');
+var
+  w: TTextDateWriter;
+  tmp: TTextWriterStackBuffer;
+  files: TFindFilesDynArray;
+  f: PFindFiles;
+  i: PtrInt;
+  isfile: boolean;
+  n: RawUtf8;
+begin
+  w := TTextDateWriter.CreateOwnedStream(tmp);
+  try
+    w.AddShort('<!DOCTYPE html>'#13#10'<html>'#13#10'<head>'#13#10'<title>Index of /');
+    w.AddHtmlEscapeUtf8(Name); // paranoid
+    w.AddShort('</title>'#13#10'</head>'#13#10 +
+      '<body style="font-family:verdana">'#13#10'<h1>Index of /');
+    w.AddHtmlEscapeUtf8(Name);
+    w.AddShort('</h1>'#13#10'<table>'#13#10 +
+      '<tr><th></th><th>Name</th><th>Last modified</th><th>Size</th></tr>'#13#10 +
+      '<tr><th colspan="4"><hr></th></tr>'#13#10);
+    if Name <> '' then
+      W.Add('<tr><td>%</td><td><a href="..">../</a></td><td></td><td ' +
+        'align="right">-</td><tr>'#13#10, [_DIR[false]]);
+    files := FindFiles(Folder, FILES_ALL, '',
+      [ffoExcludesDir, ffoSortByName, ffoIncludeFolder]);
+    f := pointer(files);
+    for i := 1 to length(files) do
+    begin
+      isfile := f^.Size >= 0; // size = -1 for folders
+      StringToUtf8(f^.Name, n);
+      w.AddShorter('<tr><td>');
+      w.AddShorter(_DIR[isfile]);
+      w.AddShort('</td><td><a href="');
+      if Path <> '' then
+      begin
+        w.AddHtmlEscapeUtf8(Path);
+        if Path[length(Path)] <> '/' then
+          w.AddDirect('/');
+      end;
+      UrlEncodeName(w, n);
+      if not isFile then
+        w.AddDirect('/');
+      w.AddDirect('"', '>');
+      w.AddHtmlEscapeUtf8(n);
+      if not isFile then
+        w.AddDirect('/');
+      w.AddShort('</a></td><td>');
+      w.AddDateTime(@f^.Timestamp, ' ', #0, false, true);
+      w.AddShort('&nbsp;</td><td align="right">');
+      if isFile then
+        w.AddShort(KB(f^.Size))
+      else
+        w.AddDirect('-');
+      w.AddShort('</td><tr>'#13#10);
+      inc(f);
+    end;
+    w.AddShort('</table>'#13#10'</body>'#13#10'</html>');
+    w.SetText(Html);
+  finally
+    w.Free;
+  end;
+end;
+
 
 
 { ****************** ScanUtf8, GLOB and SOUNDEX Text Search }
@@ -2977,9 +3103,9 @@ begin
   if Init.TryLock then // thread-safe init once from supplied csv
     DoInit(pointer(csv), caseinsensitive);
   result := ((Names <> nil) and
-             MatchAny(pointer(Names), uri.Name.Text, uri.Name.Len)) or
+             MatchAnyP(pointer(Names), uri.Name.Text, uri.Name.Len)) or
             ((Paths <> nil) and
-             MatchAny(pointer(Paths), uri.Path.Text, uri.Path.Len));
+             MatchAnyP(pointer(Paths), uri.Path.Text, uri.Path.Len));
 end;
 
 
@@ -3122,10 +3248,10 @@ end;
 
 function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
 begin
-  result := MatchAny(pointer(Match), pointer(Text), length(Text));
+  result := MatchAnyP(pointer(Match), pointer(Text), length(Text));
 end;
 
-function MatchAny(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean;
+function MatchAnyP(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean;
 var
   n: integer;
 begin
@@ -3134,7 +3260,7 @@ begin
     exit;
   if TextLen <= 0 then
     Text := nil;
-  n := PDALen(PAnsiChar(pointer(Match)) - _DALEN)^ + (_DAOFF - 1);
+  n := PDALen(PAnsiChar(pointer(Match)) - _DALEN)^ + _DAOFF;
   repeat
     // inlined Match^.Match() to avoid internal error on Delphi
     if Text <> nil then
@@ -4348,7 +4474,7 @@ begin
     if fSnapShotAfterMinutes = 0 then
       fSnapshotTimestamp := 0
     else
-      fSnapshotTimestamp := GetTickCount64 + fSnapShotAfterMinutes * 60000;
+      fSnapshotTimestamp := GetTickCount64 + fSnapShotAfterMinutes * MilliSecsPerMin;
   finally
     fSafe.WriteUnLock;
   end;

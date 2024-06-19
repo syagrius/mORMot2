@@ -1691,7 +1691,7 @@ type
     // - CreatesSockIn is mandatory
     // - it first check and quickly return any data pending in SockIn^.Buffer
     // - if the buffer is void, will call InputSock to fill it
-    // - returns -1 in case of a socket error (e.g. broken/closed connection)
+    // - returns -1/-2 in case of a socket error (e.g. broken/closed connection)
     // - returns the number of bytes available in input buffers (SockIn or TLS):
     // there may be more waiting at the socket level
     function SockInPending(aTimeOutMS: integer): integer;
@@ -1782,9 +1782,6 @@ type
     // - return false on any error, true on success
     // - bypass the SockSend() buffers
     function TrySndLow(P: pointer; Len: integer): boolean;
-    /// returns the low-level error number
-    // - i.e. returns WSAGetLastError
-    class function LastLowSocketError: integer;
     /// direct accept an new incoming connection on a bound socket
     // - instance should have been setup as a server via a previous Bind() call
     // - returns nil on error or a ResultClass instance on success
@@ -4985,7 +4982,7 @@ const
     'open', 'bind');
   BINDMSG: array[boolean] of string = (
     'Is a server available on this address:port?',
-    'Another process may be currently listening to this port!');
+    'Port may be invalid or already bound by another process!');
 
 constructor TCrtSocket.Bind(const aAddress: RawUtf8; aLayer: TNetLayer;
   aTimeOut: integer; aReusePort: boolean);
@@ -5556,9 +5553,10 @@ begin
           fTimeOut := backup;
         end;
       end;
-    cspSocketError,
+    cspSocketError:
+      result := -1; // indicates broken socket
     cspSocketClosed:
-      result := -1; // indicates broken/closed socket
+      result := -2; // indicates closed socket
   end; // cspNoData will leave result=0
 end;
 
@@ -5951,11 +5949,6 @@ begin
       exit;
   until false;
   result := true;
-end;
-
-class function TCrtSocket.LastLowSocketError: integer;
-begin
-  result := sockerrno;
 end;
 
 function TCrtSocket.AcceptIncoming(

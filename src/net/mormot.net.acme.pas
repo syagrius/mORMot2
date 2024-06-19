@@ -1300,7 +1300,7 @@ begin
     if hsoEnableLogging in opt then
     begin
       fHttpServer.Logger.CopyParams(fHttpServer.Logger);
-      fHttpServer.Logger.DestMainLog := 'access80.log';
+      fHttpServer.Logger.Settings.DestMainFile := 'access80.log';
     end;
   end;
   // setup the ACME configuration
@@ -1413,7 +1413,7 @@ begin
      (fRenewBeforeEndDays <= 0) or
      (Tix64 < fNextCheckTix) then
     exit;
-  fNextCheckTix := Tix64 + (MSecsPerDay shr 1); // retry every half a day
+  fNextCheckTix := Tix64 + (MilliSecsPerDay shr 1); // retry every half a day
   CheckCertificatesBackground; // launch a dedicated background thread
 end;
 

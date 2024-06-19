@@ -250,8 +250,8 @@ begin
 end;
 
 const
-  SecsPerFileTime = 10000000;
   MilliSecsPerFileTime = 10000;
+  SecsPerFileTime      = 10000000;
 
 procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
 begin
@@ -267,13 +267,27 @@ begin
   FT.dwHighDateTime := PInt64Rec(@I64)^.Hi;
 end;
 
+// To account for daylight saving time when converting a file time to a local
+// time, use the following function in place of using FileTimeToLocalFileTime:
+// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-filetimetolocalfiletime
+
+function FileTimeToLocalSystemTime(const ft: FILETIME; out lt: TSystemTime): boolean;
+var
+  st: TSystemTime;
+begin
+  FillCharFast(lt, SizeOf(lt), 0);
+  result := FileTimeToSystemTime(ft, st);
+  if result then
+    if not SystemTimeToTzSpecificLocalTime(nil, st, lt) then
+      lt := st;
+end;
+
 procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
 var
-  ft, lt: TFileTime;
+  lft: TFileTime;
 begin
-  UnixTimeToFileTime(I64, ft);
-  FileTimeToLocalFileTime(ft, lt);
-  FileTimeToSystemTime(lt, Local);
+  UnixTimeToFileTime(I64, lft);
+  FileTimeToLocalSystemTime(lft, Local); // no FileTimeToLocalFileTime
 end;
 
 function FileTimeToUnixTime(const FT: TFileTime): TUnixTime;
@@ -319,7 +333,7 @@ begin
   if PInt64(@FT)^ = 0 then
     result := 0
   else // inlined UnixTimeToDateTime()
-    result := FileTimeToUnixMSTime(FT) / MSecsPerDay + UnixDateDelta;
+    result := FileTimeToUnixMSTime(FT) / MilliSecsPerDay + UnixDateDelta;
 end;
 
 procedure DateTimeToFileTime(dt: TDateTime; out FT: TFileTime);
@@ -405,25 +419,21 @@ begin
     StdOut := GetStdHandle(STD_OUTPUT_HANDLE);
 end;
 
-{$I-}
-procedure DisplayFatalError(const title, msg: RawUtf8);
+procedure ConsoleErrorWrite(const text: RawUtf8);
+var
+  err: THandle;
+  txt: RawByteString;
 begin
   // better than a MessageBox() especially for services
-  AllocConsole; // will create one black window console if none
-  if title <> '' then
-  begin
-    TextColor(ccWhite);
-    writeln(#13#10, title);
-    writeln(StringOfChar('-', length(title) + 1), #13#10);
-    TextColor(ccLightRed);
-    writeln(msg);
-    TextColor(ccLightGray);
-  end
-  else
-    writeln(msg);
-  ioresult;
+  if not HasConsole then
+    AllocConsole; // will create one black window console if none
+  err := GetStdHandle(STD_ERROR_HANDLE);
+  if (err = INVALID_HANDLE_VALUE) or
+     (err = 0) then
+    exit;
+  txt := Utf8ToConsole(text);
+  FileWriteAll(err, pointer(txt), length(txt));
 end;
-{$I+}
 
 function IsSharedViolation(ErrorCode: integer): boolean;
 begin
@@ -692,7 +702,7 @@ begin
   if _QueryPerformanceFrequencyPer10 then
     Value := QWord(v) div 10 // faster div by a constant (especially on FPC_64)
   else
-    Value := QWord((QWord(v) * 1000000) div _QueryPerformanceFrequency);
+    Value := QWord((QWord(v) * MicroSecsPerSec) div _QueryPerformanceFrequency);
 end;
 
 var
@@ -835,18 +845,26 @@ begin
     result := 0;
 end;
 
+function FileTimeToDosTime(const ft: FILETIME): integer;
+var
+  lst: TSystemTime;
+  lft: TFileTime;
+begin
+  result := 0;
+  if FileTimeToLocalSystemTime(ft, lst) and // no FileTimeToLocalFileTime
+     SystemTimeToFileTime(lst, lft) then
+    FileTimeToDosDateTime(lft, LongRec(result).Hi, LongRec(result).Lo);
+end;
+
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
 var
   fa: WIN32_FILE_ATTRIBUTE_DATA;
-  ft: TFileTime;
 begin
   result := 0;
   if (FileName <> '') and
      GetFileAttributesInternal(FileName, fa) and
-     ({%H-}fa.dwFileAttributes and faDirectory = 0) and
-     FileTimeToLocalFileTime(fa.ftLastWriteTime, ft) and
-     not FileTimeToDosDateTime(ft, LongRec(result).Hi, LongRec(result).Lo) then
-    result := 0;
+     ({%H-}fa.dwFileAttributes and faDirectory = 0) then
+    result := FileTimeToDosTime(fa.ftLastWriteTime);
 end;
 
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
@@ -872,8 +890,18 @@ begin
 end;
 
 function SearchRecToWindowsTime(const F: TSearchRec): integer;
-begin
-  result := F.Time; // already in the expected legacy format
+begin // don't use F.Time since latest Delphi (and FPC) RTL deprecated it
+ result := FileTimeToDosTime(F.FindData.ftLastWriteTime);
+end;
+
+function SearchRecToDateTime(const F: TSearchRec): TDateTime;
+var
+  lst: TSystemTime;
+begin // don't use F.Time since latest Delphi (and FPC) RTL deprecated it
+  if FileTimeToLocalSystemTime(F.FindData.ftLastWriteTime, lst) then
+    result := SystemTimeToDateTime(lst) // no FileTimeToLocalFileTime
+  else
+    result := 0;
 end;
 
 function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
@@ -1012,8 +1040,13 @@ begin
             GetFileAttributesInternal(FileName, fa);
   if not result then
     exit;
-  PInt64Rec(@FileSize)^.Lo := fa.nFileSizeLow;
-  PInt64Rec(@FileSize)^.Hi := fa.nFileSizeHigh;
+  if fa.dwFileAttributes and faDirectory = 0 then
+  begin
+    PInt64Rec(@FileSize)^.Lo := fa.nFileSizeLow;
+    PInt64Rec(@FileSize)^.Hi := fa.nFileSizeHigh;
+  end
+  else
+    FileSize := -1; // FileName is a folder
   FileTimestampUtc := FileTimeToUnixMSTime(fa.ftLastWriteTime) // no local time
 end;
 
@@ -1313,7 +1346,7 @@ end;
 
 function GetUptimeSec: cardinal;
 begin
-  result := GetTickCount64 div MSecsPerSec; // good enough
+  result := GetTickCount64 div MilliSecsPerSec; // good enough
 end;
 
 procedure SleepHiRes(ms: cardinal);

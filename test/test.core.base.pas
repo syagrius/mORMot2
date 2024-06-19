@@ -3983,7 +3983,7 @@ begin
   Check(MicroSecToString(1000001) = '1s');
   Check(MicroSecToString(2030001) = '2.03s');
   Check(MicroSecToString(200000070001) = '2d');
-  Check(KB(-123) = '-123 B');
+  Check(KB(-123) = '');
   Check(KB(0) = '0 B');
   Check(KB(123) = '123 B');
   Check(KB(1023) = '1 KB');
@@ -4820,6 +4820,49 @@ begin
   CheckEqual(ExtractExtU('c:\var\toto.ext', true), 'ext');
   CheckEqual(ExtractExtU('/var/toto/'), '');
   CheckEqual(ExtractExtU('/var/toto'), '');
+  Check(NormalizeFileName('') = '');
+  Check(NormalizeFileName('toto.ext') = 'toto.ext');
+  {$ifdef OSWINDOWS}
+  Check(NormalizeFileName('var\toto.ext') = 'var\toto.ext');
+  Check(NormalizeFileName('\var\toto.ext') = '\var\toto.ext');
+  Check(NormalizeFileName('titi\var\toto.ext') = 'titi\var\toto.ext');
+  Check(NormalizeFileName('\var\') = '\var\');
+  Check(NormalizeFileName('var/toto.ext') = 'var\toto.ext');
+  Check(NormalizeFileName('/var/toto.ext') = '\var\toto.ext');
+  Check(NormalizeFileName('titi/var/toto.ext') = 'titi\var\toto.ext');
+  Check(NormalizeFileName('/var/') = '\var\');
+  Check(NormalizeFileName('\var/') = '\var\');
+  Check(NormalizeFileName('/var\') = '\var\');
+  U := '';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '');
+  U := '/var';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '\var');
+  U := '/var\';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '\var\');
+  {$else}
+  Check(NormalizeFileName('var\toto.ext') = 'var/toto.ext');
+  Check(NormalizeFileName('\var\toto.ext') = '/var/toto.ext');
+  Check(NormalizeFileName('titi\var\toto.ext') = 'titi/var/toto.ext');
+  Check(NormalizeFileName('\var\') = '/var/');
+  Check(NormalizeFileName('var/toto.ext') = 'var/toto.ext');
+  Check(NormalizeFileName('/var/toto.ext') = '/var/toto.ext');
+  Check(NormalizeFileName('titi/var/toto.ext') = 'titi/var/toto.ext');
+  Check(NormalizeFileName('/var/') = '/var/');
+  Check(NormalizeFileName('\var/') = '/var/');
+  Check(NormalizeFileName('/var\') = '/var/');
+  U := '';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '');
+  U := '/var';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '/var');
+  U := '/var\';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '/var/');
+  {$endif OSWINDOWS}
   CaseFoldingTest;
   for i := 0 to high(ROWIDS) do
     Check(isRowID(ROWIDS[i]) = (i < 8));
@@ -5981,20 +6024,20 @@ var
 
   procedure CheckAgainst(const full: TSmbiosInfo; const os: TSmbiosBasicInfos);
   begin
-    CheckEqual(full.Bios.VendorName, os[sbiBiosVendor]);
-    CheckEqual(full.Bios.Version, os[sbiBiosVersion]);
-    CheckEqual(full.Bios.Release, os[sbiBiosRelease]);
-    CheckEqual(full.Bios.Firmware, os[sbiBiosFirmware]);
-    CheckEqual(full.Bios.BuildDate, os[sbiBiosDate]);
-    CheckEqual(full.System.ProductName, os[sbiProductName]);
-    CheckEqual(full.System.Version, os[sbiVersion]);
-    CheckEqual(full.System.Uuid, os[sbiUuid]);
+    CheckEqualTrim(full.Bios.VendorName,    os[sbiBiosVendor], 'vend');
+    CheckEqualTrim(full.Bios.Version,       os[sbiBiosVersion], 'vers');
+    CheckEqualTrim(full.Bios.Release,       os[sbiBiosRelease], 'rel');
+    CheckEqualTrim(full.Bios.Firmware,      os[sbiBiosFirmware], 'firm');
+    CheckEqualTrim(full.Bios.BuildDate,     os[sbiBiosDate], 'date');
+    CheckEqualTrim(full.System.ProductName, os[sbiProductName], 'pname');
+    CheckEqualTrim(full.System.Version,     os[sbiVersion], 'vers');
+    CheckEqualTrim(full.System.Uuid,        os[sbiUuid], 'uuid');
     if full.Processor <> nil then
-      CheckEqual(full.Processor[0].Manufacturer, os[sbiCpuManufacturer]);
+      CheckEqualTrim(full.Processor[0].Manufacturer, os[sbiCpuManufacturer], 'proc');
     if full.Battery <> nil then
-      CheckEqual(full.Battery[0].Manufacturer, os[sbiBatteryManufacturer]);
+      CheckEqualTrim(full.Battery[0].Manufacturer, os[sbiBatteryManufacturer], 'batt');
     if full.Oem <> nil then
-      CheckEqual(full.Oem[0], os[sbiOem]);
+      CheckEqualTrim(full.Oem[0], os[sbiOem], 'oem');
   end;
 
 begin
@@ -6703,6 +6746,20 @@ begin
     CheckEqual(GetMimeContentType(@BIN[i], 34, ''), BIN_MIME[i]);
     CheckEqual(GetMimeContentTypeFromBuffer(@BIN[i], 34, ''), BIN_MIME[i]);
   end;
+  s := '<?xml';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
+  s := '<html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!doctype html><html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!doctype note>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtUnknown);
+  s := '<?XML';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
+  s := '<HTML><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!DocType HTML<html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
   // mime multipart encoding
   for rfc2388 := false to true do
   begin
