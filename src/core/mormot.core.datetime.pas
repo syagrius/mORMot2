@@ -509,8 +509,11 @@ type
     procedure ToHttpDate(out text: RawUtf8; const tz: RawUtf8 = 'GMT';
       const prefix: RawUtf8 = '');
     /// convert the stored date and time to its text in HTTP-like format
+    // - e.g. "Tue, 15 Nov 1994 12:45:26 GMT"
     procedure ToHttpDateShort(var text: shortstring; const tz: RawUtf8 = 'GMT';
       const prefix: RawUtf8 = '');
+    /// convert the stored date into its '19 Sep 2023' English-readable date text
+    procedure ToTextDateShort(var text: TShort15);
     /// convert the stored date and time into its Iso-8601 text, with no Milliseconds
     procedure ToIsoDateTimeShort(var text: shortstring; FirstTimeChar: AnsiChar = 'T');
     /// convert the stored date and time into its Iso-8601 text, with no Milliseconds
@@ -580,6 +583,12 @@ function NowToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' ';
 // ready to be displayed
 function NowUtcToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' '): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// retrieve the current local date into '19 Sep 2023' English-readable text
+function NowTextDateShort(UtcDate: boolean): TShort15;
+
+/// convert a TUnixTime date into '19 Sep 2023' English-readable text
+function UnixTimeToTextDateShort(Date: TUnixTime): TShort15;
 
 /// convert some date/time to the ISO 8601 text layout, including milliseconds
 // - i.e. 'YYYY-MM-DD hh:mm:ss.sssZ' or 'YYYYMMDD hhmmss.sssZ' format
@@ -2471,6 +2480,13 @@ begin
     tz], text);
 end;
 
+procedure TSynSystemTime.ToTextDateShort(var text: TShort15);
+begin
+  FormatShort16('% % %', [SmallUInt32Utf8[Day],
+                          HTML_MONTH_NAMES[Month],
+                          UInt4DigitsToShort(Year)], text);
+end;
+
 procedure TSynSystemTime.ToIsoDateTime(out text: RawUtf8; FirstTimeChar: AnsiChar);
 var
   tmp: shortstring;
@@ -2685,6 +2701,22 @@ end;
 function NowUtcToString(Expanded: boolean; FirstTimeChar: AnsiChar): RawUtf8;
 begin
   result := NowToString(Expanded, FirstTimeChar, {UTC=}true);
+end;
+
+function NowTextDateShort(UtcDate: boolean): TShort15;
+var
+  T: TSynSystemTime;
+begin
+  T.FromNow(not UtcDate);
+  T.ToTextDateShort(result);
+end;
+
+function UnixTimeToTextDateShort(Date: TUnixTime): TShort15;
+var
+  T: TSynSystemTime;
+begin
+  T.FromUnixTime(Date);
+  T.ToTextDateShort(result);
 end;
 
 function DateTimeMSToString(DateTime: TDateTime; Expanded: boolean;
