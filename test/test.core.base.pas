@@ -43,6 +43,10 @@ const
   {$endif OSWINDOWS}
 
 
+{$ifdef FPC_EXTRECORDRTTI}
+  {$rtti explicit fields([vcPublic])} // mantadory :(
+{$endif FPC_EXTRECORDRTTI}
+
 type
   /// a test class, used by TTestServiceOrientedArchitecture
   // - to test TPersistent objects used as parameters for remote service calls
@@ -1785,7 +1789,7 @@ begin
   for i := 0 to 1000 do
   begin
     Fill(F, i);
-    Check(RecordEquals(F, AF[i], AFP.Info.Cache.ItemInfo));
+    Check(RecordEquals(F, AF[i], AFP.Info.Cache.ItemInfoRaw));
   end;
   for i := 0 to 1000 do
   begin
@@ -5862,8 +5866,11 @@ begin
   CheckEqual(m, 12);
   Check(ParseMonth(' apr-', m));
   CheckEqual(m, 4);
-  CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
-    'Sun, 06 Nov 1994 08:49:37 GMT')), '1994-11-06T08:49:37');
+  dt := HttpDateToDateTime('Sun, 06 Nov 1994 08:49:37 GMT');
+  CheckEqual(DateTimeToIso8601Text(dt), '1994-11-06T08:49:37');
+  CheckEqual(DateTimeToHttpDate(dt), 'Sun, 06 Nov 1994 08:49:37 GMT');
+  Check(UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt)) =
+    'Sun, 06 Nov 1994 08:49:37 GMT');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sunday, 06-DEC-94 08:49:37 UTC')), '1994-12-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(

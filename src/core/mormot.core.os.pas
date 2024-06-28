@@ -542,7 +542,11 @@ function SidToKnown(const text: RawUtf8): TWellKnownSid; overload;
 function SidToKnownGroups(const sids: PSids): TWellKnownSids;
 
 const // some time conversion constants with Milli/Micro/NanoSec resolution
-  SecsPerHour          = 60;   // missing in oldest Delphi
+  SecsPerHour  = SecsPerMin * MinsPerHour; // missing in oldest Delphi
+  SecsPerDay   = SecsPerMin * MinsPerDay;
+  SecsPerWeek  = 7 * SecsPerDay;
+  SecsPerMonth = 2629746; // rough approximation of SecsPerDay * 365.2425 / 12
+  SecsPerYear  = 12 * SecsPerMonth;
   MilliSecsPerSec      = 1000;
   MilliSecsPerSecShl   = 10; // 1 shl 10 = 1024 = rough approximation of 1000
   MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
@@ -3625,11 +3629,11 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is set
 function EnsureDirectoryExists(const Directory: TFileName;
-  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
 
 /// just a wrapper around EnsureDirectoryExists(NormalizeFileName(Directory))
 function NormalizeDirectoryExists(const Directory: TFileName;
-  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
 
 /// delete the content of a specified directory
 // - only one level of file is deleted within the folder: no recursive deletion

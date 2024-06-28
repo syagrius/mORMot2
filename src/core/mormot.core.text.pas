@@ -1810,6 +1810,14 @@ procedure AppendLine(var Text: RawUtf8; const Args: array of const;
 function MakePath(const Part: array of const; EndWithDelim: boolean = false;
   Delim: AnsiChar = PathDelim): TFileName;
 
+/// just a wrapper around EnsureDirectoryExists(MakePath([Part]))
+function EnsureDirectoryExists(const Part: array of const;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+
+/// just a wrapper around EnsureDirectoryExists(NormalizeFileName(MakePath([Part])))
+function NormalizeDirectoryExists(const Part: array of const;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+
 /// MakePath() variant which can handle the file extension specifically
 function MakeFileName(const Part: array of const; LastIsExt: boolean = true): TFileName;
 
@@ -3585,7 +3593,7 @@ begin
   fTempBufSize := aBufSize;
   fTempBuf := aBuf;
   dec(aBuf);
-  B := aBuf; // Add() methods will append at B+1
+  B := aBuf;   // Add() methods will append at B+1
   BEnd := @aBuf[aBufSize - 15]; // BEnd := B-16 to avoid overwrite/overread
   {$ifndef PUREMORMOT2}
   if DefaultTextWriterTrimEnum then
@@ -4302,7 +4310,8 @@ procedure TTextWriter.AddCRAndIndent;
 var
   ntabs: cardinal;
 begin
-  if B^ = #9 then
+  if (B >= fTempBuf) and
+     (B^ = #9) then
     // we just already added an indentation level - do it once
     exit;
   ntabs := fHumanReadableLevel;
@@ -8915,6 +8924,11 @@ function Make(const Args: array of const): RawUtf8;
 var
   f: TFormatUtf8;
 begin
+  if high(Args) = 0 then
+  begin
+    VarRecToUtf8(Args[0], result); // can be returned e.g. by reference
+    exit;
+  end;
   {%H-}f.DoAdd(@Args[0], length(Args));
   FastSetString(result, f.L);
   f.Write(pointer(result));
@@ -8947,6 +8961,19 @@ var
 begin
   {%H-}f.DoDelim(@Part[0], length(Part), EndWithDelim, Delim);
   f.WriteString(string(result));
+end;
+
+function EnsureDirectoryExists(const Part: array of const;
+  RaiseExceptionOnCreationFailure: ExceptionClass): TFileName;
+begin
+  result := EnsureDirectoryExists(MakePath(Part), RaiseExceptionOnCreationFailure);
+end;
+
+function NormalizeDirectoryExists(const Part: array of const;
+  RaiseExceptionOnCreationFailure: ExceptionClass): TFileName;
+begin
+  result := EnsureDirectoryExists(NormalizeFileName(MakePath(Part)),
+    RaiseExceptionOnCreationFailure);
 end;
 
 function MakeFileName(const Part: array of const; LastIsExt: boolean): TFileName;

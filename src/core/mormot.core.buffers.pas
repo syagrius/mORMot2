@@ -2139,6 +2139,8 @@ type
     /// called during process to setup ExpectedSize/ExpectedWrittenSize fields
     procedure SetExpectedSize(SizeExpected, Position: Int64);
     /// retrieve the current status as simple text
+    // - ready to be displayed on the console, e.g. as a single short line with no
+    // CRLF during process, and eventually with full information and ending CRLF
     function GetProgress: RawUtf8;
     /// initialize the information for a new process
     // - once expected size and ident are set, caller should call DoAfter()
@@ -4276,7 +4278,7 @@ begin
         until (n = 0) or
               (chunk >= chunkend);
       else
-        ErrorData('ReadVarUInt64Array got kind=%', [ord(k)]);
+        ErrorData('ReadVarUInt64Array got kind=%', [ord(k)]){%H-};
     end;
   until n = 0;
 end;
@@ -6104,7 +6106,7 @@ begin
           result := SynLZDecompress1Partial(src, srcLen, dst, dstLen);
       end;
   else
-    result := 0;
+    result := 0{%H-};
   end;
 end;
 
@@ -6140,7 +6142,7 @@ begin
     doUncompressPartial:
       result := RleUnCompressPartial(src, dst, srcLen, dstLen);
   else
-    result := 0;
+    result := 0{%H-};
   end;
 end;
 
@@ -9594,7 +9596,6 @@ begin
     ProgressInfoToConsole(Sender, @Sender.fInfo);
 end;
 
-{$I-}
 class procedure TStreamRedirect.ProgressInfoToConsole(
   Sender: TObject; Info: PProgressInfo);
 var
@@ -9610,8 +9611,8 @@ begin
   if length(msg) > 250 then
     FakeLength(msg, 250); // paranoid overflow check
   Info.ConsoleLen := length(msg); // to properly erase previous line
-  system.write(msg);
-  ioresult;
+  Prepend(msg, [eraseline]);
+  ConsoleWrite(msg, ccLightGray, {nolf=}true, {nocolor=}true);
 end;
 
 class procedure TStreamRedirect.NotifyEnded(
@@ -9642,8 +9643,6 @@ begin
     tmp.Free;
   end;
 end;
-
-{$I+}
 
 procedure TStreamRedirect.DoReport(ReComputeElapsed: boolean);
 begin

@@ -47,6 +47,7 @@ type
 
   /// define one TSynAngelizeService action
   // - depending on the context, as "method:param" pair
+  // - may contain e.g. 'exec:/path/to/file', 'start:%run%' or even 'start'
   TSynAngelizeAction = type RawUtf8;
 
   /// define one or several TSynAngelizeService action(s)
@@ -173,7 +174,7 @@ type
       read fRun write fRun;
     /// human-friendly Unicode text which could be displayed on Web or Console UI
     // - in addition to the Name short identifier
-    // - contains e.g. "Name": "Authentication Service",
+    // - contains e.g. "Description": "Authentication Service",
     property Description: RawUtf8
       read fDescription write fDescription;
     /// sub-services are started from their increasing Level
@@ -454,7 +455,7 @@ type
     /// finalize the stored information
     destructor Destroy; override;
     /// read and parse all *.service definitions from Settings.Folder
-    // - as called by Start overriden method
+    // - e.g. as called by Start overriden method
     // - may be called before head to validate the execution settings
     // - raise ESynAngelize on invalid settings or dubious StateFile
     function LoadServicesFromSettingsFolder: integer;
@@ -1046,17 +1047,17 @@ function TSynAngelize.CustomParseCmd(P: PUtf8Char): boolean;
 begin
   result := true; // the command has been identified and processed
   case IdemPPChar(P, @AGL_CMD) of
-    0:
+    0: // --list
       ListServices;
-    1:
+    1: // --settings
       begin
         WriteCopyright;
         ConsoleWrite('Found %', [Plural('setting', LoadServicesFromSettingsFolder)]);
       end;
-    2:
+    2: // --new
       NewService;
-    3,
-    4:
+    3, // --retry
+    4: // --resume
       begin
         WriteCopyright;
         {$ifdef OSWINDOWS}
@@ -1101,7 +1102,7 @@ end;
 const
   _STATEMAGIC = $5131e3a6;
 
-function SortByLevel(const A, B): integer; // to display by increasing Level
+function SortByLevel(const A, B): integer; // run and display by increasing Level
 begin
   result := TSynAngelizeService(A).Level - TSynAngelizeService(B).Level;
   if result = 0 then
@@ -1879,6 +1880,7 @@ begin
   tix := GetTickCount64;
   for i := 0 to high(fService) do // ordered by s.Level
   begin
+    // check the services for any pending "watch" task
     s := fService[i];
     if (s.fNextWatch = 0) or
        (tix < s.fNextWatch) then

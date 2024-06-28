@@ -3171,16 +3171,16 @@ begin
     else
       text := 'SIG';
     end;
+    level := sllExceptionOS; // abort after panic
     if Sig = SIGTERM then
-      // polite quit
-      level := sllInfo
-    else
-       // abort after panic
-      level := sllExceptionOS;
-    if Info = nil then
-      si_code := 0
-    else
-      si_code := Info^.si_code;
+      level := sllInfo;      // polite quit
+    si_code := 0;
+    if Info <> nil then
+      try
+        si_code := Info^.si_code;
+      except
+        si_code := -1; // paranoid
+      end;
     SynDaemonInterceptLog(level,
       'SynDaemonIntercepted received SIG%=% si_code=%',
       [text, Sig, si_code], nil);
@@ -3201,6 +3201,7 @@ begin
       exit;
     SynDaemonInterceptLog := onlog;
     FillCharFast(sa, SizeOf(sa), 0);
+    sa.sa_flags := SA_SIGINFO; // sa_handler() 3-params signature
     sa.sa_handler := @DoShutDown;
     fpSigaction(SIGQUIT, @sa, nil);
     fpSigaction(SIGTERM, @sa, nil);

@@ -791,6 +791,7 @@ type
     procedure AddOutHeader(const Values: array of const);
     /// will extract the "content-type" from OutCustomHeaders into OutContentType
     procedure ExtractOutContentType;
+      {$ifdef HASINLINE} inline; {$endif}
     /// input parameter containing the caller message body
     // - e.g. some GET/POST/PUT JSON data can be specified here
     property InContent: RawByteString
@@ -1866,7 +1867,8 @@ type
       read fWriterHost;
   published
     /// the associated settings, owned by this instance
-    // - if you change the settings fields directly, call
+    // - if a whole instance is assigned to this property, proper
+    // values copy will be done, including string format parsing
     property Settings: THttpLoggerSettings
       read fSettings write SetSettings;
   end;
