@@ -104,6 +104,7 @@ type
   /// abstract HTTP/1.1 RESTful JSON mORMot Client class
   // - this class, and other inherited classes defined in this unit, are
   // thread-safe, since each of their Uri() method is protected by a giant lock
+  // - do NOT use this abstract class, but one of its fully implemented child
   TRestHttpClientGeneric = class(TRestClientUri)
   protected
     fKeepAliveMS: cardinal;
@@ -228,8 +229,7 @@ type
 
   /// HTTP/1.1 RESTful JSON mORMot Client abstract class using either WinINet,
   // WinHttp or libcurl API
-  // - not to be called directly, but via TRestHttpClientWinINet or (even
-  // better) TRestHttpClientWinHttp overridden classes under Windows
+  // - do NOT use this abstract class, but one of its fully implemented children
   TRestHttpClientRequest = class(TRestHttpClientGeneric)
   protected
     fRequest: THttpRequest;
@@ -243,7 +243,7 @@ type
     procedure InternalClose; override;
     /// set the fWinAPI class
     // - the overridden implementation should set the expected fWinAPIClass
-    procedure InternalSetClass; virtual; abstract;
+    procedure InternalSetClass; virtual;
   public
     /// internal class instance used for the connection
     // - will return either a TWinINet, a TWinHttp or a TCurlHttp class instance
@@ -793,11 +793,16 @@ begin
   result := fRequest <> nil;
 end;
 
+procedure TRestHttpClientRequest.InternalSetClass;
+begin
+  ERestHttpClient.RaiseUtf8('Abstract %: use inherited class', [self]);
+end;
+
 procedure TRestHttpClientRequest.InternalOpen;
 begin
   InternalSetClass;
   if fRequestClass = nil then
-    ERestHttpClient.RaiseUtf8('fRequestClass=nil for %', [self]);
+    ERestHttpClient.RaiseUtf8('Unsupported %.InternalOpen', [self]);
   fRequest := fRequestClass.Create(fServer, fPort, fHttps, fProxyName,
     fProxyByPass, fConnectTimeout, fSendTimeout, fReceiveTimeout);
   fRequest.ExtendedOptions := fExtendedOptions;

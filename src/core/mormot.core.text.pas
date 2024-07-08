@@ -1831,12 +1831,18 @@ function MakeCsv(const Value: array of const; EndWithComma: boolean = false;
 function StringToConsole(const S: string): RawByteString;
 
 /// write some text to the console using a given color
+// - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Fmt: RawUtf8; const Args: array of const;
   Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
 
 /// write some text to the console using a given color
+// - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Args: array of const;
   Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+
+/// write some text to the console using the current color
+// - similar to writeln() but redirect to ConsoleWrite() with proper thread safety
+procedure ConsoleWriteRaw(const Args: array of const; NoLineFeed: boolean = false); overload;
 
 /// could be used in the main program block of a console application to
 // handle unexpected fatal exceptions
@@ -8718,7 +8724,7 @@ begin
     VarRecToUtf8(Args[0], result)
   else
   begin
-    f.Parse(Format, @Args[0], length(Args));
+    f.Parse(Format, @Args[0], length(Args)); // handle all supplied Args[]
     FastSetString(result, f.L);
     f.Write(pointer(result));
   end;
@@ -9033,21 +9039,27 @@ begin
   ConsoleWrite(tmp, Color, NoLineFeed);
 end;
 
+procedure ConsoleWriteRaw(const Args: array of const; NoLineFeed: boolean);
+var
+  tmp: RawUtf8;
+begin
+  Make(Args, tmp);
+  ConsoleWrite(tmp, ccLightGray, NoLineFeed, {nocolor=}true);
+end;
+
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean);
 begin
-  ConsoleWrite(#13#10'Fatal exception ', ccLightRed, true);
+  ConsoleWrite(CRLF + 'Fatal exception ', ccLightRed, true);
   ConsoleWrite('%', [E.ClassType], ccWhite, true);
   ConsoleWrite(' raised with message ', ccLightRed);
   ConsoleWrite('  %', [E.Message], ccLightMagenta);
-  TextColor(ccLightGray);
-  if WaitForEnterKey then
-  begin
-    ConsoleWrite(#13#10'Program will now abort');
-    {$ifndef OSPOSIX}
-    ConsoleWrite('Press [Enter] to quit');
-    ConsoleWaitForEnterKey;
-    {$endif OSPOSIX}
-  end;
+  if not WaitForEnterKey then
+    exit;
+  ConsoleWriteRaw(CRLF + 'Program will now abort');
+  {$ifndef OSPOSIX}
+  ConsoleWriteRaw('Press [Enter] to quit');
+  ConsoleWaitForEnterKey;
+  {$endif OSPOSIX}
 end;
 
 

@@ -1423,6 +1423,8 @@ type
   // - pcoBroadcastNotAlone will disable broadcasting for up to one second if
   // no response at all was received within BroadcastTimeoutMS delay
   // - pcoNoServer disable the local UDP/HTTP servers and acts as a pure client
+  // - pcoNoBanIP disable the 4 seconds IP banishment mechanism at HTTP level;
+  // set RejectInstablePeersMin = 0 to disable banishment at UDP level
   // - pcoSelfSignedHttps enables HTTPS communication with a self-signed server
   // (warning: this option should be set on all peers, clients and servers)
   // - pcoVerboseLog will log all details, e.g. raw UDP frames
@@ -1432,6 +1434,7 @@ type
     pcoTryLastPeer,
     pcoBroadcastNotAlone,
     pcoNoServer,
+    pcoNoBanIP,
     pcoSelfSignedHttps,
     pcoVerboseLog);
 
@@ -1497,7 +1500,8 @@ type
     // which sent invalid UDP frames or HTTP/HTTPS requests
     // - should be a positive small power of two <= 128
     // - default is 4, for a 4 minutes time-to-live of IP banishments
-    // - you may set 0 to disable the whole safety mechanism
+    // - you may set 0 to disable the whole IP ban safety mechanism at UDP level
+    // - use pcoNoBanIP option to disable the IP ban mechanism at HTTP level
     property RejectInstablePeersMin: integer
       read fRejectInstablePeersMin write fRejectInstablePeersMin;
     /// how many milliseconds UDP broadcast should wait for a response
@@ -1673,7 +1677,9 @@ type
     constructor Create(aSettings: THttpPeerCacheSettings;
       const aSharedSecret: RawByteString;
       aHttpServerClass: THttpServerSocketGenericClass = nil;
-      aHttpServerThreadCount: integer = 2); reintroduce;
+      aHttpServerThreadCount: integer = 2;
+      aLogClass: TSynLogClass = nil;
+      const aUuid: RawUtf8 = ''); reintroduce;
     /// finalize this peer-to-peer cache instance
     destructor Destroy; override;
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
@@ -1686,7 +1692,7 @@ type
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - if a file has been downloaded from the main repository, this method
     // should be called to copy the content into this instance files cache
-    procedure OnDowloaded(const Params: THttpClientSocketWGet;
+    procedure OnDowloaded(var Params: THttpClientSocketWGet;
       const Partial: TFileName; PartialID: integer); virtual;
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - OnDownload() may have returned corrupted data: local cache file is
@@ -5091,9 +5097,10 @@ begin
   UInt32ToUtf8(fSettings.Port, fPort);
   FormatUtf8('%:%', [fMac.IP, fPort], fIpPort); // UDP/TCP bound to this network
   if fSettings.RejectInstablePeersMin > 0 then
+  begin
     fInstable := THttpAcceptBan.Create(fSettings.RejectInstablePeersMin);
-  if fInstable <> nil then
     fInstable.WhiteIP := fIP4; // from localhost: only hsoBan40xIP (4 seconds)
+  end;
   fLog.Add.Log(sllDebug, 'Create: network="%" as % (broadcast=%) %',
     [fMac.Name, fIpPort, fMac.Broadcast, fMac.Address], self);
 end;
@@ -5271,7 +5278,8 @@ var
   key: THash256Rec;
 begin
   // setup internal processing status
-  GetComputerUuid(fUuid);
+  if IsNullGuid(fUuid) then
+    GetComputerUuid(fUuid);
   fFrameSeqLow := Random32 shr 1; // 31-bit random start value set at startup
   fFrameSeq := fFrameSeqLow;
   // setup internal cryptography
@@ -5282,8 +5290,10 @@ begin
   fAesDec := fAesEnc.Clone as TAesGcmAbstract; // two AES-GCM-128 instances
   HmacSha256(key.b, '2b6f48c3ffe847b9beb6d8de602c9f25', key.b); // paranoid
   fSharedMagic := key.h.c3; // 32-bit derivation for anti-fuzzing checksum
-  TSynLog.Add.Log(sllTrace, 'Create: SecretFingerPrint=%, Seq=#%',
-    [key.b[0], CardinalToHexShort(fFrameSeq)], self); // safe 8-bit fingerprint
+  if Assigned(fLog) then
+    fLog.Add.Log(sllTrace, 'Create: Uuid=% SecretFingerPrint=%, Seq=#%',
+      [GuidToShort(fUuid), key.b[0], CardinalToHexShort(fFrameSeq)], self);
+      // log includes safe 8-bit fingerprint
   FillZero(key.b);
 end;
 
@@ -5457,7 +5467,7 @@ begin
         if not late then
           inc(fResponses);
     end
-  else if fOwner.fInstable<> nil then // RejectInstablePeersMin
+  else if fOwner.fInstable <> nil then // RejectInstablePeersMin
     fOwner.fInstable.BanIP(remote.IP4);
 end;
 
@@ -5580,15 +5590,21 @@ end;
 constructor THttpPeerCache.Create(aSettings: THttpPeerCacheSettings;
   const aSharedSecret: RawByteString;
   aHttpServerClass: THttpServerSocketGenericClass;
-  aHttpServerThreadCount: integer);
+  aHttpServerThreadCount: integer;
+  aLogClass: TSynLogClass; const aUuid: RawUtf8);
 var
   log: ISynLog;
   avail, existing: Int64;
 begin
-  fLog := TSynLog;
+  fLog := aLogClass;
+  if fLog = nil then
+    fLog := TSynLog;
   log := fLog.Enter('Create threads=%', [aHttpServerThreadCount], self);
   fFilesSafe.Init;
   // intialize the cryptographic state in inherited THttpPeerCrypt.Create
+  if (aUuid <> '') and
+     not RawUtf8ToGuid(aUuid, fUuid) then // allow UUID customization
+    EHttpPeerCache.RaiseUtf8('Invalid %.Create(uuid=%)', [self, aUuid]);
   inherited Create(aSharedSecret);
   // setup the processing options
   if aSettings = nil then
@@ -5657,8 +5673,10 @@ var
   opt: THttpServerOptions;
 begin
   if aHttpServerClass = nil then
-    aHttpServerClass := THttpServer;
-  opt := [hsoBan40xIP, hsoNoXPoweredHeader, hsoThreadSmooting];
+    aHttpServerClass := THttpServer; // classic per-thread client is good enough
+  opt := [hsoNoXPoweredHeader, hsoThreadSmooting];
+  if not (pcoNoBanIP in fSettings.Options) then // RejectInstablePeersMin = UDP
+    include(opt, hsoBan40xIP);
   if fVerboseLog then
     include(opt, hsoLogVerbose);
   if pcoSelfSignedHttps in fSettings.Options then
@@ -6056,7 +6074,7 @@ begin
   end;
 end;
 
-procedure THttpPeerCache.OnDowloaded(const Params: THttpClientSocketWGet;
+procedure THttpPeerCache.OnDowloaded(var Params: THttpClientSocketWGet;
   const Partial: TFileName; PartialID: integer);
 var
   local: TFileName;
@@ -6089,6 +6107,11 @@ begin
     // size mismatch may happen on race condition (hash collision is unlikely)
     if PartialID <> 0 then
       fPartials.ChangeFile(PartialID, local); // switch to the local file
+    if localsize = sourcesize then
+      Params.SetStep(wgsAlternateAlreadyInCache, [local])
+    else
+      Params.SetStep(wgsAlternateWrongSizeInCache,
+        [local, ' ', localsize, '<>', sourcesize]); // paranaoid
     exit;
   end;
   QueryPerformanceMicroSeconds(start);
@@ -6142,6 +6165,7 @@ begin
     end;
     // actually copy the source file into the local cache folder
     ok := CopyFile(Partial, local, {failsifexists=}false);
+    Params.SetStep(wgsAlternateCopiedInCache, [local]);
     if ok and istemp then
       // force timestamp = now within the temporary folder
       FileSetDateFromUnixUtc(local, UnixTimeUtc)

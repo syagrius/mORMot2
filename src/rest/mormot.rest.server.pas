@@ -586,8 +586,8 @@ type
     property ServiceExecution: PServiceFactoryExecution
       read fServiceExecution write fServiceExecution;
     /// the current execution options of an interface-based service
-    // - contain ServiceExecution.Options including optNoLogInput/optNoLogOutput
-    // in case of TInterfaceFactory.RegisterUnsafeSpiType
+    // - contains a local copy of ServiceExecution.Options, adding eventual
+    // optNoLogInput/optNoLogOutput for TInterfaceFactory.RegisterUnsafeSpiType
     property ServiceExecutionOptions: TInterfaceMethodOptions
       read fServiceExecutionOptions write fServiceExecutionOptions;
     /// force the interface-based service methods to return a JSON object
@@ -1750,10 +1750,12 @@ type
   TOnInternalInfo = procedure(Sender: TRestUriContext;
     var Info: TDocVariantData) of object;
 
-  /// a generic/abstract REpresentational State Transfer (REST) server
-  // - descendent must implement the protected EngineList() Retrieve() Add()
-  // Update() Delete() methods - so if you want a REST server with no ORM
-  // (e.g. for a pure SOA server), use (or inherit) TRestServerFullMemory
+  /// abstract REpresentational State Transfer (REST) server
+  // - don't use this abstract class, but override and implement the protected
+  // EngineList() Retrieve() Add() Update() Delete() methods
+  // - so if you want a REST server with no ORM (e.g. for a pure SOA server),
+  // use (or inherit) TRestServerFullMemory; if you want a REST server with
+  // tied ORM (with SQLite3 or any external DB), use TRestServerDB
   // - automatic call of this methods by a generic Uri() RESTful function
   // - any published method of descendants must match TOnRestServerCallBack
   // prototype, and is expected to be thread-safe
@@ -3387,11 +3389,11 @@ begin
       EServiceException.RaiseUtf8('%.InternalExecuteSoaByInterface: ' +
         'ServiceMethodIndex=% and ServiceMethod=nil', [self, ServiceMethodIndex]);
   end;
+  // implement per-method authorization
   if (Session > CONST_AUTHENTICATION_NOT_USED) and
      (ServiceExecution <> nil) and
-     ((SessionGroup <= 0) or
-      (SessionGroup > 255) or
-      (byte(SessionGroup - 1) in ServiceExecution.Denied)) then
+     (ServiceExecution^.Auth.StateID <> idAllowAll) and
+     ServiceExecution^.Auth.IsDenied(SessionGroup) then
   begin
     Error('Unauthorized method', HTTP_NOTALLOWED);
     exit;
@@ -3406,15 +3408,15 @@ var
   spi: TInterfaceMethodValueDirections;
 begin
   // expects Service, ServiceParameters, ServiceMethod(Index) to be set
-  m := ServiceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
+  m := fServiceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
   if m >= 0 then
   begin
-    if ServiceMethod = nil then
-      ServiceMethod := @Service.InterfaceFactory.Methods[m];
-    ServiceExecution := @Service.Execution[m];
-    ServiceExecutionOptions := ServiceExecution.Options;
-    // log from Ctxt.ServiceExecutionOptions
-    spi := ServiceMethod^.HasSpiParams;
+    if fServiceMethod = nil then
+      fServiceMethod := @Service.InterfaceFactory.Methods[m];
+    fServiceExecution := @Service.Execution[m];
+    fServiceExecutionOptions := ServiceExecution.Options;
+    // un-log SPI into Ctxt.ServiceExecutionOptions
+    spi := fServiceMethod^.HasSpiParams;
     if spi <> [] then
     begin
       if [imdConst, imdVar] * spi <> [] then
@@ -3427,16 +3429,16 @@ begin
        (sllServiceCall in fServer.LogLevel) and
        (ServiceParameters <> nil) and
        (PWord(ServiceParameters)^ <> ord('[') + ord(']') shl 8) then
-     if optNoLogInput in ServiceExecutionOptions then
+     if optNoLogInput in fServiceExecutionOptions then
        fLog.Log(sllServiceCall, '%{}',
-         [ServiceMethod^.InterfaceDotMethodName], Server)
+         [fServiceMethod^.InterfaceDotMethodName], Server)
      else
        fLog.Log(sllServiceCall, '%%',
-         [ServiceMethod^.InterfaceDotMethodName, ServiceParameters], Server);
+         [fServiceMethod^.InterfaceDotMethodName, ServiceParameters], Server);
     // OnMethodExecute() callback event
     if Assigned(TServiceFactoryServer(Service).OnMethodExecute) then
       if not TServiceFactoryServer(Service).
-               OnMethodExecute(self, ServiceMethod^) then
+               OnMethodExecute(self, fServiceMethod^) then
         exit; // execution aborted by the callback
   end;
   if TServiceFactoryServer(Service).ResultAsXMLObjectIfAcceptOnlyXML and
@@ -4582,7 +4584,7 @@ begin
   WR := TJsonWriter.CreateOwnedStream(temp);
   try // convert URI parameters into the expected ordered json array
     WR.AddDirect('[');
-    m := ServiceMethod;
+    m := fServiceMethod;
     ilow := 0;
     a := @m^.Args[m^.ArgsInFirst];
     for arg := m^.ArgsInFirst to m^.ArgsInLast do
@@ -6148,9 +6150,13 @@ end;
 
 constructor TRestServer.Create(aModel: TOrmModel; aHandleUserAuthentication: boolean);
 begin
+  // avoid coder confusion if this abstract class is instantiated
+  if PClass(self)^ = TRestServer then
+    ERestException.RaiseUtf8(
+      'Abstract %.Create: use TRestServerFullMemory or TRestServerDB', [self]);
+  // setup the associated ORM model
   if aModel = nil then
     EOrmException.RaiseUtf8('%.Create(Model=nil)', [self]);
-  // setup the associated ORM model
   fStatLevels := SERVERDEFAULTMONITORLEVELS;
   fAuthUserClass := TAuthUser;
   fAuthGroupClass := TAuthGroup;

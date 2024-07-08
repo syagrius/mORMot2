@@ -1807,7 +1807,7 @@ begin
         FileSetDateFromUnixUtc(dstfn, reftime div MilliSecsPerSec);
         inc(result);
         if sfoWriteFileNameToConsole in Options then
-          ConsoleWrite('synched %', [dstfn]);
+          ConsoleWriteRaw(['synched ', dstfn]);
       end
       else if (sfoSubFolder in Options) and
               SearchRecValidFolder(fdst) then
@@ -1865,7 +1865,7 @@ begin
       break;
     inc(result);
     if sfoWriteFileNameToConsole in Options then
-      ConsoleWrite('copied %', [reffn]);
+      ConsoleWriteRaw(['copied ', reffn]);
   until (FindNext(sr) <> 0);
   FindClose(sr);
 end;
@@ -5657,8 +5657,8 @@ begin
   SetParameters(aParameters); // should parse the JSON-encoded parameters
 end;
 
-constructor TSynFilterOrValidate.CreateUtf8(const Format: RawUtf8; const Args,
-  Params: array of const);
+constructor TSynFilterOrValidate.CreateUtf8(const Format: RawUtf8;
+  const Args, Params: array of const);
 begin
   Create(FormatJson(Format, Args, Params));
 end;

@@ -547,6 +547,7 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
   SecsPerWeek  = 7 * SecsPerDay;
   SecsPerMonth = 2629746; // rough approximation of SecsPerDay * 365.2425 / 12
   SecsPerYear  = 12 * SecsPerMonth;
+
   MilliSecsPerSec      = 1000;
   MilliSecsPerSecShl   = 10; // 1 shl 10 = 1024 = rough approximation of 1000
   MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
@@ -4002,6 +4003,10 @@ var
 // - on Windows, will call the corresponding API, and set StdOut global variable
 procedure AllocConsole;
 
+/// always true on POSIX, may be false for a plain Windows GUI application
+function HasConsole: boolean;
+  {$ifdef OSPOSIX} inline; {$endif OSPOSIX}
+
 /// change the console text writing color
 procedure TextColor(Color: TConsoleColor);
 
@@ -4012,6 +4017,14 @@ procedure TextBackground(Color: TConsoleColor);
 // - this method is protected by its own CriticalSection for output consistency
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor = ccLightGray;
   NoLineFeed: boolean = false; NoColor: boolean = false); overload;
+
+/// write some text to the console using the current color
+// - similar to writeln() but redirect to ConsoleWrite(NoColor=true)
+procedure ConsoleWriteRaw(const Text: RawUtf8; NoLineFeed: boolean = false); overload;
+
+/// append a line feed to the console
+// - similar to writeln but redirect to ConsoleWrite() with proper thread safety
+procedure ConsoleWriteLn;
 
 /// will wait for the ENTER key to be pressed, with all needed waiting process
 // - on the main thread, will call Synchronize() for proper work e.g. with
@@ -7892,12 +7905,11 @@ end;
 
 procedure TExecutableResource.Close;
 begin
-  if HGlobal <> 0 then
-  begin
-    UnlockResource(HGlobal); // only needed outside of Windows
-    FreeResource(HGlobal);
-    HGlobal := 0;
-  end;
+  if HGlobal = 0 then
+    exit;
+  UnlockResource(HGlobal); // only needed outside of Windows
+  FreeResource(HGlobal);
+  HGlobal := 0;
 end;
 
 
@@ -8043,6 +8055,16 @@ begin
      GetMemoryInfoText, _oskb(avail), _oskb(total),
      {$ifdef OSPOSIX} RetrieveLoadAvg, {$endif} Executable.Version.VersionInfo,
      OSVersionText, CpuInfoText, BiosInfoText]);
+end;
+
+procedure ConsoleWriteRaw(const Text: RawUtf8; NoLineFeed: boolean);
+begin
+  ConsoleWrite(Text, ccLightGray, NoLineFeed, {nocolor=}true);
+end;
+
+procedure ConsoleWriteLn;
+begin
+  ConsoleWrite(CRLF, ccLightGray, {nolinefeed=}true, {nocolor=}true);
 end;
 
 function ConsoleReadBody: RawByteString;
@@ -8908,7 +8930,6 @@ begin
     exit;
   ConsoleWrite(FullDescription(exedescription));
   ConsoleWrite(err, ccLightRed);
-  TextColor(ccLightGray);
 end;
 
 function TExecutableCommandLine.ConsoleHelpFailed(

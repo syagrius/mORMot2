@@ -285,6 +285,9 @@ type
     procedure Commit; override;
     /// discard changes of a Transaction for this connection
     procedure Rollback; override;
+    /// low-level direct access to the actual associated TSqlDBConnectionProperties
+    property Proxy: TSqlDBProxyConnectionPropertiesAbstract
+      read fProxy;
   end;
 
   /// implements a proxy-like virtual connection statement to a DB engine
@@ -564,8 +567,8 @@ type
     // - you can optionally register one user credential
     // - parameter aHttps is ignored by this class
     // - is implemented via a THttpServer instance, which will maintain one
-    // thread per client connection, which is as expected by some DB drivers e.g.
-    // for transaction consistency
+    // thread per client connection, which is as expected by some DB drivers,
+    // e.g. for transaction consistency
     constructor Create(aProperties: TSqlDBConnectionProperties;
       const aDatabaseName: RawUtf8; const aPort: RawUtf8 = SYNDB_DEFAULT_HTTP_PORT;
       const aUserName: RawUtf8 = ''; const aPassword: RawUtf8 = '';
@@ -578,7 +581,8 @@ type
   {$ifdef USEHTTPSYS}
 
   /// implements a mormot.db.proxy HTTP server using fast http.sys kernel-mode server
-  // - under Windows, this class is faster and more stable than TSqlDBServerSockets
+  // - under Windows, this class may be more integrated with the operating system
+  // than plain TSqlDBServerSockets
   TSqlDBServerHttpApi = class(TSqlDBServerAbstract)
   protected
   public
@@ -596,14 +600,13 @@ type
       aAuthenticate: TSynAuthenticationAbstract = nil); override;
   end;
 
-  /// the default mormot.db.proxy HTTP server class on each platform
-  TSqlDBServerRemote = TSqlDBServerHttpApi;
-
-  {$else}
-
-  TSqlDBServerRemote = TSqlDBServerSockets;
-
   {$endif USEHTTPSYS}
+
+
+  /// the default mormot.db.proxy HTTP server class on each platform
+  // - won't default to TSqlDBServerHttpApi on Windows, because even if this
+  // class seems more "native", it won't maintain one thread per client
+  TSqlDBServerRemote = TSqlDBServerSockets;
 
 
 { ************ HTTP Client Classes for Remote Access }
@@ -1382,21 +1385,23 @@ begin
     MoveFast(Reader^, fDataCurrentRowNull[0], fDataCurrentRowNullLen);
     inc(Reader, fDataCurrentRowNullLen);
   end;
-  fDataCurrentRowValuesStart := Reader;
+  fDataCurrentRowValuesStart := Reader; // remember raw binary position
   for F := 0 to fColumnCount - 1 do
     if GetBitPtr(pointer(fDataCurrentRowNull), F) then
       fDataCurrentRowValues[F] := nil
     else
     begin
+      // get column type and data
       ft := fColumns[F].ColumnType;
-      if ft < ftInt64 then
+      if ft < ftInt64 then // ftUnknown or ftNull should not appear here
       begin
         // per-row column type (SQLite3 only)
         ft := TSqlDBFieldType(Reader^);
         inc(Reader);
       end;
       fDataCurrentRowColTypes[F] := ft;
-      fDataCurrentRowValues[F] := Reader;
+      fDataCurrentRowValues[F] := Reader; // per reference
+      // go to next column
       case ft of
         ftInt64:
           Reader := GotoNextVarInt(Reader);
@@ -1898,7 +1903,7 @@ end;
 
 destructor TSqlDBServerAbstract.Destroy;
 begin
-  inherited;
+  inherited Destroy;
   fServer.Free;
   fProtocol.Free;
   fSafe.Done;

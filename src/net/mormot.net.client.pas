@@ -200,12 +200,14 @@ type
     wgsAlternateSuccess,
     wgsAlternateFailed,
     wgsAlternateReset,
+    wgsAlternateAlreadyInCache,
+    wgsAlternateWrongSizeInCache,
+    wgsAlternateCopiedInCache,
     wgsProgressive,
     wgsProgressiveFailed,
     wgsGet,
     wgsSetDate,
-    wgsLastMod,
-    rwgs9);
+    wgsLastMod);
   /// which steps have been performed during THttpClientSocket.WGet() process
   TWGetSteps = set of TWGetStep;
 
@@ -322,7 +324,7 @@ type
     // pcfResponsePartial with the new file name
     // - this method is called after any file has been successfully downloaded
     // - Params.Hasher/Hash are expected to be populated
-    procedure OnDowloaded(const Params: THttpClientSocketWGet;
+    procedure OnDowloaded(var Params: THttpClientSocketWGet;
       const Partial: TFileName; OnDownloadingID: THttpPartialID);
     /// notify the alternate download implementation that the data supplied
     // by OnDownload() was incorrect
@@ -569,8 +571,9 @@ type
 
 /// returns the HTTP User-Agent header value of a mORMot client including
 // the Instance class name in its minified/uppercase-only translation
-// - typical value is "Mozilla/5.0 (Linux x64; mORMot) HCS/2.0 Tests/3"
+// - typical value is "Mozilla/5.0 (Linux x64; mORMot) HCS/2 Tests/3"
 // for THttpClientSocket from a Tests.exe application in version 3.x
+// - framework is identified as '/2' with no release number, for security
 // - note: the framework would identify the 'mORMot' pattern in the user-agent
 // header to enable advanced behavior e.g. about JSON transmission
 function DefaultUserAgent(Instance: TObject): RawUtf8;
@@ -1570,9 +1573,8 @@ begin
   vers[0] := #0;
   if Executable.Version.Major <> 0 then
     FormatShort16('/%', [Executable.Version.Major], vers);
-  result := FormatUtf8(
-    'Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/% %%',
-    [name, copy(SYNOPSE_FRAMEWORK_VERSION, 1, 3), Executable.ProgramName, vers]);
+  FormatUtf8('Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/2 %%',
+    [name, Executable.ProgramName, vers], result);
 end;
 
 
@@ -1643,7 +1645,7 @@ end;
 
 function ToText(wgs: TWGetSteps; trimmed: boolean): RawUtf8;
 begin
-  result := GetSetName(TypeInfo(TWGetStep), wgs, trimmed);
+  result := GetSetName(TypeInfo(TWGetSteps), wgs, trimmed);
 end;
 
 var
@@ -2675,7 +2677,7 @@ begin
     SendTimeout := HTTP_DEFAULT_SENDTIMEOUT;
   if ReceiveTimeout = 0 then
     ReceiveTimeout := HTTP_DEFAULT_RECEIVETIMEOUT;
-  InternalConnect(ConnectionTimeOut, SendTimeout, ReceiveTimeout); // raise an exception on error
+  InternalConnect(ConnectionTimeOut, SendTimeout, ReceiveTimeout); // raise exception on error
 end;
 
 constructor THttpRequest.Create(const aUri: RawUtf8; const aProxyName: RawUtf8;
@@ -3023,7 +3025,7 @@ procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
             EWinHttp.RaiseFromLastError;
           inc(Current, BytesWritten);
           if not fOnUpload(Self, Current, L) then
-            raise EWinHttp.CreateUtf8('%: OnUpload canceled %', [self, aMethod]);
+            EWinHttp.RaiseUtf8('%: OnUpload canceled %', [self, aMethod]);
         end;
       end;
     end
@@ -3363,7 +3365,7 @@ begin
     if _http.Request(url, 'GET', 0, inH, '', '', outH, outD) = 101 then
       fSocket := _http.fSocket
     else
-      raise EWinHttp.CreateUtf8('%.Create: % handshake failed', [self, _http]);
+      EWinHttp.RaiseUtf8('%.Create: % handshake failed', [self, _http]);
   finally
     _http.Free;
   end;

@@ -88,16 +88,17 @@ type
   // session_signature parameter value for a given URI
   // - by default, suaCRC32 will compute fast but not cryptographically secure
   // ! crc32(crc32(privatesalt, timestamp, 8), url, urllen)
-  // - suaCRC32C and suaXXHASH will be faster and slightly safer
+  // - suaCRC32C and suaXXHASH are similar non-cryptographic alternatives
   // - but you can select other stronger alternatives, which result will be
   // reduced to 32-bit hexadecimal - suaMD5 will be the fastest cryptographic
-  // hash available on all platforms, for enhanced security, by calling e.g.
+  // hash available on all platforms (but if SHA-NI is available), for enhanced
+  // security, by calling e.g.
   // ! (aServer.AuthenticationRegister(TRestClientAuthenticationDefault) as
   // !   TRestServerAuthenticationDefault).Algorithm := suaMD5;
-  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be the slowest, to provide
+  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be slower, and may provide
   // additional level of trust, depending on your requirements: note that
   // since the hash is reduced to 32-bit resolution, those may not provide
-  // higher security than suaMD5
+  // higher security than suaMD5 or suaSHA1
   // - note that SynCrossPlatformRest clients only implements suaCRC32 yet
   TRestAuthenticationSignedUriAlgo = (
     suaCRC32,
@@ -406,6 +407,13 @@ type
       ctxt: TRestClientSideInvoke;
       const method, params, clientDrivenID: RawUtf8;
       out sent, head: RawUtf8); virtual; abstract;
+    /// at Client Side, adjust STATUS and BODY according to the routing scheme
+    // - this method does nothing by default
+    // - could be used to adapt to custom BODY output, e.g. on error handling
+    class procedure ClientSideInvoked(const uri: RawUtf8;
+      ctxt: TRestClientSideInvoke;
+      const method, params, clientDrivenID: RawUtf8;
+      var resp, head: RawUtf8; var status: integer); virtual;
     /// could be overriden to notify advances routing features
     // - default returns [] but TRestClientRoutingRest includes csiAsOctetStream
     class function Supports: TRestClientSideInvoke; virtual;
@@ -538,11 +546,12 @@ type
     function FindAndRelease(aID: TRestClientCallbackID): boolean;
   end;
 
-  /// a generic REpresentational State Transfer (REST) client with URI
+  /// abstract REpresentational State Transfer (REST) client with URI
   // - URI are standard Collection/Member implemented as ModelRoot/TableName/TableID
   // - handle RESTful commands GET POST PUT DELETE LOCK UNLOCK
   // - never call this abstract class, but inherit and override the
   // InternalUri/InternalIsOpen/InternalOpen/InternalClose virtual abstract methods
+  // - do NOT use this abstract class, but one of its fully implemented children
   TRestClientUri = class(TRest)
   protected
     fClient: IRestOrmClient;
@@ -1642,6 +1651,13 @@ end;
 
 { TRestClientRouting }
 
+class procedure TRestClientRouting.ClientSideInvoked(const uri: RawUtf8;
+  ctxt: TRestClientSideInvoke; const method, params, clientDrivenID: RawUtf8;
+  var resp, head: RawUtf8; var status: integer);
+begin
+  // nothing to do by default
+end;
+
 class function TRestClientRouting.Supports: TRestClientSideInvoke;
 begin
   result := []; // no advanced process by default
@@ -2212,6 +2228,10 @@ end;
 
 constructor TRestClientUri.Create(aModel: TOrmModel);
 begin
+  // avoid coder confusion if this abstract class is instantiated
+  if PClass(self)^ = TRestClientUri then
+    ERestException.RaiseUtf8('Abstract %.Create: use an inherited class', [self]);
+  // setup this client class
   inherited Create(aModel);
   fMaximumAuthentificationRetry := 1;
   fComputeSignature := TRestClientAuthenticationSignedUri.ComputeSignatureCrc32;
