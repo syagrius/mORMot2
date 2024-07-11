@@ -2204,6 +2204,7 @@ type
   // as Unicode if necessary
   TPdfInfo = class(TPdfDictionaryWrapper)
   private
+    fCustomMetadata: RawUtf8;
     function GetAuthor: string;
     procedure SetAuthor(const Value: string);
     function GetCreationDate: TDateTime;
@@ -2240,6 +2241,10 @@ type
     /// the PDF document title
     property Title: string
       read GetTitle write SetTitle;
+    /// allow to add some custom XMP metadata for PDFA/1
+    // - may be used e.g. to generate ZUGFeRD-PDF content
+    property CustomMetadata: RawUtf8
+     read fCustomMetadata write fCustomMetadata;
   end;
 
   /// a dictionary wrapper class for the PDF document catalog fields
@@ -2529,7 +2534,7 @@ type
     procedure CreateAssociatedUnicodeFont;
     // update font description from used chars
     procedure PrepareForSaving;
-    // low level adding of a glyph (returns the real glyph index found, 0 if none)
+    // low level add glyph (returns the real glyph index found, aGlyph if none)
     function GetAndMarkGlyphAsUsed(aGlyph: word): word;
   public
     /// create the TrueType font object instance
@@ -6004,9 +6009,9 @@ end;
 
 function TPdfFontTrueType.GetAndMarkGlyphAsUsed(aGlyph: word): word;
 var
-  i: integer;
+  i: PtrInt;
 begin
-  result := aGlyph;
+  result := aGlyph; // fallback to raw glyph index if nothing explicit
   // 1. check if not already registered as used
   with WinAnsiFont do // WinAnsiFont.fUsedWide[] = glyphs used by ShowText
     for i := 0 to fUsedWideChar.Count - 1 do
@@ -6021,7 +6026,6 @@ begin
           WideChar(fUsedWideChar.Values[i]))].Glyph;
         exit; // result may be 0 if this glyph doesn't exist in the CMAP content
       end;
-  result := 0; // returns 0 if not found
 end;
 
 constructor TPdfFontTrueType.Create(ADoc: TPdfDocument; AFontIndex: integer;
@@ -7127,7 +7131,7 @@ begin
     fOutputIntents := TPdfArray.Create(fXRef);
     dic := TPdfDictionary.Create(fXRef);
     dic.AddItem('Type', 'OutputIntent');
-    dic.AddItem('S', 'GTS_PdfA1'); // there is no GTS_PdfA2 or GTS_PdfA3
+    dic.AddItem('S', 'GTS_PDFA1'); // there is no GTS_PdfA2 or GTS_PdfA3
     dic.AddItemText('OutputConditionIdentifier', 'sRGB');
     dic.AddItemText('RegistryName', 'http://www.color.org');
     rgb := TPdfStream.Create(self);
@@ -7154,9 +7158,9 @@ begin
     P[0] := '<';
     mormot.core.text.BinToHex(PAnsiChar(@fFileID), P + 1, 16);
     P[SizeOf(fFileID) * 2 + 1] := '>';
-    ID := TPdfArray.Create(fXRef);
-    ID.AddItem(TPdfRawText.Create(hexFileID));
-    ID.AddItem(TPdfRawText.Create(hexFileID));
+    ID := TPdfArray.Create(fXRef); // array of 2 strings, as file identifier
+    ID.AddItem(TPdfRawText.Create(hexFileID)); // creation ID
+    ID.AddItem(TPdfRawText.Create(hexFileID)); // modified ID
     fTrailer.Attributes.AddItem('ID', ID);
   end;
   {$ifdef USE_PDFSECURITY}
@@ -7307,8 +7311,9 @@ begin
       '<dc:description><rdf:Alt><rdf:li xml:lang="x-default">').
       AddS(Info.Subject).
       Add('</rdf:li></rdf:Alt></dc:description>' +
-      '</rdf:Description>' +
-      '<rdf:Description rdf:about="" xmlns:pdf="http://ns.adobe.com/pdf/1.3/">' +
+      '</rdf:Description>').
+      Add(Info.CustomMetadata).
+      Add('<rdf:Description rdf:about="" xmlns:pdf="http://ns.adobe.com/pdf/1.3/">' +
       '<pdf:Keywords>').
       AddS(Info.Keywords).
       Add('</pdf:Keywords>' +
