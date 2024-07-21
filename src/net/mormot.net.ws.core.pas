@@ -12,7 +12,7 @@ unit mormot.net.ws.core;
    - WebSockets Asynchronous Frames Parsing
    - WebSockets Client and Server Shared Process
    - TWebSocketProtocolChat Simple Protocol
-   - Sockets.IO / Engine.IO Raw Protocols
+   - Socket.IO / Engine.IO Raw Protocols
 
   *****************************************************************************
 
@@ -1018,7 +1018,7 @@ var
   WebSocketsMaxFrameMB: cardinal = 256;
 
 
-{ ****************** Sockets.IO / Engine.IO Raw Protocols }
+{ ****************** Socket.IO / Engine.IO Raw Protocols }
 
 type
   /// define the Engine.IO available packet types
@@ -1055,38 +1055,51 @@ function SocketIOHandshakeUri(const Root: RawUtf8 = '/engine.io';
 type
   /// abstract parent for client side and server side Engine.IO sessions support
   // - several Socket.IO namespaces are maintained over this main Engine.IO session
-  TEngineIOSessionsAbstract = class(TSynPersistentLock)
+  TEngineIOSessionsAbstract = class(TSynPersistent)
   protected
+    fSafe: TLightLock;
+    fVersion: integer;
     fEngineSid: RawUtf8;
     fPingInterval, fPingTimeout, fMaxPayload: integer;
   public
+    /// initialize this class instance with some default values
+    constructor Create; override;
+  published
     /// the associated Engine.IO Session ID
     // - as computed on the server side, and received on client side
     property EngineSid: RawUtf8
       read fEngineSid;
+    /// the protocol version used by this class, as used for EIO=? parmeter
+    // - is currently fixed to 4
+    property Version: integer
+      read fVersion;
     /// the ping interval, used in Engine.IO heartbeat mechanism (in milliseconds)
+    // - ping packets are now sent by the server, since protocol v4
+    // - default value is 20000, i.e. 20 seconds
     property PingInterval: integer
       read fPingInterval write fPingInterval;
     /// the ping timeout, used in Engine.IO heartbeat mechanism (in milliseconds)
+    // - default value is 25000, i.e. 25 seconds
     property PingTimeout: integer
       read fPingTimeout write fPingTimeout;
     /// optional number of bytes per chunk, used in Engine.IO payloads mechanism
+    // - default value is 0, meaning no
     property MaxPayload: integer
       read fMaxPayload write fMaxPayload;
   end;
 
   /// abstract parent for one client side and server side Socket.IO session
   // - each session has its own namespace
-  TSocketIOSessionAbstract = class(TSynPersistentLock)
+  TSocketIOSessionAbstract = class(TSynPersistent)
   protected
+    fSafe: TLightLock;
     fOwner: TEngineIOSessionsAbstract;
     fSid, fNameSpace: RawUtf8;
-  public
   published
-    /// the associated Sockets.IO Session ID, as computed on the server side
+    /// the associated Socket.IO Session ID, as computed on the server side
     property Sid: RawUtf8
       read fSid;
-    /// the associated Sockets.IO Session ID, as computed on the server side
+    /// the associated Socket.IO Session ID, as computed on the server side
     property NameSpace: RawUtf8
       read fNameSpace;
   end;
@@ -3383,7 +3396,7 @@ begin
 end;
 
 
-{ ****************** Sockets.IO / Engine.IO Raw Protocols }
+{ ****************** Socket.IO / Engine.IO Raw Protocols }
 
 // reference: https://sockjs.com/docs/v4/socket-io-protocol/
 
@@ -3397,6 +3410,17 @@ begin
     [Root, CardinalToHexShort(Random32)], result);
   if PollingUpgradeSid <> '' then
     Append(result, '&sid=', PollingUpgradeSid);
+end;
+
+
+{ TEngineIOSessionsAbstract }
+
+constructor TEngineIOSessionsAbstract.Create;
+begin
+  inherited Create;
+  fVersion := 4;
+  fPingTimeout := 20000;
+  fPingInterval := 25000;
 end;
 
 
