@@ -674,8 +674,8 @@ type
     fInternalJsonWriter: TJsonWriter;
     procedure InternalAddFixedAnsi(Source: PAnsiChar; SourceChars: cardinal;
       AnsiToWide: PWordArray; Escape: TTextWriterKind);
-    // called after TRttiCustomProp.GetValueDirect/GetValueGetter
-    procedure AddRttiVarData(const Value: TRttiVarData; Escape: TTextWriterKind;
+    // called for varAny after TRttiCustomProp.GetRttiVarData
+    procedure AddRttiVarData(Value: PRttiVarData; Escape: TTextWriterKind;
       WriteOptions: TTextWriterWriteObjectOptions);
   public
     /// release all internal structures
@@ -783,7 +783,7 @@ type
       WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); override;
     /// append a variant content as number or string
     // - this overriden version will properly handle JSON escape
-    // - properly handle Value as a TRttiVarData from TRttiProp.GetValue
+    // - properly handle varAny from TRttiCustomProp.GetRttiVarData
     procedure AddVariant(const Value: variant; Escape: TTextWriterKind = twJsonEscape;
       WriteOptions: TTextWriterWriteObjectOptions = []); override;
     /// append complex types as JSON content using raw TypeInfo()
@@ -6524,8 +6524,8 @@ begin
       AddTextW(v^.VAny, Escape);
     varAny:
       // rkEnumeration,rkSet,rkDynArray,rkClass,rkInterface,rkRecord,rkObject
-      // from TRttiCustomProp.GetValueDirect/GetValueGetter
-      AddRttiVarData(PRttiVarData(v)^, Escape, WriteOptions);
+      // from TRttiCustomProp.GetRttiVarData
+      AddRttiVarData(PRttiVarData(v), Escape, WriteOptions);
     varVariantByRef:
       AddVariant(PVariant(v^.VPointer)^, Escape, WriteOptions);
     varStringByRef:
@@ -6598,28 +6598,28 @@ begin
       {magic=}Escape <> twOnSameLine);
 end;
 
-procedure TJsonWriter.AddRttiVarData(const Value: TRttiVarData;
+procedure TJsonWriter.AddRttiVarData(Value: PRttiVarData;
   Escape: TTextWriterKind; WriteOptions: TTextWriterWriteObjectOptions);
 var
   V64: Int64;
 begin
-  if Value.PropValueIsInstance then
+  if Value^.PropValueIsInstance then
   begin
-    // from TRttiCustomProp.GetValueGetter
-    if rcfGetOrdProp in Value.Prop.Value.Cache.Flags then
+    // from TRttiCustomProp.GetRttiVarDataGetter
+    if rcfGetOrdProp in Value^.Prop.Value.Cache.Flags then
     begin
       // rkEnumeration,rkSet,rkDynArray,rkClass,rkInterface
-      V64 := Value.Prop.Prop.GetOrdProp(Value.PropValue);
-      AddRttiCustomJson(@V64, Value.Prop.Value, Escape, WriteOptions);
+      V64 := Value^.Prop.Prop.GetOrdProp(Value^.PropValue);
+      AddRttiCustomJson(@V64, Value^.Prop.Value, Escape, WriteOptions);
     end
     else
       // rkRecord,rkObject have no getter methods
       EJsonException.RaiseUtf8('%.AddRttiVarData: unsupported % (%)',
-        [self, Value.Prop.Value.Name, ToText(Value.Prop.Value.Kind)^]);
+        [self, Value^.Prop.Value.Name, ToText(Value^.Prop.Value.Kind)^]);
   end
   else
-    // from TRttiCustomProp.GetValueDirect
-    AddRttiCustomJson(Value.PropValue, Value.Prop.Value, Escape, WriteOptions);
+    // from TRttiCustomProp.GetRttiVarDataDirect
+    AddRttiCustomJson(Value^.PropValue, Value^.Prop.Value, Escape, WriteOptions);
 end;
 
 procedure TJsonWriter.AddText(const Text: RawByteString; Escape: TTextWriterKind);
@@ -10349,9 +10349,9 @@ begin
         fNewInstance := @_New_PersistentWithCustomCreate
       else if C = TObjectWithCustomCreate then
       begin
+        // e.g. TSynPersistent, TOrm or TObjectWithID
         fNewInstance := @_New_ObjectWithCustomCreate;
         // allow any kind of customization for TObjectWithCustomCreate children
-        // - is used e.g. by TOrm or TObjectWithID
         n := Props.Count;
         TObjectWithCustomCreateRttiCustomSetParser(
           TObjectWithCustomCreateClass(fValueClass), self);
@@ -10390,7 +10390,7 @@ begin
       else if C = TList then
         fNewInstance := @_New_List
       else if C = TObject then
-        fNewInstance := @_New_Object
+        fNewInstance := @_New_Object // fallback to plain TObject.Create
       else
       begin
         // customize JSON serialization
@@ -10490,9 +10490,9 @@ var
   vt: cardinal;
   ctx: TGetJsonField;
 begin
-  // see TRttiCustomProp.GetValueDirect
+  // see TRttiCustomProp.GetRttiVarDataDirect
   vt := Cache.VarDataVType;
-  TRttiVarData(Dest).VType := vt;
+  TSynVarData(Dest).VType := vt;
   case vt of
     varInt64,
     varBoolean:
@@ -10502,7 +10502,7 @@ begin
       // rkInt64, rkQWord
       begin
         if not (rcfQWord in Cache.Flags) then
-          TRttiVarData(Dest).VType := varInt64; // fix VType
+          TSynVarData(Dest).VType := varInt64; // fix VType
         Dest.VInt64 := PInt64(Data)^;
       end;
     varSingle:
@@ -10537,7 +10537,7 @@ begin
     varUnknown:
       // rkChar, rkWChar, rkSString converted into temporary RawUtf8
       begin
-        TRttiVarData(Dest).VType := varString;
+        TSynVarData(Dest).VType := varString;
         Dest.VAny := nil; // avoid GPF
         Info.StringToUtf8(Data, RawUtf8(Dest.VAny));
       end;
@@ -10545,7 +10545,7 @@ begin
      begin
        tmp := nil; // use temporary JSON conversion
        SaveJson(Data^, Info, [], RawUtf8(tmp)); // =TJsonWriter.AddTypedJson()
-       TRttiVarData(Dest).VType := varEmpty;
+       TSynVarData(Dest).VType := varEmpty;
        ctx.Json := tmp;
        JsonToAnyVariant(variant(Dest), ctx, Options, true);
        FastAssignNew(tmp);
@@ -10740,7 +10740,7 @@ begin
         // try TDocVariant/TBsonVariant name lookup
         if DocVariantType.FindSynVariantType(PVarData(Data)^.VType, vt) then
         begin
-          TRttiVarData(v).VType := varEmpty; // IntGet() would clear it
+          TSynVarData(v).VType := varEmpty; // IntGet() would clear it
           vt.IntGet(v, PVarData(Data)^, @n[1], ord(n[0]), {noexc=}true);
           if v.VType = varEmpty then
             break;

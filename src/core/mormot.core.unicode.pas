@@ -1830,10 +1830,8 @@ procedure FillZero(var secret: SpiUtf8); overload;
 // (i.e. has refcount = 1), to avoid zeroing still-used values
 procedure FillZero(var secret: TBytes); overload;
 
-{$ifdef HASVARUSTRING}
 /// fill all bytes of this UTF-16 string with zeros, i.e. 'toto' -> #0#0#0#0
-procedure FillZero(var secret: UnicodeString); overload;
-{$endif HASVARUSTRING}
+procedure FillZero(var secret: SynUnicode); overload;
 
 /// actual replacement function called by StringReplaceAll() on first match
 // - not to be called as such, but defined globally for proper inlining
@@ -2709,7 +2707,7 @@ var
   c: cardinal;
   begd: PWideChar;
   endSource: PUtf8Char;
-  endDest: PWideChar;
+  endDest: PWord;
   i, extra: integer;
   {$ifdef CPUX86NOTPIC}
   utf8: TUtf8Table absolute UTF8_TABLE;
@@ -2734,17 +2732,18 @@ begin
   utf8 := @UTF8_TABLE;
   {$endif CPUX86NOTPIC}
   endSource := source + sourceBytes;
-  endDest := dest + MaxDestChars;
+  endDest := @dest[MaxDestChars];
   begd := dest;
   repeat
     c := byte(source^);
     inc(source);
     if c <= 127 then
     begin
+      if PtrUInt(@dest[1]) >= PtrUInt(endDest) then
+        break; // avoid buffer overflow before writing
       PWord(dest)^ := c; // much faster than dest^ := WideChar(c) for FPC
       inc(dest);
-      if (source < endSource) and
-         (dest < endDest) then
+      if source < endSource then
         continue
       else
         break;
@@ -2769,20 +2768,22 @@ begin
     end;
     if c <= $ffff then
     begin
+      if PtrUInt(@dest[1]) >= PtrUInt(endDest) then
+        break;
       PWord(dest)^ := c;
       inc(dest);
-      if (source < endSource) and
-         (dest < endDest) then
+      if source < endSource then
         continue
       else
         break;
     end;
     dec(c, $10000); // store as UTF-16 surrogates
+    if PtrUInt(@dest[2]) >= PtrUInt(endDest) then
+      break;
     PWordArray(dest)[0] := (c shr 10) or UTF16_HISURROGATE_MIN;
     PWordArray(dest)[1] := (c and $3FF) or UTF16_LOSURROGATE_MIN;
     inc(dest, 2);
-    if (source >= endSource) or
-       (dest >= endDest) then
+    if source >= endSource then
       break;
   until false;
 Quit:
@@ -7711,10 +7712,11 @@ end;
 
 procedure FillZero(var secret: RawByteString);
 begin
-  if secret <> '' then
-    with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
-      if refCnt = 1 then // avoid GPF if const
-        FillCharFast(pointer(secret)^, length, 0);
+  if secret = '' then
+    exit;
+  with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
+    if refCnt = 1 then // avoid GPF if const
+      FillCharFast(pointer(secret)^, length, 0);
   FastAssignNew(secret); // dec refCnt
 end;
 
@@ -7728,16 +7730,19 @@ begin
   FillZero(RawByteString(secret));
 end;
 
-{$ifdef HASVARUSTRING}
-procedure FillZero(var secret: UnicodeString);
+procedure FillZero(var secret: SynUnicode);
 begin
-  if secret <> '' then
-    with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
-      if refCnt = 1 then // avoid GPF if const
-        FillCharFast(pointer(secret)^, length * SizeOf(WideChar), 0);
-  Finalize(secret); // dec refCnt
+  if secret = '' then
+    exit;
+  {$ifdef HASVARUSTRING}
+  with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
+    if refCnt = 1 then // avoid GPF if constant UnicodeString
+      FillCharFast(pointer(secret)^, length * SizeOf(WideChar), 0);
+  {$else} // BSTR have no reference counting
+  FillCharFast(pointer(secret)^, length(secret) * SizeOf(WideChar), 0);
+  {$endif HASVARUSTRING}
+  secret := '';
 end;
-{$endif HASVARUSTRING}
 
 procedure FillZero(var secret: TBytes);
 begin
@@ -8214,7 +8219,10 @@ eol:      if P^ <= #13 then
           break; // handle next line
         end
         else if P^ <> #0 then
-          continue; // e.g. #9
+        begin
+          inc(P); // e.g. #9
+          continue;
+        end;
 eof:    result := nil; // reached P^=#0 -> not found
         exit;
       until false

@@ -1509,7 +1509,8 @@ type
     property LineFeed: RawUtf8
       read fLineFeed write fLineFeed;
     /// map ParamStr(1 .. ParamCount) values, encoded as RawUtf8
-    // - may be used e.g. for regression tests instead of ParamStr()
+    // - may be used e.g. for regression tests instead of ParamStr():
+    // ! c.RawParams := CsvToRawUtf8DynArray('-o file.txt --y -v -t 1', ' ');
     property RawParams: TRawUtf8DynArray
       read fRawParams write fRawParams;
   end;
@@ -1890,7 +1891,10 @@ type
     function ReadQword(const entry: SynUnicode): QWord;
     /// read a Windows Registry content as binary buffer after ReadOpen()
     // - just a wrapper around RegQueryValueExW() API call
-    function ReadBuffer(const entry: SynUnicode; Data: pointer; DataLen: DWORD): boolean;
+    function ReadBuffer(const entry: SynUnicode; data: pointer; datalen: DWORD): boolean;
+    /// read a Windows Registry content as length-specified buffer after ReadOpen()
+    // - returns the number of bytes written to Data
+    function ReadMax(const entry: SynUnicode; data: pointer; maxdatalen: DWORD): DWORD;
     /// retrieve a Windows Registry content size as binary bytes after ReadOpen()
     // - returns -1 if the entry is not found
     function ReadSize(const entry: SynUnicode): integer;
@@ -2178,6 +2182,36 @@ function ReadRegString(Key: THandle; const Path, Value: string): string;
 function DelayedProc(var api; var lib: THandle;
   libname: PChar; procname: PAnsiChar): boolean;
 
+{ some Windows API redefined here for Delphi and FPC consistency }
+
+type
+  TTimeZoneName = array[0..31] of WideChar;
+  TTimeZoneInformation = record
+    Bias: integer;
+    StandardName: TTimeZoneName;
+    StandardDate: TSystemTime;
+    StandardBias: integer;
+    DaylightName: TTimeZoneName;
+    DaylightDate: TSystemTime;
+    DaylightBias: integer;
+  end;
+
+  TDynamicTimeZoneInformation = record
+    TimeZone: TTimeZoneInformation; // XP information
+    TimeZoneKeyName: array[0..127] of WideChar;
+    DynamicDaylightTimeDisabled: boolean;
+  end;
+
+function GetTimeZoneInformation(var info: TTimeZoneInformation): DWORD;
+  stdcall; external kernel32;
+
+/// allow to change the current system time zone on Windows
+// - don't use this low-level function but the high-level mormot.core.search
+// TSynTimeZone.ChangeOperatingSystemTimeZone method
+// - will use the proper API before and after Vista, if needed
+// - raise EOSException on failure
+procedure SetSystemTimeZone(const info: TDynamicTimeZoneInformation);
+
 type
   HCRYPTPROV = pointer;
   HCRYPTKEY = pointer;
@@ -2310,6 +2344,16 @@ type
     hCryptProv: HCRYPTPROV;
     pfnGetSignerCertificate: PFN_CRYPT_GET_SIGNER_CERTIFICATE;
     pvGetArg: pointer;
+  end;
+
+  PUNICODE_STRING = ^UNICODE_STRING;
+  UNICODE_STRING = packed record
+    Length: word;
+    MaximumLength: word;
+    {$ifdef CPUX64}
+    _align: array[0..3] of byte;
+    {$endif CPUX64}
+    Buffer: PWideChar;
   end;
 
   /// direct access to the Windows CryptoApi
@@ -3039,7 +3083,7 @@ function WinErrorConstant(Code: cardinal): PUtf8Char;
 
 /// raise an EOSException from the last system error using WinErrorText()
 procedure RaiseLastError(const Context: shortstring;
-  RaisedException: ExceptClass = nil);
+  RaisedException: ExceptClass = nil; Code: integer = 0);
 
 /// raise an Exception from the last module error using WinErrorText()
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);

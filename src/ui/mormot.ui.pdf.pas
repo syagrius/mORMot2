@@ -4631,7 +4631,9 @@ var
 begin
   if BEnd - B <= 24 then
     Save;
+  {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if cardinal(Value) < 1000 then
+  {$endif ASMINTEL}
     if cardinal(Value) < 10 then
     begin
       B^ := AnsiChar(Value + 48);
@@ -4642,11 +4644,13 @@ begin
       PWord(B)^ := TwoDigitLookupW[Value];
       inc(B, 2);
     end
+    {$ifndef ASMINTEL}
     else
     begin
       PCardinal(B)^ := PCardinal(SmallUInt32Utf8[Value])^;
       inc(B, 3);
     end
+    {$endif ASMINTEL}
   else
   begin
     P := StrInt32(@t[23], Value);
@@ -7133,6 +7137,7 @@ begin
     dic.AddItem('Type', 'OutputIntent');
     dic.AddItem('S', 'GTS_PDFA1'); // there is no GTS_PdfA2 or GTS_PdfA3
     dic.AddItemText('OutputConditionIdentifier', 'sRGB');
+    dic.AddItemText('Info', 'sRGB'); // to show the output intents on Acrobat-Reader tab "standards"
     dic.AddItemText('RegistryName', 'http://www.color.org');
     rgb := TPdfStream.Create(self);
     rgb.Attributes.AddItem('N', 3);

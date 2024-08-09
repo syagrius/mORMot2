@@ -620,7 +620,7 @@ type
     /// append an Unsigned 32-bit integer Value as a String
     procedure AddU(Value: PtrUInt);
       {$ifdef FPC_OR_DELPHIXE4}{$ifdef ASMINTEL}inline;{$endif}{$endif} // URW1111
-    /// append an Unsigned integer <= 999 Value as a String
+    /// append an Unsigned integer <= 255 < 999 Value as a String
     procedure AddB(Value: PtrUInt);
       {$ifdef HASINLINE}inline;{$endif}
     /// append an Unsigned 32-bit integer Value as a quoted hexadecimal String
@@ -1206,8 +1206,9 @@ var
   // - use around 16KB of heap (since each item consumes 16 bytes), but increase
   // overall performance and reduce memory allocation (and fragmentation),
   // especially during multi-threaded execution
-  // - noticeable when strings are used as array indexes (e.g.
+  // - noticeable when RawUtf8 strings are used as array indexes (e.g.
   // in mormot.db.nosql.bson)
+  // - less noticeable without any allocation: StrInt32() is faster on a buffer
   // - is defined globally, since may be used from an inlined function
   SmallUInt32Utf8: array[0..999] of RawUtf8;
 
@@ -1985,6 +1986,8 @@ type
   protected
     fRaisedAt: pointer;
     fMessageUtf8: RawUtf8;
+    // internal method called by the constructor when fMessageUtf8 was just set
+    // - this virtual method will redirect to Create(Utf8ToString(fMessageUtf8))
     procedure CreateAfterSetMessageUtf8; virtual;
   public
     /// constructor which will use FormatUtf8() instead of Format()
@@ -4203,7 +4206,7 @@ var
 begin
   if B >= BEnd then
     FlushToStream;
-  P := pointer(SmallUInt32Utf8[Value]); // caller ensured Value <= 999
+  P := pointer(SmallUInt32Utf8[Value]); // caller ensured Value <= 255 < 999
   PCardinal(B + 1)^ := PCardinal(P)^;
   inc(B, PStrLen(P - _STRLEN)^);
 end;
@@ -4975,12 +4978,9 @@ begin
 end;
 
 procedure TTextWriter.AddString(const Text: RawUtf8);
-var
-  L: PtrInt;
 begin
-  L := PtrInt(Text);
-  if L <> 0 then
-    AddNoJsonEscape(pointer(Text), PStrLen(L - _STRLEN)^);
+  if Text <> '' then
+    AddNoJsonEscape(pointer(Text), PStrLen(PtrInt(Text) - _STRLEN)^);
 end;
 
 procedure TTextWriter.AddSpaced(Text: PUtf8Char; TextLen, Width: PtrInt);

@@ -650,15 +650,15 @@ begin
     [ModuleName, code, string(WinErrorText(code, ModuleName))]);
 end;
 
-procedure RaiseLastError(const Context: shortstring; RaisedException: ExceptClass);
-var
-  code: integer;
+procedure RaiseLastError(const Context: shortstring;
+  RaisedException: ExceptClass; Code: integer);
 begin
-  code := GetLastError;
+  if Code = 0 then
+    Code := GetLastError;
   if RaisedException = nil then
     RaisedException := EOSException;
   raise RaisedException.CreateFmt('%s error %x (%s)',
-    [Context, code, string(WinErrorText(code, nil))])
+    [Context, Code, string(WinErrorText(Code, nil))])
 end;
 
 function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
@@ -2012,6 +2012,35 @@ begin
   end;
 end;
 
+function SetTimeZoneInformation(const info: TTimeZoneInformation): BOOL;
+  stdcall; external kernel32; // make it consistent on Delphi and FPC
+
+procedure SetSystemTimeZone(const info: TDynamicTimeZoneInformation);
+var
+  SetDynamicTimeZoneInformation: function(
+    const lpTimeZoneInformation: TDynamicTimeZoneInformation): BOOL; stdcall;
+  privileges: TSynWindowsPrivileges;
+  ok: BOOL;
+  err: integer;
+begin
+  privileges.Init;
+  try
+    privileges.Enable(wspTimeZone); // ensure has SE_TIME_ZONE_NAME
+    SetDynamicTimeZoneInformation := GetProcAddress(
+      GetModuleHandle(kernel32), 'SetDynamicTimeZoneInformation');
+    if Assigned(SetDynamicTimeZoneInformation) then
+      ok := SetDynamicTimeZoneInformation(info)    // Vista+
+    else
+      ok := SetTimeZoneInformation(info.TimeZone); // XP
+    err := GetLastError;
+  finally
+    privileges.Done;
+  end;
+  if not ok then
+    RaiseLastError('SetSystemTimeZone', EOSException, err);
+  PostMessage(HWND_BROADCAST, WM_TIMECHANGE, 0, 0); // notify the apps
+end;
+
 var
   PsapiDll: THandle;
 
@@ -2966,9 +2995,23 @@ begin
 end;
 
 function TWinRegistry.ReadBuffer(const entry: SynUnicode;
-  Data: pointer; DataLen: DWord): boolean;
+  data: pointer; datalen: DWord): boolean;
 begin
-  result := RegQueryValueExW(key, pointer(entry), nil, nil, Data, @DataLen) = 0;
+  result := RegQueryValueExW(key, pointer(entry), nil, nil, data, @datalen) = 0;
+end;
+
+function TWinRegistry.ReadMax(const entry: SynUnicode;
+  Data: pointer; MaxDataLen: DWORD): DWORD;
+var
+  tmp: RawByteString;
+begin
+  tmp := ReadData(entry); // we need to read the whole entry
+  result := length(tmp);
+  if result = 0 then
+    exit;
+  if result > MaxDataLen then
+    result := MaxDataLen;
+  MoveFast(pointer(tmp)^, Data^, result);
 end;
 
 function TWinRegistry.ReadSize(const entry: SynUnicode): integer;
@@ -3553,16 +3596,6 @@ const
 
 type
   _PPS_POST_PROCESS_INIT_ROUTINE = ULONG;
-
-  PUNICODE_STRING = ^UNICODE_STRING;
-  UNICODE_STRING = packed record
-    Length: word;
-    MaximumLength: word;
-    {$ifdef CPUX64}
-    _align: array[0..3] of byte;
-    {$endif CPUX64}
-    Buffer: PWideChar;
-  end;
 
   PMS_PEB_LDR_DATA = ^MS_PEB_LDR_DATA;
   MS_PEB_LDR_DATA = packed record

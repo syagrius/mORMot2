@@ -1415,11 +1415,9 @@ function IsValidEmail(P: PUtf8Char): boolean;
 { ***************** Cross-Platform TSynTimeZone Time Zones }
 
 type
-  {$A-} { make all records packed for cross-platform binary serialization }
-
   /// used to store Time Zone bias in TSynTimeZone
-  // - map how low-level information is stored in the Windows Registry
-  TTimeZoneInfo = record
+  // - map low-level information as stored in the Windows Registry 'TZI' entry
+  TTimeZoneInfo = packed record
     Bias: integer;
     bias_std: integer;
     bias_dlt: integer;
@@ -1430,6 +1428,8 @@ type
 
   /// text identifier of a Time Zone, following Microsoft Windows naming
   TTimeZoneID = type RawUtf8;
+
+  {$A-} { make object packed for cross-platform binary serialization }
 
   /// used to store Time Zone information for a single area in TSynTimeZone
   // - Delphi "object" is buggy on stack -> also defined as record with methods
@@ -1448,6 +1448,8 @@ type
     end;
     /// search for the TTimeZoneInfo of a given year
     function GetTziFor(year: integer): PTimeZoneInfo;
+    /// erase all fields of this structure
+    procedure Clear;
   end;
 
   /// used to store the Time Zone information of a TSynTimeZone class
@@ -1472,28 +1474,44 @@ type
     fZones: TDynArrayHashed;
     fLastZone: TTimeZoneID;
     fLastIndex: integer;
+    fCurrentIndex, fUtcIndex: integer;
     fIds: TStringList;
     fDisplays: TStringList;
-    function LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+    procedure SetIDs;
+    procedure SetDisplays;
+    procedure LockedAfterLoad;
+    function LockedSearch(const TzId: TTimeZoneID): PtrInt;
+    class function LoadDefault: TSynTimeZone;
   public
     /// initialize the internal storage
     // - but no data is available, until Load* methods are called
     constructor Create;
-    /// retrieve the time zones from Windows registry, or from a local file
-    // - under Linux, the file should be located with the executable, renamed
-    // with a .tz extension - may have been created via SaveToFile(''), or
-    // from a 'TSynTimeZone' bound resource
-    // - "dummycpp" parameter exists only to disambiguate constructors for C++
-    constructor CreateDefault(dummycpp: integer = 0);
     /// finalize the instance
     destructor Destroy; override;
     /// will retrieve the default shared TSynTimeZone instance
-    // - locally created via the CreateDefault constructor
+    // - on Windows, will call LoadFromRegistry
+    // - under Linux, try first with LoadFromResource, then LoadFromFile do should be located with the executable,
     // - see also the NowToLocal/LocalToUtc/UtcToLocal global functions
     class function Default: TSynTimeZone;
+      {$ifdef HASINLINE} static; inline; {$endif}
     {$ifdef OSWINDOWS}
     /// read time zone information from the Windows registry
     procedure LoadFromRegistry;
+    /// the current OS time zone as Zones[] Ids[] Displays[] index
+    // - as retrieved by LoadFromRegistry
+    // - equals -1 if was not retrieved
+    property CurrentIndex: integer
+      read fCurrentIndex;
+    /// change the current OS time zone from its Zones[] Ids[] Displays[] index
+    // - currently only available on Windows
+    // - this method is not thread-safe, because it uses an index
+    procedure ChangeOperatingSystemTimeZone(Index: PtrInt); overload;
+    /// change the current Operating System time zone to a given TzId
+    // - currently only available on Windows
+    // - could be used e.g. as
+    // ! TSynTimeZone.Default.ChangeOperatingSystemTimeZone('UTC');
+    // ! TSynTimeZone.Default.ChangeOperatingSystemTimeZone('Romance Standard Time');
+    procedure ChangeOperatingSystemTimeZone(const TzId: TTimeZoneID); overload;
     {$endif OSWINDOWS}
     /// read time zone information from a compressed file
     // - if no file name is supplied, a ExecutableName.tz file would be used
@@ -1518,11 +1536,9 @@ type
     /// write then time zone information into a compressed memory buffer
     function SaveToBuffer: RawByteString;
     /// retrieve the time bias (in minutes) for a given date/time on a TzId
+    // - this is the main search function of this class
     function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
       out Bias: integer; out HaveDaylight: boolean; ValueIsUtc: boolean = false): boolean;
-    /// retrieve the display text corresponding to a TzId
-    // - returns '' if the supplied TzId is not recognized
-    function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
     /// compute the UTC date/time corrected for a given TzId
     function UtcToLocal(const UtcDateTime: TDateTime; const TzId: TTimeZoneID): TDateTime;
     /// compute the current date/time corrected for a given TzId
@@ -1532,21 +1548,35 @@ type
     // time bias period, so the returned value is informative only, and any
     // stored value should be following UTC
     function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
+    /// retrieve the display text corresponding to a TzId
+    // - returns '' if the supplied TzId is not recognized
+    function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
+    /// low-level thread-unsafe function return the index of a TzID from Ids[]
+    function GetIndex(const TzId: TTimeZoneID): PtrInt;
     /// direct access to the low-level time zone information
     property Zone: TTimeZoneDataDynArray
       read fZone;
     /// direct access to the wrapper over the time zone information array
     property Zones: TDynArrayHashed
       read fZones;
+    /// the number of items in Zone[] Ids[] and Displays[]
+    property Count: integer
+      read fZoneCount;
     /// returns a TStringList of all TzID values
     // - could be used to fill any UI component to select the time zone
     // - order in Ids[] array follows the Zone[].id information
     function Ids: TStrings;
+      {$ifdef HASINLINE} inline; {$endif}
     /// returns a TStringList of all Display text values
     // - could be used to fill any UI component to select the time zone
     // - order in Displays[] array follows the Zone[].display information
     function Displays: TStrings;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
+
+var
+  /// global variable used when inlining TSynTimeZone.Default method
+  SharedSynTimeZone: TSynTimeZone;
 
 /// retrieve the time bias (in minutes) for a given date/time on a TzId
 // - will use a global shared thread-safe TSynTimeZone instance for the request
@@ -1993,7 +2023,7 @@ begin
           'u':
             PCardinal(values[v])^ := GetNextItemCardinal(P, #0);
           'U':
-            PQword(values[v])^ := GetNextItemQword(P, #0);
+            PQWord(values[v])^ := GetNextItemQword(P, #0);
           'f':
             unaligned(PDouble(values[v])^) := GetNextItemDouble(P, #0);
           'F':
@@ -6103,25 +6133,24 @@ begin
   end;
 end;
 
+procedure TTimeZoneData.Clear;
+begin
+  Finalize(self);
+  FillcharFast(tzi, SizeOf(tzi), 0);
+end;
 
-{ TTimeZoneInformation }
+
+{ TSynTimeZone }
+
+// a somewhat-official per-country list between IANA and Microsoft names online:
+// https://github.com/unicode-org/cldr/blob/main/common/supplemental/windowsZones.xml
 
 constructor TSynTimeZone.Create;
 begin
+  fCurrentIndex := -1;
+  fUtcIndex := -1;
   fZones.InitSpecific(TypeInfo(TTimeZoneDataDynArray),
     fZone, ptRawUtf8, @fZoneCount);
-end;
-
-constructor TSynTimeZone.CreateDefault(dummycpp: integer);
-begin
-  Create;
-  {$ifdef OSWINDOWS}
-  LoadFromRegistry;
-  {$else}
-  LoadFromFile;
-  if fZoneCount = 0 then
-    LoadFromResource; // if no .tz file is available, try if bound to executable
-  {$endif OSWINDOWS}
 end;
 
 destructor TSynTimeZone.Destroy;
@@ -6131,23 +6160,32 @@ begin
   fDisplays.Free;
 end;
 
-var
-  SharedSynTimeZone: TSynTimeZone;
+class function TSynTimeZone.LoadDefault: TSynTimeZone;
+begin
+  GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
+  try
+    result := SharedSynTimeZone;
+    if result <> nil then
+      exit;
+    result := TSynTimeZone.Create;
+    {$ifdef OSWINDOWS}
+    result.LoadFromRegistry; // use official Windows registry as reference
+    {$else}
+    result.LoadFromResource; // first try if bound to the executable
+    if result.fZoneCount = 0 then
+      result.LoadFromFile;   // fallback search for a local .tz file
+    {$endif OSWINDOWS}
+    SharedSynTimeZone := RegisterGlobalShutdownRelease(result);
+  finally
+    GlobalUnLock;
+  end;
+end;
 
 class function TSynTimeZone.Default: TSynTimeZone;
 begin
-  if SharedSynTimeZone = nil then
-  begin
-    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
-    try
-      if SharedSynTimeZone = nil then
-        SharedSynTimeZone :=
-          RegisterGlobalShutdownRelease(TSynTimeZone.CreateDefault);
-    finally
-      GlobalUnLock;
-    end;
-  end;
-  result := SharedSynTimeZone;
+  result := SharedSynTimeZone; // efficiently inlined
+  if result = nil then
+    result := LoadDefault;
 end;
 
 function TSynTimeZone.SaveToBuffer: RawByteString;
@@ -6171,16 +6209,57 @@ begin
   FileFromString(SaveToBuffer, FN);
 end;
 
+function TSynTimeZone.LockedSearch(const TzId: TTimeZoneID): PtrInt;
+begin
+  if TzId = '' then
+    result := -1
+  else if TzId = fLastZone then
+    result := fLastIndex
+  else
+  begin
+    result := fZones.FindHashed(TzId);
+    fLastZone := TzId;
+    flastIndex := result;
+  end;
+end;
+
+procedure TSynTimeZone.LockedAfterLoad;
+begin
+  fLastZone := '';
+  FreeAndNil(fIds);
+  FreeAndNil(fDisplays);
+  fZones.ForceReHash;
+  fUtcIndex := LockedSearch('UTC');
+  if fUtcIndex < 0 then
+    fUtcIndex := LockedSearch('GMT Standard Time'); // e.g. for XP
+end;
+
+function IsNotVoidUtc(const TzId: TTimeZoneID): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := PCardinal(TzId)^ = ord('U') + ord('T') shl 8 + ord('C') shl 16;
+end;
+
+function TSynTimeZone.GetIndex(const TzId: TTimeZoneID): PtrInt;
+begin
+  if TzId = '' then
+    result := -1
+  else if (fUtcIndex >= 0) and
+          IsNotVoidUtc(TzId) then
+    result := fUtcIndex
+  else
+    result := LockedSearch(TzId);
+end;
+
 procedure TSynTimeZone.LoadFromBuffer(const Buffer: RawByteString);
 begin
   if Buffer = '' then
-   exit;
+    exit;
   fSafe.WriteLock;
   try
+    fCurrentIndex := -1;
     fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer));
-    fZones.ForceReHash;
-    FreeAndNil(fIds);
-    FreeAndNil(fDisplays);
+    LockedAfterLoad;
   finally
     fSafe.WriteUnLock;
   end;
@@ -6208,17 +6287,27 @@ end;
 
 {$ifdef OSWINDOWS}
 
-procedure TSynTimeZone.LoadFromRegistry;
 const
   REGKEY = 'Software\Microsoft\Windows NT\CurrentVersion\Time Zones\';
+
+procedure TSynTimeZone.LoadFromRegistry;
 var
+  info: TTimeZoneInformation;
+  current: RawUtf8;
   reg: TWinRegistry;
   keys: TRawUtf8DynArray;
   i, first, last, year, n: integer;
-  item: TTimeZoneData;
+  z: TTimeZoneData;
 begin
+  // retrieve current selected system time zone
+  FillCharFast(info, SizeOf(info), 0);
+  GetTimeZoneInformation(info);
+  if info.StandardName[0] <> #0 then
+    current := UnicodeBufferToUtf8(info.StandardName);
+  // read all time zones information from registry
   fSafe.WriteLock;
   try
+    fCurrentIndex := -1;
     fZones.Clear;
     if reg.ReadOpen(wrLocalMachine, REGKEY) then
       keys := reg.ReadEnumEntries
@@ -6227,14 +6316,16 @@ begin
     n := length(keys);
     fZones.Capacity := n;
     for i := 0 to n - 1 do
-    begin
-      Finalize(item);
-      FillcharFast(item.tzi, SizeOf(item.tzi), 0);
       if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i], {reopen=}true) then
       begin
-        item.id := keys[i]; // registry keys are genuine by definition
-        item.display := reg.ReadString('Display');
-        reg.ReadBuffer('TZI', @item.tzi, SizeOf(item.tzi));
+        z.Clear;
+        z.id := keys[i]; // registry keys are genuine by definition
+        z.display := reg.ReadString('Display');
+        reg.ReadBuffer('TZI', @z.tzi, SizeOf(z.tzi));
+        if (fCurrentIndex < 0) and
+           (current <> '') and
+           (reg.ReadString('Std') = current) then
+          fCurrentIndex := fZoneCount;
         if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i] + '\Dynamic DST', true) then
         begin
           // warning: never defined on XP/2003, and not for all entries
@@ -6244,59 +6335,86 @@ begin
              (last >= first) then
           begin
             n := 0;
-            SetLength(item.dyn, last - first + 1);
+            SetLength(z.dyn, last - first + 1);
             for year := first to last do
               if reg.ReadBuffer(Utf8ToSynUnicode(UInt32ToUtf8(year)),
-                @item.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
+                @z.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
               begin
-                item.dyn[n].year := year;
+                z.dyn[n].year := year;
                 inc(n);
               end;
-            SetLength(item.dyn, n);
+            SetLength(z.dyn, n);
           end;
         end;
-        fZones.Add(item);
+        fZones.Add(z);
       end;
-    end;
+    SetLength(fZone, fZoneCount);
     reg.Close;
-    fZones.ForceReHash;
-    FreeAndNil(fIds);
-    FreeAndNil(fDisplays);
+    LockedAfterLoad;
   finally
     fSafe.WriteUnLock;
   end;
 end;
 
-{$endif OSWINDOWS}
-
-function TSynTimeZone.LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+procedure TSynTimeZone.ChangeOperatingSystemTimeZone(const TzId: TTimeZoneID);
+var
+  i: PtrInt;
 begin
-  if TzId = '' then
-    result := -1
-  else
-  begin
-    if TzId = fLastZone then
-      result := fLastIndex
-    else
-    begin
-      result := fZones.FindHashed(TzId);
-      fLastZone := TzId;
-      flastIndex := result;
-    end;
+  fSafe.WriteLock;
+  try
+    i := GetIndex(TzId);
+    if i < 0 then
+      ESynException.RaiseUtf8(
+        'Unknown %.ChangeOperatingSystemTimeZone(%)', [self, TzId]);
+    ChangeOperatingSystemTimeZone(i); // may raise exception
+  finally
+    fSafe.WriteUnLock;
   end;
 end;
+
+procedure TSynTimeZone.ChangeOperatingSystemTimeZone(Index: PtrInt);
+var
+  info: TDynamicTimeZoneInformation;
+  z: ^TTimeZoneData;
+  reg: TWinRegistry;
+begin
+  if PtrUInt(Index) >= PtrUInt(fZoneCount) then
+    ESynException.RaiseUtf8(
+      'Unexpected %.ChangeOperatingSystemTimeZone(%)', [self, Index]);
+  // use the existing information for this zone
+  z := @fZone[Index];
+  FillCharFast(info, SizeOf(info), 0);
+  info.TimeZone.Bias := z^.tzi.Bias;
+  info.TimeZone.StandardDate := TSystemTime(z^.tzi.change_time_std);
+  info.TimeZone.DaylightDate := TSystemTime(z^.tzi.change_time_dlt);
+  info.TimeZone.StandardBias := z^.tzi.bias_std;
+  info.TimeZone.DaylightBias := z^.tzi.bias_dlt;
+  Utf8ToWideChar(@info.TimeZoneKeyName, pointer(z^.id), 128, length(z^.id), true);
+  // retrieve additional information from the registry
+  if not reg.ReadOpen(wrLocalMachine, REGKEY + z^.id) then
+    ESynException.RaiseUtf8('%.ChangeOperatingSystemTimeZone: missing % key',
+      [self, z^.id]); // paranoid
+  try // direct copy of the UTF-16 buffer from registry
+    reg.ReadMax('Std', @info.TimeZone.StandardName, 32 * 2);
+    reg.ReadMax('Dlt', @info.TimeZone.DaylightName, 32 * 2);
+  finally
+    reg.Close;
+  end;
+  // actually change the system time zone - may raise EOSException
+  SetSystemTimeZone(info);
+  fCurrentIndex := Index;
+end;
+
+{$endif OSWINDOWS}
 
 function TSynTimeZone.GetDisplay(const TzId: TTimeZoneID): RawUtf8;
 var
   ndx: PtrInt;
 begin
   fSafe.ReadLock;
-  ndx := LockedFindZoneIndex(TzId);
+  ndx := GetIndex(TzId);
   if ndx < 0 then
-    if TzId = 'UTC' then // e.g. on XP
-      result := TzId
-    else
-      result := ''
+    result := ''
   else
     result := fZone[ndx].display;
   fSafe.ReadUnLock;
@@ -6311,16 +6429,21 @@ var
   tzi: PTimeZoneInfo;
   std, dlt: TDateTime;
 begin
+  // handle most obvious cases
+  Bias := 0;
+  HaveDaylight := false;
+  result := false;
+  if TzId = '' then
+    exit;
+  result := IsNotVoidUtc(TzId);
+  if result then
+    exit;
+  // use the internal hash table
   fSafe.ReadLock;
   try
-    ndx := LockedFindZoneIndex(TzId);
+    ndx := LockedSearch(TzId);
     if ndx < 0 then
-    begin
-      Bias := 0;
-      HaveDaylight := false;
-      result := TzId = 'UTC'; // e.g. on XP
       exit;
-    end;
     d.FromDate(Value); // faster than DecodeDate
     tzi := fZone[ndx].GetTziFor(d.Year);
     if tzi.change_time_std.IsZero then
@@ -6352,10 +6475,10 @@ begin
       else
         Bias := tzi.Bias + tzi.bias_std;
     end;
-    result := true;
   finally
     fSafe.ReadUnLock;
   end;
+  result := true;
 end;
 
 function TSynTimeZone.UtcToLocal(const UtcDateTime: TDateTime;
@@ -6365,7 +6488,8 @@ var
   HaveDaylight: boolean;
 begin
   if (self = nil) or
-     (TzId = '') then
+     (TzId = '') or
+     IsNotVoidUtc(TzId) then
     result := UtcDateTime
   else
   begin
@@ -6386,7 +6510,8 @@ var
   HaveDaylight: boolean;
 begin
   if (self = nil) or
-     (TzID = '') then
+     (TzId = '') or
+     IsNotVoidUtc(TzId) then
     result := LocalDateTime
   else
   begin
@@ -6395,33 +6520,45 @@ begin
   end;
 end;
 
-function TSynTimeZone.Ids: TStrings;
+procedure TSynTimeZone.SetIDs;
 var
   i: PtrInt;
 begin
+  fSafe.WriteLock;
   if fIDs = nil then
   begin
     fIDs := TStringList.Create;
-    fSafe.ReadLock;
     for i := 0 to length(fZone) - 1 do
       fIDs.Add(Utf8ToString(RawUtf8(fZone[i].id)));
-    fSafe.ReadUnLock;
   end;
+  fSafe.WriteUnLock;
+end;
+
+procedure TSynTimeZone.SetDisplays;
+var
+  i: PtrInt;
+begin
+  fSafe.WriteLock;
+  if fDisplays = nil then
+  begin
+    fDisplays := TStringList.Create;
+    for i := 0 to length(fZone) - 1 do
+      fDisplays.Add(Utf8ToString(fZone[i].display));
+  end;
+  fSafe.WriteUnLock;
+end;
+
+function TSynTimeZone.Ids: TStrings;
+begin
+  if fIDs = nil then
+    SetIDs;
   result := fIDs;
 end;
 
 function TSynTimeZone.Displays: TStrings;
-var
-  i: PtrInt;
 begin
   if fDisplays = nil then
-  begin
-    fDisplays := TStringList.Create;
-    fSafe.ReadLock;
-    for i := 0 to length(fZone) - 1 do
-      fDisplays.Add(Utf8ToString(fZone[i].display));
-    fSafe.ReadUnLock;
-  end;
+    SetDisplays;
   result := fDisplays;
 end;
 

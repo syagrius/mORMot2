@@ -140,10 +140,19 @@ const
   nlIP = [nlTcp, nlUdp];
 
 type
-  /// end-user code should use this TNetSocket type to hold a socket reference
+  /// end-user code should use this TNetSocket type to hold a socket handle
   // - then its methods will allow cross-platform access to the connection
   TNetSocket = ^TNetSocketWrap;
+
+  /// pointer reference to a cross-platformsocket handle
   PNetSocket = ^TNetSocket;
+
+  /// dynamic array of socket handles
+  TNetSocketDynArray = array of TNetSocket;
+
+  /// pointer reference to a dynamic array of socket handles
+  // - used e.g. as optional parameter to GetReachableNetAddr()
+  PNetSocketDynArray = ^TNetSocketDynArray;
 
   /// internal mapping of an address, in any supported socket layer
   {$ifdef USERECORDWITHMETHODS}
@@ -180,6 +189,8 @@ type
     function IP(localasvoid: boolean = false): RawUtf8; overload;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// convert this address into its 32-bit IPv4 value, 0 on IPv6/nlUnix
+    // - may return cLocalhost32 for 127.0.0.1
+    // - returns 0 (i.e. 0.0.0.0) for AF_INET6 or AF_UNIX
     function IP4: cardinal;
       {$ifdef FPC}inline;{$endif}
     /// convert this address into its shortstring IPv4/IPv6 textual representation
@@ -211,13 +222,11 @@ type
     function SocketBind(socket: TNetSocket): TNetResult;
   end;
 
-  /// pointer to a socket address mapping
+  /// pointer reference to a socket address mapping
   PNetAddr = ^TNetAddr;
 
+  /// dynamic array of socket addresses
   TNetAddrDynArray = array of TNetAddr;
-
-  TNetSocketDynArray = array of TNetSocket;
-  PNetSocketDynArray = ^TNetSocketDynArray;
 
   PTerminated = ^boolean; // on FPC system.PBoolean doesn't exist :(
 
@@ -349,6 +358,10 @@ type
     // - is likely to flush the cache
     procedure SetTimeOut(aSeconds: integer);
   end;
+
+
+/// internal very low-level function retrieving the latest socket OS error code
+function RawSocketErrNo: integer; {$ifdef OSWINDOWS} stdcall; {$endif}
 
 /// internal low-level function retrieving the latest socket error information
 function NetLastError(AnotherNonFatal: integer = NO_ERROR;
@@ -905,8 +918,10 @@ type
   end;
 
   /// abstract definition of the TLS encrypted layer
-  // - is implemented e.g. by the SChannel API on Windows, or OpenSSL on POSIX
-  // if you include mormot.lib.openssl11 to your project
+  // - is implemented e.g. by the SChannel API on Windows by this unit, or
+  // OpenSSL on POSIX if you include mormot.lib.openssl11 to your project
+  // - on Windows, you can define USE_OPENSSL and FORCE_OPENSSL conditionals
+  // in YOUR project options to switch to OpenSSL instead of SChannel
   INetTls = interface
     /// method called once to attach the socket from the client side
     // - should make the proper client-side TLS handshake and create a session
@@ -976,6 +991,15 @@ var
   // HTTP-01 challenges associated with the OnNetTlsAcceptServerName callback
   OnNetTlsAcceptChallenge: TOnNetTlsAcceptChallenge;
 
+
+{$ifdef OSWINDOWS}
+/// SChannel TLS layer communication factory - as expected by this unit
+// - TLS 1.3 will be available since Windows 11
+// - can be used at runtime to override another implementation e.g.
+// @NewOpenSslNetTls from mormot.lib.openssl11 by executing:
+// ! @NewNetTls := @NewSChannelNetTls;
+function NewSChannelNetTls: INetTls;
+{$endif OSWINDOWS}
 
 
 { ******************** Efficient Multiple Sockets Polling }
@@ -1572,7 +1596,7 @@ type
     fBytesOut: Int64;
     fSecure: INetTls;
     fSockInEofError: integer;
-    fWasBind: boolean;
+    fWasBind, fAborted: boolean;
     fSocketLayer: TNetLayer;
     fSocketFamily: TNetFamily;
     // updated by every SockSend() call
@@ -1674,6 +1698,9 @@ type
     procedure Close; virtual;
     /// close the opened socket, and corresponding SockIn/SockOut
     destructor Destroy; override;
+    /// mark the internal Aborted flag to let any blocking loop abort ASAP
+    // - will also close any associated socket at OS level
+    procedure Abort; virtual;
     /// read Length bytes from SockIn buffer + Sock if necessary
     // - if SockIn is available, it first gets data from SockIn^.Buffer,
     // then directly receive data from socket if UseOnlySockIn = false
@@ -1851,6 +1878,10 @@ type
     property SockOut: PTextFile
       read fSockOut;
     {$endif PUREMORMOT2}
+    /// equals true when the Abort method has been called
+    // - could be used to abort any blocking process ASAP
+    property Aborted: boolean
+      read fAborted;
   published
     /// low-level socket type, initialized after Open() with socket
     property SocketLayer: TNetLayer
@@ -1968,7 +1999,7 @@ function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetRes
 var
   err: integer;
 begin
-  err := sockerrno;
+  err := RawSocketErrNo;
   if Error <> nil then
     Error^ := err;
   case err of
@@ -2248,7 +2279,7 @@ begin
       PCardinal(@sin_addr)^ := cardinal(-1) // 255.255.255.255
     else if (address = cAnyHost) or
             (address = c6AnyHost) then
-      // keep 0.0.0.0
+      // keep 0.0.0.0 for bind - but connect would redirect to 127.0.0.1
     else if NetIsIP4(pointer(address), @sin_addr) or
             GetKnownHost(address, PCardinal(@sin_addr)^) or
             NetAddrCache.SafeFind(address, PCardinal(@sin_addr)^) then
@@ -2823,7 +2854,7 @@ end;
 
 function TNetSocketWrap.GetName(out addr: TNetAddr): TNetResult;
 var
-  len: tsocklen;
+  len: TSockLen;
 begin
   FillCharFast(addr, SizeOf(addr), 0);
   if @self = nil then
@@ -2837,7 +2868,7 @@ end;
 
 function TNetSocketWrap.GetPeer(out addr: TNetAddr): TNetResult;
 var
-  len: tsocklen;
+  len: TSockLen;
 begin
   FillCharFast(addr, SizeOf(addr), 0);
   if @self = nil then
@@ -5061,7 +5092,7 @@ begin
   except
     on E: Exception do
     begin
-      fSecure := nil;
+      fSecure := nil; // reset TLS context
       raise ENetSock.CreateFmt('%s.DoTlsAfter: TLS failed [%s %s]',
         [ClassNameShort(self)^, ClassNameShort(E)^, E.Message]);
     end;
@@ -5219,6 +5250,12 @@ begin
   {$endif OSLINUX}
 end;
 
+function TCrtSocket.SockIsDefined: boolean;
+begin
+  result := (self <> nil) and
+            ({%H-}PtrInt(fSock) > 0);
+end;
+
 const
   SOCKMINBUFSIZE = 1024; // big enough for headers (content will be read directly)
 
@@ -5282,7 +5319,7 @@ begin
       result := WSAECONNABORTED
     else
     begin
-      result := -sockerrno; // ioresult = low-level socket error as negative
+      result := -RawSocketErrNo; // ioresult = low-level socket error as negative
       if result = 0 then
         result := WSAETIMEDOUT;
     end;
@@ -5453,6 +5490,24 @@ begin
   {$endif OSPOSIX}
 end;
 
+procedure TCrtSocket.Abort;
+begin
+  if (self = nil) or
+     fAborted then
+    exit;
+  fAborted := true; // global flag checked within most recv/send loops
+  if Assigned(OnLog) then
+    OnLog(sllTrace, 'Abort socket=%', [fSock.Socket], self);
+  if SockIsDefined then
+    {$ifdef OSWINDOWS}
+    // closing will abort any pending Windows recv/send call in another thread
+    fSock.Close;
+    {$else}
+    // shutdown should do the trick on Linux, without messing the file descriptor
+    shutdown(fSock.Socket, SHUT_RDWR);
+    {$endif OSWINDOWS}
+end;
+
 destructor TCrtSocket.Destroy;
 begin
   Close;
@@ -5489,7 +5544,8 @@ begin
           dec(Length, len);
           inc(result, len);
         end;
-        if Length = 0 then
+        if fAborted or
+           (Length = 0) then
           exit; // we got everything we wanted
         if not UseOnlySockIn then
           break;
@@ -5515,12 +5571,6 @@ begin
   FastSetString(RawUtf8(result), Length); // assume CP_UTF8 for FPC RTL bug
   if SockInRead(pointer(result), Length, UseOnlySockIn) <> Length then
     result := '';
-end;
-
-function TCrtSocket.SockIsDefined: boolean;
-begin
-  result := (self <> nil) and
-            ({%H-}PtrInt(fSock) > 0);
 end;
 
 function TCrtSocket.SockInPending(aTimeOutMS: integer): integer;
@@ -5818,8 +5868,8 @@ begin
       if Assigned(OnLog) then
         OnLog(sllTrace, 'TrySockRecv: timeout after %ms)', [TimeOut], self);
       exit; // identify read timeout as error
-    until false;
-    result := true;
+    until fAborted;
+    result := not fAborted;
   end;
 end;
 
@@ -5861,7 +5911,7 @@ procedure TCrtSocket.SockRecvLn(out Line: RawUtf8; CROnly: boolean);
         end
         else
           inc(P);
-    until false;
+    until fAborted;
   end;
 
 var
@@ -5901,7 +5951,8 @@ begin
   else
     repeat
       SockRecv(@c, 1);
-    until c = #10;
+    until fAborted or
+          (c = #10);
 end;
 
 procedure TCrtSocket.SndLow(P: pointer; Len: integer);
@@ -5948,8 +5999,8 @@ begin
     if (neError in events) or
        not (neWrite in events) then // identify timeout as error
       exit;
-  until false;
-  result := true;
+  until fAborted;
+  result := not fAborted;
 end;
 
 function TCrtSocket.AcceptIncoming(

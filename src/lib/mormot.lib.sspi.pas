@@ -48,7 +48,6 @@ type
   end;
   PTimeStamp = ^TTimeStamp;
 
-
   ALG_ID = cardinal;
   TALG_IDs = array[word] of ALG_ID;
   PALG_IDs = ^TALG_IDs;
@@ -174,6 +173,7 @@ type
     dwExchStrength: cardinal;
     /// retrieve some decoded text representation of this raw information
     // - typically 'ECDHE256-AES128-SHA256 TLSv1.2'
+    // - used only on XP, where SECPKG_ATTR_CIPHER_INFO is not available
     function ToText: RawUtf8;
   end;
   PSecPkgConnectionInfo = ^TSecPkgConnectionInfo;
@@ -306,17 +306,22 @@ const
   SEC_E_UNSUPPORTED_FUNCTION   = $80090302;
   SEC_E_INVALID_TOKEN          = $80090308;
   SEC_E_MESSAGE_ALTERED        = $8009030F;
+  SEC_E_CONTEXT_EXPIRED        = $80090317;
   SEC_E_INCOMPLETE_MESSAGE     = $80090318;
   SEC_E_BUFFER_TOO_SMALL       = $80090321;
   SEC_E_ILLEGAL_MESSAGE        = $80090326;
   SEC_E_CERT_UNKNOWN           = $80090327;
   SEC_E_CERT_EXPIRED           = $80090328;
+  SEC_E_ENCRYPT_FAILURE        = $80090329;
+  SEC_E_DECRYPT_FAILURE        = $80090330;
   SEC_E_ALGORITHM_MISMATCH     = $80090331;
 
   SEC_WINNT_AUTH_IDENTITY_UNICODE = $02;
 
   SCHANNEL_SHUTDOWN = 1;
+
   SCHANNEL_CRED_VERSION = 4;
+  SCH_CREDENTIALS_VERSION = 5;
 
   SCH_CRED_NO_SYSTEM_MAPPER                    = $00000002;
   SCH_CRED_NO_SERVERNAME_CHECK                 = $00000004;
@@ -336,6 +341,7 @@ const
   SCH_CRED_MEMORY_STORE_CERT                   = $00010000;
   SCH_CRED_CACHE_ONLY_URL_RETRIEVAL_ON_CREATE  = $00020000;
   SCH_SEND_ROOT_CERT                           = $00040000;
+  SCH_USE_STRONG_CRYPTO                        = $00400000;
 
 function SspiResToText(res: cardinal): TShort31;
 
@@ -389,11 +395,11 @@ function FreeCredentialsHandle(phCredential: PSecHandle): integer; stdcall;
 type
   _HMAPPER = pointer;
 
-  /// SChannel credential information
-  TSChannelCred = record
+  /// SChannel credential information as SCHANNEL_CRED legacy format
+  TSChannelCredOld = record
     dwVersion: cardinal;
     cCreds: cardinal;
-    paCred: PCCERT_CONTEXT;
+    paCred: PPCCERT_CONTEXT;
     hRootStore: HCERTSTORE;
     cMappers: cardinal;
     aphMappers: _HMAPPER;
@@ -406,8 +412,44 @@ type
     dwFlags: cardinal;
     dwCredFormat: cardinal;
   end;
-  /// pointer to SChannel credential information
-  PSChannelCred = ^TSChannelCred;
+
+  /// SChannel TLS information within new Win10+ SCH_CREDENTIALS
+  TSChannelCredTls = record
+    cAlpnIds: cardinal;
+    rgstrAlpnIds: PUNICODE_STRING;
+    grbitDisabledProtocols: cardinal;
+    cDisabledCrypto: cardinal;
+    pDisabledCrypto: pointer;
+    dwFlags: cardinal;
+  end;
+  PSChannelCredTls = ^TSChannelCredTls;
+
+  /// SChannel credential information as Win10+ SCH_CREDENTIALS
+  TSChannelCredNew = record
+    dwVersion: cardinal;
+    dwCredFormat: cardinal;
+    cCreds: cardinal;
+    paCred: PPCCERT_CONTEXT;
+    hRootStore: HCERTSTORE;
+    cMappers: cardinal;
+    aphMappers: _HMAPPER;
+    dwSessionLifespan: cardinal;
+    dwFlags: cardinal;
+    cTlsParameters: cardinal;
+    pTlsParameters: PSChannelCredTls;
+  end;
+
+  /// SChannel credential information, in legacy or Win11 format
+  TSChannelCred = record
+    case integer of // not a true dwVersion field to avoid Win64 alignment issue
+      SCHANNEL_CRED_VERSION: (
+        Old: TSChannelCredOld;
+      );
+      SCH_CREDENTIALS_VERSION: (
+        New: TSChannelCredNew;
+        Tls: TSChannelCredTls; // refered from New.pTlsParameters
+      );
+  end;
 
   /// store a memory buffer during SChannel encryption
   TCryptDataBlob = record
@@ -424,18 +466,21 @@ type
 const
   UNISP_NAME = 'Microsoft Unified Security Protocol Provider';
 
-  SP_PROT_TLS1          = $0C0;
-  SP_PROT_TLS1_SERVER   = $040;
-  SP_PROT_TLS1_CLIENT   = $080;
-  SP_PROT_TLS1_1        = $300;
+  SP_PROT_TLS1_0_SERVER = $040;
+  SP_PROT_TLS1_0_CLIENT = $080;
   SP_PROT_TLS1_1_SERVER = $100;
   SP_PROT_TLS1_1_CLIENT = $200;
-  SP_PROT_TLS1_2        = $C00;
   SP_PROT_TLS1_2_SERVER = $400;
   SP_PROT_TLS1_2_CLIENT = $800;
-  SP_PROT_TLS1_3        = $3000; // Windows Server 2022 ;)
-  SP_PROT_TLS1_3_SERVER = $1000;
+  SP_PROT_TLS1_3_SERVER = $1000; // Windows 11 or Windows Server 2022 ;)
   SP_PROT_TLS1_3_CLIENT = $2000;
+
+  SP_PROT_TLS1_0   = SP_PROT_TLS1_0_CLIENT or SP_PROT_TLS1_0_SERVER;
+  SP_PROT_TLS1_1   = SP_PROT_TLS1_1_CLIENT or SP_PROT_TLS1_1_SERVER;
+  SP_PROT_TLS1_2   = SP_PROT_TLS1_2_CLIENT or SP_PROT_TLS1_2_SERVER;
+  SP_PROT_TLS1_3   = SP_PROT_TLS1_3_CLIENT or SP_PROT_TLS1_3_SERVER;
+  // TLS 1.0 and TLS 1.1 are universally deprecated
+  SP_PROT_TLS_SAFE = SP_PROT_TLS1_2 or SP_PROT_TLS1_3;
 
   PKCS12_INCLUDE_EXTENDED_PROPERTIES = $10;
 
@@ -987,8 +1032,14 @@ begin
       result := 'SEC_I_INCOMPLETE_CREDENTIALS';
     SEC_I_RENEGOTIATE:
       result := 'SEC_I_RENEGOTIATE';
+    SEC_E_UNSUPPORTED_FUNCTION:
+      result := 'SEC_E_UNSUPPORTED_FUNCTION';
     SEC_E_INCOMPLETE_MESSAGE:
       result := 'SEC_E_INCOMPLETE_MESSAGE';
+    SEC_E_BUFFER_TOO_SMALL:
+      result := 'SEC_E_BUFFER_TOO_SMALL';
+    SEC_E_MESSAGE_ALTERED:
+      result := 'SEC_E_MESSAGE_ALTERED';
     SEC_E_INVALID_TOKEN:
       result := 'SEC_E_INVALID_TOKEN';
     SEC_E_ILLEGAL_MESSAGE:
@@ -997,14 +1048,14 @@ begin
       result := 'SEC_E_CERT_UNKNOWN';
     SEC_E_CERT_EXPIRED:
       result := 'SEC_E_CERT_EXPIRED';
+    SEC_E_CONTEXT_EXPIRED:
+      result := 'SEC_E_CONTEXT_EXPIRED';
+    SEC_E_ENCRYPT_FAILURE:
+      result := 'SEC_E_ENCRYPT_FAILURE';
+    SEC_E_DECRYPT_FAILURE:
+      result := 'SEC_E_DECRYPT_FAILURE';
     SEC_E_ALGORITHM_MISMATCH:
       result := 'SEC_E_ALGORITHM_MISMATCH';
-    SEC_E_UNSUPPORTED_FUNCTION:
-      result := 'SEC_E_UNSUPPORTED_FUNCTION';
-    SEC_E_MESSAGE_ALTERED:
-      result := 'SEC_E_MESSAGE_ALTERED';
-    SEC_E_BUFFER_TOO_SMALL:
-      result := 'SEC_E_BUFFER_TOO_SMALL';
   else
     str(res, result);
   end;
@@ -1072,7 +1123,7 @@ end;
 
 procedure FixProtocol(var dwProtocol: cardinal);
 begin
-  if dwProtocol and SP_PROT_TLS1 <> 0 then
+  if dwProtocol and SP_PROT_TLS1_0 <> 0 then
     dwProtocol := 0
   else if dwProtocol and SP_PROT_TLS1_1 <> 0 then
     dwProtocol := 1
@@ -1082,16 +1133,19 @@ begin
     dwProtocol := 3;
 end;
 
-function TSecPkgConnectionInfo.ToText: RawUtf8;
+function TSecPkgConnectionInfo.ToText: RawUtf8;  // fallback on XP
 var
   h: byte;
   alg, hsh, xch: string[5];
 begin
+  // see https://learn.microsoft.com/en-us/windows/win32/seccrypto/alg-id                       
   FixProtocol(dwProtocol);
   if aiCipher and $1f in [14..17] then
     alg := 'AES'
   else if aiCipher = $6801 then
     alg := 'RC4-'
+  else if aiCipher = $6603 then
+    alg := '3DES-'
   else
     str(aiCipher and $1f, alg);
   h := aiHash and $1f;
@@ -1166,24 +1220,22 @@ end;
 
 procedure FreeSecurityContext(var handle: TSecHandle);
 begin
-  if (handle.dwLower <> -1) or
-     (handle.dwUpper <> -1) then
-  begin
-    DeleteSecurityContext(@handle);
-    handle.dwLower := -1;
-    handle.dwUpper := -1;
-  end;
+  if (handle.dwLower = -1) and
+     (handle.dwUpper = -1) then
+    exit;
+  DeleteSecurityContext(@handle);
+  handle.dwLower := -1;
+  handle.dwUpper := -1;
 end;
 
 procedure FreeCredentialsContext(var handle: TSecHandle);
 begin
-  if (handle.dwLower <> -1) or
-     (handle.dwUpper <> -1) then
-  begin
-    FreeCredentialsHandle(@handle);
-    handle.dwLower := -1;
-    handle.dwUpper := -1;
-  end;
+  if (handle.dwLower = -1) and
+     (handle.dwUpper = -1) then
+    exit;
+  FreeCredentialsHandle(@handle);
+  handle.dwLower := -1;
+  handle.dwUpper := -1;
 end;
 
 procedure FreeSecContext(var aSecContext: TSecContext);
@@ -1731,8 +1783,8 @@ begin
   OutDesc.cBuffers := 1;
   OutDesc.pBuffers := @OutBuf;
   Status := AcceptSecurityContext(@aSecContext.CredHandle, LInCtxPtr, @InDesc,
-      ASC_REQ_ALLOCATE_MEMORY or ASC_REQ_CONFIDENTIALITY,
-      SECURITY_NATIVE_DREP, @aSecContext.CtxHandle, @OutDesc, CtxAttr, nil);
+    ASC_REQ_ALLOCATE_MEMORY or ASC_REQ_CONFIDENTIALITY,
+    SECURITY_NATIVE_DREP, @aSecContext.CtxHandle, @OutDesc, CtxAttr, nil);
   result := (Status = SEC_I_CONTINUE_NEEDED) or
             (Status = SEC_I_COMPLETE_AND_CONTINUE);
   if (Status = SEC_I_COMPLETE_NEEDED) or

@@ -32,7 +32,7 @@ type
   // - and we also use PtrInt for our TNetSocketWrap cast
   TSocket = PtrInt;
 
-  tsocklen = integer;
+  TSockLen = integer;
 
   PFDSet = ^TFDSet;
   TFDSet = record
@@ -412,7 +412,7 @@ function WSAStartup(wVersionRequired: word; var WSData: TWSAData): integer; stdc
 function WSACleanup: integer; stdcall;
   external ws2 name 'WSACleanup';
 
-function sockerrno: integer; stdcall;
+function RawSocketErrNo: integer; stdcall;
   external ws2 name 'WSAGetLastError';
 
 function getaddrinfo(NodeName, ServName: PAnsiChar; Hints: PAddrInfo;
@@ -535,6 +535,7 @@ var
     NumberOfBytesToWrite, NumberOfBytesPerSend: DWORD; pOvp: POverlapped;
     pTransmitBuffers: PTransmitFileBuffers; dwFlags: DWORD): BOOL; stdcall;
   }
+
 
 { ******** TNetSocket Cross-Platform Wrapper }
 
@@ -723,7 +724,7 @@ begin
   if res < 0 then
   begin
     if loerr <> nil then
-      loerr^ := sockerrno;
+      loerr^ := RawSocketErrNo;
     exit; // returning [neError]
   end;
   result := [];
@@ -828,9 +829,9 @@ const
   IF_TYPE_IEEE80211         = 71; // Vista+
   IF_TYPE_TUNNEL            = 131;
 
-  MAX_HOSTNAME_LEN = 128;
-  MAX_DOMAIN_NAME_LEN = 128;
-  MAX_SCOPE_ID_LEN = 256;
+  MAX_HOSTNAME_LEN        = 128;
+  MAX_DOMAIN_NAME_LEN     = 128;
+  MAX_SCOPE_ID_LEN        = 256;
   MAX_ADAPTER_ADDRESS_LEN = 8;
 
 type
@@ -1558,7 +1559,7 @@ begin
         tmplen := mormot.net.sock.recv(sub^.socket, @tmp, tmplen, 0);
         fOnLog(sllWarning, 'leak sock=% over=% recv=% %',
           [pointer(sub^.socket), PtrUInt(sub^.over[wieRecv].overlapped.Internal),
-           tmplen, sockerrno], self);
+           tmplen, RawSocketErrNo], self);
       end;
       if wioUnsubscribeShutdownSocket in fOptions then
         TNetSocket(sub^.socket).ShutdownAndClose({rdwr=}false);
@@ -1647,13 +1648,13 @@ begin
       // and work with regular sockets recv() calls like TPollSocketAbstract
       result := // WSARecv=NO_ERROR if there is something to recv()
         (WSARecv(o^.socket, oe^.buf, 1, bytes, flags, @oe^.overlapped) = NO_ERROR) or
-        (sockerrno = WSAIOPENDING); // WSAIOPENDING = wait for incoming data
+        (RawSocketErrNo = WSAIOPENDING); // WSAIOPENDING = wait for incoming data
     wieSend:
       // from mormot.net.async: overlapped write with buf/buflen = connection.fWr
       // to avoid GetNext returning with no delay (and save a syscall)
       result :=
         (WSASend(o^.socket, oe^.buf, 1, bytes, 0, @oe^.overlapped) = NO_ERROR) or
-        (sockerrno = WSAIOPENDING);
+        (RawSocketErrNo = WSAIOPENDING);
     wieAccept:
       // overlapped AcceptEx() to be followed by GetNextAcceptAndPrepare()
       // from mormot.net.async: not used, unless IOCP_ACCEPTEX is defined
@@ -1670,7 +1671,7 @@ begin
           result := acceptex(
                      o^.Socket, TSocket(netsock), pointer(fAcceptExBuf), 0,
                      ACCEPTEX_SIZE, ACCEPTEX_SIZE, bytes, @oe^.overlapped) or
-                    (sockerrno = WSAIOPENDING)
+                    (RawSocketErrNo = WSAIOPENDING)
         end
         else
           err := 'concurrent wieAccept'
@@ -1687,7 +1688,7 @@ begin
             if bind(TSocket(netsock), PSockAddr(buf), buflen) = NO_ERROR then
               result := connectex(TSocket(netsock), PSockAddr(buf), buflen,
                           nil, 0, bytes, @oe^.overlapped) or
-                        (sockerrno = WSAIOPENDING)
+                        (RawSocketErrNo = WSAIOPENDING)
             else
               err := 'bind error'
           else
@@ -1889,6 +1890,9 @@ type
     fAcceptCertStore: HCERTSTORE;
     procedure ESChannelRaiseLastError(const ctx: shortstring; res: cardinal);
     function CheckSEC_E_OK(const ctx: shortstring; res: integer): cardinal;
+    function FreeAndCheckSocket(const ctx: shortstring; res: integer;
+      tofree: pointer): cardinal;
+    function HandshakeStep(buf: PByteArray; var len: integer): cardinal;
     procedure HandshakeLoop;
     procedure FinalizeCredCtxt;
   public
@@ -1912,12 +1916,14 @@ type
 procedure TSChannelNetTls.ESChannelRaiseLastError(
   const ctx: shortstring; res: cardinal);
 var
-  syserr: integer;
+  sys: integer;
+  msg: string;
 begin
-  syserr := GetLastError;
-  raise ESChannel.CreateFmt('<%s>: %s returned %x [%s], System Error %d [%s]',
-    [fServerAddressW, ctx, res, SspiResToText(res), syserr,
-     string(GetErrorText(syserr))]);
+  sys := GetLastError;
+  msg := format('<%s>: %s returned %x [%s], System Error %d [%s]',
+    [fServerAddressW, ctx, res, SspiResToText(res), sys, GetErrorText(sys)]);
+  //writeln(fSocket.Socket,' ',msg);
+  raise ESChannel.Create(msg);
 end;
 
 function TSChannelNetTls.CheckSEC_E_OK(
@@ -1929,10 +1935,14 @@ begin
   result := res;
 end;
 
-function CheckSocket(const ctx: shortstring; res: integer): cardinal;
+function TSChannelNetTls.FreeAndCheckSocket(const ctx: shortstring;
+  res: integer; tofree: pointer): cardinal;
 begin
+  //writeln(fSocket.Socket,' ',ctx,'=',res);
+  if tofree <> nil then
+    CheckSEC_E_OK(ctx, FreeContextBuffer(tofree)); // avoid leak id raised
   if res = SOCKET_ERROR then
-    raise ESChannel.CreateFmt('%s: Socket Error %d', [ctx, sockerrno]);
+    raise ESChannel.CreateFmt('%s: Socket Error %d', [ctx, RawSocketErrNo]);
   if res = 0 then
     raise ESChannel.CreateFmt('%s: Handshake aborted', [ctx]);
   result := res;
@@ -1971,18 +1981,49 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
-procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean);
+procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean;
+  dwFlags: cardinal; paServCred: PPCCERT_CONTEXT);
 begin
   FillCharFast(cred, SizeOf(cred), 0);
-  cred.dwVersion := SCHANNEL_CRED_VERSION;
-  cred.grbitEnabledProtocols :=
-      SP_PROT_TLS1_2_CLIENT or SP_PROT_TLS1_3_CLIENT or
-      SP_PROT_TLS1_2_SERVER or SP_PROT_TLS1_3_SERVER;
-  if (OSVersion < wSeven) or // XP and Vista only support TLS 1.0 anyway :(
-     AllowDeprecatedTls then
-    cred.grbitEnabledProtocols := cred.grbitEnabledProtocols or
-      SP_PROT_TLS1_CLIENT or SP_PROT_TLS1_1_CLIENT or
-      SP_PROT_TLS1_SERVER or SP_PROT_TLS1_1_SERVER;
+  // TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
+  // Enabling TLS 1.3 on earlier versions of Windows is possible through the
+  // registry, but is explictly documented as unsafe by Microsoft.
+  // https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
+  if (OSVersion in [wEleven, wEleven_64]) or
+     (OSVersion >= wServer2022_64) then
+  begin
+    // require new SCH_CREDENTIALS structure in order to enable TLS 1.3
+    cred.New.dwVersion := SCH_CREDENTIALS_VERSION;
+    if not AllowDeprecatedTLS then
+    begin
+      dwFlags := dwFlags or SCH_USE_STRONG_CRYPTO;
+      cred.New.cTlsParameters := 1;
+      cred.New.pTlsParameters := @cred.Tls;
+      cred.Tls.grbitDisabledProtocols := cardinal(not SP_PROT_TLS_SAFE);
+    end;
+    cred.New.dwFlags := dwFlags;
+    if paServCred <> nil then
+    begin
+      cred.New.cCreds := 1;
+      cred.New.paCred := paServCred;
+    end;
+  end
+  else
+  begin
+    // legacy SCHANNEL_CRED structure - deprecated since Windows 10, 1809
+    cred.Old.dwVersion := SCHANNEL_CRED_VERSION;
+    cred.Old.dwFlags := dwFlags;
+    cred.Old.grbitEnabledProtocols := SP_PROT_TLS_SAFE;
+    if (OSVersion < wSeven) or // XP and Vista only support TLS 1.0 anyway :(
+       AllowDeprecatedTls then
+      cred.Old.grbitEnabledProtocols := cred.Old.grbitEnabledProtocols or
+        SP_PROT_TLS1_0 or SP_PROT_TLS1_1;
+    if paServCred <> nil then
+    begin
+      cred.Old.cCreds := 1;
+      cred.Old.paCred := paServCred;
+    end;
+  end;
 end;
 
 procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
@@ -2001,12 +2042,13 @@ begin
   trial := 0;
   while true do
     try
-      CredInit(cred, Context.AllowDeprecatedTLS);
       if Context.IgnoreCertificateErrors then
-        cred.dwFlags := SCH_CRED_MANUAL_CRED_VALIDATION
+        f := SCH_CRED_MANUAL_CRED_VALIDATION or
+             SCH_CRED_NO_DEFAULT_CREDS
       else
-        cred.dwFlags := SCH_CRED_REVOCATION_CHECK_CHAIN or
-                        SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+        f := SCH_CRED_REVOCATION_CHECK_CHAIN or
+             SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+      CredInit(cred, Context.AllowDeprecatedTLS, f, nil);
       CheckSEC_E_OK('AcquireCredentialsHandleW', AcquireCredentialsHandleW(
         nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
       fDataPos := 0;
@@ -2025,10 +2067,9 @@ begin
       if (buf.buf[2].cbBuffer = 0) or // SECBUFFER_TOKEN
          (buf.buf[2].pvBuffer = nil) then
         raise ESChannel.CreateFmt('Void Hello answer to %s', [ServerAddress]);
-      CheckSocket('send', mormot.net.sock.Send(
-        fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0));
-      CheckSEC_E_OK('FreeContextBuffer',
-        FreeContextBuffer(buf.buf[2].pvBuffer));
+      FreeAndCheckSocket('send', mormot.net.sock.Send(
+        fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0),
+        buf.buf[2].pvBuffer);
       // make TLS handshake and prepare for process
       HandshakeLoop;
       break; // we are connected
@@ -2122,9 +2163,7 @@ begin
   // prepare TLS connection properties from AfterBind() global certificate
   if BoundContext.AcceptCert = nil then
     raise ESChannel.Create('AfterAccept: missing AfterBind');
-  CredInit(cred, BoundContext.AllowDeprecatedTls);
-  cred.cCreds := 1;
-  cred.paCred := @BoundContext.AcceptCert;
+  CredInit(cred, BoundContext.AllowDeprecatedTls, 0, @BoundContext.AcceptCert);
   CheckSEC_E_OK('AcquireCredentialsHandleW',
     AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
       nil, @cred, nil, nil, @fCred, nil));
@@ -2150,73 +2189,72 @@ begin
   result := @fCtxt; // return as PCtxtHandle
 end;
 
-procedure TSChannelNetTls.HandshakeLoop;
-
-  function ComputeAndSendAnswer: cardinal;
-  var
-    f: cardinal;
-    buf: THandshakeBuf;
-    LInCtxPtr: PSecHandle;
+function TSChannelNetTls.HandshakeStep(buf: PByteArray; var len: integer): cardinal;
+var
+  f: cardinal;
+  b: THandshakeBuf;
+  LInCtxPtr: PSecHandle;
+begin
+  //writeln(fSocket.Socket,' Handshake STEP ', len);
+  HandshakeBufInit(b);
+  b.buf[0].pvBuffer := buf; // SECBUFFER_TOKEN
+  b.buf[0].cbBuffer := len;
+  f := 0;
+  if fAccept then // server side
   begin
-    HandshakeBufInit(buf);
-    buf.buf[0].cbBuffer := fDataCount; // SECBUFFER_TOKEN
-    buf.buf[0].pvBuffer := pointer(fData);
-    f := 0;
-    if fAccept then
-    begin
-      if (fCtxt.dwLower = 0) and (fCtxt.dwUpper = 0) then
-        LInCtxPtr := nil
-      else
-        LInCtxPtr := @fCtxt;
-      result := AcceptSecurityContext(
-        @fCred, LInCtxPtr, @buf.input, fFlags, 0, @fCtxt, @buf.output, f, nil);
-    end
+    if (fCtxt.dwLower = 0) and
+       (fCtxt.dwUpper = 0) then
+      LInCtxPtr := nil
     else
-      result := InitializeSecurityContextW(
-        @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
-        @buf.input, 0, nil, @buf.output, f, nil);
-    //writeln(IntToHex(result, 8),' [',SspiResToText(result),'] tosend=',buf.buf[2].cbBuffer);
-    if (result = SEC_E_OK) or
-       (result = SEC_I_CONTINUE_NEEDED) or
-       ((f and ISC_REQ_EXTENDED_ERROR) <> 0) then
-      if (buf.buf[2].cbBuffer <> 0) and
-         (buf.buf[2].pvBuffer <> nil) then
-      begin
-        // need to send back something to the server
-        CheckSocket('send', mormot.net.sock.Send(
-          fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0));
-        CheckSEC_E_OK('FreeContextBuffer',
-          FreeContextBuffer(buf.buf[2].pvBuffer));
-      end;
-    if (buf.buf[1].BufferType = SECBUFFER_EXTRA) and
-       (buf.buf[1].cbBuffer <> 0) then
-    begin
-      // reuse pending bytes - avoid unexpected SEC_E_INVALID_TOKEN
-      //writeln('SECBUFFER_EXTRA=',buf.buf[1].cbBuffer,' / ',fDataCount);
-      MoveFast(PByteArray(fData)[cardinal(fDataCount) - buf.buf[1].cbBuffer],
-               PByteArray(fData)[0], buf.buf[1].cbBuffer);
-      fDataCount := buf.buf[1].cbBuffer;
-    end
-    else if result <> SEC_E_INCOMPLETE_MESSAGE then
-      fDataCount := 0;
-  end;
+      LInCtxPtr := @fCtxt;
+    result := AcceptSecurityContext(
+      @fCred, LInCtxPtr, @b.input, fFlags, 0, @fCtxt, @b.output, f, nil);
+  end
+  else // client side
+    result := InitializeSecurityContextW(
+      @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
+      @b.input, 0, nil, @b.output, f, nil);
+  //writeln(fSocket.Socket,' ',SspiResToText(result),' tosend=',b.buf[2].cbBuffer);
+  if (result = SEC_E_OK) or
+     (result = SEC_I_CONTINUE_NEEDED) or
+     ((f and ISC_REQ_EXTENDED_ERROR) <> 0) then
+    if (b.buf[2].cbBuffer <> 0) and
+       (b.buf[2].pvBuffer <> nil) then
+      // need to send back something to the server
+      FreeAndCheckSocket('send', mormot.net.sock.Send(
+        fSocket.Socket, b.buf[2].pvBuffer, b.buf[2].cbBuffer, 0),
+        b.buf[2].pvBuffer);
+  if (b.buf[1].BufferType = SECBUFFER_EXTRA) and
+     (b.buf[1].cbBuffer <> 0) then
+  begin
+    // reuse pending bytes - avoid unexpected SEC_E_INVALID_TOKEN
+    //writeln(fSocket.Socket,' SECBUFFER_EXTRA=',b.buf[1].cbBuffer,'/',len);
+    MoveFast(buf[cardinal(len) - b.buf[1].cbBuffer], buf[0], b.buf[1].cbBuffer);
+    len := b.buf[1].cbBuffer;
+  end
+  else if result <> SEC_E_INCOMPLETE_MESSAGE then
+    len := 0;
+end;
 
+procedure TSChannelNetTls.HandshakeLoop;
 var
   res: cardinal;
 begin
+  //writeln(fSocket.Socket,' Handshake IN');
   repeat
-    inc(fDataCount, CheckSocket('recv',
+    inc(fDataCount, FreeAndCheckSocket('recv',
       recv(fSocket.Socket,
-        @PByteArray(fData)[fDataCount], length(fData) - fDataCount, 0)));
-    res := ComputeAndSendAnswer;
+        @PByteArray(fData)[fDataCount], length(fData) - fDataCount, 0), nil));
+    res := HandshakeStep(pointer(fData), fDataCount);
     if res = SEC_I_INCOMPLETE_CREDENTIALS then
       // check https://stackoverflow.com/a/47479968/458259
-      res := ComputeAndSendAnswer; // run twice to let the handshake pass
+      // run twice to let the handshake pass
+      res := HandshakeStep(pointer(fData), fDataCount);
   until (res <> SEC_I_CONTINUE_NEEDED) and
         (res <> SEC_E_INCOMPLETE_MESSAGE);
-  CheckSEC_E_OK('ComputeAndSendAnswer', res);
+  CheckSEC_E_OK('HandshakeStep', res);
   // note: fDataCount trailing content may come from SECBUFFER_EXTRA bytes
-  fCipherName := ''; // will be retrieved if needed 
+  fCipherName := ''; // will be retrieved if needed
   if fInputSize = 0 then
   begin
     // retrieve the TLS field sizes during first handshake
@@ -2229,6 +2267,7 @@ begin
     SetLength(fInput, fInputSize);
     fInputCount := 0;
   end;
+  //writeln(fSocket.Socket,' Handshake OUT inputsize=',fInputSize);
 end;
 
 destructor TSChannelNetTls.Destroy;
@@ -2293,7 +2332,6 @@ var
   buf: array[0..3] of TSecBuffer;
   res: cardinal;
   read, i, newlen: integer;
-  needsRenegotiate: boolean;
 
   function DecryptInput: cardinal;
   var
@@ -2345,11 +2383,11 @@ begin
       inc(fInputCount, read);
       res := DecryptInput;
     until res <> SEC_E_INCOMPLETE_MESSAGE;
-    needsRenegotiate := false;
     repeat
+//if res <> SEC_E_OK then writeln(fSocket.Socket,' res=',SspiResToText(res));
       case res of
         SEC_I_RENEGOTIATE:
-          needsRenegotiate := true;
+          ; // appears with TLS 1.3
         SEC_I_CONTEXT_EXPIRED:
           fSessionClosed := true;
         SEC_E_INCOMPLETE_MESSAGE:
@@ -2358,7 +2396,7 @@ begin
           CheckSEC_E_OK('DecryptInput', res);
       end;
       fInputCount := 0;
-      for i := 1 to 3 do
+      for i := 1 to 3 do // i=0 for SECBUFFER_DATA input
         case buf[i].BufferType of
           SECBUFFER_DATA:
             begin
@@ -2374,15 +2412,17 @@ begin
               fInputCount := buf[i].cbBuffer;
             end;
         end;
+      if res = SEC_I_RENEGOTIATE then
+// https://learn.microsoft.com/en-us/windows/win32/secauthn/decryptmessage--schannel#remarks
+        HandshakeStep(pointer(fInput), fInputCount);
       if fInputCount = 0 then
         break;
       res := DecryptInput;
     until false;
-    if needsRenegotiate then
-      HandshakeLoop;
   except
+    // catch any socket/SChannel exception for the caller to shutdown the socket
     result := nrFatalError;
-    exit; // shutdown the connection on ESChannel fatal error
+    exit;
   end;
   read := fDataCount;
   if Length < read then
@@ -2428,7 +2468,7 @@ begin
     buf[3].BufferType := SECBUFFER_EMPTY;
     buf[3].pvBuffer := nil;
     if EncryptMessage(@fCtxt, 0, @desc, 0) <> SEC_E_OK then
-      exit; // shutdown the connection on SChannel error
+      exit; // caller would shutdown the connection on SChannel error
     len := buf[0].cbBuffer + buf[1].cbBuffer + buf[2].cbBuffer;
     sent := 0;
     repeat
@@ -2479,20 +2519,24 @@ procedure InitializeUnit;
 var
   sock: TSocket;
 begin
+  // the Windows Sockets API (WSA) needs explicit initialization
   WSAStartup($0202, WsaDataOnce);
   SocketAPIVersion := RawUtf8(Format('%s.%d',
     [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
+  // get some low-level extended functions for IOCP
   sock := socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   acceptex := GetExtensionFunc(sock, WSAID_ACCEPTEX);
   getacceptexsockaddrs := GetExtensionFunc(sock, WSAID_GETACCEPTEXSOCKADDRS);
   connectex := GetExtensionFunc(sock, WSAID_CONNECTEX);
   //transmitfile := GetExtensionFunc(sock, WSAID_TRANSMITFILE);
   closesocket(sock);
+  // we can use SChannel for TLS support (including TLS 1.3 on Windows 11)
   NewNetTls := NewSChannelNetTls;
 end;
 
 procedure FinalizeUnit;
 begin
+  // the Windows Sockets API (WSA) needs explicit finalization
   WSACleanup;
 end;
 

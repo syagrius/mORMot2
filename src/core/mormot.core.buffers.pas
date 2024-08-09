@@ -1824,6 +1824,13 @@ const
 // compressed zip/gz/gif/png/jpeg/avi/mp3/mp4 markers (aka "magic numbers")
 function IsContentCompressed(Content: pointer; Len: PtrInt): boolean;
 
+/// recognize e.g. 'text/css' or 'application/json' as compressible
+function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
+
+/// recognize e.g. 'text/css' or 'application/json' as compressible
+function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// fast guess of the size, in pixels, of a JPEG memory buffer
 // - will only scan for basic JPEG structure, up to the StartOfFrame (SOF) chunk
 // - returns TRUE if the buffer is likely to be a JPEG picture, and set the
@@ -2667,25 +2674,25 @@ type
   /// pointer reference to a TRawByteStringGroup
   PRawByteStringGroup = ^TRawByteStringGroup;
 
-  /// thread-safe reusable set of constant RawByteString instances
-  // - use internally its own TLockedList O(1) efficient structure
+  /// thread-safe reusable set of constant RawByteString/RawUtf8 instances
+  // - all RawByteString will be constant (RefCnt=-2) with some max length
+  // - maintain internally its own TLockedList O(1) set of instances
   // - warning: any call to New() should manually be followed by one Release()
-  TRawByteStringCached = class
+  TRawByteStringHeap = class
   protected
-    fLength: integer;
+    fMaxLength: TStrLen;
     fOne: TLockedList;
   public
-    /// initialize the internal cache for a given length
-    constructor Create(aLength: integer);
-    /// return a new RawByteString of a given length, with refcount = -2
-    // - may be allocated or returned from its internal cache
-    procedure New(var aDest: RawByteString;
-      aCodePage: integer = CP_RAWBYTESTRING); overload;
+    /// initialize the internal cache for a given maximum length
+    constructor Create(aMaxLength: integer);
+    /// return a new RawByteString of a given length, with refcount=-2
+    // - if aTextLen is its default 0, MaxLength will be used
+    // - returned from its internal cache, unless aTextLen>MaxLength, which will
+    // allocate a regular RawByteString from heap
+    procedure New(var aDest: RawByteString; aText: PUtf8Char = nil;
+      aTextLen: TStrLen = 0; aCodePage: integer = CP_RAWBYTESTRING); overload;
     /// return a new RawUtf8 of a given length, with refcount = -2
-    procedure New(var aDest: RawUtf8); overload;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// return a new RawUtf8 of a given length into a pointer, with refcount = -2
-    procedure NewUtf8(var aDest: pointer);
+    procedure New(var aDest: RawUtf8; aText: PUtf8Char; aTextLen: TStrLen); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// put back a RawByteString acquired from New() into the internal cache
     procedure Release(var aDest: RawByteString); overload;
@@ -2704,9 +2711,9 @@ type
     /// how many New() calls are currently active
     property Count: integer
       read fOne.Count;
-    /// the length() of RawByteString returned by New()
-    property Length: integer
-      read fLength;
+    /// the maximum length() of RawByteString returned by New()
+    property MaxLength: TStrLen
+      read fMaxLength;
   end;
 
   /// store one RawByteString content with an associated length
@@ -8886,6 +8893,42 @@ begin
       end;
 end;
 
+const
+  _CONTENT: array[0..3] of PUtf8Char = (
+    'TEXT/',
+    'IMAGE/',
+    'APPLICATION/',
+    nil);
+  _CONTENT_IMG: array[0..2] of PUtf8Char = (
+    'SVG',
+    'X-ICO',
+    nil);
+  _CONTENT_APP: array[0..4] of PUtf8Char = (
+    'JSON',
+    'XML',
+    'JAVASCRIPT',
+    'VND.API+JSON',
+    nil);
+
+function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
+begin
+  case IdemPPChar(ContentType, @_CONTENT) of
+    0: // text/*
+      result := true;
+    1: // image/*
+      result := IdemPPChar(ContentType + 6, @_CONTENT_IMG) >= 0;
+    2: // application/*
+      result := IdemPPChar(ContentType + 12, @_CONTENT_APP) >= 0;
+  else
+    result := false;
+  end;
+end;
+
+function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
+begin
+  result := IsContentTypeCompressible(pointer(ContentType));
+end;
+
 function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
   out Height, Width, Bits: integer): boolean;
 var
@@ -11106,56 +11149,65 @@ begin
 end;
 
 
-{ TRawByteStringCached }
+{ TRawByteStringHeap }
 
 type
-  TRawByteStringCacheOne = record
+  TRawByteStringHeapOne = record
     header: TLockedListOne;
     strrec: TStrRec;
-  end;
-  PRawByteStringCacheOne = ^TRawByteStringCacheOne;
+  end; // followed by the text content
+  PRawByteStringHeapOne = ^TRawByteStringHeapOne;
 
-constructor TRawByteStringCached.Create(aLength: integer);
+const
+  REFCNT_CACHE = -2; // will be handled as constant (released only by our class)
+
+constructor TRawByteStringHeap.Create(aMaxLength: integer);
 begin
-  fLength := aLength;
-  fOne.Init(aLength + (SizeOf(TRawByteStringCacheOne) + 1));
+  fMaxLength := aMaxLength;
+  fOne.Init(aMaxLength + (SizeOf(TRawByteStringHeapOne) + 1));
 end;
 
-procedure TRawByteStringCached.New(var aDest: RawByteString; aCodePage: integer);
+procedure TRawByteStringHeap.New(var aDest: RawByteString;
+  aText: PUtf8Char; aTextLen: TStrLen; aCodePage: integer);
 var
-  one: PRawByteStringCacheOne;
+  one: PRawByteStringHeapOne;
 begin
+  if aTextLen <= 0 then
+    aTextLen := fMaxLength
+  else if aTextLen > fMaxLength then
+  begin // too big for our cached instances -> manual allocation
+    FastSetStringCP(aDest, aText, aTextLen, aCodePage);
+    exit;
+  end;
   one := fOne.New;
   {$ifdef HASCODEPAGE}
   one^.strrec.codePage := aCodePage;
   one^.strrec.elemSize := 1;
   {$endif HASCODEPAGE}
-  one^.strrec.refCnt := -2;
-  one^.strrec.length := fLength;
+  one^.strrec.refCnt := REFCNT_CACHE;
+  one^.strrec.length := aTextLen;
   inc(one);
+  PByteArray(one)[aTextLen] := 0; // like a regular AnsiString
+  if aText <> nil then
+    MoveFast(aText^, one^, aTextLen);
   FastAssignNew(aDest, one);
 end;
 
-procedure TRawByteStringCached.New(var aDest: RawUtf8);
+procedure TRawByteStringHeap.New(var aDest: RawUtf8; aText: PUtf8Char; aTextLen: TStrLen);
 begin
-  New(RawByteString(aDest), CP_UTF8);
+  New(RawByteString(aDest), aText, aTextLen, CP_UTF8);
 end;
 
-procedure TRawByteStringCached.NewUtf8(var aDest: pointer);
-begin
-  New(PRawByteString(@aDest)^, CP_UTF8);
-end;
-
-procedure TRawByteStringCached.Release(var aDest: RawByteString);
+procedure TRawByteStringHeap.Release(var aDest: RawByteString);
 var
-  one: PRawByteStringCacheOne;
+  one: PRawByteStringHeapOne;
 begin
   if self <> nil then
   begin
     one := pointer(aDest);
     dec(one);
-    if (one^.strrec.refCnt = -2) and
-       (one^.strrec.length = TStrLen(fLength)) and
+    if (one^.strrec.refCnt = REFCNT_CACHE) and
+       (one^.strrec.length = fMaxLength) and
        fOne.Free(one) then
     begin
       pointer(aDest) := nil;
@@ -11165,22 +11217,22 @@ begin
   FastAssignNew(aDest) // this was a regular RawByteString
 end;
 
-procedure TRawByteStringCached.Release(var aDest: RawUtf8);
+procedure TRawByteStringHeap.Release(var aDest: RawUtf8);
 begin
   Release(RawByteString(aDest));
 end;
 
-procedure TRawByteStringCached.Release(var aDest: pointer);
+procedure TRawByteStringHeap.Release(var aDest: pointer);
 begin
   Release(PRawByteString(@aDest)^);
 end;
 
-function TRawByteStringCached.Clean: PtrInt;
+function TRawByteStringHeap.Clean: PtrInt;
 begin
   result := fOne.EmptyBin * fOne.Size;
 end;
 
-destructor TRawByteStringCached.Destroy;
+destructor TRawByteStringHeap.Destroy;
 begin
   fOne.Done;
   inherited Destroy;

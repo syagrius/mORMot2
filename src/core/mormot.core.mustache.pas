@@ -256,7 +256,7 @@ type
       Info: TRttiCustom;
       ListCount: integer;
       ListCurrent: integer;
-      Temp: TRttiVarData;
+      Temp: TSynVarData;
     end;
     fOnGetGlobalData: TOnGetGlobalData;
     procedure PushContext(Value: pointer; Rtti: TRttiCustom);
@@ -670,7 +670,7 @@ begin
     VariantLoadJson(result, ValueName, @JSON_[mFast])
   else if fGetVarDataFromContextNeedsFree then
   begin
-    if TRttiVarData(result).VType <> varEmpty then
+    if TVarData(result).VType <> varEmpty then
       VarClearProc(TVarData(result));
     GetVarDataFromContext(-1, ValueName, TVarData(result)); // set directly
   end
@@ -694,7 +694,7 @@ var
   j, k, n: PtrInt;
 begin
   valnam := Copy(ValueName, space + 1, maxInt);
-  TRttiVarData(val).VType := varEmpty;
+  TSynVarData(val).VType := varEmpty;
   valFree := fGetVarDataFromContextNeedsFree;
   if valnam <> '' then
   begin

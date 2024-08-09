@@ -2226,7 +2226,6 @@ begin
   {$endif ASMX64}
 end;
 
-procedure TTestCoreBase._RecordCopy;
 type
   TR = record
     One: integer;
@@ -2240,6 +2239,7 @@ type
     Dyn: array of integer;
     Bulk: array[0..19] of byte;
   end;
+
   TLicenseData = record
     CustomerNum: Integer;
     CustomerName: RawUtf8;
@@ -2247,10 +2247,57 @@ type
     LicenceDate: TDate;
     ProductName: RawUtf8;
   end;
+
+  TEnum = (e0, e1, e2, e3, e4);
+
+  TPeople2 = class(TSynPersistent)
+  private
+    fFirstName: string;
+    fLastName: RawUtf8;
+    fYearOfBirth: Int64;
+    fYearOfDeath: integer;
+    fEnum: TEnum;
+    function GetEnum: TEnum;
+    procedure SetEnum(const Value: TEnum);
+  published // properties are in another order
+    property YearOfBirth: Int64
+      read fYearOfBirth write fYearOfBirth;
+    property LastName: RawUtf8
+      read fLastName write fLastName;
+    property FirstName: string
+      read fFirstName write fFirstName;
+    property YearOfDeath: integer
+      read fYearOfDeath write fYearOfDeath;
+    property Enum: TEnum
+      read GetEnum write SetEnum;
+  end;
+
+  TPeopleR = packed record
+    LastName, FirstName: RawUtf8;
+    YearOfBirth, Unused: integer;
+    Enum: TEnum;
+  end;
+
+function TPeople2.GetEnum: TEnum;
+begin
+  result := fEnum;
+end;
+
+procedure TPeople2.SetEnum(const Value: TEnum);
+begin
+  fEnum := Value;
+end;
+
+procedure TTestCoreBase._RecordCopy;
 var
   A, B, C: TR;
   i, j: PtrInt;
   lic: TLicenseData;
+  o1: TOrmPeople;
+  o2: TPeople2;
+  r: TPeopleR;
+  p: TRecordPeople;
+  m: TRttiMap;
 begin
   CheckEqual(lic.CustomerName, '');
   FillZeroRtti(TypeInfo(TLicenseData), lic);
@@ -2317,18 +2364,134 @@ begin
   B.Three := 3;
   B.Dyn[0] := 10;
   RecordCopy(C, B, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  Check(A.One = C.One);
+  CheckEqual(A.One, C.One);
   Check(A.S1 = C.S1);
-  Check(C.Three = 3);
+  CheckEqual(C.Three, 3);
   Check(A.S2 = C.S2);
   Check(A.Five = C.Five);
-  Check(A.V = C.V);
+  Check(A.v = C.v);
   Check(Int64(A.R) = Int64(C.R));
   Check(A.Arr[5] = C.Arr[5]);
   Check(A.Arr[0] = C.Arr[0]);
-  Check(A.Dyn[9] = C.Dyn[9]);
+  CheckEqual(A.Dyn[9], C.Dyn[9]);
   {Check(A.Dyn[0]=0) bug in original VCL?}
-  Check(C.Dyn[0] = 10);
+  CheckEqual(C.Dyn[0], 10);
+  // TPeople2 <--> TOrmPeople class mapping
+  o1 := TOrmPeople.Create;
+  o2 := TPeople2.Create;
+  o1.FirstName := 'toto';
+  o1.LastName := 'titi';
+  o1.YearOfBirth := 1926;
+  o1.YearOfDeath := 2010;
+  CopyObject(o1, o2);
+  CheckEqual(o1.FirstName, 'toto');
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o1.LastName, 'titi');
+  CheckEqual(o1.LastName, o2.LastName);
+  CheckEqual(o1.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(o1.YearOfDeath, o2.YearOfDeath);
+  // TRecordPeople <--> TOrmPeople record/class mapping
+  p.YearOfBirth := -1;
+  CheckEqual(p.YearOfBirth, -1);
+  RecordZero(@p, TypeInfo(TRecordPeople));
+  CheckEqual(p.FirstName, '');
+  CheckEqual(p.LastName, '');
+  CheckEqual(p.YearOfBirth, 0);
+  CheckEqual(p.YearOfDeath, 0);
+  ObjectToRecord(o2, p, TypeInfo(TRecordPeople));
+  CheckEqual(p.FirstName, 'toto');
+  CheckEqual(p.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o2.YearOfDeath);
+  o2.Enum := e1;
+  ClearObject(o2);
+  Check(o2.FirstName = '');
+  CheckEqual(o2.LastName, '');
+  CheckEqual(o2.YearOfBirth, 0);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e0);
+  RecordToObject(p, o2, TypeInfo(TRecordPeople));
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o2.LastName, 'titi');
+  CheckEqual(o2.YearOfBirth, p.YearOfBirth);
+  CheckEqual(o2.YearOfDeath, p.YearOfDeath);
+  // TPeopleR <--> TOrmPeople record/class mapping
+  o2.Enum := e4;
+  {$ifndef HASEXTRECORDRTTI} // oldest Delphi or FPC
+  Rtti.RegisterType(TypeInfo(TEnum));
+  Rtti.RegisterFromText(TypeInfo(TPeopleR),
+    'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
+  {$endif HASEXTRECORDRTTI}
+  r.YearOfBirth := -1;
+  CheckEqual(r.YearOfBirth, -1);
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e0);
+  ObjectToRecord(o2, r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, 'toto');
+  CheckEqual(r.LastName, 'titi');
+  CheckEqual(r.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e4);
+  ClearObject(o2);
+  Check(o2.FirstName = '');
+  CheckEqual(o2.LastName, '');
+  CheckEqual(o2.YearOfBirth, 0);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e0);
+  RecordToObject(r, o2, TypeInfo(TPeopleR));
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o2.LastName, 'titi');
+  CheckEqual(o2.YearOfBirth, r.YearOfBirth);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e4);
+  // TPeople2 <--> TPeopleR class/record mapping with TRttiMap
+  m.Init(TPeople2, TypeInfo(TPeopleR)).AutoMap;
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e0);
+  m.ToB(o2, @r); // from class to DTO
+  CheckEqual(r.FirstName, 'toto');
+  CheckEqual(r.LastName, 'titi');
+  CheckEqual(r.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e4);
+  // TPeople2 <--> TPeopleR class/record custom fields mapping with TRttiMap
+  m.Init(TPeople2, TypeInfo(TPeopleR)).Map([
+    'firstName', 'lastname',   // inverted
+    'lastname', 'firstName',
+    'YearOfBirth', 'Unused']); // moved
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  m.ToB(o2, @r); // from class to DTO
+  CheckEqual(r.LastName, 'toto');
+  CheckEqual(r.FirstName, 'titi');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, o2.YearOfBirth);
+  Check(r.Enum = e0);
+  // TOrmPeople <--> TRecordPeople class/record fields mapping with TRttiMap
+  m.Init(TypeInfo(TOrmPeople), TypeInfo(TRecordPeople)).AutoMap;
+  CheckEqual(p.FirstName, 'toto');
+  CheckEqual(p.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o1.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o1.YearOfDeath);
+  o1.Free;
+  o1 := m.ToA(@p); // from DTO to class
+  CheckEqual(o1.FirstName, 'toto');
+  CheckEqual(o1.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o1.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o1.YearOfDeath);
+  o1.Free;
+  o2.Free;
 end;
 
 procedure TTestCoreBase._TSynList;
@@ -2629,11 +2792,22 @@ begin
     CheckEqual(f, '');
     CheckHash(c.DetectUnknown, $5EA096A5);
     CheckHash(c.FullDescription('this is test #3 executable', 'exename'), $DFE40A21);
-//writeln(c.FullDescription('this is test #3 executable', 'exename'));
+    c.Clear;
+    c.RawParams := CsvToRawUtf8DynArray('-o file.txt --y -v -t 1', ' ');
+    c.Parse(#10, '-', '--');
+    CheckEqual(length(c.Args), 0);
+    CheckEqual(length(c.Options), 2);
+    CheckEqual(length(c.Names), 2);
+    CheckEqual(length(c.Values), length(c.Names));
+    Check(c.Option('y'));
+    Check(c.Option('v'));
+    Check(c.Get('o', f));
+    CheckEqual(f, 'file.txt');
+    Check(c.Get('t', t));
+    CheckEqual(t, 1);
   finally
     c.Free;
   end;
-//ConsoleWaitForEnterKey;
 end;
 
 procedure TTestCoreBase._IsMatch;
@@ -5951,22 +6125,18 @@ begin
   Check(not SameValue(dt, NowUtc),
     'NowUtc should not truncate time (e.g. to 5 sec resolution)');
   // validate zones taken from Windows registry or mormot.tz.res on POSIX
-  tz := TSynTimeZone.CreateDefault;
-  try
-    local := tz.UtcToLocal(dt, 'UTC');
-    check(SameValue(local, dt));
-    check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
-    check(bias = 0);
-    check(not hdl);
-    local := tz.UtcToLocal(dt, 'Romance Standard Time');
-    check(not SameValue(local, dt), 'Paris never aligns with London');
-    check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
-    check(hdl);
-    check(bias < 0, 'Paris is always ahead of London');
-    buf := tz.SaveToBuffer;
-  finally
-    tz.Free;
-  end;
+  tz := TSynTimeZone.Default;
+  local := tz.UtcToLocal(dt, 'UTC');
+  check(SameValue(local, dt));
+  check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
+  check(bias = 0);
+  check(not hdl);
+  local := tz.UtcToLocal(dt, 'Romance Standard Time');
+  check(not SameValue(local, dt), 'Perfide Albion never matches the continent');
+  check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
+  check(hdl);
+  check(bias < 0, 'Paris is always ahead of London');
+  buf := tz.SaveToBuffer;
   tz := TSynTimeZone.Create;
   try
     tz.LoadFromBuffer(buf);
@@ -6770,6 +6940,22 @@ begin
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
   s := '<!DocType HTML<html><body>';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  Check(not IsContentTypeCompressible('anything'));
+  Check(not IsContentTypeCompressible('toto/plain'));
+  Check(IsContentTypeCompressible('text/plain'));
+  Check(IsContentTypeCompressible('text/xml'));
+  Check(IsContentTypeCompressible('text/css'));
+  Check(not IsContentTypeCompressible('texto/xml'));
+  Check(IsContentTypeCompressible('application/json'));
+  Check(IsContentTypeCompressibleU('APPLICATION/JSON'));
+  Check(IsContentTypeCompressible('application/xml'));
+  Check(IsContentTypeCompressible('application/javascript'));
+  Check(IsContentTypeCompressible('application/VND.API+JSON'));
+  Check(not IsContentTypeCompressible('application/plain'));
+  Check(IsContentTypeCompressible('image/svg'));
+  Check(IsContentTypeCompressible('image/X-ico'));
+  Check(IsContentTypeCompressible('image/X-ICO'));
+  Check(not IsContentTypeCompressible('image/png'));
   // mime multipart encoding
   for rfc2388 := false to true do
   begin
