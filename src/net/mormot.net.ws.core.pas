@@ -968,8 +968,7 @@ type
   // - then any incoming focText/focBinary events will trigger this callback
   // - eventually, a focConnectionClose will notify the connection ending
   TOnWebSocketProtocolChatIncomingFrame = procedure(
-    Sender: TWebSocketProcess;
-    const Frame: TWebSocketFrame) of object;
+    Sender: TWebSocketProcess; const Frame: TWebSocketFrame) of object;
 
   /// simple chatting protocol, allowing to receive and send WebSocket frames
   // - you can use this protocol to implement simple asynchronous communication
@@ -2981,7 +2980,7 @@ begin
             continue;
           self.Log(request, 'NotifyCallback AnswerToIgnore TIMEOUT -> ' +
             'abort connection', sllInfo);
-          result := HTTP_NOTIMPLEMENTED; // 501 will force recreate connection
+          result := HTTP_CLIENTERROR; // to force recreate connection
           exit;
         until false;
       end;

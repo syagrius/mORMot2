@@ -1573,7 +1573,7 @@ function FastFindIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): Ptr
 // - return index of Values[result]=Value
 // - return -1 if Value was not found
 function FastFindIntegerSorted(const Values: TIntegerDynArray; Value: integer): PtrInt; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // GPF on older Delphi
 
 /// fast O(log(n)) binary search of a 16-bit unsigned integer value in a sorted array
 // - use branchless asm on x86_64
@@ -3035,6 +3035,10 @@ function Random32: cardinal; overload;
 // - thread-safe function: each thread will maintain its own TLecuyer table
 function Random31: integer;
 
+/// compute of a 31-bit random value <> 0, using the gsl_rng_taus2 generator
+// - thread-safe function: each thread will maintain its own TLecuyer table
+function Random31Not0: integer;
+
 /// fast compute of a 64-bit random value, using the gsl_rng_taus2 generator
 // - thread-safe function: each thread will maintain its own TLecuyer table
 function Random64: QWord;
@@ -3619,6 +3623,26 @@ procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: Ptr
 
 type
   PVarType = ^TVarType;
+
+  /// a variant/TVarData overlapped structure with a 32-bit VType field
+  // - 32-bit VType is faster for initialization than 16-bit TVarData.VType
+  // - it is safe to transtype this as plain variant or TVarData
+  TSynVarData = packed record
+    case integer of
+      0: (
+        VType: cardinal;
+        case padding: cardinal of // access the most used TVarData value members
+          varInteger: (VInteger: integer);
+          varDouble:  (VDouble:  double);
+          varDate:    (VDate:    TDateTime);
+          varInt64:   (VInt64:   Int64);
+          varString:  (VString:  pointer);
+          varAny:     (VAny:     pointer);
+          );
+      1: (
+        Data: TVarData); // access to all standard value members
+  end;
+  PSynVarData = ^TSynVarData;
 
 const
   /// unsigned 64bit integer variant type
@@ -4211,33 +4235,19 @@ uses
 { ************ Common Types Used for Compatibility Between Compilers and CPU }
 
 procedure VarClearAndSetType(var v: variant; vtype: integer);
-var
-  p: PInteger; // more efficient generated asm with an explicit temp variable
 begin
-  p := @v;
-  {$if defined(OSBSDDARWIN) and defined(ARM3264)}
-  if PVarData(p)^.VType and VTYPE_STATIC <> 0 then // just like in Variants.pas
-  {$else}
-  if p^ and VTYPE_STATIC <> 0 then
-  {$ifend}
-    VarClearProc(PVarData(p)^);
-  p^ := vtype;
+  if TSynVarData(v).VType and VTYPE_STATIC <> 0 then
+    VarClearProc(TVarData(v));
+  TSynVarData(v).VType := vtype;
 end;
 
 {$ifdef HASINLINE}
 procedure VarClear(var v: variant); // defined here for proper inlining
-var
-  p: PInteger; // more efficient generated asm with an explicit temp variable
 begin
-  p := @v;
-  {$if defined(OSBSDDARWIN) and defined(ARM3264)}
-  if PVarData(p)^.VType and VTYPE_STATIC = 0 then // just like in Variants.pas
-  {$else}
-  if p^ and VTYPE_STATIC = 0 then
-  {$ifend}
-    p^ := 0
+  if TSynVarData(v).VType and VTYPE_STATIC <> 0 then
+    VarClearProc(TVarData(v))
   else
-    VarClearProc(PVarData(p)^);
+    TSynVarData(v).VType := 0;
 end;
 {$endif HASINLINE}
 
@@ -9031,7 +9041,7 @@ begin
     rs2 := 8;
   if rs3 < 16 then
     rs3 := 16;
-  seedcount := 1; // will reseet after 16 GB, i.e. 2^32 of output data
+  seedcount := 1; // will reseed after 16 GB, i.e. 2^32 of output data
 end;
 
 function TLecuyer.RawNext: cardinal;
@@ -9157,6 +9167,14 @@ begin
   result := _Lecuyer.Next shr 1;
 end;
 
+function Random31Not0: integer;
+begin
+  with _Lecuyer do
+    repeat
+      result := Next shr 1;
+    until result <> 0;
+end;
+
 function Random32(max: cardinal): cardinal;
 begin
   result := (QWord(_Lecuyer.Next) * max) shr 32;
@@ -9211,12 +9229,16 @@ end;
 function MultiEventFind(const EventList; const Event: TMethod): PtrInt;
 var
   events: TMethodDynArray absolute EventList;
+  e: PMethod;
 begin
+  e := pointer(events);
   if Event.Code <> nil then // callback assigned
     for result := 0 to length(events) - 1 do
-      if (events[result].Code = Event.Code) and
-         (events[result].Data = Event.Data) then
-        exit;
+      if (e^.Code = Event.Code) and
+         (e^.Data = Event.Data) then
+        exit
+      else
+        inc(e);
   result := -1;
 end;
 
@@ -9414,8 +9436,8 @@ begin
     ERMSB_MIN_SIZE_BWD := 0; // in both directions to bypass the SSE2 code
     {$endif FPC_X86}
   end
-    // but MoveFast/SynLz are likely to abort -> recompile with HASNOSSE2 conditional
-    // note: mormot.core.os.pas InitializeSpecificUnit will notify it on console
+  // but MoveFast/SynLz are likely to abort -> recompile with HASNOSSE2 conditional
+  // note: mormot.core.os.pas InitializeSpecificUnit will notify it on console
   else if cfERMS in CpuFeatures then
     ERMSB_MIN_SIZE_FWD := 4096; // "on 32-bit strings have to be at least 4KB"
     // backward rep movsd has no ERMS optimization so degrades performance
@@ -12222,6 +12244,7 @@ end;
 procedure InitializeUnit;
 begin
   assert(ord(high(TSynLogLevel)) = 31);
+  assert(@PSynVarData(nil)^.VAny = @PVarData(nil)^.VAny);
   // initialize internal constants
   crc32tabInit(2197175160, crc32ctab); // crc32c() reversed polynom
   crc32tabInit(3988292384, crc32tab);  // crc32() = zlib's reversed polynom

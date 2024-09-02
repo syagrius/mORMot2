@@ -43,38 +43,37 @@ type
   gss_name_t_ptr = ^gss_name_t;
   gss_cred_id_t = pointer;
   gss_ctx_id_t = pointer;
+
+  // we need to circumvent non-standard definitions of MacOS
   {$ifdef OSDARWIN}
-  gss_length_t = cardinal; // no OM_STRING/xom.h on MacOS - see gssapi.hin
+  gss_length_t = cardinal; // no OM_STRING/xom.h on MacOS - OM_uint32 in gssapi.hin
   {$ifdef CPUINTEL}
   // #if defined(__APPLE__) && (defined(__ppc__) || defined(__ppc64__) || defined(__i386__) || defined(__x86_64__))
   {$A2} // #pragma pack(push,2)
   {$endif CPUINTEL}
-  gss_OID_desc = record
-    length: gss_length_t;
-    elements: pointer;
-  end;
   {$else}
   gss_length_t = PtrUInt;
+  {$endif OSDARWIN}
+
   gss_OID_desc = record
     length: gss_length_t;
     elements: pointer;
   end;
-  {$endif OSDARWIN}
-
   gss_OID = ^gss_OID_desc;
   gss_OID_ptr = ^gss_OID;
-  gss_OID_array = array [word] of gss_OID_desc;
+
+  gss_OID_array = array[word] of gss_OID_desc;
   gss_OID_descs = ^gss_OID_array;
 
   gss_OID_set_desc = record
-    count: PtrUInt;
+    count: PtrUInt; // size_t in all platforms
     elements: gss_OID_descs;
   end;
   gss_OID_set = ^gss_OID_set_desc;
   gss_OID_set_ptr = ^gss_OID_set;
 
   gss_buffer_desc = record
-    length: PtrUInt;
+    length: PtrUInt; // size_t in all platforms
     value: pointer;
   end;
   gss_buffer_t = ^gss_buffer_desc;
@@ -84,20 +83,30 @@ type
 
 const
   GSS_C_NO_NAME = nil;
-  GSS_C_NO_OID = nil;
+  GSS_C_NO_OID  = nil;
 
   GSS_C_GSS_CODE  = 1;
   GSS_C_MECH_CODE = 2;
 
+  // Expiration time of 2^32-1 seconds means infinite lifetime
   GSS_C_INDEFINITE = $FFFFFFFF;
 
   GSS_C_BOTH      = 0;
   GSS_C_INITIATE  = 1;
   GSS_C_ACCEPT    = 2;
 
-  GSS_C_MUTUAL_FLAG = 2;
-  GSS_C_CONF_FLAG   = 16;
-  GSS_C_INTEG_FLAG  = 32;
+  // Request that remote peer authenticate itself
+  GSS_C_MUTUAL_FLAG   = 2;
+  // Enable replay detection for messages protected with gss_wrap or gss_get_mic
+  GSS_C_REPLAY_FLAG   = 4;
+  // Enable detection of out-of-sequence protected messages
+  GSS_C_SEQUENCE_FLAG = 8;
+  // Request that confidentiality service be made available (via gss_wrap).
+  GSS_C_CONF_FLAG     = 16;
+  // Request that integrity service be made available (via gss_wrap or gss_get_mic)
+  GSS_C_INTEG_FLAG    = 32;
+  // Do not reveal the initiator's identity to the acceptor
+  GSS_C_ANON_FLAG     = 64;
 
   GSS_C_CALLING_ERROR_OFFSET = 24;
   GSS_C_ROUTINE_ERROR_OFFSET = 16;
@@ -113,14 +122,57 @@ const
   GSS_S_UNSEQ_TOKEN     = 1 shl (GSS_C_SUPPLEMENTARY_OFFSET + 3);
   GSS_S_GAP_TOKEN       = 1 shl (GSS_C_SUPPLEMENTARY_OFFSET + 4);
 
-  // raw 1.3.6.1.5.5.2 OID
-  // {iso(1) org(3) dod(6) internet(1) security(5) mechanisms(5) snego(2)}
-  gss_mech_spnego: array [0..5] of byte = (
-    43, 6, 1, 5, 5, 2);
-  gss_mech_spnego_desc: gss_OID_desc = (
-    length: SizeOf(gss_mech_spnego);
-    elements: @gss_mech_spnego);
-  GSS_C_MECH_SPNEGO: gss_OID = @gss_mech_spnego_desc;
+  // https://github.com/krb5/krb5/blob/master/src/lib/gssapi/generic/gssapi_generic.c#L35
+
+  // raw 1.2.840.113554.1.2.1.1 OID
+  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2)
+  //  generic(1) user-name(1)}
+  gss_nt_user_name: array [0..9] of byte = (
+    42, 134, 72, 134, 247, 18, 1, 2, 1, 1);
+  gss_nt_user_name_desc: gss_OID_desc = (
+    length: SizeOf(gss_nt_user_name);
+    elements: @gss_nt_user_name);
+  GSS_C_NT_USER_NAME: gss_OID = @gss_nt_user_name_desc;
+
+  // raw 1.2.840.113554.1.2.1.2 OID
+  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2)
+  //  generic(1) machine_uid_name(2)}
+  gss_nt_machine_name: array [0..9] of byte = (
+    42, 134, 72, 134, 247, 18, 1, 2, 1, 2);
+  gss_nt_machine_name_desc: gss_OID_desc = (
+    length: SizeOf(gss_nt_machine_name);
+    elements: @gss_nt_machine_name);
+  GSS_C_NT_MACHINE_UID_NAME: gss_OID = @gss_nt_machine_name_desc;
+
+  // raw 1.2.840.113554.1.2.1.3 OID
+  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2)
+  //  generic(1) string_uid_name(3)}
+  gss_nt_stringuidname_name: array [0..9] of byte = (
+    42, 134, 72, 134, 247, 18, 1, 2, 1, 3);
+  gss_nt_stringuidname_name_desc: gss_OID_desc = (
+    length: SizeOf(gss_nt_stringuidname_name);
+    elements: @gss_nt_stringuidname_name);
+  GSS_C_NT_STRING_UID_NAME: gss_OID = @gss_nt_stringuidname_name_desc;
+
+  // raw 1.2.840.113554.1.2.1.2 OID
+  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2)
+  //  generic(1) service_name(4)}
+  gss_nt_hostbased_name: array [0..9] of byte = (
+    42, 134, 72, 134, 247, 18, 1, 2, 1, 4);
+  gss_nt_hostbased_name_desc: gss_OID_desc = (
+    length: SizeOf(gss_nt_hostbased_name);
+    elements: @gss_nt_hostbased_name);
+  GSS_C_NT_HOSTBASED_SERVICE: gss_OID = @gss_nt_hostbased_name_desc;
+
+  // raw 1.2.840.113554.1.2.2.1 OID
+  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2)
+  //  krb5(2) krb5-name(1)}
+  gss_nt_krb5_name: array [0..9] of byte = (
+    42, 134, 72, 134, 247, 18, 1, 2, 2, 1);
+  gss_nt_krb5_name_desc: gss_OID_desc = (
+    length: SizeOf(gss_nt_krb5_name);
+    elements: @gss_nt_krb5_name);
+  GSS_KRB5_NT_PRINCIPAL_NAME: gss_OID = @gss_nt_krb5_name_desc;
 
   // raw 1.2.840.113554.1.2.2 OID
   // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2) krb5(2)}
@@ -131,23 +183,24 @@ const
     elements: @gss_mech_krb5);
   GSS_C_MECH_KRB5: gss_OID = @gss_mech_krb5_desc;
 
-  // raw 1.2.840.113554.1.2.2.1 OID
-  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2) krb5(2) krb5-name(1)}
-  gss_nt_krb5_name: array [0..9] of byte = (
-    42, 134, 72, 134, 247, 18, 1, 2, 2, 1);
-  gss_nt_krb5_name_desc: gss_OID_desc = (
-    length: SizeOf(gss_nt_krb5_name);
-    elements: @gss_nt_krb5_name);
-  GSS_KRB5_NT_PRINCIPAL_NAME: gss_OID = @gss_nt_krb5_name_desc;
+  // raw 1.3.6.1.5.5.2 OID for SPNEGO Simple and Protected Negotiation Mechanism
+  // {iso(1) org(3) dod(6) internet(1) security(5) mechanisms(5) snego(2)}
+  gss_mech_spnego: array [0..5] of byte = (
+    43, 6, 1, 5, 5, 2);
+  gss_mech_spnego_desc: gss_OID_desc = (
+    length: SizeOf(gss_mech_spnego);
+    elements: @gss_mech_spnego);
+  GSS_C_MECH_SPNEGO: gss_OID = @gss_mech_spnego_desc;
 
-  // raw 1.2.840.113554.1.2.1.1 OID
-  // {iso(1) member-body(2) us(840) mit(113554) infosys(1) gssapi(2) generic(1) user-name(1)}
-  gss_nt_user_name: array [0..9] of byte = (
-    42, 134, 72, 134, 247, 18, 1, 2, 1, 1);
-  gss_nt_user_name_desc: gss_OID_desc = (
-    length: SizeOf(gss_nt_user_name);
-    elements: @gss_nt_user_name);
-  GSS_C_NT_USER_NAME: gss_OID = @gss_nt_user_name_desc;
+  // raw 1.3.6.1.4.1.311.2.2.10 OID for GS2-NTLM (NTLM) Mechanism
+  // {iso(1) identified-organization(3) dod(6) internet(1) private(4)
+  //  enterprise(1) 311 2 2 10}
+  gss_mech_ntlm: array [0..9] of byte = (
+    $2b, $06, $01, $04, $01, $82, $37, $02, $02, $0a);
+  gss_mech_ntlm_desc: gss_OID_desc = (
+    length: SizeOf(gss_mech_ntlm);
+    elements: @gss_mech_ntlm);
+  GSS_C_MECH_NTLM: gss_OID = @gss_mech_ntlm_desc;
 
 
 type
@@ -288,30 +341,51 @@ type
   end;
 
 
+const
+  {$ifdef OSDARWIN}
+  GssMitDef     = 'libgssapi_krb5.dylib';
+  GssHeimdalDef = 'libgssapi.dylib';
+  GssOSDef      = '/System/Library/Frameworks/GSS.framework/GSS';
+  {$else}
+  GssMitDef     = 'libgssapi_krb5.so.2';
+  GssHeimdalDef = 'libgssapi.so.3';
+  GssOSDef      = '';
+  {$endif OSDARWIN}
+
+
 var
   /// access to the low-level libgssapi
   GssApi: TGssApi;
 
-  /// library name of the system implementation of GSSAPI
-  // - only used on MacOS by default (GSS is available since 10.7 Lion in 2011)
-  // - you can overwrite with a custom value, and call LoadGssApi again
-  {$ifdef OSDARWIN}
-  GssLib_OS: TFileName = '/System/Library/Frameworks/GSS.framework/GSS';
-  {$else}
-  GssLib_OS: TFileName = '';
-  {$endif OSDARWIN}
+  /// custom library name for GSSAPI
+  // - tried before OS/MIT/Heimdal standard alternatives
+  // - you can overwrite with a custom value, make FreeAndNil(GssApi) and call
+  // LoadGssApi again
+  // - may be used on MacOS e.g. with '/full/path/to/libgssapi_krb5.dylib' for
+  // proper user/password credential without any previous kinit or logged user
+  GssLib_Custom: TFileName = '';
 
   /// library name of the MIT implementation of GSSAPI
-  // - you can overwrite with a custom value, and call LoadGssApi again
-  GssLib_MIT: TFileName = 'libgssapi_krb5.so.2';
+  // - you can overwrite with a custom value, make FreeAndNil(GssApi) and call
+  // LoadGssApi again
+  GssLib_MIT: TFileName = GssMitDef;
 
   /// library name of the Heimdal implementation of GSSAPI
-  // - you can overwrite with a custom value, and call LoadGssApi again
-  GssLib_Heimdal: TFileName = 'libgssapi.so.3';
+  // - you can overwrite with a custom value, make FreeAndNil(GssApi) and call
+  // LoadGssApi again
+  GssLib_Heimdal: TFileName = GssHeimdalDef;
+
+  /// library name of the system implementation of GSSAPI
+  // - only used on MacOS by default (GSS is available since 10.7 Lion in 2011)
+  // - you can overwrite with a custom value, make FreeAndNil(GssApi) and call
+  // LoadGssApi again
+  GssLib_OS: TFileName = GssOSDef;
 
 
 /// dynamically load GSSAPI library
 // - do nothing if the library is already loaded
+// - will try LibraryName, GssLib_Custom, GssLib_MIT, GssLib_Heimdal and
+// GssLib_OS in this specific order, and maybe from the executable folder
 procedure LoadGssApi(const LibraryName: TFileName = '');
 
 /// check whether GSSAPI library is loaded or not
@@ -409,11 +483,16 @@ function ClientSspiAuth(var aSecContext: TSecContext;
 // - aUserName is the domain and user name, in form of 'username' or
 // 'username@MYDOMAIN.TLD' if aSecKerberosSpn is not set or if
 // ClientForceSpn() has not been called ahead
-// - aPassword is the user clear text password
+// - aPassword is the user clear text password - you may set '' if you have a
+// previous kinit for aUserName on the system, and want to recover this token
 // - aOutData contains data that must be sent to server
 // - you can specify an optional Mechanism OID - default is SPNEGO
 // - if function returns True, client must send aOutData to server
 // and call function again with data, returned from server
+// - warning: on MacOS, the system GSSAPI library seems to create a session-wide
+// token (as if a kinit was made), whereas it should only create a transient
+// token in memory, so it is pretty unsafe to use; a workaround is to provide
+// your own libgssapi_krb5.dylib in GssLib_Custom
 function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aInData: RawByteString; const aUserName: RawUtf8;
   const aPassword: SpiUtf8; const aSecKerberosSpn: RawUtf8;
@@ -452,6 +531,9 @@ procedure ClientForceSpn(const aSecKerberosSpn: RawUtf8);
 procedure ServerForceKeytab(const aKeytab: RawUtf8);
 
 const
+  /// the API available on this system to implement Kerberos
+  SECPKGNAMEAPI = 'GSSAPI';
+
   /// HTTP Challenge name
   // - GSS API only supports Negotiate/Kerberos - NTLM is unsafe and deprecated
   SECPKGNAMEHTTP: RawUtf8 = 'Negotiate';
@@ -573,19 +655,20 @@ var
   i: PtrInt;
   P: PPointerArray;
   api: TGssApi; // local instance for thread-safe load attempt
-  tried: RawUtf8;
+  tried: TFileName;
 begin
   if GssApi <> nil then
     // already loaded
     exit;
-  tried := LibraryName + GssLib_OS + GssLib_MIT + GssLib_Heimdal;
+  tried := LibraryName + GssLib_Custom + GssLib_MIT + GssLib_Heimdal + GssLib_OS;
   if GssApiTried = tried then
     // try LoadLibrary() only if any of the .so names changed
     exit;
   GssApiTried := tried;
   api := TGssApi.Create;
+  api.TryFromExecutableFolder := true; // good idea to check local first
   if api.TryLoadLibrary(
-      [LibraryName, GssLib_OS, GssLib_MIT, GssLib_Heimdal], nil) then
+      [LibraryName, GssLib_Custom, GssLib_MIT, GssLib_Heimdal, GssLib_OS], nil) then
   begin
     P := @@api.gss_import_name;
     for i := 0 to high(GSS_NAMES) do
@@ -668,6 +751,7 @@ begin
   if (aMinorStatus <> 0) and
      (aMinorStatus <> 100001) then
     GetDisplayStatus(Msg, aMinorStatus, GSS_C_MECH_CODE);
+//writeln('ERROR: ', Msg);
   inherited Create(Utf8ToString(Msg));
   fMajorStatus := AMajorStatus;
   fMinorStatus := AMinorStatus;
@@ -751,7 +835,7 @@ begin
         SetLength(oid^[i], length + SizeOf(gss_OID_desc));
         o := pointer(oid^[i]);
         o^.length := length;
-        o^.elements := PAnsiChar(o) + SizeOf(o^);
+        o^.elements := PAnsiChar(o) + SizeOf(o^); // points just after oid_desc
         MoveFast(elements^, o^.elements^, length);
       end;
     GssApi.gss_inquire_saslname_for_mech(
@@ -802,8 +886,6 @@ begin
     InBuf.value := pointer(aInData);
     OutBuf.length := 0;
     OutBuf.value := nil;
-    if aMech = nil then
-      aMech := GSS_C_MECH_SPNEGO;
     MajStatus := GssApi.gss_init_sec_context(MinStatus, aSecContext.CredHandle,
       aSecContext.CtxHandle, TargetName, aMech,
       CtxReqAttr, GSS_C_INDEFINITE, nil, @InBuf, nil, @OutBuf, @CtxAttr, nil);
@@ -818,16 +900,21 @@ begin
   end;
 end;
 
-function CredMech(var mech: gss_OID; var tmp: gss_OID_set_desc): gss_OID_set;
+function SetCredMech(var mech: gss_OID; var mechs: gss_OID_set_desc): gss_OID_set;
 begin
+  RequireGssApi;
   if mech = nil then
-    result := nil
-  else
+    mech := GSS_C_MECH_SPNEGO;
+  {$ifdef OSDARWIN}
+  if copy(GssApi.LibraryPath, 1, 8) = '/System/' then
   begin
-    result := @tmp;
-    tmp.count := 1;
-    tmp.elements := @mech;
+    result := nil; // circumvent weird MacOS system library limitation
+    exit;
   end;
+  {$endif OSDARWIN}
+  mechs.count := 1;
+  mechs.elements := pointer(mech);
+  result := @mechs;
 end;
 
 function ClientSspiAuth(var aSecContext: TSecContext;
@@ -836,15 +923,16 @@ function ClientSspiAuth(var aSecContext: TSecContext;
 var
   MajStatus, MinStatus: cardinal;
   SecKerberosSpn: RawUtf8;
-  tmp: gss_OID_set_desc;
+  m: gss_OID_set;
+  mechs: gss_OID_set_desc;
 begin
-  RequireGssApi;
+  m := SetCredMech(aMech, mechs);
   if aSecContext.CredHandle = nil then
   begin
     // first call: create the needed context for the current user
     aSecContext.CreatedTick64 := GetTickCount64();
     MajStatus := GssApi.gss_acquire_cred(MinStatus, nil, GSS_C_INDEFINITE,
-    CredMech(aMech, tmp), GSS_C_INITIATE, aSecContext.CredHandle, nil, nil);
+      m, GSS_C_INITIATE, aSecContext.CredHandle, nil, nil);
     GccCheck(MajStatus, MinStatus,
       'ClientSspiAuth: Failed to acquire credentials for current user');
   end;
@@ -864,31 +952,52 @@ var
   MajStatus, MinStatus: cardinal;
   InBuf: gss_buffer_desc;
   UserName: gss_name_t;
-  SecKerberosSpn: RawUtf8;
-  tmp: gss_OID_set_desc;
+  SecKerberosSpn, n , p, u: RawUtf8;
+  m: gss_OID_set;
+  mechs: gss_OID_set_desc;
 begin
-  RequireGssApi;
-  if aSecContext.CredHandle = nil then
-  begin
-    // first call: create the needed context for those credentials
-    aSecContext.CreatedTick64 := GetTickCount64;
-    InBuf.length := Length(aUserName);
-    InBuf.value := pointer(aUserName);
-    MajStatus := GssApi.gss_import_name(
-      MinStatus, @InBuf, GSS_KRB5_NT_PRINCIPAL_NAME, UserName);
-    GccCheck(MajStatus, MinStatus, 'Failed to import UserName');
-    InBuf.length := Length(aPassword);
-    InBuf.value := pointer(aPassword);
-    MajStatus := GssApi.gss_acquire_cred_with_password(
-      MinStatus, UserName, @InBuf, GSS_C_INDEFINITE, CredMech(aMech, tmp),
-      GSS_C_INITIATE, aSecContext.CredHandle, nil, nil);
-    GccCheck(MajStatus, MinStatus,
-      'Failed to acquire credentials for specified user');
-  end;
+  m := SetCredMech(aMech, mechs);
   if aSecKerberosSpn <> '' then
     SecKerberosSpn := aSecKerberosSpn
   else
     SecKerberosSpn := ForceSecKerberosSpn;
+  if aSecContext.CredHandle = nil then
+  begin
+    // first call: create the needed context for those credentials
+    UserName := nil;
+    aSecContext.CreatedTick64 := GetTickCount64;
+    u := aUserName;
+    Split(u, '@', n, p);
+    if p = '' then
+      p := SplitRight(SecKerberosSpn, '@'); // try to extract the SPN
+    if p <> '' then
+      u := n + '@' + UpperCase(p); // force upcase to avoid enduser confusion
+    InBuf.length := Length(u);
+    InBuf.value := pointer(u);
+    MajStatus := GssApi.gss_import_name(
+      MinStatus, @InBuf, GSS_KRB5_NT_PRINCIPAL_NAME, UserName);
+    GccCheck(MajStatus, MinStatus, 'Failed to import UserName');
+    if aPassword = '' then
+      // recover an existing session with the supplied UserName
+      MajStatus := GssApi.gss_acquire_cred(MinStatus, UserName,
+        GSS_C_INDEFINITE, m, GSS_C_INITIATE, aSecContext.CredHandle, nil, nil)
+    else
+    begin
+      // create a new transient in-memory token with the supplied credentials
+      // WARNING: on MacOS, the default system GSSAPI stack seems to create a
+      //  session-wide token (like kinit), not a transient token in memory - you
+      //  may prefer to load a proper libgssapi_krb5.dylib instead
+      InBuf.length := Length(aPassword);
+      InBuf.value := pointer(aPassword);
+      MajStatus := GssApi.gss_acquire_cred_with_password(
+        MinStatus, UserName, @InBuf, GSS_C_INDEFINITE, m,
+        GSS_C_INITIATE, aSecContext.CredHandle, nil, nil);
+    end;
+    if UserName <> nil then
+      GssApi.gss_release_name(MinStatus, UserName);
+    GccCheck(MajStatus, MinStatus,
+      'Failed to acquire credentials for specified user');
+  end;
   result := ClientSspiAuthWorker(
     aSecContext, aInData, SecKerberosSpn, aOutData, aMech);
 end;

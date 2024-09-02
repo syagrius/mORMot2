@@ -137,6 +137,11 @@ begin
   tmp.Done;
 end;
 
+procedure DoWin32PWideCharToFileName(P: PWideChar; var fn: TFileName);
+begin
+  fn := TFileName(SynUnicode(P)); // let the RTL do the conversion (if needed)
+end;
+
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
@@ -554,12 +559,14 @@ begin
         result := 'MORE_DATA';
       ERROR_NO_SYSTEM_RESOURCES:
         result := 'NO_SYSTEM_RESOURCES';
+      // most common WinHttp API errors
       ERROR_WINHTTP_CANNOT_CONNECT:
         result := 'WINHTTP_CANNOT_CONNECT';
       ERROR_WINHTTP_TIMEOUT:
         result := 'WINHTTP_TIMEOUT';
       ERROR_WINHTTP_INVALID_SERVER_RESPONSE:
         result := 'WINHTTP_INVALID_SERVER_RESPONSE';
+      // main Windows Socket API (WSA) errors
       10014:
         result := 'WSAEFAULT';
       10022:
@@ -582,6 +589,17 @@ begin
         result := 'WSAECONNREFUSED';
       11003:
         result := 'WSATRY_AGAIN';
+      // some security-related HRESULT errors
+      $80096010:
+        result := 'TRUST_E_BAD_DIGEST';
+      $800b0100:
+        result := 'TRUST_E_NOSIGNATURE';
+      $800b0101:
+        result := 'CERT_E_EXPIRED';
+      $800b010a:
+        result := 'CERT_E_CHAINING';
+      $800b010c:
+        result := 'CERT_E_REVOKED';
       else
         result := nil;
     end;
@@ -650,15 +668,27 @@ begin
     [ModuleName, code, string(WinErrorText(code, ModuleName))]);
 end;
 
-procedure RaiseLastError(const Context: shortstring;
-  RaisedException: ExceptClass; Code: integer);
+function WinLastError(const Context: shortstring; Code: integer): string;
 begin
   if Code = 0 then
     Code := GetLastError;
+  result := Format('%s error %x (%s)',
+    [Context, Code, string(WinErrorText(Code, nil))]);
+end;
+
+procedure RaiseLastError(const Context: shortstring;
+  RaisedException: ExceptClass; Code: integer);
+begin
   if RaisedException = nil then
     RaisedException := EOSException;
-  raise RaisedException.CreateFmt('%s error %x (%s)',
-    [Context, Code, string(WinErrorText(Code, nil))])
+  raise RaisedException.Create(WinLastError(Context, Code))
+end;
+
+procedure WinCheck(const Context: shortstring; Code: integer;
+  RaisedException: ExceptClass);
+begin
+  if Code <> NO_ERROR then
+    RaiseLastError(Context, RaisedException, Code);
 end;
 
 function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
@@ -707,20 +737,23 @@ end;
 
 var
   shlwapiDll: THandle; // lazy loading (only by TNetClientProtocolFile)
-  PathCreateFromUrl: function(pszUrl, pszPath: PChar; var pcchPath: cardinal;
-    dwFlags: cardinal): HRESULT; stdcall;
+  PathCreateFromUrlW: function(pszUrl, pszPath: PWideChar;
+    var pcchPath: cardinal; dwFlags: cardinal): HRESULT; stdcall;
 
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
   len: DWORD;
-  tmp: array[0..MAX_PATH] of char;
+  u: TSynTempBuffer;
+  fn: array[0..MAX_PATH] of WideChar;
 begin
   result := '';
+  Utf8ToWin32PWideChar(Uri, u);
   len := MAX_PATH;
-  if DelayedProc(PathCreateFromUrl, shlwapiDll, 'shlwapi.dll',
-       'PathCreateFromUrl' + _AW) and
-     (PathCreateFromUrl(pointer(Uri), @tmp, len, 0) = S_OK) then
-    result := tmp;
+  if DelayedProc(PathCreateFromUrlW, shlwapiDll, 'shlwapi.dll',
+       'PathCreateFromUrlW') and
+     (PathCreateFromUrlW(u.buf, @fn, len, 0) = S_OK) then
+    DoWin32PWideCharToFileName(fn, result);
+  u.Done;
 end;
 
 const
@@ -982,7 +1015,7 @@ begin
            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
     exit;
   GetModuleFileNameW(hm, tmp, SizeOf(tmp));
-  result := string(SynUnicode(tmp));
+  DoWin32PWideCharToFileName(tmp, result);
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -2805,7 +2838,7 @@ var
   // avoid unneeded reference to ShlObj.pas
   // - late binding is mandatory to be used on WinPE which does NOT have this dll
   // - late binding also ensure that we load libraries only when needed
-  SHGetFolderPath: function(hwnd: hwnd; csidl: integer; hToken: THandle;
+  SHGetFolderPathW: function(hwnd: hwnd; csidl: integer; hToken: THandle;
     dwFlags: DWord; pszPath: PChar): HRESULT; stdcall;
 
 const
@@ -2838,7 +2871,7 @@ const
     'TEMP',            // spTemp
     '');               // spLog
 var
-  tmp: array[0..MAX_PATH] of char;
+  tmp: array[0..MAX_PATH] of WideChar;
 begin
   result := '';
   case kind of
@@ -2860,18 +2893,18 @@ begin
     spTemp:
       begin
         // typically 'C:\Users\<user>\AppData\Local\Temp'
-        if GetTempPath(MAX_PATH, @tmp) <> 0 then
-          result := tmp; // retrieve from dedicated standard API
+        if GetTempPathW(MAX_PATH, @tmp) <> 0 then // first try Windows API
+          DoWin32PWideCharToFileName(tmp, result);
         if result = '' then
           result := GetEnvironmentVariable(_ENV[spTemp]); // fallback
       end;
   else
     if (CSIDL[kind] <> 0) and
-       DelayedProc(SHGetFolderPath, SHFolderDll, 'SHFolder.dll',
-         'SHGetFolderPath' + _AW) and
-       (SHGetFolderPath(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
+       DelayedProc(SHGetFolderPathW, SHFolderDll, 'SHFolder.dll',
+         'SHGetFolderPathW') and
+       (SHGetFolderPathW(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
       // retrieved from official CSIDL
-      result := tmp
+      DoWin32PWideCharToFileName(tmp, result)
     else
     begin
       // fallback to environment variables (very unlikely)
@@ -2930,7 +2963,7 @@ begin
     Close;
   key := 0;
   result := RegOpenKeyExW(
-    _HKEY[root], Utf8ToWin32PWideChar(keyname, tmp), 0, KEY_READ, key) = 0;
+    _HKEY[root], Utf8ToWin32PWideChar(keyname, tmp), 0, KEY_READ, key) = NO_ERROR;
   tmp.Done;
 end;
 
@@ -2948,15 +2981,12 @@ begin
   result := '';
   rsize := {%H-}tmp.Init; // most of the time, a single call is enough
   res := RegQueryValueExW(key, pointer(entry), nil, @rtype, tmp.buf, @rsize);
-  if res <> 0 then
-    if res = ERROR_MORE_DATA then
-    begin
-      tmp.Init(rsize); // more than 4KB of data (unlikely)
-      res := RegQueryValueExW(key, pointer(entry), nil, nil, tmp.buf, @rsize);
-    end
+  if res <> NO_ERROR then
+    if res = ERROR_MORE_DATA then // more than 4KB of data (unlikely)
+      res := RegQueryValueExW(key, pointer(entry), nil, nil, tmp.Init(rsize), @rsize)
     else
       exit;
-  if res = 0 then
+  if res = NO_ERROR then
   begin
     case rtype of
       REG_SZ,
@@ -2975,10 +3005,10 @@ var
   rsize: DWord;
 begin
   result := '';
-  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @rsize) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @rsize) <> NO_ERROR then
     exit;
   SetLength(result, rsize);
-  if RegQueryValueExW(key, pointer(entry), nil, nil, pointer(result), @rsize) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, pointer(result), @rsize) <> NO_ERROR then
     result := '';
 end;
 
@@ -2997,7 +3027,7 @@ end;
 function TWinRegistry.ReadBuffer(const entry: SynUnicode;
   data: pointer; datalen: DWord): boolean;
 begin
-  result := RegQueryValueExW(key, pointer(entry), nil, nil, data, @datalen) = 0;
+  result := RegQueryValueExW(key, pointer(entry), nil, nil, data, @datalen) = NO_ERROR;
 end;
 
 function TWinRegistry.ReadMax(const entry: SynUnicode;
@@ -3016,7 +3046,7 @@ end;
 
 function TWinRegistry.ReadSize(const entry: SynUnicode): integer;
 begin
-  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> NO_ERROR then
     result := -1;
 end;
 
@@ -3028,7 +3058,7 @@ begin
   result := nil;
   count := 0;
   if (RegQueryInfoKeyW(key, nil, nil, nil, @count, @maxlen,
-       nil, nil, nil, nil, nil, nil) <> 0) or
+       nil, nil, nil, nil, nil, nil) <> NO_ERROR) or
      (count = 0) then
     exit;
   SetLength(result, count);
@@ -3037,7 +3067,7 @@ begin
   for i := 0 to count - 1 do
   begin
     len := maxlen;
-    if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = 0 then
+    if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = NO_ERROR then
       Win32PWideCharToUtf8(tmp.buf, len, result[i]);
   end;
   tmp.Done;
@@ -5075,8 +5105,21 @@ function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName
   redirected: PRawByteString; const onoutput: TOnRedirect;
   const wrkdir: TFileName): integer;
 var
-  startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   processinfo: TProcessInformation;
+begin
+  result := RunCommandWin(cmd, waitfor, processinfo, env, options,
+    waitfordelayms, redirected, onoutput, wrkdir);
+  if processhandle <> nil then
+    processhandle^ := processinfo.hProcess;
+end;
+
+function RunCommandWin(const cmd: TFileName; waitfor: boolean;
+  var processinfo: TProcessInformation; const env: TFileName;
+  options: TRunOptions; waitfordelayms: cardinal;
+  redirected: PRawByteString; const onoutput: TOnRedirect;
+  const wrkdir: TFileName): integer;
+var
+  startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   security: TSecurityAttributes;
   exe, path: TFileName;
   rd, wr, job: THandle;
@@ -5134,6 +5177,7 @@ var
 begin
   // https://support.microsoft.com/en-us/help/175986/info-understanding-createprocess-and-command-line-arguments
   result := -1;
+  FillCharFast(processinfo, SizeOf(processinfo), 0);
   // extract path and exe from cmd input
   if cmd = '' then
     exit;
@@ -5203,7 +5247,6 @@ begin
     else
       rd := 0;
   // https://docs.microsoft.com/en-en/windows/desktop/ProcThread/process-creation-flags
-  FillCharFast(processinfo, SizeOf(processinfo), 0);
   flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE;
   if not (roWinNoProcessDetach in options) then
     flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
@@ -5233,8 +5276,6 @@ begin
     exit;
   end;
   // setup the newly created process
-  if processhandle <> nil then
-    processhandle^ := processinfo.hProcess;
   if flags and CREATE_BREAKAWAY_FROM_JOB <> 0 then
   begin
     job := CreateJobToClose(processinfo.dwProcessID);

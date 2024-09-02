@@ -1563,15 +1563,37 @@ procedure UrlEncodeName(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overl
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; const Text: RawUtf8); overload;
 
+type
+  /// some options for UrlEncode()
+  TUrlEncoder = set of (
+    ueTrimLeadingQuestionMark,
+    ueEncodeNames,
+    ueSkipVoidString,
+    ueSkipVoidValue);
+
 /// encode supplied parameters to be compatible with URI encoding
 // - parameters must be supplied two by two, as Name,Value pairs, e.g.
 // ! url := UrlEncode(['select','*','where','ID=12','offset',23,'object',aObject]);
 // - parameters names should be plain ASCII-7 RFC compatible identifiers
-// (0..9a..zA..Z_.~), otherwise their values are skipped
+// (0..9a..zA..Z_.~), otherwise they are skipped unless ueEncodeNames is set
 // - parameters values can be either textual, integer or extended, or any TObject
 // - TObject serialization into UTF-8 will be processed with ObjectToJson()
 function UrlEncode(const NameValuePairs: array of const;
-  TrimLeadingQuestionMark: boolean = false): RawUtf8; overload;
+  Options: TUrlEncoder = []): RawUtf8; overload;
+
+/// encode supplied parameters to be compatible with URI encoding
+// - consider using UrlAppend() if you just need to append some parameters
+function UrlEncode(const NameValuePairs: array of const;
+  TrimLeadingQuestionMark: boolean): RawUtf8; overload;
+
+/// append some encoded Name,Value pairs parameters to an existing URI
+// - will check if Uri does already end with '?' or '&'
+function UrlAppend(const Uri: RawUtf8; const NameValuePairs: array of const;
+  Options: TUrlEncoder = []): RawUtf8;
+
+/// encode a full URI with prefix and parameters
+function UrlEncodeFull(const PrefixFmt: RawUtf8; const PrefixArgs,
+  NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
 
 /// decode a UrlEncode() URI encoded parameter into its original value
 function UrlDecode(U: PUtf8Char): RawUtf8; overload;
@@ -1734,7 +1756,8 @@ type
     mtBz2,
     mtPdf,
     mtSQlite3,
-    mtXcomp);
+    mtXcomp,
+    mtDicom);
   PMimeType = ^TMimeType;
 
 const
@@ -1776,7 +1799,8 @@ const
     'application/bzip2',             // mtBz2
     'application/pdf',               // mtPdf
     'application/x-sqlite3',         // mtSQlite3
-    'application/x-compress');       // mtXcomp
+    'application/x-compress',        // mtXcomp
+    'application/dicom');            // mtDicom
 
 /// retrieve the MIME content type from its file name
 function GetMimeContentTypeFromExt(const FileName: TFileName;
@@ -2032,6 +2056,8 @@ function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString; over
 /// fill a ShortString with the (hexadecimal) chars of the input text/binary
 function EscapeToShort(const source: RawByteString): ShortString; overload;
 
+/// if source is not UTF-8 calls EscapeToShort, otherwise return it directly
+function ContentToShort(const source: RawByteString): ShortString;
 
 /// generate some pascal source code holding some data binary as constant
 // - can store sensitive information (e.g. certificates) within the executable
@@ -7613,7 +7639,7 @@ begin
     P := pointer(result);
     P[0] := 'X';
     P[1] := '''';
-    BinToHex(RawBlob, P + 2, RawBlobLength);
+    mormot.core.text.BinToHex(RawBlob, P + 2, RawBlobLength);
     P[RawBlobLength * 2 + 2] := '''';
   end;
 end;
@@ -8023,11 +8049,12 @@ end;
 
 // some local sub-functions for better code generation of UrlEncode()
 
-procedure _UrlEncode_Write(s, d: PByte; tab: PTextByteSet; space2plus: cardinal);
+function _UrlEncode_Write(s, d: PByte; tab: PTextByteSet; space2plus: cardinal): PtrUInt;
 var
   c: cardinal;
   hex: PByteToWord;
 begin
+  result := PtrUInt(d);
   if d = nil then
     exit;
   hex := @TwoDigitsHexWB;
@@ -8041,7 +8068,7 @@ begin
       inc(d);
     end
     else if c = 0 then
-      exit
+      break
     else if c = space2plus then // space2plus=32 for parameter, =48 for URI
     begin
       d^ := ord('+');
@@ -8055,6 +8082,7 @@ begin
       inc(d, 2);
     end;
   until false;
+  result := PtrUInt(d) - result; // return the number of written bytes
 end;
 
 function _UrlEncode_ComputeLen(s: PByte; tab: PTextByteSet; space2plus: byte): PtrInt;
@@ -8089,9 +8117,13 @@ end;
 
 procedure _UrlEncodeW(W: TTextWriter; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 begin
-  if Text <> nil then
-    _UrlEncode_Write(Text, W.AddPrepare(_UrlEncode_ComputeLen(
-      Text, @TEXT_BYTES, space2plus)), @TEXT_BYTES, space2plus);
+  if (Text = nil) or
+     (W = nil) then
+    exit;
+  TextLen := TextLen * 3; // worse case
+  if TextLen > W.BEnd - W.B then // need to compute exact length
+    TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
+  inc(W.B, _UrlEncode_Write(Text, W.AddPrepare(TextLen), @TEXT_BYTES, space2plus));
 end;
 
 function UrlEncode(const Text: RawUtf8): RawUtf8;
@@ -8134,35 +8166,86 @@ begin
   _UrlEncodeW(W, pointer(Text), length(Text), 48);
 end;
 
+function UrlEncode(const NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
+begin
+  result := UrlEncodeFull('', [], NameValuePairs, Options);
+end;
+
+const
+  _UE_OPT: array[boolean] of TUrlEncoder = ([], [ueTrimLeadingQuestionMark]);
+
 function UrlEncode(const NameValuePairs: array of const;
   TrimLeadingQuestionMark: boolean): RawUtf8;
-// (['select','*','where','ID=12','offset',23,'object',aObject]);
+begin
+  result := UrlEncodeFull('', [], NameValuePairs, _UE_OPT[TrimLeadingQuestionMark]);
+end;
+
+function UrlAppend(const Uri: RawUtf8; const NameValuePairs: array of const;
+  Options: TUrlEncoder): RawUtf8;
+begin
+  if (Uri <> '') and (Uri[length(Uri)] in ['?', '&']) then
+    include(Options, ueTrimLeadingQuestionMark);
+  result := UrlEncodeFull(Uri, [], NameValuePairs, Options);
+end;
+
+function UrlEncodeFull(const PrefixFmt: RawUtf8; const PrefixArgs,
+  NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
 var
   a, n: PtrInt;
   name, value: RawUtf8;
   p: PVarRec;
+  w: TTextWriter;
+  possibleDirect, valueDirect, hasContent: boolean;
+  tmp: TTextWriterStackBuffer;
 begin
-  result := '';
-  n := high(NameValuePairs);
-  if (n < 0) or
-     (n and 1 <> 1) then // n should be = 1,3,5,7,..
-    exit;
-  for a := 0 to n shr 1 do
-  begin
-    VarRecToUtf8(NameValuePairs[a * 2], name);
-    if not IsUrlValid(pointer(name)) then
-      continue; // just skip invalid names
-    p := @NameValuePairs[a * 2 + 1];
-    if p^.VType = vtObject then
-      value := ObjectToJson(p^.VObject, []) // VarRecToUtf8(vtObject)=ClassName
-    else
-      VarRecToUtf8(p^, value);
-    result := result + '&' + name + '=' + UrlEncode(value);
+  hasContent := false;
+  possibleDirect := DefaultJsonWriter <> TTextWriter;
+  w := DefaultJsonWriter.CreateOwnedStream(tmp);
+  try
+    if PrefixFmt <> '' then
+      w.Add(PrefixFmt, PrefixArgs);
+    n := high(NameValuePairs);
+    if (n > 0) and
+       (n and 1 = 1) then // n should be = 1,3,5,7,..
+      for a := 0 to n shr 1 do
+      begin
+        p := @NameValuePairs[a * 2];
+        VarRecToUtf8(p^, name);
+        if not IsUrlValid(pointer(name)) then
+          if ueEncodeNames in Options then
+            name := UrlEncodeName(name)
+          else
+            continue; // just skip invalid names
+        inc(p);
+        valueDirect := possibleDirect and (byte(p^.VType) in vtNotString);
+        if (ueSkipVoidValue in Options) and
+           VarRecIsVoid(p^) then
+          continue // skip e.g. '' or 0
+        else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
+          value := ObjectToJson(p^.VObject, [])
+        else if not valueDirect then
+        begin
+          VarRecToUtf8(p^, value);
+          if (ueSkipVoidString in Options) and
+             (value = '') then
+            continue; // skip ''
+        end;
+        if hasContent then
+          w.AddDirect('&')
+        else if not (ueTrimLeadingQuestionMark in Options) then
+          w.AddDirect('?');
+        hasContent := true;
+        w.AddString(name);
+        w.AddDirect('=');
+        if valueDirect then
+          w.Add(p^) // requires TJsonWriter
+        else
+          _UrlEncodeW(w, pointer(value), length(value), 32); // = UrlEncode(W)
+      end;
+    w.SetText(result);
+  finally
+    w.Free;
   end;
-  if TrimLeadingQuestionMark then
-    delete(result, 1, 1)
-  else
-    result[1] := '?';
 end;
 
 function IsUrlValid(P: PUtf8Char): boolean;
@@ -8176,9 +8259,11 @@ begin
   repeat
     if tcUriUnreserved in tab[P^] then
       inc(P) // was  ['_', '-', '.', '~', '0'..'9', 'a'..'z', 'A'..'Z']
+    else if P^ = #0 then
+      break
     else
       exit;
-  until P^ = #0;
+  until false;
   result := true;
 end;
 
@@ -8615,15 +8700,15 @@ end;
 { *********** Basic MIME Content Types Support }
 
 const
-  MIME_MAGIC: array[0..17] of cardinal = (
+  MIME_MAGIC: array[0..18] of cardinal = (
      $04034b50 + 1, $46445025 + 1, $21726152 + 1, $afbc7a37 + 1,
      $694c5153 + 1, $75b22630 + 1, $9ac6cdd7 + 1, $474e5089 + 1,
      $38464947 + 1, $46464f77 + 1, $a3df451a + 1, $002a4949 + 1,
      $2a004d4d + 1, $2b004d4d + 1, $46464952 + 1, $e011cfd0 + 1,
-     $5367674f + 1, $1c000000 + 1);
+     $5367674f + 1, $1c000000 + 1, $4d434944 + 1);
   MIME_MAGIC_TYPE: array[0..high(MIME_MAGIC)] of TMimeType = (
      mtZip, mtPdf, mtRar, mt7z, mtSQlite3, mtWma, mtWmv, mtPng, mtGif, mtFont,
-     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4);
+     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4, mtDicom);
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8638,18 +8723,24 @@ begin
       case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
         ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
           begin
-            result := mtHtml;
+            result := mtHtml; // legacy HTML document
             exit;
           end;
         ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
           begin
-            if IdemPChar(PUtf8Char(Content) + 5, 'TYPE HTML') then
-              result := mtHtml;
+            if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
+               ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
+               (PAnsiChar(Content)[9] = ' ') then
+              if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
+                 ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+                result := mtHtml // HTML5 markup
+              else
+                result := mtXml; // malformed XML document
             exit;
           end;
         ord('?') + ord('x') shl 8 + ord('m') shl 16 + ord('l') shl 24:
           begin
-            result := mtXml;
+            result := mtXml; // "well formed" XML document
             exit;
           end;
       end;
@@ -8672,6 +8763,10 @@ begin
           case PWord(Content)^ of
             $4D42:
               result := mtBmp; // 42 4D
+            else
+              if (Len > 132) and // 'DICOM' prefix may appear at offset 128
+                 (PCardinalArray(Content)^[32] = $4d434944) then
+              result := mtDicom;
           end;
         end;
       mtWebp:
@@ -8744,20 +8839,20 @@ begin
 end;
 
 const
-  MIME_EXT: array[0..46] of PUtf8Char = ( // for IdemPPChar() start check
+  MIME_EXT: array[0..48] of PUtf8Char = ( // for IdemPPChar() start check
     'PNG',  'GIF',  'TIF',  'JP',  'BMP', 'DOC',  'HTM',  'CSS',
     'JSON', 'ICO',  'WOF',  'TXT', 'SVG', 'ATOM', 'RDF',  'RSS',
     'WEBP', 'APPC', 'MANI', 'XML', 'JS',  'MJS',  'WOFF', 'OGG',
     'OGV',  'MP4',  'M2V',  'M2P', 'MP3', 'H264', 'TEXT', 'LOG',
     'GZ',   'WEBM', 'MKV',  'RAR', '7Z',  'BZ2',  'WMA',  'WMV',
-    'AVI',  'PPT',  'XLS',  'PDF', 'SQLITE', 'DB3', nil);
+    'AVI',  'PPT',  'XLS',  'PDF', 'DCM', 'DICOM', 'SQLITE', 'DB3', nil);
   MIME_EXT_TYPE: array[0 .. high(MIME_EXT) - 1] of TMimeType = (
     mtPng,  mtGif,  mtTiff,  mtJpg,  mtBmp,  mtDoc,  mtHtml, mtCss,
     mtJson, mtXIcon, mtFont, mtText, mtSvg,  mtXml,  mtXml,  mtXml,
     mtWebp, mtManifest, mtManifest,  mtXml,  mtJS,   mtJS,   mtFont, mtOgg,
     mtOgg,  mtMp4,  mtMp2,   mtMp2,  mtMpeg, mtH264, mtText, mtText,
     mtGzip, mtWebm, mtWebm,  mtRar,  mt7z,   mtBz2,  mtWma,  mtWmv,
-    mtAvi,  mtPpt,  mtXls,  mtPdf,   mtSQlite3, mtSQlite3);
+    mtAvi,  mtPpt,  mtXls,   mtPdf, mtDicom, mtDicom, mtSQlite3, mtSQlite3);
 
 function GetMimeTypeFromExt(const Ext: RawUtf8): TMimeType;
 var
@@ -9353,6 +9448,19 @@ function EscapeToShort(const source: RawByteString): ShortString;
 begin
   result[0] := AnsiChar(
     EscapeBuffer(pointer(source), length(source), @result[1], 255) - @result[1]);
+end;
+
+function ContentToShort(const source: RawByteString): ShortString;
+var
+  l: PtrInt;
+begin
+  l := length(source);
+  if (l = 0) or
+     IsValidUtf8(source) then
+    SetString(result, PAnsiChar(pointer(source)), l)
+  else
+    result[0] := AnsiChar(
+      EscapeBuffer(pointer(source), l, @result[1], 255) - @result[1]);
 end;
 
 function BinToSource(const ConstName, Comment: RawUtf8;

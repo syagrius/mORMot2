@@ -6,7 +6,7 @@ unit mormot.db.sql.odbc;
 {
   *****************************************************************************
 
-   Efficient SQL Database Connection via ODBC 
+   Efficient SQL Database Connection via ODBC
     -  TSqlDBOdbcConnection* and TSqlDBOdbcStatement Classes
 
   *****************************************************************************
@@ -26,6 +26,7 @@ uses
   mormot.core.text,
   mormot.core.datetime,
   mormot.core.data,
+  mormot.core.rtti,
   mormot.core.json,
   mormot.core.perf,
   mormot.core.log,

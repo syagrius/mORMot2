@@ -27,8 +27,10 @@ uses
   mormot.crypt.secure,
   mormot.net.sock,
   mormot.net.http,
+  mormot.net.client,
   mormot.net.server,
   mormot.net.async,
+  mormot.net.openapi,
   mormot.net.ldap,
   mormot.net.dns,
   mormot.net.rtsphttp,
@@ -62,11 +64,13 @@ type
     // this is the main method called by RtspOverHttp[BufferedWrite]
     procedure DoRtspOverHttp(options: TAsyncConnectionsOptions);
   published
+    /// validate mormot.net.openapi unit
+    procedure OpenAPI;
     /// validate TUriTree high-level structure
     procedure _TUriTree;
     /// validate DNS and LDAP clients (and NTP/SNTP)
     procedure DNSAndLDAP;
-    /// RTSP over HTTP, as implemented in SynProtoRTSPHTTP unit
+    /// RTSP over HTTP, as implemented in mormot.net.rtsphttp unit
     procedure RTSPOverHTTP;
     /// RTSP over HTTP, with always temporary buffering
     procedure RTSPOverHTTPBufferedWrite;
@@ -80,6 +84,69 @@ type
 
 
 implementation
+
+const
+  // some reference from https://github.com/OAI/OpenAPI-Specification
+  OpenApiRef: array[0..1] of RawUtf8 = (
+    'v2.0/json/petstore-simple.json',
+    'v3.0/petstore.json');
+
+procedure TNetworkProtocols.OpenAPI;
+var
+  i: PtrInt;
+  fn: TFileName;
+  u, ud, uc, url: RawUtf8;
+  pets: TRawUtf8DynArray;
+  oa: TOpenApiParser;
+begin
+  for i := 1 to high(RESERVED_KEYWORDS) do
+    CheckUtf8(StrComp(pointer(RESERVED_KEYWORDS[i - 1]),
+      pointer(RESERVED_KEYWORDS[i])) < 0, RESERVED_KEYWORDS[i]);
+  for i := 0 to high(RESERVED_KEYWORDS) do
+  begin
+    u := RESERVED_KEYWORDS[i];
+    Check(IsReservedKeyWord(u));
+    inc(u[1], 32); // lowercase
+    Check(IsReservedKeyWord(u));
+    LowerCaseSelf(u);
+    Check(IsReservedKeyWord(u));
+    u := u + 's';
+    Check(not IsReservedKeyWord(u));
+    Check(not IsReservedKeyWord(UInt32ToUtf8(i)));
+  end;
+  SetLength(pets, length(OpenApiRef));
+  for i := 0 to high(OpenApiRef) do
+  begin
+    fn := FormatString('%petstore%.json', [WorkDir, i + 1]);
+    pets[i] := StringFromFile(fn);
+    if pets[i] = '' then
+    begin
+      url := OpenApiRef[i];
+      if not IdemPChar(pointer(url), 'HTTP') then
+        url := 'https://raw.githubusercontent.com/OAI/' +
+                 'OpenAPI-Specification/main/examples/' + url;
+       JsonBufferReformat(pointer(
+        HttpGet(url, nil, false, nil, 0, {forcesock:}true, {igncerterr:}true)),
+        pets[i]);
+      if pets[i] <> '' then
+        FileFromString(pets[i], fn);
+    end;
+  end;
+  for i := 0 to high(pets) do
+    if pets[i] <> '' then
+    begin
+      oa := TOpenApiParser.Create;
+      try
+        oa.ParseJson(pets[i]);
+        ud := FormatUtf8('pets%.dto.pas', [i + 1]);
+        uc := FormatUtf8('pets%.client.pas', [i + 1]);
+        //ConsoleWrite(oa.GetDtosUnit(ud));
+        //ConsoleWrite(oa.GetClientUnit(uc, 'TPets', ud));
+      finally
+        oa.Free;
+      end;
+    end;
+end;
 
 procedure RtspRegressionTests(proxy: TRtspOverHttpServer; test: TSynTestCase;
   clientcount, steps: integer);
@@ -599,7 +666,7 @@ var
   l: TLdapClientSettings;
   one: TLdapClient;
   utc1, utc2: TDateTime;
-  ntp, usr, pwd, main, txt: RawUtf8;
+  ntp, usr, pwd, ku, main, txt: RawUtf8;
   hasinternet: boolean;
 begin
   CheckEqual(1 shl ord(uacPartialSecretsRodc), $04000000, 'uacHigh');
@@ -664,6 +731,10 @@ begin
   CheckEqual(DNToCN(
     'cn=JDoe,ou=Widgets,ou=Manufacturing,dc=USRegion,dc=OrgName,dc=com'),
     'USRegion.OrgName.com/Manufacturing/Widgets/JDoe');
+  CheckEqual(DNToCN(
+    'OU=d..zaf(fds )da\,z \"\"((''\\/ df\3D\3Dez,OU=test_wapt,OU=computers,' +
+    'OU=tranquilit,DC=ad,DC=tranquil,DC=it'),
+    'ad.tranquil.it/tranquilit/computers/test_wapt/d\.\.zaf(fds )da,z ""((''\\\/ df==ez');
   // validate LDAP escape/unescape
   for c := 0 to 200 do
   begin
@@ -758,6 +829,9 @@ begin
       end;
       for j := 0 to high(clients) do
       begin
+        txt := '';
+        if clients[j] = main then
+          txt := ' (main)';
         one := TLdapClient.Create;
         try
           one.Settings.TargetUri := clients[j];
@@ -768,25 +842,43 @@ begin
             begin
               one.Settings.UserName := usr;
               one.Settings.Password := pwd;
-              {$ifdef OSPOSIX}
-              // a valid current kinit session seems mandatory on GSSAPI,
-              // which makes Kerberos password authentication pointless
-              one.Settings.TargetPort := LDAP_TLS_PORT; // TLS needed for safety
-              if not one.Bind then
-              {$else}
-              //  Windows allow a kerberos connection from an unrolled computer
-              if not one.BindSaslKerberos then
-              {$endif OSPOSIX}
+              if Executable.Command.Option('ldaps') then
               begin
-                CheckUtf8(false, 'ldap:%', [clients[j]]);
+                // plain over TLS
+                one.Settings.TargetPort := LDAP_TLS_PORT; // force TLS
+                if one.Bind then
+                  AddConsole('connected to % with TLS + plain Bind',
+                    [one.Settings.TargetUri])
+                else
+                begin
+                  CheckUtf8(false, 'Bind % res=% [%]%',
+                    [one.Settings.TargetUri, one.ResultCode, one.ResultString, txt]);
+                  continue;
+                end;
+              end
+              else
+                // Windows/SSPI and POSIX/GSSAPI with no prior loggued user
+                if one.BindSaslKerberos('', @ku) then
+                  AddConsole('connected to % with specific user % = %',
+                    [one.Settings.TargetUri, usr, ku])
+                else
+                begin
+                  CheckUtf8(false, '% on ldap:% [%]%',
+                    [usr, clients[j], one.ResultString, txt]);
+                  continue;
+                end;
+            end
+            else
+              // Windows/SSPI and POSIX/GSSAPI with a prior loggued user (kinit)
+              if one.BindSaslKerberos('', @ku) then
+                AddConsole('connected to % with current Kerberos user %',
+                  [one.Settings.TargetUri, ku])
+              else
+              begin
+                CheckUtf8(false, 'currentuser on ldap:% [%]%',
+                  [clients[j], one.ResultString, txt]);
                 continue;
               end;
-            end
-            else if not one.BindSaslKerberos then
-              continue;
-            txt := '';
-            if clients[j] = main then
-              txt := ' (main)';
             Check(one.NetbiosDN <> '', 'NetbiosDN');
             Check(one.ConfigDN <> '', 'ConfigDN');
             Check(one.Search(one.WellKnownObjects.Users, {typesonly=}false,

@@ -33,6 +33,7 @@ uses
   mormot.core.unicode,
   mormot.core.datetime,
   mormot.core.rtti,
+  mormot.core.variants,
   mormot.core.data,
   mormot.core.log,
   mormot.lib.sspi, // do-nothing units on non compliant OS
@@ -50,6 +51,11 @@ uses
 // - e.g. DNToCN('CN=User1,OU=Users,OU=London,DC=xyz,DC=local') =
 // 'xyz.local/London/Users/User1'
 function DNToCN(const DN: RawUtf8): RawUtf8;
+
+/// low-level parse a Distinguished Name text into its DC= OU= CN= parts
+procedure ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
+  ValueEscapeCN: boolean = false);
+
 
 const
   // LDAP result codes
@@ -477,6 +483,11 @@ type
     /// retrieve a value as its inital value stored with Add()
     // - return '' if the index is out of range, or the attribute is void
     function GetRaw(index: PtrInt = 0): RawByteString;
+    /// retrieve this attribute value(s) as a variant
+    // - return nil if there is no value (self=nil or Count=0)
+    // - if there is a single value, return it as a single variant text
+    // - if Count > 0, return a TDocVariant array with all texts
+    function GetVariant: variant;
     /// how many values have been added to this attribute
     property Count: integer
       read fCount;
@@ -581,6 +592,14 @@ type
     function ObjectNames(asCN: boolean = false): TRawUtf8DynArray;
     /// return all Items[].Attributes.Get(AttributeName) as a sorted array
     function ObjectAttributes(const AttributeName: RawUtf8): TRawUtf8DynArray;
+    /// add all result as a TDocVariant object nested tree
+    // - the full CN will be used as path
+    // - attributes would be included as ObjectAttributeField (e.g. '_attr')
+    // fields (including the "objectName" value), unless ObjectAttributeField
+    // is '', and no attribute will be set; if ObjectAttributeField is '*' no
+    // sub-field will be generated, and attributes will be written directly
+    procedure AppendTo(var Dvo: TDocVariantData;
+      const ObjectAttributeField: RawUtf8);
     /// dump the result of a LDAP search into human readable form
     // - used for debugging
     function Dump: RawUtf8;
@@ -869,6 +888,8 @@ type
     procedure GetByAccountType(AT, Uac, unUac: integer;
       const BaseDN, CustomFilter, Match, AttributeName: RawUtf8;
       out Res: TRawUtf8DynArray);
+    function GetTlsContext: PNetTlsContext;
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// initialize this LDAP client instance
     constructor Create; overload; override;
@@ -933,6 +954,10 @@ type
     /// retrieve all entries that match a given set of criteria
     // - will generate as many requests/responses as needed to retrieve all
     // the information into the SearchResult property
+    // - if paging has been enabled (e.g. with SearchBegin), you should call
+    // and process the SearchResult several times, until SearchCookie is ''
+    // - by default, all attributes would be retrieved, unless a specific set
+    // of Attributes is supplied; if you want no attribute, use ['']
     function Search(const BaseDN: RawUtf8; TypesOnly: boolean;
       const Filter: RawUtf8; const Attributes: array of RawUtf8): boolean;
     /// retrieve all entries that match a given set of criteria
@@ -959,6 +984,16 @@ type
     // - Returns nil if the object is not found or if the search failed
     function SearchObject(const ObjectDN, Filter, Attribute: RawUtf8;
       Scope: TLdapSearchScope = lssBaseObject): TLdapAttribute; overload;
+    /// retrieve all pages of entries into a TDocVariant instance
+    // - will contain the nested results as an object, generated from then
+    // CN of the returned object names
+    // - attributes would be added as ObjectAttributeField (e.g. '_attr') fields,
+    // unless ObjectAttributeField is '', and no attribute will be added, or
+    // ObjectAttributeField is '*', and attributes are written as no sub-field
+    function SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
+      const Filter: RawUtf8; const Attributes: array of RawUtf8;
+      const ObjectAttributeField: RawUtf8 = '_attr'; MaxCount: integer = 0;
+      SortByName: boolean = true): variant;
     /// create a new entry in the directory
     function Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
     /// Add a new computer in the domain
@@ -1065,11 +1100,13 @@ type
     property FullResult: TAsnObject
       read fFullResult;
     /// optional advanced options for FullTls = true
-    // - by default, IgnoreCertificateErrors is set to true by Create
-    // - but you can change these default settings to validate the server
-    // certificate if needed
-    property TlsContext: TNetTlsContext
-      read fTlsContext write fTlsContext;
+    // - we define a pointer to the record and not directly a record property
+    // to allow direct modification of any property of the record
+    // - by default, IgnoreCertificateErrors is set to true by Create - you can
+    // change these default settings, for instance as such:
+    // ! TlsContext^.IgnoreCertificateErrors := false;
+    property TlsContext: PNetTlsContext
+      read GetTlsContext;
     /// sequence number of the last LDAP command
     // - incremented with any LDAP command
     property Seq: integer
@@ -1169,7 +1206,8 @@ type
     // - call GetUserDN() to retrieve the user's distinguishedName and
     // primaryGroupID attributes from User sAMAccountName or userPrincipalName
     // - will check if primaryGroupID matches any registered groups SID, then
-    // call GetIsMemberOf() to search for registered groups
+    // call GetIsMemberOf() to search for registered groups (following
+    // GroupNested property to walk the chain of ancestries)
     // - optionally return the matching sAMAccountName in GroupsAN[]
     function Authorize(const User: RawUtf8;
       GroupsAN: PRawUtf8DynArray = nil): boolean;
@@ -1197,6 +1235,8 @@ type
     property GroupCustomFilter: RawUtf8
       read fGroupCustomFilter write fGroupCustomFilter;
     /// allow to enable the 1.2.840.113556.1.4.1941 recursive search flag
+    // - true by default; as documented by Microsoft: "walks the chain of
+    // ancestry in objects all the way to the root until it finds a match"
     property GroupNested: boolean
       read fGroupNested write fGroupNested;
     /// after how many seconds the internal cache should be flushed
@@ -1443,36 +1483,61 @@ end;
 
 { **************** LDAP Protocol Definitions }
 
-function DNToCN(const DN: RawUtf8): RawUtf8;
+procedure ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
+  ValueEscapeCN: boolean);
 var
   p: PUtf8Char;
-  dc, ou, cn, kind, value: RawUtf8;
+  kind, value: RawUtf8;
+  dcn, oun, cnn: integer;
 begin
-  result := '';
   p := pointer(DN);
   if p = nil then
     exit;
+  dcn := 0;
+  oun := 0;
+  cnn := 0;
   repeat
-    GetNextItemTrimed(p, '=', kind);
-    GetNextItemTrimed(p, ',', value);
+    GetNextItemTrimedEscaped(p, '=', '\', kind);
+    GetNextItemTrimedEscaped(p, ',', '\', value);
     if (kind = '') or
        (value = '') then
-      ELdap.RaiseUtf8('DNToCN(%): invalid Distinguished Name', [DN]);
+      ELdap.RaiseUtf8('ParsDN(%): invalid Distinguished Name', [DN]);
     if not PropNameValid(pointer(value)) then // simple alphanum is just fine
-      value := LdapEscapeCN(LdapUnescape(value)); // may need some (un)escape
-    LowerCaseSelf(kind);
-    if kind = 'dc' then
     begin
-      if dc <> '' then
-        dc := dc + '.';
-      dc := dc + value;
-    end
-    else if kind = 'ou' then
-      Prepend(ou, ['/', value])
-    else if kind = 'cn' then
-      Prepend(cn, ['/', value]);
+      value := LdapUnescape(value); // may need some (un)escape
+      if ValueEscapeCN then
+        value := EscapeChar(value , LDAP_CN, '\'); // inlined LdapEscapeCN()
+    end;
+    case PCardinal(kind)^ and $ffdfdf of
+      ord('D') + ord('C') shl 8:
+        AddRawUtf8(dc, dcn, value);
+      ord('O') + ord('U') shl 8:
+        AddRawUtf8(ou, oun, value);
+      ord('C') + ord('N') shl 8:
+        AddRawUtf8(cn, cnn, value);
+    end;
   until p = nil;
-  result := dc + ou + cn;
+  if dc <> nil then
+    DynArrayFakeLength(dc, dcn);
+  if ou <> nil then
+    DynArrayFakeLength(ou, oun);
+  if cn <> nil then
+    DynArrayFakeLength(cn, cnn);
+end;
+
+function DNToCN(const DN: RawUtf8): RawUtf8;
+var
+  dc, ou, cn: TRawUtf8DynArray;
+begin
+  result := '';
+  if DN = '' then
+    exit;
+  ParseDN(DN, dc, ou, cn, {valueEscapeCN=}true);
+  result := RawUtf8ArrayToCsv(dc, '.');
+  if ou <> nil then
+    Append(result, RawUtf8('/'), RawUtf8ArrayToCsv(ou, '/', -1, {reverse=}true));
+  if cn <> nil then
+    Append(result, RawUtf8('/'), RawUtf8ArrayToCsv(cn, '/', -1, {reverse=}true));
 end;
 
 function RawLdapErrorString(ErrorCode: integer): RawUtf8;
@@ -1844,13 +1909,6 @@ end;
 const
   NTVER: RawByteString = #6#0#0#0; // '\00\00\00\06' does NOT work on CLDAP
 
-function Random31: cardinal;
-begin
-  repeat
-    result := Random32 shr 1;
-  until result <> 0;
-end;
-
 function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
   const DomainName, LdapServerAddress, LdapServerPort: RawUtf8): boolean;
 var
@@ -1869,7 +1927,7 @@ begin
   sock := addr.NewSocket(nlUdp);
   if sock <> nil then
   try
-    id := Random31;
+    id := Random31Not0;
     FormatUtf8('(&(DnsDomain=%)(NtVer=%))',
       [LdapEscapeName(DomainName), NTVER], filter);
     req := Asn(ASN1_SEQ, [
@@ -1998,7 +2056,7 @@ begin
   if sock <> nil then
   try
     sock.SetBroadcast(true);
-    id := Random31;
+    id := Random31Not0;
     req := Asn(ASN1_SEQ, [
              Asn(id),
              //Asn(''), // the RFC 1798 requires user, but MS AD does not :(
@@ -2211,7 +2269,7 @@ begin
         end;
       end;
   end;
-  // fallback to hexa if the input is not valid UTF-8 (as expected LDAP v3)
+  // fallback to hexa if the input is not valid UTF-8 (as expected with LDAP v3)
   if IsValidUtf8(s) then
     EnsureRawUtf8(s)
   else
@@ -2266,6 +2324,17 @@ begin
     result := ''
   else
     result := fList[index];
+end;
+
+function TLdapAttribute.GetVariant: variant;
+begin
+  SetVariantNull(result);
+  if (self <> nil) and
+     (fCount > 0) then
+    if fCount = 1 then
+      RawUtf8ToVariant(GetReadable, result)
+    else
+      TDocVariantData(result).InitArrayFrom(GetAllReadable, JSON_FAST);
 end;
 
 
@@ -2519,6 +2588,45 @@ begin
     w.SetText(result);
   finally
     w.Free;
+  end;
+end;
+
+procedure TLdapResultList.AppendTo(var Dvo: TDocVariantData;
+  const ObjectAttributeField: RawUtf8);
+var
+  i, j: PtrInt;
+  res: TLdapResult;
+  attr: TLdapAttribute;
+  dc, ou, cn: TRawUtf8DynArray;
+  a: TDocVariantData;
+  v: PDocVariantData;
+begin
+  for i := 0 to Count - 1 do
+  begin
+    res := Items[i];
+    ParseDN(res.ObjectName, dc, ou, cn);
+    if dc = nil then
+      continue;
+    v := Dvo.O_[RawUtf8ArrayToCsv(dc, '.')];
+    for j := high(ou) downto 0 do
+      v := v^.O_[ou[j]];
+    for j := high(cn) downto 0 do
+      v := v^.O_[cn[j]];
+    if ObjectAttributeField = '' then
+      continue; // no attribute
+    a.Init(mNameValue, dvObject);
+    a.Capacity := res.Attributes.Count + 1;
+    a.AddValueFromText('objectName', res.ObjectName);
+    for j := 0 to res.Attributes.Count - 1 do
+    begin
+      attr := res.Attributes.Items[j];
+      a.AddValue(attr.AttributeName, attr.GetVariant);
+    end;
+    if ObjectAttributeField = '*' then
+      v^.AddOrUpdateFrom(variant(a), {onlymissing=}true)
+    else
+      v^.AddValue(ObjectAttributeField, variant(a), {owned=}true);
+    a.Clear;
   end;
 end;
 
@@ -2913,6 +3021,11 @@ begin
     end;
   if fResultString = '' then
     fResultString := 'Connect: failed';
+end;
+
+function TLdapClient.GetTlsContext: PNetTlsContext;
+begin
+  result := @fTlsContext;
 end;
 
 function TLdapClient.BuildPacket(const Asn1Data: TAsnObject): TAsnObject;
@@ -3781,6 +3894,30 @@ begin
   root := SearchObject(ObjectDN, Filter, [Attribute], Scope);
   if root <> nil then
     result := root.Attributes.Find(Attribute);
+end;
+
+function TLdapClient.SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
+  const Filter: RawUtf8; const Attributes: array of RawUtf8;
+  const ObjectAttributeField: RawUtf8; MaxCount: integer;
+  SortByName: boolean): variant;
+var
+  n: integer;
+begin
+  VarClear(result);
+  TDocVariantData(result).Init(mNameValue, dvObject); // case sensitive names
+  n := 0;
+  SearchCookie := '';
+  repeat
+    if not Search(BaseDN, TypesOnly, Filter, Attributes) then
+      break;
+    SearchResult.AppendTo(TDocVariantData(result), ObjectAttributeField);
+    inc(n, SearchResult.Count);
+  until (SearchCookie = '') or
+        ((MaxCount > 0) and
+         (n > MaxCount));
+  SearchCookie := '';
+  if SortByName then
+    TDocVariantData(result).SortByName(nil, {reverse=}false, {nested=}true);
 end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-extended

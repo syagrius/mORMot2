@@ -618,6 +618,11 @@ type
     // fixed by "ip link set eth0 alias somename"
     // - not available on Android or BSD
     FriendlyName: RawUtf8;
+    ///  name of the adapter with which these addresses are associated
+    // - unlike FriendlyName, it can't be renamed by the end user
+    // - e.g. on Windows: '{1C7CAE9E-3256-4784-8CA4-B721D3B5A00F}'
+    // - equals Name on POSIX
+    AdapterName: RawUtf8;
     /// the hardware MAC address of this adapter
     // - contains e.g. '12:50:b6:1e:c6:aa' from /sys/class/net/eth0/adddress
     // - may equal '00:00:00:00:00:00' for a non-physical interface (makSoftware)
@@ -749,7 +754,7 @@ type
   // - at this point, Context.CipherName is set, but PeerInfo, PeerIssuer and
   // PeerSubject are not - it is up to the event to compute the PeerInfo value
   // - TLS is an opaque structure, typically an OpenSSL PSSL pointer, so you
-  // could use e.g. PSSL(TLS).PeerCertificates array
+  // could use e.g. PSSL(TLS).PeerCertificate or PSSL(TLS).PeerCertificates array
   TOnNetTlsPeerValidate = procedure(Socket: TNetSocket;
     Context: PNetTlsContext; TLS: pointer) of object;
 
@@ -1483,6 +1488,10 @@ type
     /// compute the whole normalized URI
     // - e.g. 'https://Server:Port/Address' or 'http://unix:/Server:/Address'
     function URI: RawUtf8;
+    /// compute the normalized URI of the server and port
+    // - e.g. 'https://Server:Port/' or 'http://unix:/Server:/'
+    // - i.e. URI result without the Address part
+    function ServerPort: RawUtf8;
     /// the server port, as integer value
     function PortInt: TNetPort;
     /// compute the root resource Address, without any URI-encoded parameter
@@ -1526,6 +1535,12 @@ const
   /// the default TCP port as integer, as DEFAULT_PORT_INT[Https]
   DEFAULT_PORT_INT: array[boolean] of TNetPort = (
     80, 443);
+  /// can be used to generate e.g. http:// ws:// or https:// wss:// constants
+  TLS_TEXT: array[boolean] of string[1] = (
+    '', 's');
+  /// quick access to http:// or https:// constants
+  HTTPS_TEXT: array[boolean] of RawUtf8 = (
+    'http://', 'https://');
 
 /// check is the supplied address text is on format '1.2.3.4'
 // - will optionally fill a 32-bit binary buffer with the decoded IPv4 address
@@ -1726,7 +1741,7 @@ type
     // - just a wrapper around PtrInt(fSock)>0
     function SockIsDefined: boolean;
       {$ifdef HASINLINE}inline;{$endif}
-    /// check the connection status of the socket
+    /// check the connection status of the socket using getpeername()
     function SockConnected: boolean;
     /// simulate writeln() with direct use of Send(Sock, ..) - includes trailing #13#10
     // - useful on multi-treaded environnement (as in THttpServer.Process)
@@ -2080,7 +2095,9 @@ begin
     msg := format('%s [%s - #%d]', [msg, _NR[error], ord(error)]);
     if errnumber <> nil then
       msg := format('%s sys=%d (%s)', [msg, errnumber^, GetErrorText(errnumber^)]);
-  end;
+  end
+  else
+    fLastError := nrUnknownError;
   inherited CreateFmt(msg, args);
 end;
 
@@ -4799,8 +4816,8 @@ end;
 procedure TUri.Clear;
 begin
   Https := false;
-  layer := nlTcp;
-  Finalize(self);
+  Layer := nlTcp;
+  Finalize(self); // reset all RawUtf8 fields
 end;
 
 function TUri.From(aUri: RawUtf8; const DefaultPort: RawUtf8): boolean;
@@ -4825,14 +4842,14 @@ begin
        NetStartWith(pointer(p), 'WSS') then // wss: is just an upgraded https:
       Https := true
     else if NetStartWith(pointer(p), 'UDP') then
-      layer := nlUdp; // 'udp://server:port';
+      Layer := nlUdp; // 'udp://server:port';
     p := s + 3;
   end;
   // parse Server
   if NetStartWith(pointer(p), 'UNIX:') then
   begin
     inc(p, 5); // 'http://unix:/path/to/socket.sock:/url/path'
-    layer := nlUnix;
+    Layer := nlUnix;
     s := p;
     while not (s^ in [#0, ':']) do
       inc(s); // Server='path/to/socket.sock'
@@ -4886,34 +4903,36 @@ begin
 end;
 
 function TUri.URI: RawUtf8;
-const
-  Prefix: array[boolean] of RawUtf8 = (
-    'http://', 'https://');
+begin
+  result := NetConcat([ServerPort, Address]);
+end;
+
+function TUri.ServerPort: RawUtf8;
 begin
   if layer = nlUnix then
-    result := NetConcat(['http://unix:', Server, ':/', address])
-  else if (port = '') or
-          (port = '0') or
-          (port = DEFAULT_PORT[Https]) then
-    result := NetConcat([Prefix[Https], Server, '/', address])
+    result := NetConcat(['http://unix:', Server, ':/'])
+  else if (Port = '') or
+          (Port = '0') or
+          (Port = DEFAULT_PORT[Https]) then
+    result := NetConcat([HTTPS_TEXT[Https], Server, '/'])
   else
-    result := NetConcat([Prefix[Https], Server, ':', port, '/', address]);
+    result := NetConcat([HTTPS_TEXT[Https], Server, ':', Port, '/']);
 end;
 
 function TUri.PortInt: TNetPort;
 begin
-  result := GetCardinal(pointer(port));
+  result := GetCardinal(pointer(Port));
 end;
 
 function TUri.Root: RawUtf8;
 var
   i: PtrInt;
 begin
-  i := PosExChar('?', address);
+  i := PosExChar('?', Address);
   if i = 0 then
-    Root := address
+    result := Address
   else
-    Root := copy(address, 1, i - 1);
+    result := copy(Address, 1, i - 1);
 end;
 
 function TUri.ResourceName: RawUtf8;
@@ -5616,7 +5635,7 @@ var
   addr: TNetAddr;
 begin
   result := SockIsDefined and
-            (fSock.GetPeer(addr) = nrOK);
+            (fSock.GetPeer(addr) = nrOK); // OS may return ENOTCONN/WSAENOTCONN
 end;
 
 procedure TCrtSocket.SockSend(P: pointer; Len: integer);
@@ -5649,7 +5668,7 @@ var
   tmp: ShortString;
 begin
   for i := 0 to high(Values) do
-    with Values[i] do
+    with Values[i] do // only most common arguments are supported
       case VType of
         vtString:
           SockSend(@VString^[1], PByte(VString)^);
@@ -5680,6 +5699,9 @@ begin
             Str(VInt64^, tmp);
             SockSend(@tmp[1], Length(tmp));
           end;
+      else
+        raise ENetSock.CreateFmt('%s.SockSend: unsupported VType=%d',
+          [ClassNameShort(self)^, VType]); // paranoid
       end;
   SockSendCRLF;
 end;

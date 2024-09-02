@@ -772,7 +772,8 @@ function PrivKeyCertPfx: RawByteString;
 // - if OpenSSL is available and UsePreComputed is false, will
 // generate a temporary pair of key files via
 // Generate(CU_TLS_SERVER, '127.0.0.1', nil, 3650) with a random password
-// - if UsePreComputed=true or on pure SChannel, will use the PrivKeyCertPfx pre-computed constant
+// - if UsePreComputed=true or on pure SChannel, will use the PrivKeyCertPfx
+// pre-computed constant
 // - you should eventually call DeleteFile(Utf8ToString(TLS.CertificateFile))
 // and DeleteFile(Utf8ToString(TLS.PrivateKeyFile)) to delete the two temp files
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
@@ -3968,7 +3969,7 @@ begin
   except
     on E: Exception do
       begin
-        // intercept and return Internal Server Error 500
+        // intercept and return Internal Server Error 500 on any fatal exception
         Ctxt.RespStatus := HTTP_SERVERERROR;
         Ctxt.SetErrorMessage('%: %', [E, E.Message]);
         IncStat(grException);

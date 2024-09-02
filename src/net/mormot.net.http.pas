@@ -117,6 +117,12 @@ function PurgeHeaders(const headers: RawUtf8; trim: boolean = false;
 procedure ExtractHeader(var headers: RawUtf8; const upname: RawUtf8;
   out res: RawUtf8);
 
+/// retrieve a HTTP header text value from its case-insensitive name
+function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean; overload;
+
+/// retrieve a HTTP header 64-bit integer value from its case-insensitive name
+function GetHeader(const Headers, Name: RawUtf8; out Value: Int64): boolean; overload;
+
 /// 'HEAD' and 'OPTIONS' methods would be detected and return true
 // - will check only the first four chars for efficiency
 function HttpMethodWithNoBody(const method: RawUtf8): boolean;
@@ -156,8 +162,11 @@ function IsOptions(const method: RawUtf8): boolean;
 function IsUrlFavIcon(P: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// check if the supplied text start with http:// or https://
+/// check if the supplied text start with 'http://' or 'https://'
 function IsHttp(const text: RawUtf8): boolean;
+
+/// true if the supplied text is case-insensitive 'none'
+function IsNone(const text: RawUtf8): boolean;
 
 /// naive detection of most used bots from a HTTP User-Agent string
 // - meant to be fast, with potentially a lot of false negatives: please do not
@@ -187,7 +196,7 @@ function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
 /// convert a file URL to a local file path using our TUri parser
 // - mormot.core.os.pas implements this on Windows via PathCreateFromUrl() API
 // - used e.g. by TNetClientProtocolFile to implement the 'file://' protocol
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 
 {$endif OSPOSIX}
 
@@ -2584,6 +2593,30 @@ begin
   until false;
 end;
 
+function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean;
+var
+  up: array[byte] of AnsiChar;
+begin
+  result := false;
+  if (Name = '') or
+     (Headers = '') then
+    exit;
+  PWord(UpperCopy255Buf(@up, pointer(Name), length(Name)))^ := ord(':');
+  result := FindNameValue(Headers, @up, Value);
+end;
+
+function GetHeader(const Headers, Name: RawUtf8; out Value: Int64): boolean;
+var
+  v: RawUtf8;
+  err: integer;
+begin
+  result := GetHeader(Headers, Name, v);
+  if not result then
+    exit;
+  Value := GetInt64(pointer(v), err);
+  result := err = 0;
+end;
+
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
 begin
   if IsAnsiCompatible(header) then
@@ -2659,6 +2692,13 @@ begin
             ((text[5] = ':') or
              ((text[5] in ['s', 'S']) and
               (text[6] = ':')));
+end;
+
+function IsNone(const text: RawUtf8): boolean;
+begin
+  result := (length(text) = 4) and
+            (PCardinal(text)^ and $dfdfdfdf =
+              ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24);
 end;
 
 function IsHttpUserAgentBot(const UserAgent: RawUtf8): boolean;
@@ -2889,12 +2929,12 @@ end;
 
 {$ifdef OSPOSIX}
 
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
   u: TUri;
 begin
   result := '';
-  u.From(RawUtf8(Uri));
+  u.From(Uri);
   if (u.Server = '') or
      PropNameEquals(u.Server, 'localhost') or
      IsLocalHost(pointer(u.Server)) then // supports only local files

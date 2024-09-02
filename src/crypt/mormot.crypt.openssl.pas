@@ -874,7 +874,7 @@ end;
 
 procedure TAesAbstractOsl.AfterCreate;
 var
-  nam: TShort16;
+  nam: TShort15;
 begin
   AlgoName(nam); // always #0 terminated
   fAes.Init(self, pointer(@nam[1]));
@@ -961,7 +961,7 @@ end;
 
 function TAesGcmOsl.AesGcmInit: boolean;
 var
-  nam: TShort16;
+  nam: TShort15;
 begin
   AlgoName(nam); // always #0 terminated
   fAes.Init(self, pointer(@nam[1]));
@@ -2283,7 +2283,7 @@ begin
       if CommonName <> '' then
         cn := CommonName;
       name.AddEntries(Country, State, Locality, Organization, OrgUnit,
-        cn, EmailAddress, SurName, GivenName);
+        cn, EmailAddress, SurName, GivenName, SerialNumber);
     end
     else
       name.AddEntry('CN', cn);

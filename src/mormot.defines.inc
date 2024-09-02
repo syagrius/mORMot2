@@ -80,7 +80,7 @@
 // disable Windows mormot.lib.sspi support in mormot.rest.client/server units
 
 {.$define NOGSSAPIAUTH}
-// disable Posix mormot.lib.gsssapi support in mormot.rest.client/server units
+// disable POSIX mormot.lib.gsssapi support in mormot.rest.client/server units
 
 {.$define NOPOINTEROFFSET}
 // disable TOrmTable offsets on 64-bit if your memory is huge or fragmented
@@ -619,6 +619,7 @@
 
 // -----------
 // -- about pascal code expectations
+// DO NOT CHANGE ANYTHING BELOW: our code REQUIRES those values to work properly
 
   {$H+} // we use long strings
   {$R-} // disable Range checking in our code
@@ -804,4 +805,7 @@
 
 {$endif OSPOSIX}
 
+{$if defined(USEWININET) or defined(USELIBCURL)}
+  {$define USEHTTPREQUEST}
+{$ifend}
 

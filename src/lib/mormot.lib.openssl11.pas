@@ -1541,8 +1541,8 @@ type
     procedure ToUtf8(out result: RawUtf8;
       flags: cardinal = XN_FLAG_RFC2253 and not ASN1_STRFLGS_ESC_MSB);
     procedure AddEntry(const Name, Value: RawUtf8);
-    procedure AddEntries(const Country, State, Locality,
-      Organization, OrgUnit, CommonName, EmailAddress, SurName, GivenName: RawUtf8);
+    procedure AddEntries(const Country, State, Locality, Organization, OrgUnit,
+      CommonName, EmailAddress, SurName, GivenName, SerialNumber: RawUtf8);
     procedure SetEntry(const Name, Value: RawUtf8);
     procedure DeleteEntry(NID: integer); overload;
     procedure DeleteEntry(const Name: RawUtf8); overload;
@@ -7661,7 +7661,7 @@ end;
 type
   // extra header for IV and plain text / key size storage
   // - should match the very same record definition in TRsa.Seal/Open
-  // from mormot.crypt.rsa
+  // from mormot.crypt.rsa.pas, which is fully compatible with this unit
   TRsaSealHeader = packed record
     iv: THash128;
     plainlen: integer;
@@ -7721,6 +7721,21 @@ begin
   EVP_CIPHER_CTX_free(ctx);
 end;
 
+{ for reference, some matching code in python with OpenSSL 3.x:
+
+  crt = x509.load_pem_x509_certificate(pem, default_backend())
+  rsa = crt.public_key()
+  apadding = padding.PKCS1v15()
+  aes_key = os.urandom(16)
+  aes_iv = os.urandom(16)
+  cipher = Cipher(algorithms.AES(aes_key), modes.CTR(aes_iv), backend=default_backend())
+  encryptor = cipher.encryptor()
+  encrypted_data = encryptor.update(content) + encryptor.finalize()
+  encrypted_aes_key = rsa.encrypt(aes_key, apadding)
+  header = TRsaSealHeader(iv=aes_iv, plainlen=len(content), encryptedkeylen=len(encrypted_aes_key))
+  final_message = header.pack() + encrypted_aes_key + encrypted_data
+}
+
 function EVP_PKEY.RsaOpen(Cipher: PEVP_CIPHER;
   const Msg: RawByteString; CodePage: integer): RawByteString;
 var
@@ -7779,7 +7794,7 @@ var
   ctx: PEVP_PKEY_CTX;
   len: PtrUInt;
 begin
-  // to be used used for a very small content since this may be very slow
+  // to be used for a very small content since this may be very slow
   result := '';
   if @self = nil then
     exit;
@@ -8303,7 +8318,7 @@ begin
 end;
 
 procedure X509_NAME.AddEntries(const Country, State, Locality, Organization,
-  OrgUnit, CommonName, EmailAddress, SurName, GivenName: RawUtf8);
+  OrgUnit, CommonName, EmailAddress, SurName, GivenName, SerialNumber: RawUtf8);
 begin
   // warning: don't check for duplicates
   AddEntry('C',  Country);
@@ -8315,6 +8330,7 @@ begin
   AddEntry('emailAddress', EmailAddress);
   AddEntry('SN', Surname);
   AddEntry('GN', GivenName);
+  AddEntry('serialNumber', SerialNumber);
 end;
 
 procedure X509_NAME.SetEntry(const Name, Value: RawUtf8);

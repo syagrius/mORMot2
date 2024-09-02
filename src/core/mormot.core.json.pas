@@ -899,7 +899,7 @@ type
     // - string values may be escaped, depending on the supplied parameter
     // - very fast (avoid most temporary storage)
     procedure Add(const V: TVarRec; Escape: TTextWriterKind = twNone;
-      WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); overload;
+      WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); override;
     /// encode the supplied data as an UTF-8 valid JSON object content
     // - data must be supplied two by two, as Name,Value pairs, e.g.
     // ! aWriter.AddJsonEscape(['name','John','year',1972]);
@@ -1937,7 +1937,7 @@ type
     class function RegisterCustomSerializer(Info: PRttiInfo;
       const Reader: TOnRttiJsonRead; const Writer: TOnRttiJsonWrite): TRttiJson;
     /// unregister any custom callback for JSON serialization of a given TypeInfo()
-    // - will also work after RegisterFromText()
+    // - will also work after RegisterFromText() or RegisterCustomEnumValues()
     class function UnRegisterCustomSerializer(Info: PRttiInfo): TRttiJson;
     /// register a custom callback for JSON serialization of a given class
     // - replace deprecated TTextWriter.RegisterCustomJSONSerializer() method
@@ -1953,6 +1953,18 @@ type
       const RttiDefinition: RawUtf8;
       IncludeReadOptions: TJsonParserOptions;
       IncludeWriteOptions: TTextWriterWriteObjectOptions): TRttiJson;
+    /// register custom JSON serialization of enum and/or set from custom text
+    // - the supplied CustomText should point to a constant array of text values:
+    // ! type  TMyEnum = (meOne, meTwo);
+    // ! const MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('one', 'and 2');
+    // !   TRttiJson.RegisterCustomEnumValues(TypeInfo(TMyEnum), nil, @MYENUM2TXT);
+    class procedure RegisterCustomEnumValues(EnumInfo, SetInfo: PRttiInfo;
+      CustomText: PRawUtf8Array); overload;
+    /// register custom JSON serialization of several enum and/or set from text
+    // - just a wrapper around the overload method, supplied as trios of
+    // EnumInfo,SetInfo,CustomText pointers
+    class procedure RegisterCustomEnumValues(
+        const EnumSetTextTrios: array of pointer); overload;
     /// define an additional set of unserialization JSON options
     // - is included for this type to the supplied TJsonParserOptions
     property IncludeReadOptions: TJsonParserOptions
@@ -5382,6 +5394,16 @@ begin
     Ctxt.W.AddB(Data^);
 end;
 
+procedure _JS_EnumerationCustom(Data: PByte; const Ctxt: TJsonSaveContext);
+begin
+   Ctxt.W.Add('"');
+   with Ctxt.Info.Cache do
+     if (Data^ >= EnumMin) and
+        (Data^ <= EnumMax) then
+       Ctxt.W.AddJsonEscape(pointer(EnumCustomText^[Data^]), {len=}0);
+   Ctxt.W.AddDirect('"');
+end;
+
 procedure _JS_Set(Data: PCardinal; const Ctxt: TJsonSaveContext);
 var
   PS: PShortString;
@@ -5417,11 +5439,12 @@ begin
        GetAllBits(Data^, Ctxt.Info.Cache.EnumMax + 1) then
       Ctxt.W.AddShorter('"*"')
     else
+    with Ctxt.Info.Cache do
     begin
-      PS := Ctxt.Info.Cache.EnumList;
-      for i := 0 to Ctxt.Info.Cache.EnumMax do
+      PS := EnumList;
+      for i := 0 to EnumMax do
       begin
-        if (i >= Ctxt.Info.Cache.EnumMin) and
+        if (i >= EnumMin) and
            GetBitPtr(Data, i) then
         begin
           Ctxt.AddShort(PS);
@@ -5443,6 +5466,33 @@ begin
     MoveFast(Data^, v, Ctxt.Info.Size);
     Ctxt.W.AddQ(v);
   end;
+end;
+
+procedure _JS_SetCustom(Data: PCardinal; const Ctxt: TJsonSaveContext);
+var
+  i: cardinal;
+  p: PPUtf8Char;
+begin
+  Ctxt.W.Add('[');
+  with Ctxt.Info.Cache do
+  begin
+    p := pointer(EnumCustomText);
+    if p <> nil then
+      for i := 0 to EnumMax do
+      begin
+        if (p^ <> nil) and
+           (i >= EnumMin) and
+           GetBitPtr(Data, i) then
+        begin
+          Ctxt.W.AddDirect('"');
+          Ctxt.W.AddJsonEscape(p^, {len=}0);
+          Ctxt.W.AddDirect('"', ',');
+        end;
+        inc(p); // next
+      end;
+    Ctxt.W.CancelLastComma;
+  end;
+  Ctxt.W.AddDirect(']');
 end;
 
 procedure _JS_Array(Data: PAnsiChar; const Ctxt: TJsonSaveContext);
@@ -6383,12 +6433,6 @@ var
 begin
   if Format = '' then
     exit;
-  if (Format = '%') and
-     (high(Values) >= 0) then
-  begin
-    Add(Values[0], Escape);
-    exit;
-  end;
   ValuesIndex := 0;
   F := pointer(Format);
   repeat
@@ -6399,7 +6443,7 @@ begin
         break;
       inc(F);
     until false;
-    AddNoJsonEscape(S, F - S);
+    AddNoJsonEscape(S, F - S); // append Format content with no escaping
     if F^ = #0 then
       exit;
     // add next value as text instead of F^='%' placeholder
@@ -7840,10 +7884,14 @@ begin
       Data^ := GetExtended(Ctxt.Value); // was propbably stored as double
 end;
 
-procedure _JL_GUID(Data: PByteArray; var Ctxt: TJsonParserContext);
+procedure _JL_GUID(Data: PGuid; var Ctxt: TJsonParserContext);
 begin
   if Ctxt.ParseNext then
-    Ctxt.Valid := TextToGuid(Ctxt.Value, Data) <> nil;
+    if (Ctxt.ValueLen = 0) or
+       (Ctxt.Value = nil) then  // "" or null fill TGuid with zeros
+      FillZero(Data^)
+    else
+      Ctxt.Valid := RawUtf8ToGuid(Ctxt.Value, Ctxt.ValueLen, Data^);
 end;
 
 procedure _JL_Hash(Data: PByte; var Ctxt: TJsonParserContext);
@@ -7939,6 +7987,23 @@ begin
     Data^ := GetCardinal(Ctxt.Value);
 end;
 
+function EnumFind(List: PPUtf8Char; Max: PtrInt;
+  Value: pointer; ValueLen: TStrLen): PtrInt;
+begin
+  result := 0;
+  repeat
+    if (List^ <> nil) and
+       (PStrLen(List^ - _STRLEN)^ = ValueLen) and
+       CompareMemFixed(List^, Value, ValueLen) then
+      exit;
+    if result = Max then
+      break;
+    inc(List);
+    inc(result);
+  until false;
+  result := -1;
+end;
+
 procedure _JL_Enumeration(Data: pointer; var Ctxt: TJsonParserContext);
 var
   v: PtrInt;
@@ -7947,7 +8012,11 @@ begin
   if Ctxt.ParseNext then
   begin
     if Ctxt.WasString then
-      v := Ctxt.Info.Cache.EnumInfo.GetEnumNameValue(Ctxt.Value, Ctxt.ValueLen)
+      with Ctxt.Info.Cache do
+        if EnumCustomText = nil then
+          v := EnumInfo.GetEnumNameValue(Ctxt.Value, Ctxt.ValueLen)
+        else
+          v := EnumFind(pointer(EnumCustomText), EnumMax, Ctxt.Value, Ctxt.ValueLen)
     else
     begin
       v := GetInteger(Ctxt.Value, err);
@@ -7965,14 +8034,40 @@ begin
   end;
 end;
 
+procedure FindCustomSet(var Ctxt: TJsonParserContext; V: PInt64);
+var
+  i: PtrInt;
+begin
+  V^ := 0;
+  if Ctxt.ParseNull or
+     not Ctxt.ParseArray then
+    // detect void (i.e. null or []) or invalid array
+    exit;
+  repeat
+    if Ctxt.ParseNext then
+    with Ctxt.Info.Cache do
+    begin
+      i := EnumFind(pointer(EnumCustomText), EnumMax, Ctxt.Value, Ctxt.ValueLen);
+      if (i < 64) and
+         (i >= PtrInt(EnumMin)) then
+        SetBit64(V^, i);
+    end;
+  until (not Ctxt.Valid) or
+        (Ctxt.EndOfObject = ']');
+  Ctxt.ParseEndOfObject;
+end;
+
 procedure _JL_Set(Data: pointer; var Ctxt: TJsonParserContext);
 var
   v: QWord;
 begin
   with Ctxt.Info.Cache do
-    v := GetSetNameValue(EnumList, EnumMin, EnumMax,
-      Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json,
-      Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}EndOfObject);
+    if EnumCustomText = nil then
+      v := GetSetNameValue(EnumList, EnumMin, EnumMax,
+        Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json,
+        Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}EndOfObject)
+    else
+      FindCustomSet(Ctxt, @v);
   Ctxt.Valid := Ctxt.Json <> nil;
   MoveFast(v, Data^, Ctxt.Info.Size);
 end;
@@ -8453,7 +8548,7 @@ end;
 // defined here to have _JL_RawJson and _JL_Variant known
 procedure TJsonParserContext.ParsePropComplex(Data: pointer);
 var
-  v: TRttiVarData;
+  v: TSynVarData;
   tmp: TObject;
 begin
   // handle special cases of a setter method
@@ -8466,39 +8561,43 @@ begin
         begin
           tmp := TRttiJson(Info).fNewInstance(Info);
           try
-            v.Prop := Prop; // JsonLoad() would reset Prop := nil
+            v.VAny := Prop.Prop; // JsonLoad() could reset Prop := nil
             TRttiJsonLoad(Info.JsonLoad)(@tmp, self); // JsonToObject(tmp)
             if not Valid then
               FreeAndNil(tmp)
             else
             begin
-              v.Prop.Prop.SetOrdProp(Data, PtrInt(tmp));
+              PRttiProp(v.VAny).SetOrdProp(Data, PtrInt(tmp));
               if jpoSetterExpectsToFreeTempInstance in Options then
                 FreeAndNil(tmp);
             end;
           except
             on Exception do
-              tmp.Free;
+              tmp.Free; // avoid memory leak on parsing erro
           end;
         end;
       end;
     ptRawJson: // TRttiProp.SetValue() assume RawUtf8 -> dedicated RawJson code
       begin
-        v.Data.VAny := nil;
+        v.VAny := nil;
         try
-          _JL_RawJson(@v.Data.VAny, self);
+          _JL_RawJson(@v.VAny, self);
           if Valid then
-            Prop^.Prop.SetLongStrProp(Data, RawJson(v.Data.VAny));
+            Prop^.Prop.SetLongStrProp(Data, RawJson(v.VAny));
         finally
-          FastAssignNew(v.Data.VAny);
+          FastAssignNew(v.VAny);
         end;
       end;
-    ptSet: // use a local temp variable before calling the setter
-      begin
-        v.Data.VInt64 := 0;
-        _JL_Set(@v.Data.VInt64, self);
+    ptEnumeration,
+    ptSet:   // unserialize into a local variable before calling the setter
+      begin  // _JL_Set/_JL_Enumeration work also with EnumCustomText <> nil
+        v.VInt64 := 0;
+        if Info.Parser = ptSet then
+          _JL_Set(@v.VInt64, self)
+        else
+          _JL_Enumeration(@v.VInt64, self);
         if Valid then
-          Prop^.Prop.SetOrdProp(Data, v.Data.VInt64);
+          Prop^.Prop.SetOrdProp(Data, v.VInt64);
       end;
   else // call the getter via TRttiProp.SetValue() of a transient TRttiVarData
     begin
@@ -8624,6 +8723,7 @@ begin
     Data^.Clear;
     if Ctxt.ParseNull or
        not Ctxt.ParseArray then
+       // detect void (i.e. null or []) or invalid array
       exit;
     repeat
       if Ctxt.ParseNext then
@@ -10450,7 +10550,7 @@ begin
         fJsonSave := @_JS_RttiCustom;
      if (not Assigned(fJsonLoad)) and
         (Flags * [rcfWithoutRtti, rcfHasNestedProperties] <> []) then
-      fJsonLoad := @_JL_RttiCustom
+       fJsonLoad := @_JL_RttiCustom
     end;
   end;
   // TRttiJson.RegisterCustomSerializer() custom callbacks have priority
@@ -10922,8 +11022,10 @@ begin
   result := Rtti.RegisterType(Info) as TRttiJson;
   result.fJsonWriter.Code := nil; // force reset of the JSON serialization
   result.fJsonReader.Code := nil;
+  if result.Kind in (rkEnumerationTypes + [rkSet]) then
+    result.fCache.EnumCustomText := nil;
   if result.Kind <> rkDynArray then // Reader/Writer are for items, not array
-    result.SetParserType(result.Parser, result.ParserComplex);
+    result.SetParserType(result.Parser, result.ParserComplex); // set default
 end;
 
 class function TRttiJson.UnRegisterCustomSerializerClass(ObjectClass: TClass): TRttiJson;
@@ -10945,6 +11047,42 @@ begin
   result.fIncludeWriteOptions := IncludeWriteOptions;
 end;
 
+class procedure TRttiJson.RegisterCustomEnumValues(EnumInfo, SetInfo: PRttiInfo;
+  CustomText: PRawUtf8Array);
+var
+  r: TRttiJson;
+begin
+  if CustomText = nil then
+    exit;
+  if (EnumInfo <> nil) and
+     (EnumInfo^.Kind in rkEnumerationTypes) then
+   begin
+     r := Rtti.RegisterType(EnumInfo) as TRttiJson;
+     r.fCache.EnumCustomText := CustomText;
+     r.fJsonSave := @_JS_EnumerationCustom;
+     // keep fJsonLoad := _JL_Enumeration (will also work with setters)
+   end;
+  if (SetInfo <> nil) and
+     (SetInfo^.Kind = rkSet) then
+  begin
+    r := Rtti.RegisterType(SetInfo) as TRttiJson;
+    r.fCache.EnumCustomText := CustomText;
+    r.fJsonSave := @_JS_SetCustom; // keep fJsonLoad := _JL_Set
+  end;
+end;
+
+class procedure TRttiJson.RegisterCustomEnumValues(
+  const EnumSetTextTrios: array of pointer);
+var
+  i, n: PtrInt;
+begin
+  n := length(EnumSetTextTrios);
+  if (n <> 0) and
+     (n mod 3 = 0) then
+    for i := 0 to (n div 3) - 1 do
+      RegisterCustomEnumValues(EnumSetTextTrios[i * 3],
+        EnumSetTextTrios[i * 3 + 1], EnumSetTextTrios[i * 3 + 2]);
+end;
 
 procedure _GetDataFromJson(Data: pointer; var Json: PUtf8Char;
   EndOfObject: PUtf8Char; Rtti: TRttiCustom;

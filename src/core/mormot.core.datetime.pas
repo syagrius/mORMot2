@@ -447,7 +447,8 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// fill fields from the given value - but not DayOfWeek
     procedure FromDateTime(const dt: TDateTime);
-    /// fill Year/Month/Day fields from the given value - but not DayOfWeek
+    /// fill Year/Month/Day fields from the given value
+    // - but do not compute DayOfWeek, nor touch the time fields
     // - faster than the RTL DecodeDate() function
     procedure FromDate(const dt: TDateTime);
     /// fill fields from the given value - but not DayOfWeek
@@ -585,7 +586,7 @@ function NowUtcToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' ')
   {$ifdef HASINLINE} inline; {$endif}
 
 /// retrieve the current local date into '19 Sep 2023' English-readable text
-function NowTextDateShort(UtcDate: boolean): TShort15;
+function NowTextDateShort(UtcDate: boolean = false): TShort15;
 
 /// convert a TUnixTime date into '19 Sep 2023' English-readable text
 function UnixTimeToTextDateShort(Date: TUnixTime): TShort15;
@@ -2100,7 +2101,7 @@ end;
 function TSynSystemTime.IsDateEqual(const date: TSynDate): boolean;
 begin
   result := (PCardinal(@Year)^ = PCardinal(@TSynDate(date).Year)^) and // +Month
-            (Day = TSynDate(date).Day);
+            (Day = TSynDate(date).Day); // just ignore DayOfWeek
 end;
 
 procedure TSynSystemTime.FromNowUtc;
@@ -2138,29 +2139,26 @@ procedure TSynSystemTime.FromDate(const dt: TDateTime);
 var
   t, t2, t3: PtrUInt;
 begin
+  PInt64(@Year)^ := 0; // quickly reset all Date fields
   t := Trunc(dt);
   t := (t + 693900) * 4 - 1;
-  if PtrInt(t) >= 0 then
-  begin
-    t3 := t div 146097;
-    t2 := (t - t3 * 146097) and not 3;
-    t := PtrUInt(t2 + 3) div 1461; // PtrUInt() needed for FPC i386
-    Year := t3 * 100 + t;
-    t2 := ((t2 + 7 - t * 1461) shr 2) * 5;
-    t3 := PtrUInt(t2 - 3) div 153;
-    Day := PtrUInt(t2 + 2 - t3 * 153) div 5;
-    if t3 < 10 then
-      inc(t3, 3)
-    else
-    begin
-      dec(t3, 9);
-      inc(Year);
-    end;
-    Month := t3;
-    DayOfWeek := 0; // not set by default
-  end
+  if PtrInt(t) < 0 then
+    exit;
+  t3 := t div 146097;
+  t2 := (t - t3 * 146097) and not 3;
+  t := PtrUInt(t2 + 3) div 1461; // PtrUInt() needed for FPC i386
+  Year := t3 * 100 + t;
+  t2 := ((t2 + 7 - t * 1461) shr 2) * 5;
+  t3 := PtrUInt(t2 - 3) div 153;
+  Day := PtrUInt(t2 + 2 - t3 * 153) div 5;
+  if t3 < 10 then
+    inc(t3, 3)
   else
-    PInt64(@Year)^ := 0;
+  begin
+    dec(t3, 9);
+    inc(Year);
+  end;
+  Month := t3;
 end;
 
 procedure TSynSystemTime.FromTime(const dt: TDateTime);

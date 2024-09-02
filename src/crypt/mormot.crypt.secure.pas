@@ -1920,6 +1920,9 @@ type
     SurName: RawUtf8;
     /// givenName field (OID 2.5.4.42)
     GivenName: RawUtf8;
+    /// serialNumber field (OID 2.5.4.5)
+    // - note that is not the main X.509 certificate serial, but e.g. a Tax Number
+    SerialNumber: RawUtf8;
     /// netscapeComment extension (not a field - OID 2.16.840.1.113730.1.13)
     Comment: RawUtf8;
   end;
@@ -9737,7 +9740,7 @@ begin
     else
       break;
     end;
-  result := ASN1_UTF8STRING;
+  result := ASN1_UTF8STRING; // need UTF-8 encoding
 end;
 
 function AsnText(const Text: RawUtf8): TAsnObject;

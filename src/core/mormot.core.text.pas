@@ -68,9 +68,14 @@ function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8);
 
+/// return trimmed next CSV string from P, ignoring any Escaped char
+// - P=nil after call when end of text is reached
+procedure GetNextItemTrimedEscaped(var P: PUtf8Char; Sep, Esc: AnsiChar;
+  var result: RawUtf8);
+
 /// return next CRLF separated value string from P, ending #10 or #13#10 trimmed
 // - any kind of line feed (CRLF or LF) will be handled, on all operating systems
-// - as used e.g. by TSynNameValue.InitFromCsv and TDocVariantData.InitCsv
+// - as used e.g. by TSynNameValue.InitFromCsv and TDocVariantData.InitFromPairs
 // - P=nil after call when end of text is reached
 procedure GetNextItemTrimedCRLF(var P: PUtf8Char; var result: RawUtf8);
 
@@ -224,7 +229,8 @@ function CsvToRawUtf8DynArray(const Csv: RawUtf8; const Sep: RawUtf8 = ',';
 
 /// return the corresponding CSV text from a dynamic array of UTF-8 strings
 function RawUtf8ArrayToCsv(const Values: array of RawUtf8;
-  const Sep: RawUtf8 = ','; HighValues: integer = -1): RawUtf8;
+  const Sep: RawUtf8 = ','; HighValues: integer = -1;
+  Reverse: boolean = false): RawUtf8;
 
 /// return the corresponding CSV quoted text from a dynamic array of UTF-8 strings
 // - apply QuoteStr() function to each Values[] item
@@ -914,9 +920,14 @@ type
     /// write some #0 ended UTF-8 text, according to the specified format
     // - use overriden TJsonWriter version instead!
     procedure Add(P: PUtf8Char; Len: PtrInt; Escape: TTextWriterKind); overload; virtual;
+    /// append an open array constant value to the buffer
+    // - use overriden TJsonWriter version instead!
+    procedure Add(const V: TVarRec; Escape: TTextWriterKind = twNone;
+      WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); overload; virtual;
     /// prepare direct access to the internal output buffer
     // - return nil if Len is too big to fit in the current buffer size
-    // - return the position to write text, and increase the instance position
+    // - return the position to write text
+    // - but WON'T increase the instance position: caller should do inc(B, ...)
     function AddPrepare(Len: PtrInt): pointer;
     /// write some data Base64 encoded
     // - use overriden TJsonWriter version instead!
@@ -936,6 +947,9 @@ type
     /// how many bytes are currently in the internal buffer and not on disk/stream
     // - see TextLength for the total number of bytes, on both stream and memory
     function PendingBytes: PtrUInt;
+      {$ifdef HASINLINE}inline;{$endif}
+      /// how many bytes are currently available in the internal memory buffer
+    function AvailableBytes: PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// how many bytes were currently written on disk/stream
     // - excluding the bytes in the internal buffer (see PendingBytes)
@@ -1634,10 +1648,10 @@ procedure VariantToTempUtf8(const V: variant; var Res: TTempUtf8;
   var wasString: boolean);
 
 const
-  /// which TVarRec.VType are numbers, i.e. don't need to be quoted
-  // - vtVariant is a number by default, unless detected e.g. by VariantToUtf8()
+  /// which TVarRec.VType are numbers, e.g. don't need to be quoted as JSON
+  // - vtVariant may be a string or a complex type
   vtNotString = [vtBoolean, vtInteger, vtInt64, {$ifdef FPC} vtQWord, {$endif}
-                 vtCurrency, vtExtended, vtVariant];
+                 vtCurrency, vtExtended];
 
 /// convert an open array (const Args: array of const) argument to an UTF-8
 // encoded text
@@ -1695,6 +1709,9 @@ function VarRecAsChar(const V: TVarRec): integer;
 
 /// check if a supplied "array of const" argument is an instance of a given class
 function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
+
+/// check if a supplied "array of const" argument is a void value
+function VarRecIsVoid(const V: TVarRec): boolean;
 
 /// fast Format() function replacement, optimized for RawUtf8
 // - only supported token is %, which will be written in the resulting string
@@ -2007,7 +2024,8 @@ type
     constructor CreateLastOSError(const Format: RawUtf8; const Args: array of const;
       const Trailer: ShortString = 'OSError');
     /// a wrapper function around raise CreateUtf8()
-    class procedure RaiseUtf8(const Format: RawUtf8; const Args: array of const);
+    // - generated executable code could be slightly shorter
+    class procedure RaiseUtf8(const Format: RawUtf8; const Args: array of const); overload;
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// can be used to customize how the exception is logged
     // - this default implementation will call the TSynLogExceptionToStrCustom
@@ -2367,6 +2385,7 @@ procedure GuidToShort(const
 // - expect e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {}) but
 // will ignore internal '-' so '3F2504E04F8911D39A0C0305E82C3301' is also fine
 // - note: TGuid binary order does not follow plain HexToBin or HexDisplayToBin
+// - warning: P should be not nil, and point to the first hexadecimal character
 // - return nil if the supplied text buffer is not a valid TGuid
 // - this will be the format used for JSON encoding, e.g.
 // $ { "Uid": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
@@ -2391,6 +2410,12 @@ function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
+
+/// convert some UTF-8 encoded text into a TGuid
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
+function RawUtf8ToGuid(text: PUtf8Char; textlen: PtrInt; out guid: TGuid): boolean; overload;
 
 /// trim any space and '{' '-' '}' chars from input to get a 32-char TGuid hexa
 // - change in-place the text into lowercase hexadecimal
@@ -2544,6 +2569,38 @@ begin
     S := P;
     while (S^ <> #0) and
           (S^ <> Sep) do
+      inc(S);
+    E := S;
+    while (E > P) and
+          (E[-1] in [#1..' ']) do
+      dec(E); // trim right
+    FastSetString(result, P, E - P);
+    if S^ <> #0 then
+      P := S + 1
+    else
+      P := nil;
+  end;
+end;
+
+procedure GetNextItemTrimedEscaped(var P: PUtf8Char; Sep, Esc: AnsiChar;
+  var result: RawUtf8);
+var
+  S, E: PUtf8Char;
+begin
+  if (P = nil) or
+     (Sep <= ' ') or
+     (Esc = #0) then
+    result := ''
+  else
+  begin
+    while (P^ <= ' ') and
+          (P^ <> #0) do
+      inc(P); // trim left
+    S := P;
+    while (S^ <> #0) and
+          ((S^ <> Sep) or
+           ((S > P) and
+            (S[-1] = Esc))) do // ignore e.g. \. if Sep='.' and Esc='\'
       inc(S);
     E := S;
     while (E > P) and
@@ -3345,7 +3402,7 @@ begin
 end;
 
 function RawUtf8ArrayToCsv(const Values: array of RawUtf8; const Sep: RawUtf8;
-  HighValues: integer): RawUtf8;
+  HighValues: integer; Reverse: boolean): RawUtf8;
 var
   i, len, seplen, L: integer;
   P: PAnsiChar;
@@ -3362,6 +3419,11 @@ begin
   FastSetString(result, len); // allocate the result buffer as once
   P := pointer(result);
   i := 0;
+  if Reverse then
+  begin
+    i := HighValues;
+    HighValues := 0;
+  end;
   repeat
     L := length(Values[i]);
     if L > 0 then
@@ -3376,7 +3438,10 @@ begin
       MoveFast(pointer(Sep)^, P^, seplen);
       inc(P, seplen);
     end;
-    inc(i);
+    if Reverse then
+      dec(i)
+    else
+      inc(i);
   until false;
 end;
 
@@ -3693,6 +3758,11 @@ begin
   result := B - fTempBuf + 1;
 end;
 
+function TTextWriter.AvailableBytes: PtrUInt;
+begin
+  result := BEnd - B;
+end;
+
 procedure TTextWriter.Add(const c: AnsiChar);
 begin
   if B >= BEnd then
@@ -3795,10 +3865,15 @@ begin
     '%.Add(..,Escape: TTextWriterKind) unimplemented: use TJsonWriter', [self]);
 end;
 
+procedure TTextWriter.Add(const V: TVarRec; Escape: TTextWriterKind;
+  WriteObjectOptions: TTextWriterWriteObjectOptions);
+begin
+  ESynException.RaiseUtf8('%.Add(TVarRec) unimplemented: use TJsonWriter', [self]);
+end;
+
 procedure TTextWriter.WrBase64(P: PAnsiChar; Len: PtrUInt; withMagic: boolean);
 begin
-  ESynException.RaiseUtf8(
-    '%.WrBase64() unimplemented: use TJsonWriter', [self]);
+  ESynException.RaiseUtf8('%.WrBase64() unimplemented: use TJsonWriter', [self]);
 end;
 
 procedure TTextWriter.AddShorter(const Short8: TShort8);
@@ -3825,7 +3900,6 @@ begin
   if BEnd - B <= Len then
     FlushToStream;
   result := B + 1;
-  inc(B, Len);
 end;
 
 procedure TTextWriter.WriteObject(Value: TObject;
@@ -4699,7 +4773,7 @@ begin
 end;
 
 procedure TTextWriter.AddQuotedFieldName(
-   FieldName: PUtf8Char; FieldNameLen: PtrInt; const VoidPlaceHolder: RawUtf8);
+  FieldName: PUtf8Char; FieldNameLen: PtrInt; const VoidPlaceHolder: RawUtf8);
 begin
   if FieldNameLen = 0 then
   begin
@@ -7895,6 +7969,46 @@ begin
     result := nil;
 end;
 
+function VarRecIsVoid(const V: TVarRec): boolean;
+begin
+  case V.VType of
+    vtString:
+      result := V.VString^[0] = #0;
+    vtAnsiString,
+    {$ifdef HASVARUSTRING}
+    vtUnicodeString,
+    {$endif HASVARUSTRING}
+    vtWideString,
+    vtPChar,
+    vtPWideChar,
+    vtPointer,
+    vtObject,
+    vtClass,
+    vtInterface:
+      result := V.VPointer = nil; // void pointer value
+    vtChar:
+      result := V.VChar = #0;
+    vtWideChar:
+      result := V.VWideChar = #0;
+    vtBoolean:
+      result := false; // never void by design
+    vtInteger:
+      result := V.VInteger = 0;
+    {$ifdef FPC}
+    vtQWord,
+    {$endif FPC}
+    vtCurrency,
+    vtInt64:
+      result := V.VInt64^ = 0;
+    vtExtended:
+      result := V.VExtended^ = 0;
+    vtVariant:
+      result := VarIsEmptyOrNull(V.VVariant^);
+  else
+    result := false;
+  end;
+end;
+
 function VarRecToInt64(const V: TVarRec; out value: Int64): boolean;
 begin
   case V.VType of
@@ -10229,16 +10343,21 @@ end;
 
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean;
 begin
+  result := RawUtf8ToGuid(pointer(text), length(text), guid);
+end;
+
+function RawUtf8ToGuid(text: PUtf8Char; textlen: PtrInt; out guid: TGuid): boolean;
+begin
   result := true;
-  case length(text) of
+  case textlen of
     32, // '3F2504E04F8911D39A0C0305E82C3301' TextToGuid() order, not HexToBin()
     36: // '3F2504E0-4F89-11D3-9A0C-0305E82C3301' JSON compatible layout
-      if TextToGuid(pointer(text), @guid) <> nil then
+      if TextToGuid(text, @guid) <> nil then
         exit;
     38: // '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' regular layout
-      if (text[1] <> '{') or
-         (text[38] <> '}') or
-         (TextToGuid(@text[2], @guid) <> nil) then
+      if (text[0] = '{') and
+         (text[37] = '}') and
+         (TextToGuid(@text[1], @guid) <> nil) then
         exit;
   end;
   result := false;

@@ -1400,7 +1400,7 @@ function StrCompL(P1, P2: pointer; L: PtrInt; Default: PtrInt = 0): PtrInt;
 function StrCompIL(P1, P2: pointer; L: PtrInt; Default: PtrInt = 0): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// our fast version of StrIComp(), to be used with PUtf8Char/PAnsiChar
+/// our fast version of StrIComp(), to be used with PUtf8Char/PAnsiChar as TUtf8Compare
 function StrIComp(Str1, Str2: pointer): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1425,6 +1425,9 @@ type
 var
   /// a quick wrapper to StrComp or StrIComp comparison functions
   StrCompByCase: array[{CaseInsensitive=}boolean] of TUtf8Compare;
+
+/// comparison function first by Int64 value, then by text, for TUtf8Compare
+function StrCompByNumber(Str1, Str2: pointer): PtrInt;
 
 /// retrieve the next UCS4 CodePoint stored in U, then update the U pointer
 // - this function will decode the UTF-8 content before using NormToUpper[]
@@ -1863,17 +1866,17 @@ function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
 /// UTF-8 dedicated (and faster) alternative to StringOfChar((Ch,Count))
 function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
 
-/// format a text content with SQL-like quotes
+/// format a text content with SQL/pascal-like quotes
 // - this function implements what is specified in the official SQLite3
 // documentation: "A string constant is formed by enclosing the string in single
 // quotes ('). A single quote within the string can be encoded by putting two
 // single quotes in a row - as in Pascal."
 function QuotedStr(const S: RawUtf8; Quote: AnsiChar = ''''): RawUtf8; overload;
 
-/// format a text content with SQL-like quotes
+/// format a text content with SQL/pascal-like quotes
 procedure QuotedStr(const S: RawUtf8; Quote: AnsiChar; var result: RawUtf8); overload;
 
-/// format a text buffer with SQL-like quotes
+/// format a text buffer with SQL/pascal-like quotes
 procedure QuotedStr(P: PUtf8Char; PLen: PtrInt; Quote: AnsiChar;
   var result: RawUtf8); overload;
 
@@ -2095,7 +2098,10 @@ function FindRawUtf8(const Values: array of RawUtf8; const Value: RawUtf8;
 
 /// true if Value was added successfully in Values[]
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
-  NoDuplicates: boolean = false; CaseSensitive: boolean = true): boolean; overload;
+  NoDuplicates: boolean; CaseSensitive: boolean = true): boolean; overload;
+
+/// return the newly added Value index at the end of Values[]
+function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8): PtrInt; overload;
 
 /// add the Value to Values[], with an external count variable, for performance
 function AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
@@ -6054,7 +6060,6 @@ begin
   until result = L;
 end;
 
-
 function StrIComp(Str1, Str2: pointer): PtrInt;
 var
   c1, c2: byte; // integer/PtrInt are actually slower on FPC
@@ -6086,6 +6091,22 @@ begin
     else
       // Str1=''
       result := -1;
+end;
+
+function StrCompByNumber(Str1, Str2: pointer): PtrInt;
+var
+  v1, v2: Int64;
+  err: integer;
+begin
+  v1 := GetInt64(Str1, err);
+  if err = 0 then
+    v2 := GetInt64(Str2, err)
+  else
+    v2 := 0; // to please the Delphi compiler
+  if err = 0 then
+    result := CompareInt64(v1, v2)
+  else
+    result := StrComp(Str1, Str2);
 end;
 
 function GetLineContains(p, pEnd, up: PUtf8Char): boolean;
@@ -8283,17 +8304,15 @@ begin
   begin
     FastSetString(Value, p, len);
     result := true;
-  end
-  else
-  begin
-    if not KeepNotFoundValue then
-      {$ifdef FPC}
-      FastAssignNew(Value);
-      {$else}
-      Value := '';
-      {$endif FPC}
-    result := false;
+    exit;
   end;
+  if not KeepNotFoundValue then
+    {$ifdef FPC}
+    FastAssignNew(Value);
+    {$else}
+    Value := '';
+    {$endif FPC}
+  result := false;
 end;
 
 function GetLineSize(P, PEnd: PUtf8Char): PtrUInt;
@@ -8762,23 +8781,21 @@ begin
     result := FindRawUtf8(@Values[0], Value, result + 1, CaseSensitive);
 end;
 
+function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8): PtrInt;
+begin
+  result := length(Values);
+  SetLength(Values, result + 1);
+  Values[result] := Value;
+end;
+
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
   NoDuplicates, CaseSensitive: boolean): boolean;
-var
-  i: PtrInt;
 begin
+  result := false;
   if NoDuplicates then
-  begin
-    i := FindRawUtf8(Values, Value, CaseSensitive);
-    if i >= 0 then
-    begin
-      result := false;
+    if FindRawUtf8(Values, Value, CaseSensitive) >= 0 then
       exit;
-    end;
-  end;
-  i := length(Values);
-  SetLength(Values, i + 1);
-  Values[i] := Value;
+  AddRawUtf8(Values, Value);
   result := true;
 end;
 

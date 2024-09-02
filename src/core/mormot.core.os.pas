@@ -168,7 +168,9 @@ const
   /// HTTP Status Code for "HTTP Version Not Supported"
   HTTP_HTTPVERSIONNONSUPPORTED = 505;
 
-  /// clearly wrong response code, used by THttpServerRequest.SetAsyncResponse
+  /// a fake response code, generated for client side panic failure/exception
+  HTTP_CLIENTERROR = 666;
+  /// a fake response code, used by THttpServerRequest.SetAsyncResponse
   // - for internal THttpAsyncServer asynchronous process
   HTTP_ASYNCRESPONSE = 777;
 
@@ -193,7 +195,7 @@ function StatusCodeToShort(Code: cardinal): TShort47;
 // - will map mainly SUCCESS (200), CREATED (201), NOCONTENT (204),
 // PARTIALCONTENT (206), NOTMODIFIED (304) or TEMPORARYREDIRECT (307) codes
 // - any HTTP status not part of this range will be identified as erronous
-// request in the internal server statistics
+// request e.g. in the web server statistics
 function StatusCodeIsSuccess(Code: integer): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1157,13 +1159,18 @@ function GetDelphiCompilerVersion: RawUtf8; deprecated;
 const
   /// a global constant to be appended for Windows Ansi or Wide API names
   // - match the Wide API on Delphi, since String=UnicodeString
+  // - you should not use this suffix, but the 'W' API everywhere, with proper
+  // conversion into RawUtf8 or TFileName/string
   _AW = 'W';
 
 {$else}
 
 const
   /// a global constant to be appended for Windows Ansi or Wide API names
-  // - match the Ansi API on FPC or oldest Delphi, where String=AnsiString
+  // - match the Ansi API oldest Delphi, where String=AnsiString
+  // - but won't always match the Ansi API on FPC, because Lazarus forces
+  // CP_UTF8, so you should NOT use this suffix, but the '*W' API everywhere,
+  // with proper conversion into RawUtf8 or TFileName/string
   _AW = 'A';
 
 type
@@ -2411,17 +2418,20 @@ type
   end;
 
 const
-  NO_ERROR  = Windows.NO_ERROR;
+  NO_ERROR  = Windows.NO_ERROR; // = ERROR_SUCCESS
 
-  ERROR_ACCESS_DENIED      = Windows.ERROR_ACCESS_DENIED;
-  ERROR_INVALID_PARAMETER  = Windows.ERROR_INVALID_PARAMETER;
-  ERROR_HANDLE_EOF         = Windows.ERROR_HANDLE_EOF;
-  ERROR_ALREADY_EXISTS     = Windows.ERROR_ALREADY_EXISTS;
-  ERROR_MORE_DATA          = Windows.ERROR_MORE_DATA;
-  ERROR_CONNECTION_INVALID = Windows.ERROR_CONNECTION_INVALID;
-  ERROR_OLD_WIN_VERSION    = Windows.ERROR_OLD_WIN_VERSION;
-  ERROR_IO_PENDING         = Windows.ERROR_IO_PENDING;
-  ERROR_OPERATION_ABORTED  = Windows.ERROR_OPERATION_ABORTED;
+  ERROR_ACCESS_DENIED       = Windows.ERROR_ACCESS_DENIED;
+  ERROR_INVALID_HANDLE      = Windows.ERROR_INVALID_HANDLE;
+  ERROR_INSUFFICIENT_BUFFER = Windows.ERROR_INSUFFICIENT_BUFFER;
+  ERROR_INVALID_PARAMETER   = Windows.ERROR_INVALID_PARAMETER;
+  ERROR_HANDLE_EOF          = Windows.ERROR_HANDLE_EOF;
+  ERROR_ALREADY_EXISTS      = Windows.ERROR_ALREADY_EXISTS;
+  ERROR_MORE_DATA           = Windows.ERROR_MORE_DATA;
+  ERROR_CONNECTION_INVALID  = Windows.ERROR_CONNECTION_INVALID;
+  ERROR_OLD_WIN_VERSION     = Windows.ERROR_OLD_WIN_VERSION;
+  ERROR_IO_PENDING          = Windows.ERROR_IO_PENDING;
+  ERROR_OPERATION_ABORTED   = Windows.ERROR_OPERATION_ABORTED;
+
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383770
   ERROR_WINHTTP_TIMEOUT                 = 12002;
   ERROR_WINHTTP_CANNOT_CONNECT          = 12029;
@@ -3082,8 +3092,18 @@ function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
 function WinErrorConstant(Code: cardinal): PUtf8Char;
 
 /// raise an EOSException from the last system error using WinErrorText()
+// - if Code is kept to its default 0, GetLastError is called
 procedure RaiseLastError(const Context: shortstring;
   RaisedException: ExceptClass = nil; Code: integer = 0);
+
+/// return a RaiseLastError-like error message using WinErrorText()
+// - if Code is kept to its default 0, GetLastError is called
+function WinLastError(const Context: shortstring; Code: integer = 0): string;
+
+/// call RaiseLastError(Code) if Code <> NO_ERROR = ERROR_SUCCESS
+procedure WinCheck(const Context: shortstring; Code: integer;
+  RaisedException: ExceptClass = nil);
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// raise an Exception from the last module error using WinErrorText()
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
@@ -4103,10 +4123,10 @@ function Utf8ToWin32PWideChar(const Text: RawUtf8;
   var dest: TSynTempBuffer): PWideChar;
 
 /// ask the Operating System to convert a file URL to a local file path
-// - only Windows has a such a PathCreateFromUrl() API
+// - only Windows has a such a PathCreateFromUrlW() API
 // - POSIX define this in mormot.net.http.pas, where TUri is available
 // - used e.g. by TNetClientProtocolFile to implement the 'file://' protocol
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 
 {$else}
 
@@ -4382,9 +4402,9 @@ type
     Flags: PtrUInt; // bit 0 = WriteLock, 1 = ReadWriteLock, >1 = ReadOnlyLock
     LastReadWriteLockThread, LastWriteLockThread: TThreadID; // to be reentrant
     LastReadWriteLockCount,  LastWriteLockCount: cardinal;
-    {$ifndef FPC_ASMX64}
+    {$ifndef ASMX64}
     procedure ReadOnlyLockSpin;
-    {$endif FPC_ASMX64}
+    {$endif ASMX64}
   public
     /// initialize the R/W lock
     // - not needed if TRWLock is part of a class - i.e. if was filled with 0
@@ -4404,7 +4424,7 @@ type
     // !   rwlock.ReadOnlyUnLock;
     // ! end;
     procedure ReadOnlyLock;
-      {$ifdef HASINLINE} {$ifndef FPC_ASMX64} inline; {$endif} {$endif}
+      {$ifdef HASINLINE} {$ifndef ASMX64} inline; {$endif} {$endif}
     /// release a previous ReadOnlyLock call
     procedure ReadOnlyUnLock;
       {$ifdef HASINLINE} inline; {$endif}
@@ -4652,7 +4672,7 @@ type
     // - if you want to access those array values, ensure you protect them
     // using a Safe.Lock; try ... Padding[n] ... finally Safe.Unlock structure,
     // and maintain the PaddingUsedCount property accurately
-    Padding: array[0..6] of TVarData;
+    Padding: array[0..6] of TSynVarData;
     /// initialize the mutex
     // - calling this method is mandatory (e.g. in the class constructor owning
     // the TSynLocker instance), otherwise you may encounter unexpected
@@ -5829,6 +5849,14 @@ var
   RunAbortTimeoutSecs: integer = 5;
 
 {$ifdef OSWINDOWS}
+
+/// Windows-specific RunCommand() function returning raw TProcessInformation
+function RunCommandWin(const cmd: TFileName; waitfor: boolean;
+  var processinfo: TProcessInformation; const env: TFileName = '';
+  options: TRunOptions = []; waitfordelayms: cardinal = INFINITE;
+  redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
+  const wrkdir: TFileName = ''): integer;
+
 type
   /// how RunRedirect() or RunCommand() should try to gracefully terminate
   // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
@@ -5872,7 +5900,7 @@ implementation
 const
   // StatusCodeToReason() StatusCodeToText() table to avoid memory allocations
   // - roughly sorted by actual usage order for WordScanIndex()
-  HTTP_REASON: array[0..43] of RawUtf8 = (
+  HTTP_REASON: array[0..44] of RawUtf8 = (
    'OK',                                // HTTP_SUCCESS - should be first
    'No Content',                        // HTTP_NOCONTENT
    'Temporary Redirect',                // HTTP_TEMPORARYREDIRECT
@@ -5916,9 +5944,11 @@ const
    'Gateway Timeout',                   // HTTP_GATEWAYTIMEOUT
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
-   'Invalid Request');                  // 513 - should be last
+   'Client side Exception',             // HTTP_CLIENTERROR = 666
+   'Invalid Request');                  // 513 - should be last as fallback
 
-  HTTP_CODE: array[0..43] of word = (
+
+  HTTP_CODE: array[0..high(HTTP_REASON)] of word = (
     HTTP_SUCCESS,
     HTTP_NOCONTENT,
     HTTP_TEMPORARYREDIRECT,
@@ -5962,6 +5992,7 @@ const
     HTTP_GATEWAYTIMEOUT,
     HTTP_HTTPVERSIONNONSUPPORTED,
     511,
+    HTTP_CLIENTERROR,
     513);
 
 function StatusCodeToText(Code: cardinal): PRawUtf8;
@@ -7395,7 +7426,7 @@ begin
   // fast cross-platform implementation
   folder := GetSystemPath(spTemp);
   if _TmpCounter = 0 then
-    _TmpCounter := Random32;
+    _TmpCounter := Random31; // avoid paranoid overflow
   retry := 10;
   repeat
     // thread-safe unique file name generation
@@ -9797,10 +9828,13 @@ begin
 end;
 
 // dedicated asm for this most simple (and used) method
-{$ifdef FPC_ASMX64} // some Delphi version was reported to fail with no clue why
+{$ifdef ASMX64}
 
 procedure TRWLock.ReadOnlyLock;
-asm     // stack frame is required since we may call SwitchToThread
+// stack frame is required (at least on Windows) since it may call SwitchToThread
+var
+  backup: pointer; // better than push/pop since we have a stack frame
+asm
         {$ifdef SYSVABI}
         mov     rcx, rdi      // rcx = self
         {$endif SYSVABI}
@@ -9813,9 +9847,9 @@ asm     // stack frame is required since we may call SwitchToThread
         pause
         dec     r8d
         jnz     @spin
-        push    rcx
+        mov     qword ptr [backup], rcx
         call    SwitchToThread
-        pop     rcx
+        mov     rcx, qword ptr [backup] // restore for the wait loop
         jmp     @retry
 @done:  // restore the stack frame
 end;
@@ -9844,7 +9878,7 @@ begin
         LockedExc(Flags, f + 4, f);
 end;
 
-{$endif FPC_ASMX64}
+{$endif ASMX64}
 
 procedure TRWLock.ReadOnlyUnLock;
 begin
@@ -10127,8 +10161,8 @@ var
   i: PtrInt;
 begin
   for i := 0 to fPaddingUsedCount - 1 do
-    if not (integer(Padding[i].VType) in VTYPE_SIMPLE) then
-      VarClearProc(Padding[i]);
+    if Padding[i].VType and VTYPE_STATIC <> 0 then
+      VarClearProc(Padding[i].Data);
   DeleteCriticalSection(fSection);
   fInitialized := false;
 end;
@@ -10252,7 +10286,7 @@ begin
   begin
   {$endif HASFASTTRYFINALLY}
     RWLock(cReadOnly);
-    result := variant(Padding[Index]);
+    result := variant(Padding[Index]); // safe copy
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -10302,6 +10336,7 @@ end;
 
 function TSynLocker.GetBool(Index: integer): boolean;
 begin
+  result := false;
   if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
@@ -10315,9 +10350,7 @@ begin
   finally
   {$endif HASFASTTRYFINALLY}
     RWUnLock(cReadOnly);
-  end
-  else
-    result := false;
+  end;
 end;
 
 procedure TSynLocker.SetBool(Index: integer; const Value: boolean);
@@ -10334,35 +10367,31 @@ end;
 
 procedure TSynLocker.SetUnlockedInt64(Index: integer; const Value: Int64);
 begin
-  if cardinal(Index) <= high(Padding) then
-  begin
-    if Index >= fPaddingUsedCount then
-      fPaddingUsedCount := Index + 1;
-    variant(Padding[Index]) := Value;
-  end;
+  if cardinal(Index) >= high(Padding) then
+    exit;
+  if Index >= fPaddingUsedCount then
+    fPaddingUsedCount := Index + 1;
+  variant(Padding[Index]) := Value;
 end;
 
 function TSynLocker.GetPointer(Index: integer): pointer;
 begin
+  result := nil;
   if cardinal(Index) < cardinal(fPaddingUsedCount) then
-    {$ifdef HASFASTTRYFINALLY}
-    try
-    {$else}
-    begin
-    {$endif HASFASTTRYFINALLY}
-      RWLock(cReadOnly);
-      with Padding[Index] do
-        if VType = varUnknown then
-          result := VUnknown
-        else
-          result := nil;
-    {$ifdef HASFASTTRYFINALLY}
-    finally
-    {$endif HASFASTTRYFINALLY}
-      RWUnLock(cReadOnly);
-    end
-    else
-      result := nil;
+  {$ifdef HASFASTTRYFINALLY}
+  try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
+    with Padding[Index].Data do
+      if VType = varUnknown then
+        result := VUnknown;
+  {$ifdef HASFASTTRYFINALLY}
+  finally
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
+  end;
 end;
 
 procedure TSynLocker.SetPointer(Index: integer; const Value: pointer);
@@ -10374,8 +10403,8 @@ begin
         fPaddingUsedCount := Index + 1;
       with Padding[Index] do
       begin
-        VarClearAndSetType(PVariant(@VType)^, varUnknown);
-        VUnknown := Value;
+        VarClearAndSetType(variant(Data), varUnknown);
+        VAny := Value;
       end;
     finally
       RWUnLock(cWrite);
@@ -10416,20 +10445,21 @@ end;
 
 function TSynLocker.LockedInt64Increment(Index: integer; const Increment: Int64): Int64;
 begin
+  result := 0;
   if cardinal(Index) <= high(Padding) then
     try
       RWLock(cWrite);
-      result := 0;
-      if Index < fPaddingUsedCount then
-        VariantToInt64(variant(Padding[Index]), result)
-      else
-        fPaddingUsedCount := Index + 1;
-      variant(Padding[Index]) := Int64(result + Increment);
+      with Padding[Index] do
+      begin
+        if Index < fPaddingUsedCount then
+          VariantToInt64(variant(Data), result)
+        else
+          fPaddingUsedCount := Index + 1;
+        variant(Data) := Int64(result + Increment);
+      end;
     finally
       RWUnLock(cWrite);
-    end
-    else
-      result := 0;
+    end;
 end;
 
 function TSynLocker.LockedExchange(Index: integer; const Value: variant): variant;
@@ -10441,10 +10471,10 @@ begin
       with Padding[Index] do
       begin
         if Index < fPaddingUsedCount then
-          result := PVariant(@VType)^
+          result := variant(Data)
         else
           fPaddingUsedCount := Index + 1;
-        PVariant(@VType)^ := Value;
+        variant(Data) := Value;
       end;
     finally
       RWUnLock(cWrite);
@@ -10453,6 +10483,7 @@ end;
 
 function TSynLocker.LockedPointerExchange(Index: integer; Value: pointer): pointer;
 begin
+  result := nil;
   if cardinal(Index) <= high(Padding) then
     try
       RWLock(cWrite);
@@ -10460,25 +10491,17 @@ begin
       begin
         if Index < fPaddingUsedCount then
           if VType = varUnknown then
-            result := VUnknown
+            result := VAny
           else
-          begin
-            VarClear(PVariant(@VType)^);
-            result := nil;
-          end
+            VarClearProc(Data)
         else
-        begin
           fPaddingUsedCount := Index + 1;
-          result := nil;
-        end;
         VType := varUnknown;
-        VUnknown := Value;
+        VAny := Value;
       end;
     finally
       RWUnLock(cWrite);
-    end
-  else
-    result := nil;
+    end;
 end;
 
 

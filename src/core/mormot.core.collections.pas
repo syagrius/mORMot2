@@ -521,8 +521,14 @@ type
     // !   for e in kv do
     // !     writeln(e.Key, ' = ', e.Value);
     function GetEnumerator: TIKeyValueEnumerator<TKey, TValue>;
-    /// returns the number of key/value pairs actually stored
+    /// search the index of given key
+    // - the index could then be used with Key[] and Value[] properties
     // - this is not thread-safe so to be protected by ReadLock/ReadUnLock
+    // - consider using the safer TryGetValue() or Items[] instead
+    function FindKeyIndex(const key: TKey): PtrInt;
+    /// returns the number of key/value pairs actually stored
+    // - this is not thread-safe so to be protected by ReadLock/ReadUnLock if
+    // you want to use the Key[] Value[] indexed properties
     function Count: integer;
     /// high-level access to the stored values from their associated keys
     // - GetItem() raise an EIKeyValue if the key is not available, unless
@@ -672,6 +678,8 @@ type
     function ContainsValue(const value: TValue): boolean;
     /// IKeyValue<> method to iterate over all key/value pairs
     function GetEnumerator: TIKeyValueEnumerator<TKey, TValue>;
+    /// IKeyValue<> method to search the index of given key
+    function FindKeyIndex(const key: TKey): PtrInt;
     /// high-level IKeyValue<> method to get the stored values from their keys
     property Items[const key: TKey]: TValue
       read GetItem write SetItem; default;
@@ -1473,7 +1481,7 @@ end;
 
 function TIKeyValue<TKey, TValue>.GetKey(ndx: PtrInt): TKey;
 begin
-  result := TArray<TKey>(fData.Keys.Value^)[ndx];
+  result := TArray<TKey>(fData.Keys.Value^)[ndx]; // most efficient
 end;
 
 function TIKeyValue<TKey, TValue>.GetValue(ndx: PtrInt): TValue;
@@ -1563,6 +1571,11 @@ begin
   result.fCount := fData.Count;
   dec(result.fKey); // MoveNext will make inc() first
   dec(result.fValue);
+end;
+
+function TIKeyValue<TKey, TValue>.FindKeyIndex(const key: TKey): PtrInt;
+begin
+  result := fData.Find(key, fHasTimeout);
 end;
 
 
