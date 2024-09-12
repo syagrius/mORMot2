@@ -7,9 +7,10 @@ unit mormot.net.ldap;
   *****************************************************************************
 
    Simple LDAP Protocol Client
-    - LDAP Protocol Definitions
-    - LDAP Attribute Types Definitions
     - CLDAP Client Functions
+    - LDIF Data Interchange Format
+    - LDAP Protocol Definitions
+    - LDAP Attributes Definitions
     - LDAP Response Storage
     - LDAP Client Class
     - HTTP BASIC Authentication via LDAP or Kerberos
@@ -43,6 +44,169 @@ uses
   mormot.crypt.secure,
   mormot.net.sock,
   mormot.net.dns;
+
+
+{ **************** CLDAP Client Functions }
+
+const
+  /// the TCP/UDP port usually published by a LDAP server
+  LDAP_PORT = '389';
+  /// the TCP port usually published by a LDAP server over TLS
+  LDAP_TLS_PORT = '636';
+  /// the TCP port usually published by a LDAP server over plain or TLS
+  LDAP_DEFAULT_PORT: array[{tls=}boolean] of RawUtf8 = (
+    LDAP_PORT,
+    LDAP_TLS_PORT);
+  /// the URI scheme for a LDAP server over plain or TLS
+  LDAP_DEFAULT_SCHEME: array[{tls=}boolean] of RawUtf8 = (
+    'ldap://',
+    'ldaps://');
+
+type
+  /// the decoded TCldapDomainInfo.RawLogonType value
+  TCldapDomainLogonType = (
+    cltUnknown,
+    cltUser,
+    cltAnonymous);
+
+  /// each decoded TCldapDomainInfo.RawFlags value
+  TCldapDomainFlag = (
+    cdfPDC,
+    cdfObsolete,
+    cdfGC,
+    cdfLDAP,
+    cdfDS,
+    cdfKDC,
+    cdfTimeServer,
+    cdfClosest,
+    cdfWritable,
+    cdfGoodTimeServer,
+    cdfNonDomainNC);
+
+  /// the decoded TCldapDomainInfo.RawFlags content
+  TCldapDomainFlags = set of TCldapDomainFlag;
+
+  /// define the domain information returned by CldapGetDomainInfo(
+  TCldapDomainInfo = record
+    RawLogonType, RawFlags, NTVersion: cardinal;
+    LogonType: TCldapDomainLogonType;
+    Flags: TCldapDomainFlags;
+    Guid: TGuid;
+    Forest, Domain, HostName, NetbiosDomain, NetbiosHostname: RawUtf8;
+    Unk, User, IP, ServerSite, ClientSite: RawUtf8;
+  end;
+
+/// send a CLDAP NetLogon message to a LDAP server over UDP to retrieve all
+// information of the domain
+function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
+  const DomainName, LdapServerAddress: RawUtf8;
+  const LdapServerPort: RawUtf8 = LDAP_PORT): boolean;
+
+/// retrieve the LDAP 'server:port' corresponding of a given AD Domain Name
+// - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
+// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
+// - this is the safest approach for a client, safer than CldapBroadcast()
+// or CldapSortHosts() / DnsLdapControlersSorted()
+// - as used with default lccCldap option for TLdapClient.Connect with a
+// ForcedDomainName
+function CldapGetLdapController(const DomainName: RawUtf8;
+  const NameServer: RawUtf8 = ''; TimeOutMS: integer = 500): RawUtf8;
+
+/// retrieve the LDAP 'server:port' corresponding to the running computer
+// - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
+// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
+// - if no NameServer is supplied, will use GetDnsAddresses - note that NameServer
+// is expected to be an IPv4 address, maybe prefixed as 'tcp@1.2.3.4' to force TCP
+// - this is the safest approach for a client, safer than CldapBroadcast()
+// or CldapSortHosts() / DnsLdapControlersSorted()
+// - as used with default lccCldap option for TLdapClient.Connect with no
+// ForcedDomainName
+function CldapMyLdapController(const NameServer: RawUtf8 = '';
+  UsePosixEnv: boolean = false; DomainName: PRawUtf8 = nil;
+  TimeOutMS: integer = 500): RawUtf8;
+
+/// retrieve the default LDAP 'server:port'
+// - if ForcedDomainName global variable is set, calls CldapGetLdapController()
+// - otherwise, calls CldapMyLdapController()
+// - can optionally return the associated Domain Name and Service Principal Name
+// - as used by TLdapClient.Connect in lccCldap discover mode
+function CldapGetDefaultLdapController(
+  DistinguishedName: PRawUtf8 = nil; SPN: PRawUtf8 = nil): RawUtf8;
+
+/// pickup the preferred LDAP 'server:port' of a set of LDAP servers
+// - will send CLDAP NetLogon messages to the LdapServers to retrieve
+// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
+// - as used by CldapGetLdapController() and CldapMyLdapController()
+function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer = 500): RawUtf8;
+
+type
+  /// define one result for a server identified by CldapBroadcast()
+  TCldapServer = record
+    /// after how many microseconds this response has been received
+    TimeMicroSec: integer;
+    /// the raw IP address where the UDP response came from
+    IP: RawUtf8;
+    /// the "dnsHostName" attribute returned by the server
+    // - a typical value is e.g. 'dc-site3.ad.company.it'
+    HostName: RawUtf8;
+    /// the "ldapServiceName" attribute returned by the server
+    // - a typical value is e.g. 'ad.company.it:dc-site3@AD.COMPANY.IT'
+    ServiceName: RawUtf8;
+    /// the "defaultNamingContext" attribute returned by the server
+    // - a typical value is e.g. 'DC=ad,DC=company,DC=it'
+    NamingContext: RawUtf8;
+    /// the "vendorName" attribute returned by the server
+    // - a typical value is e.g. 'Samba Team (https://www.samba.org)'
+    VendorName: RawUtf8;
+  end;
+  /// the type of array results returned by CldapBroadcast()
+  TCldapServers = array of TCldapServer;
+
+/// allow to discover the local LDAP server(s) using a CLDAP UDP broadcast
+// - will broadcast a CLDAP UDP search message over the local network,
+// then return the results in receiving order (probably the closest first)
+// - you can specify your broadcast address to check a specific network mask
+// - some AD may be configured to drop and timeout so testing via TCP is
+// unreliable: using UDP and CLDAP could be a safer approach
+// - returns the number of results added to the Servers array[] - which will be
+// sorted by time with any previous requests so you can call CldapBroadcast()
+// over several address masks
+// - note: cBroadcast = '255.255.255.255' does not mean "everywhere" in practice:
+// e.g. on Windows, you need to run also the function on cLocalHost, and on
+// POSIX it seems to require a specific broadcast per interface network mask
+// otherwise only a single interface is broadcasted
+// - is useful only for low-level forensic tools: to find out which LDAP
+// client ot use, rather call CldapGetLdapController/CldapMyLdapController
+function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer = 100;
+  const Address: RawUtf8 = cBroadcast; const Port: RawUtf8 = LDAP_PORT): integer;
+
+/// sort some LDAP host names using CLDAP over UDP
+// - expects Hosts in 'host:port' format, as returned by DnsLdapControlers,
+// e.g. ['dc-one.mycorp.com:389', 'dc-two.mycorp.com:389']
+// - hosts not available over UDP within MinimalUdpCount or the TimeoutMS period,
+// are put at the end of the list because they may still be reachable via TCP
+// - used e.g. by TLdapClient.Connect() with the lccClosest option
+procedure CldapSortHosts(var Hosts: TRawUtf8DynArray;
+  TimeoutMS, MinimalUdpCount: integer);
+
+/// retrieve the LDAP controlers sorted by UDP response time
+// - just a wrapper around DnsLdapControlers() and CldapSortHosts()
+// - won't sort by UDP response time if UdpFirstDelayMS = 0
+// - used e.g. by TLdapClient.Connect() with the lccClosest option
+// - a safer approach may be to use CldapGetLdapController/CldapMyLdapController
+function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
+  const NameServer: RawUtf8 = ''; UsePosixEnv: boolean = false;
+  DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
+
+
+{ **************** LDIF Data Interchange Format }
+
+/// check if the supplied buffer requires base-64 encoding as for RFC 2849
+function IsLdifSafe(p: PUtf8Char; l: integer): boolean;
+
+/// append the supplied buffer as specified by RFC 2849
+procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
 
 
 { **************** LDAP Protocol Definitions }
@@ -176,20 +340,6 @@ const
     LDAP_ASN1_EXT_RESPONSE];
 
 const
-  /// the TCP/UDP port usually published by a LDAP server
-  LDAP_PORT = '389';
-  /// the TCP port usually published by a LDAP server over TLS
-  LDAP_TLS_PORT = '636';
-  /// the TCP port usually published by a LDAP server over plain or TLS
-  LDAP_DEFAULT_PORT: array[{tls=}boolean] of RawUtf8 = (
-    LDAP_PORT,
-    LDAP_TLS_PORT);
-  /// the URI scheme for a LDAP server over plain or TLS
-  LDAP_DEFAULT_SCHEME: array[{tls=}boolean] of RawUtf8 = (
-    'ldap://',
-    'ldaps://');
-
-const
   /// OID of pagedresultsControl attribute
   ASN1_OID_PAGEDRESULTS = '1.2.840.113556.1.4.319';
 
@@ -307,9 +457,11 @@ function LdapEscapeCN(const Text: RawUtf8): RawUtf8;
 /// encode a "unicodePwd" binary value from a UTF-8 password
 function LdapUnicodePwd(const aPassword: SpiUtf8): RawByteString;
 
+/// decode a LDAP attribute date/time value into a pascal TDateTime
+function LdapToDate(const Text: RawUtf8): TDateTime;
 
 
-{ **************** LDAP Attribute Types Definitions }
+{ **************** LDAP Attributes Definitions }
 
 type
   /// common Attribute Types, as stored in TLdapAttribute.AttributeName
@@ -406,8 +558,16 @@ function ToText(Attribute: TLdapAttributeType): RawUtf8; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 type
-  /// the decoded fields of TLdapGroup.groupType
-  // - https://learn.microsoft.com/en-us/windows/win32/adschema/a-grouptype
+  /// the decoded fields of TLdapGroup.GroupType
+  // - https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups
+  // - gtBuiltIn is created by the system
+  // - gtGlobal has global scope
+  // - gtDomainLocal has domain local scope
+  // - gtUniversal has universal scope
+  // - gtAppBasic specifies an APP_BASIC group for Windows Server Authorization Manager
+  // - gtAppQuery specifies an APP_QUERY group for Windows Server Authorization Manager
+  // - gtSecurity specifies a security group; if this flag is not set, then
+  // the group is a distribution group
   TGroupType = (
     gtBuiltIn,
     gtGlobal,
@@ -424,26 +584,26 @@ type
     uacScript,                            //       1
     uacAccountDisable,                    //       2
     uacHomeDirRequired = 3,               //       8
-    uacLockedOut,                         //      10
-    uacPasswordNotRequired,               //      20
-    uacPasswordCannotChange,              //      40
-    uacPasswordUnencrypted,               //      80
-    uacTempDuplicateAccount,              //     100
-    uacNormalAccount,                     //     200
-    uacInterDomainTrusted = 11,           //     800
-    uacWorkstationTrusted,                //    1000
-    uacServerTrusted,                     //    2000
-    uacPasswordDonotExpire = 16,          //   10000
-    uacLogonAccount,                      //   20000
-    uacSmartcardRequired,                 //   40000
-    uacKerberosTrustedForDelegation,      //   80000
-    uacKerberosNotDelegated,              //  100000
-    uacKerberosDesOnly,                   //  200000
-    uacKerberosRequirePreAuth,            //  400000
-    uacPasswordExpired,                   //  800000
-    uacKerberosTrustedToDelegate,         // 1000000
-    uacKerberosNoPac,                     // 2000000
-    uacPartialSecretsRodc);               // 4000000
+    uacLockedOut,                         //      10 = 16
+    uacPasswordNotRequired,               //      20 = 32
+    uacPasswordCannotChange,              //      40 = 64
+    uacPasswordUnencrypted,               //      80 = 128
+    uacTempDuplicateAccount,              //     100 = 256
+    uacNormalAccount,                     //     200 = 512
+    uacInterDomainTrusted = 11,           //     800 = 2048
+    uacWorkstationTrusted,                //    1000 = 4096
+    uacServerTrusted,                     //    2000 = 8192
+    uacPasswordDonotExpire = 16,          //   10000 = 65536
+    uacLogonAccount,                      //   20000 = 131072
+    uacSmartcardRequired,                 //   40000 = 262144
+    uacKerberosTrustedForDelegation,      //   80000 = 524288
+    uacKerberosNotDelegated,              //  100000 = 1048576
+    uacKerberosDesOnly,                   //  200000 = 2097152
+    uacKerberosRequirePreAuth,            //  400000 = 4194304
+    uacPasswordExpired,                   //  800000 = 8388608
+    uacKerberosTrustedToDelegate,         // 1000000 = 16777216
+    uacKerberosNoPac,                     // 2000000 = 33554432
+    uacPartialSecretsRodc);               // 4000000 = 67108864
   TUserAccountControls = set of TUserAccountControl;
 
   /// known sAMAccountType values
@@ -459,150 +619,6 @@ type
     satAppBasicGroup,
     satAppQueryGroup);
 
-{ **************** CLDAP Client Functions }
-
-type
-  /// the decoded TCldapDomainInfo.RawLogonType value
-  TCldapDomainLogonType = (
-    cltUnknown,
-    cltUser,
-    cltAnonymous);
-
-  /// each decoded TCldapDomainInfo.RawFlags value
-  TCldapDomainFlag = (
-    cdfPDC,
-    cdfObsolete,
-    cdfGC,
-    cdfLDAP,
-    cdfDS,
-    cdfKDC,
-    cdfTimeServer,
-    cdfClosest,
-    cdfWritable,
-    cdfGoodTimeServer,
-    cdfNonDomainNC);
-
-  /// the decoded TCldapDomainInfo.RawFlags content
-  TCldapDomainFlags = set of TCldapDomainFlag;
-
-  /// define the domain information returned by CldapGetDomainInfo(
-  TCldapDomainInfo = record
-    RawLogonType, RawFlags, NTVersion: cardinal;
-    LogonType: TCldapDomainLogonType;
-    Flags: TCldapDomainFlags;
-    Guid: TGuid;
-    Forest, Domain, HostName, NetbiosDomain, NetbiosHostname: RawUtf8;
-    Unk, User, IP, ServerSite, ClientSite: RawUtf8;
-  end;
-
-/// send a CLDAP NetLogon message to a LDAP server over UDP to retrieve all
-// information of the domain
-function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
-  const DomainName, LdapServerAddress: RawUtf8;
-  const LdapServerPort: RawUtf8 = LDAP_PORT): boolean;
-
-/// retrieve the LDAP 'server:port' corresponding of a given AD Domain Name
-// - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
-// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
-// - this is the safest approach for a client, safer than CldapBroadcast()
-// or CldapSortHosts() / DnsLdapControlersSorted()
-// - as used with default lccCldap option for TLdapClient.Connect with a
-// ForcedDomainName
-function CldapGetLdapController(const DomainName: RawUtf8;
-  const NameServer: RawUtf8 = ''; TimeOutMS: integer = 500): RawUtf8;
-
-/// retrieve the LDAP 'server:port' corresponding to the running computer
-// - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
-// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
-// - if no NameServer is supplied, will use GetDnsAddresses - note that NameServer
-// is expected to be an IPv4 address, maybe prefixed as 'tcp@1.2.3.4' to force TCP
-// - this is the safest approach for a client, safer than CldapBroadcast()
-// or CldapSortHosts() / DnsLdapControlersSorted()
-// - as used with default lccCldap option for TLdapClient.Connect with no
-// ForcedDomainName
-function CldapMyLdapController(const NameServer: RawUtf8 = '';
-  UsePosixEnv: boolean = false; DomainName: PRawUtf8 = nil;
-  TimeOutMS: integer = 500): RawUtf8;
-
-/// retrieve the default LDAP 'server:port'
-// - if ForcedDomainName global variable is set, calls CldapGetLdapController()
-// - otherwise, calls CldapMyLdapController()
-// - can optionally return the associated Domain Name and Service Principal Name
-// - as used by TLdapClient.Connect in lccCldap discover mode
-function CldapGetDefaultLdapController(
-  DN: PRawUtf8 = nil; SPN: PRawUtf8 = nil): RawUtf8;
-
-/// pickup the preferred LDAP 'server:port' of a set of LDAP servers
-// - will send CLDAP NetLogon messages to the LdapServers to retrieve
-// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
-// - as used by CldapGetLdapController() and CldapMyLdapController()
-function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
-  const DomainName, NameServer: RawUtf8; TimeOutMS: integer = 500): RawUtf8;
-
-type
-  /// define one result for a server identified by CldapBroadcast()
-  TCldapServer = record
-    /// after how many microseconds this response has been received
-    TimeMicroSec: integer;
-    /// the raw IP address where the UDP response came from
-    IP: RawUtf8;
-    /// the "dnsHostName" attribute returned by the server
-    // - a typical value is e.g. 'dc-site3.ad.company.it'
-    HostName: RawUtf8;
-    /// the "ldapServiceName" attribute returned by the server
-    // - a typical value is e.g. 'ad.company.it:dc-site3@AD.COMPANY.IT'
-    ServiceName: RawUtf8;
-    /// the "defaultNamingContext" attribute returned by the server
-    // - a typical value is e.g. 'DC=ad,DC=company,DC=it'
-    NamingContext: RawUtf8;
-    /// the "vendorName" attribute returned by the server
-    // - a typical value is e.g. 'Samba Team (https://www.samba.org)'
-    VendorName: RawUtf8;
-  end;
-  /// the type of array results returned by CldapBroadcast()
-  TCldapServers = array of TCldapServer;
-
-/// allow to discover the local LDAP server(s) using a CLDAP UDP broadcast
-// - will broadcast a CLDAP UDP search message over the local network,
-// then return the results in receiving order (probably the closest first)
-// - you can specify your broadcast address to check a specific network mask
-// - some AD may be configured to drop and timeout so testing via TCP is
-// unreliable: using UDP and CLDAP could be a safer approach
-// - returns the number of results added to the Servers array[] - which will be
-// sorted by time with any previous requests so you can call CldapBroadcast()
-// over several address masks
-// - note: cBroadcast = '255.255.255.255' does not mean "everywhere" in practice:
-// e.g. on Windows, you need to run also the function on cLocalHost, and on
-// POSIX it seems to require a specific broadcast per interface network mask
-// otherwise only a single interface is broadcasted
-// - is useful only for low-level forensic tools: to find out which LDAP
-// client ot use, rather call CldapGetLdapController/CldapMyLdapController
-function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer = 100;
-  const Address: RawUtf8 = cBroadcast; const Port: RawUtf8 = LDAP_PORT): integer;
-
-/// sort some LDAP host names using CLDAP over UDP
-// - expects Hosts in 'host:port' format, as returned by DnsLdapControlers,
-// e.g. ['dc-one.mycorp.com:389', 'dc-two.mycorp.com:389']
-// - hosts not available over UDP within MinimalUdpCount or the TimeoutMS period,
-// are put at the end of the list because they may still be reachable via TCP
-// - used e.g. by TLdapClient.Connect() with the lccClosest option
-procedure CldapSortHosts(var Hosts: TRawUtf8DynArray;
-  TimeoutMS, MinimalUdpCount: integer);
-
-/// retrieve the LDAP controlers sorted by UDP response time
-// - just a wrapper around DnsLdapControlers() and CldapSortHosts()
-// - won't sort by UDP response time if UdpFirstDelayMS = 0
-// - used e.g. by TLdapClient.Connect() with the lccClosest option
-// - a safer approach may be to use CldapGetLdapController/CldapMyLdapController
-function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
-  const NameServer: RawUtf8 = ''; UsePosixEnv: boolean = false;
-  DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
-
-
-
-{ **************** LDAP Response Storage }
-
-type
   /// customize the TLdapAttributeList.Add(name, value) process
   // - default aoAlways will append the name/value pair to the existing content
   // - aoReplaceValue: if name already exists, replace its value
@@ -632,8 +648,8 @@ type
     procedure Add(const aValue: RawByteString;
       Option: TLdapAddOption = aoAlways); overload;
     /// include a new formatted text value to this list
-    procedure Add(const aValueFmt: RawUtf8; const aValueArgs: array of const;
-      Option: TLdapAddOption = aoAlways); overload;
+    procedure AddFmt(const aValueFmt: RawUtf8; const aValueArgs: array of const;
+      Option: TLdapAddOption = aoAlways); 
     /// retrieve a value as human-readable text
     // - a wrapper around AttributeValueMakeReadable() and the known type
     function GetReadable(index: PtrInt = 0): RawUtf8;
@@ -694,8 +710,8 @@ type
     function Add(const AttributeName: RawUtf8; const AttributeValue: RawByteString;
       Option: TLdapAddOption = aoAlways): TLdapAttribute; overload;
     /// search or allocate TLdapAttribute object(s) from name/value pairs to the list
-    procedure Add(const NameValuePairs: array of RawUtf8;
-      Option: TLdapAddOption = aoAlways); overload;
+    procedure AddPairs(const NameValuePairs: array of RawUtf8;
+      Option: TLdapAddOption = aoAlways); 
     /// search or allocate a new TLdapAttribute object to the list
     function Add(AttributeType: TLdapAttributeType): TLdapAttribute; overload;
     /// search or allocate a new TLdapAttribute object and its value to the list
@@ -798,6 +814,8 @@ type
     fItems: TLdapResultObjArray;
     fSearchTimeMicroSec: Int64;
     fCount: integer;
+    procedure GetAttributes(const AttrName: RawUtf8; AttrType: TLdapAttributeType;
+      ObjectNames: PRawUtf8DynArray; out Values: TRawUtf8DynArray);
   public
     /// finalize the list
     destructor Destroy; override;
@@ -809,11 +827,18 @@ type
     /// clear all TLdapResult objects in list
     procedure Clear;
     /// return all Items[].ObjectName as a sorted array
-    function ObjectNames(asCN: boolean = false): TRawUtf8DynArray;
-    /// return all Items[].Attributes.Get(AttributeName) as a sorted array
-    function ObjectAttributes(const AttributeName: RawUtf8): TRawUtf8DynArray; overload;
-    /// return all Items[].Attributes.Get(AttrType) as a sorted array
-    function ObjectAttributes(AttrType: TLdapAttributeType): TRawUtf8DynArray; overload;
+    function ObjectNames(asCN: boolean = false;
+      noSort: boolean = false): TRawUtf8DynArray;
+    /// return all Items[].Attributes.Get(AttributeName)
+    // - as a sorted array by default
+    // - or as an unsorted array, but with all corresponding ObjectName values
+    function ObjectAttributes(const AttributeName: RawUtf8;
+      ObjectNames: PRawUtf8DynArray = nil): TRawUtf8DynArray; overload;
+    /// return all Items[].Attributes.Get(AttrType)
+    // - as a sorted array by default
+    // - or as an unsorted array, but with all corresponding ObjectName values
+    function ObjectAttributes(AttrType: TLdapAttributeType;
+      ObjectNames: PRawUtf8DynArray = nil): TRawUtf8DynArray; overload;
     /// add all results as a TDocVariant object nested tree
     // - the full CN will be used as path
     // - attributes would be included as ObjectAttributeField (e.g. '_attr')
@@ -1076,7 +1101,7 @@ type
       out Dual: TLdapKnownCommonNamesDual): boolean;
     procedure GetByAccountType(AT: TSamAccountType; Uac, unUac: integer;
       const BaseDN, CustomFilter, Match: RawUtf8; Attribute: TLdapAttributeType;
-      out Res: TRawUtf8DynArray);
+      out Res: TRawUtf8DynArray; ObjectNames: PRawUtf8DynArray);
   public
     /// initialize this LDAP client instance
     constructor Create; overload; override;
@@ -1218,10 +1243,6 @@ type
     // - returns nil if no result is found or if the search failed
     function SearchFirst(const BaseDN, Filter: RawUtf8;
       const Attributes: array of RawUtf8): TLdapResult; overload;
-    /// retrieve all entries a given set of criteria and return the first result
-    // - overloaded method using convenient TLdapAttributeTypes for Attributes
-    function SearchFirst(const Attributes: TLdapAttributeTypes;
-      const Filter: RawUtf8; const BaseDN: RawUtf8 = ''): TLdapResult; overload;
     /// retrieve the entry matching the given ObjectDN
     // - will call Search method, therefore SearchResult will contains all the results
     // - returns nil if the object is not found or if the search failed
@@ -1255,8 +1276,12 @@ type
     /// retrieve all entries a given set of criteria and return the first result
     // - overloaded method using convenient TLdapAttributeTypes for Attributes
     function SearchFirst(const Attributes: TLdapAttributeTypes;
+      const Filter: RawUtf8; const BaseDN: RawUtf8 = ''): TLdapResult; overload;
+    /// retrieve all entries a given set of criteria and return the first result
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchFirstFmt(const Attributes: TLdapAttributeTypes;
       const FilterFmt: RawUtf8; const FilterArgs: array of const;
-      const BaseDN: RawUtf8 = ''): TLdapResult; overload;
+      const BaseDN: RawUtf8 = ''): TLdapResult;
     /// retrieve the entry matching the given ObjectDN
     // - overloaded method using convenient TLdapAttributeTypes for Attributes
     function SearchObject(const Attributes: TLdapAttributeTypes;
@@ -1295,12 +1320,22 @@ type
 
     { high-level computer methods }
 
+    /// retrieve all User names in the LDAP Server
+    // - you can refine your query via CustomFilter or TUserAccountControls
+    // - Match allow to search as a (AttributeName=Match) filter
+    // - returns the sAMAccountName values by default, optionally with the
+    // associated atDistinguishedName values
+    function GetComputers(FilterUac: TUserAccountControls = [];
+      UnFilterUac: TUserAccountControls = [uacAccountDisable];
+      const Match: RawUtf8 = ''; const CustomFilter: RawUtf8 = '';
+      const BaseDN: RawUtf8 = ''; ObjectNames: PRawUtf8DynArray = nil;
+      Attribute: TLdapAttributeType = atSAMAccountName): TRawUtf8DynArray;
     /// Add a new computer in the domain
     // - If password is empty, it isn't set in the attributes
     // - If DeleteIfPresent is false and there is already a computer with this
     // name in the domain, the operation fail
     // - ErrorMessage contains the failure reason (if the operation failed)
-    // - Return false if the operation failed
+    // - return false if the operation failed
     function AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
       out ErrorMessage: RawUtf8; const Password: SpiUtf8 = '';
       DeleteIfPresent : boolean = false;
@@ -1311,19 +1346,22 @@ type
     /// retrieve all Group names in the LDAP Server
     // - you can refine your query via CustomFilter or TGroupTypes
     // - Match allow to search as a (AttributeName=Match) filter
-    // - returns the sAMAccountName by default, but could be 'distinguishedName'
+    // - returns the sAMAccountName values by default, optionally with the
+    // associated atDistinguishedName values
     function GetGroups(FilterUac: TGroupTypes = [];
       UnFilterUac: TGroupTypes = []; const Match: RawUtf8 = '';
       const CustomFilter: RawUtf8 = ''; const BaseDN: RawUtf8 = '';
+      ObjectNames: PRawUtf8DynArray = nil;
       Attribute: TLdapAttributeType = atSAMAccountName): TRawUtf8DynArray;
     /// retrieve all User names in the LDAP Server
     // - you can refine your query via CustomFilter or TUserAccountControls
     // - Match allow to search as a (AttributeName=Match) filter
-    // - returns the sAMAccountName by default, but could be 'distinguishedName'
+    // - returns the sAMAccountName values by default, optionally with the
+    // associated atDistinguishedName values
     function GetUsers(FilterUac: TUserAccountControls = [];
       UnFilterUac: TUserAccountControls = [uacAccountDisable];
       const Match: RawUtf8 = ''; const CustomFilter: RawUtf8 = '';
-      const BaseDN: RawUtf8 = '';
+      const BaseDN: RawUtf8 = ''; ObjectNames: PRawUtf8DynArray = nil;
       Attribute: TLdapAttributeType = atSAMAccountName): TRawUtf8DynArray;
     /// retrieve the basic information of a LDAP Group
     // - could lookup by sAMAccountName or distinguishedName
@@ -1776,6 +1814,335 @@ begin
 end;
 
 
+{ **************** CLDAP Client Functions }
+
+const
+  NTVER: RawByteString = #6#0#0#0; // '\00\00\00\06' does NOT work on CLDAP
+
+function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
+  const DomainName, LdapServerAddress, LdapServerPort: RawUtf8): boolean;
+var
+  id, len: integer;
+  i: PtrInt;
+  filter, v: RawUtf8;
+  req, response: RawByteString;
+  addr, resp: TNetAddr;
+  sock: TNetSocket;
+  tmp: array[0..1999] of byte; // big enough for a UDP frame
+begin
+  FastRecordClear(@Info, TypeInfo(TCldapDomainInfo));
+  result := false;
+  if addr.SetFrom(LdapServerAddress, LdapServerPort, nlUdp) <> nrOk then
+    exit;
+  sock := addr.NewSocket(nlUdp);
+  if sock <> nil then
+  try
+    id := Random31Not0;
+    FormatUtf8('(&(DnsDomain=%)(NtVer=%))',
+      [LdapEscapeName(DomainName), NTVER], filter);
+    req := Asn(ASN1_SEQ, [
+             Asn(id),
+             RawLdapSearch('', false, filter, ['NetLogon'])
+           ]);
+    sock.SetReceiveTimeout(TimeOutMS);
+    if sock.SendTo(pointer(req), length(req), addr) <> nrOK then
+      exit;
+    len := sock.RecvFrom(@tmp, SizeOf(tmp), resp);
+    FastSetRawByteString(response, @tmp, len);
+    if not RawLdapSearchParse(response, id, ['netlogon'], [@v]) then
+      exit;
+    Info.IP := addr.IPWithPort;
+    Info.RawLogonType := PCardinalArray(v)[0];
+    case Info.RawLogonType of
+      23:
+        Info.LogonType := cltAnonymous;
+      25:
+        Info.LogonType := cltUser;
+    end;
+    Info.RawFlags := PCardinalArray(v)[1];
+    PWord(@Info.Flags)^ := Info.RawFlags;
+    exclude(Info.Flags, cdfObsolete);
+    Info.Guid := PGuid(@PCardinalArray(v)[2])^;
+    i := DnsParseString(v, 24, Info.Forest);
+    i := DnsParseString(v, i, Info.Domain);
+    i := DnsParseString(v, i, Info.HostName);
+    i := DnsParseString(v, i, Info.NetbiosDomain);
+    i := DnsParseString(v, i, Info.NetbiosHostname);
+    i := DnsParseString(v, i, Info.Unk);
+    if Info.LogonType = cltUser then
+      i := DnsParseString(v, i, Info.User);
+    i := DnsParseString(v, i, Info.ServerSite);
+    i := DnsParseString(v, i, Info.ClientSite);
+    Info.NTVersion := PCardinal(@PByteArray(v)[i])^;
+    result := (i + 4) < length(v);
+  finally
+    sock.Close;
+  end;
+end;
+
+function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer): RawUtf8;
+var
+  i: PtrInt;
+  h, p, n: RawUtf8;
+  info: TCldapDomainInfo;
+  res: TRawUtf8DynArray;
+begin
+  for i := 0 to length(LdapServers) - 1 do
+  begin
+    Split(LdapServers[i], ':', h, p);
+    if CldapGetDomainInfo(info, TimeOutMS, DomainName, h, p) and
+       (info.ClientSite <> '') then
+    begin
+      FormatUtf8('_ldap._tcp.%._sites.%', [info.ClientSite, DomainName], n);
+      res := DnsServices(n, NameServer);
+      if res <> nil then
+      begin
+        result := res[0];
+        exit;
+      end;
+    end;
+  end;
+  result := '';
+end;
+
+function CldapGetLdapController(const DomainName, NameServer: RawUtf8;
+  TimeOutMS: integer): RawUtf8;
+var
+  ldap: TRawUtf8DynArray;
+begin
+  ldap := DnsLdapServices(DomainName, NameServer);
+  result := CldapGetBestLdapController(ldap, DomainName, NameServer, TimeOutMS);
+end;
+
+function CldapMyLdapController(const NameServer: RawUtf8; UsePosixEnv: boolean;
+  DomainName: PRawUtf8; TimeOutMS: integer): RawUtf8;
+var
+  ldap: TRawUtf8DynArray;
+  dn: RawUtf8;
+begin
+  ldap := DnsLdapControlers(NameServer, UsePosixEnv, @dn);
+  result := CldapGetBestLdapController(ldap, dn, NameServer, TimeOutMS);
+  if (result <> '') and
+     (DomainName <> nil) then
+    DomainName^ := dn;
+end;
+
+function CldapGetDefaultLdapController(DistinguishedName, Spn: PRawUtf8): RawUtF8;
+var
+  domain: RawUtf8;
+begin
+  if ForcedDomainName <> '' then
+  begin
+    domain := ForcedDomainName;
+    result := CldapGetLdapController(ForcedDomainName, '', 500);
+  end
+  else
+    result := CldapMyLdapController('', false, @domain);
+  if result = '' then
+    exit;
+  if DistinguishedName <> nil then
+    DistinguishedName^ := domain;
+  if Spn <> nil then
+    Spn^ := NetConcat(['LDAP/', Split(result, ':'), '@', UpperCase(domain)]);
+end;
+
+function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer;
+  const Address, Port: RawUtf8): integer;
+var
+  id: integer;
+  req, response: RawByteString;
+  addr, resp: TNetAddr;
+  start, stop: Int64;
+  sock: TNetSocket;
+  len: PtrInt;
+  v: TCldapServer;
+  tmp: array[0..1999] of byte; // big enough for any UDP frame
+begin
+  result := 0;
+  if addr.SetFrom(Address, Port, nlUdp) <> nrOk then
+    exit;
+  sock := addr.NewSocket(nlUdp);
+  if sock <> nil then
+  try
+    sock.SetBroadcast(true);
+    id := Random31Not0;
+    req := Asn(ASN1_SEQ, [
+             Asn(id),
+             //Asn(''), // the RFC 1798 requires user, but MS AD does not :(
+             RawLdapSearch('', false, '*', ['dnsHostName',
+               'defaultNamingContext', 'ldapServiceName', 'vendorName'])
+           ]);
+    sock.SetReceiveTimeout(TimeOutMS);
+    QueryPerformanceMicroSeconds(start);
+    if sock.SendTo(pointer(req), length(req), addr) <> nrOK then
+      exit;
+    repeat
+      len := sock.RecvFrom(@tmp, SizeOf(tmp), resp);
+      if (len > 5) and
+         (tmp[0] = ASN1_SEQ) then
+      begin
+        FastSetRawByteString(response, @tmp, len);
+        if RawLdapSearchParse(response, id,
+          ['dnsHostName', 'defaultNamingContext', 'ldapServiceName', 'vendorName'],
+          [@v.HostName, @v.NamingContext, @v.ServiceName, @v.VendorName]) then
+        begin
+          QueryPerformanceMicroSeconds(stop);
+          v.TimeMicroSec := stop - start;
+          resp.IP(v.IP);
+          SetLength(Servers, length(Servers) + 1);
+          Servers[high(Servers)] := v;
+          Finalize(v);
+          inc(result);
+        end;
+      end;
+    until len < 0; // stop at last recvfrom() timeout
+  finally
+    sock.Close;
+  end;
+  if (result <> 0) and
+     (result <> length(Servers)) then
+    // ensure results are sorted by TimeMicroSec: integer first field
+    DynArray(TypeInfo(TCldapServers), Servers).Sort(SortDynArrayInteger);
+end;
+
+procedure CldapSortHosts(var Hosts: TRawUtf8DynArray;
+  TimeoutMS, MinimalUdpCount: integer);
+var
+  sock: TNetSocketDynArray;
+  h, p, v: RawUtf8;
+  addr, resp: TNetAddr;
+  req: TAsnObject;
+  sorted: TRawUtf8DynArray;
+  tix: Int64;
+  n, i, r: PtrInt;
+  len, found: integer;
+  poll: TPollSocketAbstract;
+  res: TPollSocketResults;
+  tmp: array[0..1999] of byte; // big enough for a UDP frame
+begin
+  n := length(Hosts);
+  if n = 0 then
+    exit;
+  found := 0;
+  SetLength(sock, n);
+  poll := PollFewSockets;
+  try
+    // multi-cast a simple LDAP request over UDP to all servers
+    for i := 0 to n - 1 do
+    begin
+      Split(Hosts[i], ':', h, p);
+      if p = '' then
+        p := LDAP_PORT;
+      if addr.SetFrom(h, p, nlUdp) <> nrOk then
+        continue;
+      sock[i] := addr.NewSocket(nlUdp);
+      if sock[i] = nil then
+        continue;
+      sock[i].SetReceiveTimeout(1);
+      req := Asn(ASN1_SEQ, [
+               Asn(777 + i),
+               RawLdapSearch('', false, '*', ['dnsHostName'])
+             ]);
+      if sock[i].SendTo(pointer(req), length(req), addr) = nrOk then
+        poll.Subscribe(sock[i], [pseRead], i)
+      else
+      begin
+        sock[i].Close;
+        sock[i] := nil;
+      end;
+    end;
+    // wait for the first incoming response(s)
+    tix := GetTickCount64 + TimeoutMS;
+    repeat
+      if poll.WaitForModified(res, 10) then
+        for r := 0 to res.Count - 1 do
+        begin
+          i := ResToTag(res.Events[r]);
+          if (PtrUInt(i) >= PtrUInt(n)) or
+             (sock[i] = nil) then
+            continue; // paranoid
+          len := sock[i].RecvFrom(@tmp, SizeOf(tmp), resp);
+          if (len > 5) and
+             (tmp[0] = ASN1_SEQ) then
+          begin
+            FastSetRawByteString(req, @tmp, len);
+            if RawLdapSearchParse(req, 777 + i, ['dnsHostName'], [@v]) then
+              AddRawUtf8(sorted, found, Hosts[i]); // found a true LDAP server
+            poll.Unsubscribe(sock[i]); // some kind of server
+            sock[i].Close;
+            sock[i] := nil;
+          end;
+       end;
+    until (found > MinimalUdpCount) or // stop as soon as we got enough host(s)
+          (found = n) or               // or we got all hosts
+          (GetTickCount64 > tix);      // or we timeout
+  finally
+    poll.Free;
+    for i := 0 to n - 1 do
+      if sock[i] <> nil then
+      begin
+        sock[i].Close;
+        AddRawUtf8(sorted, found, Hosts[i]); // not via UDP, but maybe on TCP
+      end;
+  end;
+  SetLength(sorted, found);
+  if found <> n then // e.g. if sock[] creation failed
+    for i := 0 to n - 1 do
+      AddRawUtf8(sorted, hosts[i], {nodup=}true); // ensure eventually exist
+  Hosts := sorted;
+end;
+
+function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
+  const NameServer: RawUtf8; UsePosixEnv: boolean;
+  DomainName: PRawUtf8): TRawUtf8DynArray;
+begin
+  result := DnsLdapControlers(NameServer, UsePosixEnv, DomainName);
+  if UdpFirstDelayMS > 0 then
+    CldapSortHosts(result, UdpFirstDelayMS, MinimalUdpCount);
+end;
+
+
+{ **************** LDIF Data Interchange Format }
+
+function IsLdifSafe(p: PUtf8Char; l: integer): boolean; // RFC 2849
+begin
+  if p <> nil then
+  begin
+    result := false;
+    if p^ in [#0 .. ' ', ':', '<', #128 .. #255] then // SAFE-INIT-CHAR
+      exit;
+    inc(p);
+    dec(l);
+    if l <> 0 then
+      repeat
+        if p^ in [#0, #10, #13, #128 .. #255] then    // SAFE-CHAR
+          exit;
+        inc(p);
+        dec(l);
+      until l = 0;
+    if p[-1] = ' ' then
+      exit; // "should not end with a space" RFC 2849 point 8)
+  end;
+  result := true;
+end;
+
+procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
+begin
+  if IsLdifSafe(p, l) then
+  begin
+    w.AddDirect(' ');
+    w.AddNoJsonEscape(p, l);
+  end
+  else
+  begin
+    // UTF-8 or binary content is just stored as name:: <base64>
+    w.AddDirect(':', ' ');
+    w.WrBase64(pointer(p), l, {withmagic=}false);
+  end;
+end;
+
+
 { **************** LDAP Protocol Definitions }
 
 procedure ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
@@ -2210,8 +2577,16 @@ begin
   end;
 end;
 
+function LdapToDate(const Text: RawUtf8): TDateTime;
+begin
+  if Text = 'Never expires' then
+    result := 0
+  else
+    result := Iso8601ToDateTime(Text);
+end;
 
-{ **************** LDAP Attribute Types Definitions }
+
+{ **************** LDAP Attributes Definitions }
 
 // private copy from constant to global variables because of Delphi which makes
 // a new RefCnt > 0 copy when assigning a RefCnt = -1 constant to a variable :(
@@ -2442,13 +2817,19 @@ begin
   result := GetEnumName(TypeInfo(TSamAccountType), ord(sat));
 end;
 
+var
+  // traditionnally, computer sAMAccountName ends with $ on computers
+  MACHINE_CHAR: array[boolean] of string[1] = ('', '$');
+
 function InfoFilter(AccountType: TSamAccountType; const AccountName,
   DistinguishedName, UserPrincipalName, CustomFilter: RawUtf8): RawUtf8;
 begin
   result := '';
   if AccountName <> '' then
-    FormatUtf8('(sAMAccountName=%)',
-      [LdapEscapeName(AccountName)], result);
+    FormatUtf8('(sAMAccountName=%%)',
+      [LdapEscapeName(AccountName),
+       MACHINE_CHAR[(AccountType = satMachineAccount) and
+                    (AccountName[length(AccountName)] <> '$')]], result);
   if DistinguishedName <> '' then
     result := FormatUtf8('%(distinguishedName=%)',
       [result, LdapValidDistinguishedName(DistinguishedName)]); // no escape
@@ -2471,104 +2852,6 @@ begin
     result := FormatUtf8('(&%%)', [result, CustomFilter])
 end;
 
-procedure CldapSortHosts(var Hosts: TRawUtf8DynArray;
-  TimeoutMS, MinimalUdpCount: integer);
-var
-  sock: TNetSocketDynArray;
-  h, p, v: RawUtf8;
-  addr, resp: TNetAddr;
-  req: TAsnObject;
-  sorted: TRawUtf8DynArray;
-  tix: Int64;
-  n, i, r: PtrInt;
-  len, found: integer;
-  poll: TPollSocketAbstract;
-  res: TPollSocketResults;
-  tmp: array[0..1999] of byte; // big enough for a UDP frame
-begin
-  n := length(Hosts);
-  if n = 0 then
-    exit;
-  found := 0;
-  SetLength(sock, n);
-  poll := PollFewSockets;
-  try
-    // multi-cast a simple LDAP request over UDP to all servers
-    for i := 0 to n - 1 do
-    begin
-      Split(Hosts[i], ':', h, p);
-      if p = '' then
-        p := LDAP_PORT;
-      if addr.SetFrom(h, p, nlUdp) <> nrOk then
-        continue;
-      sock[i] := addr.NewSocket(nlUdp);
-      if sock[i] = nil then
-        continue;
-      sock[i].SetReceiveTimeout(1);
-      req := Asn(ASN1_SEQ, [
-               Asn(777 + i),
-               RawLdapSearch('', false, '*', ['dnsHostName'])
-             ]);
-      if sock[i].SendTo(pointer(req), length(req), addr) = nrOk then
-        poll.Subscribe(sock[i], [pseRead], i)
-      else
-      begin
-        sock[i].Close;
-        sock[i] := nil;
-      end;
-    end;
-    // wait for the first incoming response(s)
-    tix := GetTickCount64 + TimeoutMS;
-    repeat
-      if poll.WaitForModified(res, 10) then
-        for r := 0 to res.Count - 1 do
-        begin
-          i := ResToTag(res.Events[r]);
-          if (PtrUInt(i) >= PtrUInt(n)) or
-             (sock[i] = nil) then
-            continue; // paranoid
-          len := sock[i].RecvFrom(@tmp, SizeOf(tmp), resp);
-          if (len > 5) and
-             (tmp[0] = ASN1_SEQ) then
-          begin
-            FastSetRawByteString(req, @tmp, len);
-            if RawLdapSearchParse(req, 777 + i, ['dnsHostName'], [@v]) then
-              AddRawUtf8(sorted, found, Hosts[i]); // found a true LDAP server
-            poll.Unsubscribe(sock[i]); // some kind of server
-            sock[i].Close;
-            sock[i] := nil;
-          end;
-       end;
-    until (found > MinimalUdpCount) or // stop as soon as we got enough host(s)
-          (found = n) or               // or we got all hosts
-          (GetTickCount64 > tix);      // or we timeout
-  finally
-    poll.Free;
-    for i := 0 to n - 1 do
-      if sock[i] <> nil then
-      begin
-        sock[i].Close;
-        AddRawUtf8(sorted, found, Hosts[i]); // not via UDP, but maybe on TCP
-      end;
-  end;
-  SetLength(sorted, found);
-  if found <> n then // e.g. if sock[] creation failed
-    for i := 0 to n - 1 do
-      AddRawUtf8(sorted, hosts[i], {nodup=}true); // ensure eventually exist
-  Hosts := sorted;
-end;
-
-function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
-  const NameServer: RawUtf8; UsePosixEnv: boolean;
-  DomainName: PRawUtf8): TRawUtf8DynArray;
-begin
-  result := DnsLdapControlers(NameServer, UsePosixEnv, DomainName);
-  if UdpFirstDelayMS > 0 then
-    CldapSortHosts(result, UdpFirstDelayMS, MinimalUdpCount);
-end;
-
-
-{ **************** LDAP Response Storage }
 
 { TLdapAttribute }
 
@@ -2619,7 +2902,7 @@ begin
   AddRawUtf8(TRawUtf8DynArray(fList), fCount, aValue);
 end;
 
-procedure TLdapAttribute.Add(const aValueFmt: RawUtf8;
+procedure TLdapAttribute.AddFmt(const aValueFmt: RawUtf8;
   const aValueArgs: array of const; Option: TLdapAddOption);
 begin
   Add(FormatUtf8(aValueFmt, aValueArgs), Option);
@@ -2677,43 +2960,6 @@ begin
     result := FindRawUtf8(pointer(fList), aValue, fCount, {casesens=}true)
   else
     result := -1;
-end;
-
-function IsLdifSafe(p: PUtf8Char; l: integer): boolean; // RFC 2849
-begin
-  if p <> nil then
-  begin
-    result := false;
-    if p^ in [#0 .. ' ', ':', '<', #128 .. #255] then // SAFE-INIT-CHAR
-      exit;
-    inc(p);
-    dec(l);
-    if l <> 0 then
-      repeat
-        if p^ in [#0, #10, #13, #128 .. #255] then    // SAFE-CHAR
-          exit;
-        inc(p);
-        dec(l);
-      until l = 0;
-    if p[-1] = ' ' then
-      exit; // "should not end with a space" RFC 2849 point 8)
-  end;
-  result := true;
-end;
-
-procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
-begin
-  if IsLdifSafe(p, l) then
-  begin
-    w.AddDirect(' ');
-    w.AddNoJsonEscape(p, l);
-  end
-  else
-  begin
-    // UTF-8 or binary content is just stored as name:: <base64>
-    w.AddDirect(':', ' ');
-    w.WrBase64(pointer(p), l, {withmagic=}false);
-  end;
 end;
 
 procedure TLdapAttribute.ExportToLdif(w: TTextWriter);
@@ -2859,7 +3105,7 @@ begin
   result.Add(AttributeValue, Option);
 end;
 
-procedure TLdapAttributeList.Add(const NameValuePairs: array of RawUtf8;
+procedure TLdapAttributeList.AddPairs(const NameValuePairs: array of RawUtf8;
   Option: TLdapAddOption);
 var
   i, n: PtrInt;
@@ -2940,6 +3186,8 @@ begin
 end;
 
 
+{ **************** LDAP Response Storage }
+
 { TLdapResult }
 
 constructor TLdapResult.Create;
@@ -2981,7 +3229,9 @@ procedure TLdapResult.ExportToLdif(w: TTextWriter);
 var
   i: PtrInt;
 begin
-  w.AddShorter('dn:');
+  w.AddDirect('#', ' ');
+  w.AddString(DNToCN(fObjectName));
+  w.AddShorter(#10'dn:');
   AddLdif(w, pointer(fObjectName), length(fObjectName));
   w.AddDirect(#10);
   for i := 0 to fAttributes.Count - 1 do
@@ -3005,7 +3255,7 @@ begin
   fSearchTimeMicroSec := 0;
 end;
 
-function TLdapResultList.ObjectNames(asCN: boolean): TRawUtf8DynArray;
+function TLdapResultList.ObjectNames(asCN, noSort: boolean): TRawUtf8DynArray;
 var
   i: PtrInt;
 begin
@@ -3020,57 +3270,66 @@ begin
     if asCN then
       result[i] := DNToCN(result[i]);
   end;
-  QuickSortRawUtf8(result, fCount);
+  if not noSort then
+    QuickSortRawUtf8(result, fCount);
 end;
 
-function TLdapResultList.ObjectAttributes(const AttributeName: RawUtf8): TRawUtf8DynArray;
+procedure TLdapResultList.GetAttributes(
+  const AttrName: RawUtf8; AttrType: TLdapAttributeType;
+  ObjectNames: PRawUtf8DynArray; out Values: TRawUtf8DynArray);
 var
   i, n: PtrInt;
+  r: TLdapResult;
   a: RawUtf8;
 begin
-  result := nil;
+  if ObjectNames <> nil then
+    ObjectNames^ := nil;
   if (self = nil) or
      (fCount = 0) or
-     (AttributeName = '') then
+     ((AttrName = '') and
+      (AttrType = atUndefined)) then
     exit;
   n := 0;
-  SetLength(result, fCount);
   for i := 0 to fCount - 1 do
   begin
-    a := fItems[i].Attributes.Get(AttributeName);
+    r := fItems[i];
+    if AttrType = atUndefined then
+      a := r.Attributes.Get(AttrName)
+    else
+      a := r.Attributes.Get(AttrType);
     if a = '' then
       continue;
-    result[n] := a;
+    if Values = nil then
+    begin
+      SetLength(Values, fCount - i);
+      if ObjectNames <> nil then
+        SetLength(ObjectNames^, fCount - i);
+    end;
+    Values[n] := a;
+    if ObjectNames <> nil then
+      ObjectNames^[n] := r.ObjectName;
     inc(n);
   end;
   if n <> fCount then
-    SetLength(result, n);
-  QuickSortRawUtf8(result, n);
+  begin
+    DynArrayFakeLength(Values, n);
+    if ObjectNames <> nil then
+      DynArrayFakeLength(ObjectNames^, n);
+  end;
+  if ObjectNames = nil then
+    QuickSortRawUtf8(Values, n);
 end;
 
-function TLdapResultList.ObjectAttributes(AttrType: TLdapAttributeType): TRawUtf8DynArray;
-var
-  i, n: PtrInt;
-  attr: TLdapAttributeList;
+function TLdapResultList.ObjectAttributes(const AttributeName: RawUtf8;
+  ObjectNames: PRawUtf8DynArray): TRawUtf8DynArray;
 begin
-  result := nil;
-  if (self = nil) or
-     (fCount = 0) or
-     (AttrType = atUndefined) then
-    exit;
-  n := 0;
-  SetLength(result, fCount);
-  for i := 0 to fCount - 1 do
-  begin
-    attr := fItems[i].Attributes;
-    if not (AttrType in attr.KnownTypes) then
-      continue; // no need to search
-    result[n] := attr.Get(AttrType);
-    inc(n);
-  end;
-  if n <> fCount then
-    SetLength(result, n);
-  QuickSortRawUtf8(result, n);
+  GetAttributes(AttributeName, atUndefined, ObjectNames, result);
+end;
+
+function TLdapResultList.ObjectAttributes(AttrType: TLdapAttributeType;
+  ObjectNames: PRawUtf8DynArray): TRawUtf8DynArray;
+begin
+  GetAttributes('', AttrType, ObjectNames, result);
 end;
 
 procedure TLdapResultList.AfterAdd;
@@ -3331,44 +3590,6 @@ begin
   if u.Address[1] = '/' then
     delete(u.Address, 1, 1);
   fKerberosDN := u.Address;
-end;
-
-
-
-const
-  AT_GROUP = $10000000; // 268435456
-  AT_USER  = $30000000; // 805306368
-  // https://theitbros.com/ldap-query-examples-active-directory/
-  // https://social.technet.microsoft.com/wiki/contents/articles/5392.active-directory-ldap-syntax-filters.aspx
-
-function InfoFilter(AT: cardinal; const AN, DN, UPN, CustomFilter: RawUtf8): RawUtf8;
-begin
-  result := '';
-  if AN <> '' then
-    FormatUtf8('(sAMAccountName=%)',
-      [LdapEscapeName(AN)], result);
-  if DN <> '' then
-    result := FormatUtf8('%(distinguishedName=%)',
-      [result, LdapValidDistinguishedName(DN)]); // no escape
-  if UPN <> '' then
-    result := FormatUtf8('%(userPrincipalName=%)',
-      [result, LdapEscapeName(UPN)]);
-  if result = '' then
-  begin
-    result := '(cn=)'; // return no answer whatsoever
-    exit;
-  end;
-  if ord(AN <> '') + ord(DN <> '') + ord(UPN <> '') > 1 then
-    result := FormatUtf8('(|%)', [result]);
-  result := FormatUtf8('(&(sAMAccountType=%)%%)', [AT, result, CustomFilter]);
-end;
-
-function LdapToDate(const Text: RawUtf8): TDateTime;
-begin
-  if Text = 'Never expires' then
-    result := 0
-  else
-    result := Iso8601ToDateTime(Text);
 end;
 
 
@@ -4489,7 +4710,7 @@ begin
   result := SearchFirst(DefaultDN(BaseDN), Filter, ToText(Attributes));
 end;
 
-function TLdapClient.SearchFirst(const Attributes: TLdapAttributeTypes;
+function TLdapClient.SearchFirstFmt(const Attributes: TLdapAttributeTypes;
   const FilterFmt: RawUtf8; const FilterArgs: array of const;
   const BaseDN: RawUtf8): TLdapResult;
 begin
@@ -4637,6 +4858,14 @@ end;
 
 // **** TLdapClient high-level Computer methods
 
+function TLdapClient.GetComputers(FilterUac, UnFilterUac: TUserAccountControls;
+  const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
+  Attribute: TLdapAttributeType): TRawUtf8DynArray;
+begin
+  GetByAccountType(satMachineAccount, integer(FilterUac), integer(UnFilterUac),
+    BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
+end;
+
 function TLdapClient.AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
   out ErrorMessage: RawUtf8; const Password: SpiUtf8; DeleteIfPresent: boolean;
   UserAccount: TUserAccountControls): boolean;
@@ -4652,7 +4881,8 @@ begin
   ComputerDN := NetConcat(['CN=', ComputerSafe, ',', ComputerParentDN]);
   ComputerSam := NetConcat([UpperCase(ComputerSafe), '$']);
   // Search Computer object in the domain
-  ComputerObject := SearchFirst([atSAMAccountName], '(sAMAccountName=%)', [ComputerSam]);
+  ComputerObject :=
+    SearchFirstFmt([atSAMAccountName], '(sAMAccountName=%)', [ComputerSam]);
   // If the search failed, we exit with the error message
   if ResultCode <> LDAP_RES_SUCCESS then
   begin
@@ -4704,14 +4934,17 @@ const
 
 procedure TLdapClient.GetByAccountType(AT: TSamAccountType; Uac, unUac: integer;
   const BaseDN, CustomFilter, Match: RawUtf8; Attribute: TLdapAttributeType;
-  out Res: TRawUtf8DynArray);
+  out Res: TRawUtf8DynArray; ObjectNames: PRawUtf8DynArray);
 var
   f, filter, uacname: RawUtf8;
 begin
   case AT of
     satGroup:
       uacname := 'groupType';
-    satUserAccount:
+    satUserAccount,
+    satAlias,
+    satMachineAccount,
+    satTrustAccount:
       uacname := 'userAccountControl';
   else
     ELdap.RaiseUtf8('Unexpected %.GetByAccountType(%)', [self, ToText(AT)^]);
@@ -4730,23 +4963,23 @@ begin
     filter := FormatUtf8('(&%%)', [filter, f]);
   if Search([Attribute], filter, BaseDN) and
      (SearchResult.Count > 0) then
-    Res := SearchResult.ObjectAttributes(Attribute);
+    Res := SearchResult.ObjectAttributes(Attribute, ObjectNames);
 end;
 
 function TLdapClient.GetGroups(FilterUac, UnFilterUac: TGroupTypes;
-  const Match, CustomFilter, BaseDN: RawUtf8;
+  const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
   Attribute: TLdapAttributeType): TRawUtf8DynArray;
 begin
   GetByAccountType(satGroup, integer(FilterUac), integer(UnFilterUac),
-    BaseDN, CustomFilter, Match, Attribute, result);
+    BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
 end;
 
 function TLdapClient.GetUsers(FilterUac, UnFilterUac: TUserAccountControls;
-  const Match, CustomFilter, BaseDN: RawUtf8;
+  const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
   Attribute: TLdapAttributeType): TRawUtf8DynArray;
 begin
   GetByAccountType(satUserAccount, integer(FilterUac), integer(UnFilterUac),
-    BaseDN, CustomFilter, Match, Attribute, result);
+    BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
 end;
 
 const
