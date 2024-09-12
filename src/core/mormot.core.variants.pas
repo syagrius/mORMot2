@@ -8025,7 +8025,8 @@ end;
 
 function TDocVariantData.GetNames: TRawUtf8DynArray;
 begin
-  if IsObject and
+  if (@self <> nil) and
+     IsObject and
      (VCount > 0) then
   begin
     DynArrayFakeLength(VName, VCount);
@@ -8561,7 +8562,8 @@ function TDocVariantData.GetVarData(const aName: RawUtf8;
 var
   ndx: PtrInt;
 begin
-  if (cardinal(VType) <> DocVariantVType) or
+  if (@self = nil) or
+     (cardinal(VType) <> DocVariantVType) or
      (not IsObject) or
      (VCount = 0) or
      (aName = '') then
@@ -8612,7 +8614,8 @@ var
   Dest: TVarData;
 begin
   VarClear(result{%H-});
-  if (cardinal(VType) <> DocVariantVType) or
+  if (@self = nil) or
+     (cardinal(VType) <> DocVariantVType) or
      (VCount = 0) then
     exit;
   DocVariantType.Lookup(Dest, TVarData(self), pointer(aPath), aPathDelim);
@@ -8626,7 +8629,8 @@ var
   Dest: TVarData;
 begin
   result := false;
-  if (cardinal(VType) <> DocVariantVType) or
+  if (@self = nil) or
+     (cardinal(VType) <> DocVariantVType) or
      (VCount = 0) then
     exit;
   DocVariantType.Lookup(Dest, TVarData(self), pointer(aPath), aPathDelim);
@@ -8645,7 +8649,8 @@ var
 begin
   result := @self;
   csv := pointer(aPath);
-  if aPath <> '' then
+  if (result <> nil) and
+     (aPath <> '') then
     repeat
       repeat
         vt := PVarData(result)^.VType; // inlined dv := _Safe(result^)

@@ -1427,6 +1427,7 @@ var
   StrCompByCase: array[{CaseInsensitive=}boolean] of TUtf8Compare;
 
 /// comparison function first by Int64 value, then by text, for TUtf8Compare
+// - so plain numbers will appear first, then case-sensitive text values
 function StrCompByNumber(Str1, Str2: pointer): PtrInt;
 
 /// retrieve the next UCS4 CodePoint stored in U, then update the U pointer
@@ -2059,6 +2060,30 @@ procedure CamelCase(const text: RawUtf8; var s: RawUtf8;
   const isWord: TSynByteSet = [ord('0')..ord('9'), ord('a')..ord('z'), ord('A')..ord('Z')]); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+const
+  // published for unit testing (e.g. if properly sorted)
+  RESERVED_KEYWORDS: array[0..91] of RawUtf8 = (
+    'ABSOLUTE', 'ABSTRACT', 'ALIAS', 'AND', 'ARRAY', 'AS', 'ASM', 'ASSEMBLER',
+    'BEGIN', 'CASE', 'CLASS', 'CONST', 'CONSTREF', 'CONSTRUCTOR', 'DESTRUCTOR',
+    'DIV', 'DO', 'DOWNTO', 'ELSE', 'END', 'EXCEPT', 'EXPORT', 'EXTERNAL',
+    'FALSE', 'FAR', 'FILE', 'FINALIZATION', 'FINALLY', 'FOR', 'FORWARD',
+    'FUNCTION', 'GENERIC', 'GOTO', 'IF', 'IMPLEMENTATION', 'IN', 'INHERITED',
+    'INITIALIZATION', 'INLINE', 'INTERFACE', 'IS', 'LABEL', 'LIBRARY', 'MOD',
+    'NEAR', 'NEW', 'NIL', 'NOT', 'OBJECT', 'OF', 'ON', 'OPERATOR', 'OR', 'OUT',
+    'OVERRIDE', 'PACKED', 'PRIVATE', 'PROCEDURE', 'PROGRAM', 'PROPERTY',
+    'PROTECTED', 'PUBLIC', 'PUBLISHED', 'RAISE', 'READ', 'RECORD',
+    'REINTRODUCE', 'REPEAT', 'RESOURCESTRING', 'SELF', 'SET', 'SHL', 'SHR',
+    'STATIC', 'STRING', 'THEN', 'THREADVAR', 'TO', 'TRUE', 'TRY', 'TYPE',
+    'UNIT', 'UNTIL', 'USES', 'VAR', 'VARIANT', 'VIRTUAL', 'WHILE', 'WITH',
+    'WRITE', 'WRITELN', 'XOR');
+
+/// quickly check if a text is a case-insensitive pascal code keyword
+function IsReservedKeyWord(const aName: RawUtf8): boolean;
+
+/// wrap CamelCase() and IsReservedKeyWord() to generate a valid pascal identifier
+// - if aName is void after camel-casing, will raise an EOpenApi
+function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf8;
+
 var
   /// these procedure type must be defined if a default system.pas is used
   // - expect generic "string" type, i.e. UnicodeString for Delphi 2009+
@@ -2128,8 +2153,12 @@ function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray;
 function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
 
 /// convert the string dynamic array into a dynamic array of UTF-8 strings
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
-  var result: TRawUtf8DynArray);
+procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
+  var result: TRawUtf8DynArray); overload;
+
+/// convert the string dynamic array into a dynamic array of UTF-8 strings
+function StringDynArrayToRawUtf8DynArray(
+  const Source: array of string): TRawUtf8DynArray; overload;
 
 /// convert the string list into a dynamic array of UTF-8 strings
 procedure StringListToRawUtf8DynArray(Source: TStringList;
@@ -2223,6 +2252,9 @@ procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
 /// sort a RawUtf8 array, low values first
 procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
   caseInsensitive: boolean = false); overload;
+
+/// sort and remove any duplicated RawUtf8 from Values[]
+procedure DeduplicateRawUtf8(var Values: TRawUtf8DynArray);
 
 {$ifdef OSPOSIX}
 type
@@ -8696,6 +8728,26 @@ begin
   CamelCase(pointer(text), length(text), s, isWord);
 end;
 
+function IsReservedKeyWord(const aName: RawUtf8): boolean;
+var
+  up: array[byte] of AnsiChar;
+begin
+  UpperCopy255Buf(@up, pointer(aName), length(aName))^ := #0;
+  result := FastFindPUtf8CharSorted(
+    @RESERVED_KEYWORDS, high(RESERVED_KEYWORDS), @up) >= 0; // O(log(n)) search
+end;
+
+function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf8;
+begin
+  CamelCase(aName, result);
+  if result = '' then
+    raise ESynUnicode.CreateFmt('Unexpected SanitizePascalName(%s)', [aName]);
+  result[1] := UpCase(result[1]);
+  if KeyWordCheck and
+     IsReservedKeyWord(result) then
+    result := '_' + result; // avoid identifier name collision
+end;
+
 procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string);
 var
   tmp: array[byte] of AnsiChar;
@@ -8868,7 +8920,7 @@ begin
   Values[result] := Value;
 end;
 
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
+procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
   var Result: TRawUtf8DynArray);
 var
   i: PtrInt;
@@ -8877,6 +8929,12 @@ begin
   SetLength(Result, length(Source));
   for i := 0 to length(Source) - 1 do
     StringToUtf8(Source[i], Result[i]);
+end;
+
+function StringDynArrayToRawUtf8DynArray(
+  const Source: array of string): TRawUtf8DynArray;
+begin
+  StringDynArrayToRawUtf8DynArray(Source, result);
 end;
 
 procedure StringListToRawUtf8DynArray(Source: TStringList; var Result: TRawUtf8DynArray);
@@ -9255,6 +9313,51 @@ begin
   qs.Compare := StrCompByCase[caseInsensitive];
   qs.CoValues := nil;
   qs.Sort(pointer(Values), L, R);
+end;
+
+function DeduplicateRawUtf8Sorted(val: PPointerArray; last: PtrInt): PtrInt;
+var
+  i: PtrInt;
+begin
+  // sub-function for better code generation
+  i := 0;
+  repeat // here last>0 so i<last
+    if RawUtf8(val[i]) = RawUtf8(val[i + 1]) then
+      break;
+    inc(i);
+    if i <> last then
+      continue;
+    result := i;
+    exit;
+  until false;
+  result := i;
+  inc(i);
+  if i = last then
+    exit;
+  repeat
+    if RawUtf8(val[i]) <> RawUtf8(val[i + 1]) then
+    begin
+      FastAssignNew(val[result], val[i]);
+      val[i] := nil;
+      inc(result);
+    end;
+    inc(i);
+  until i = last;
+  FastAssignNew(val[result], val[i]);
+  val[i] := nil;
+end;
+
+procedure DeduplicateRawUtf8(var Values: TRawUtf8DynArray);
+var
+  c, n: PtrInt;
+begin
+  c := length(Values);
+  if c = 0 then
+    exit;
+  QuickSortRawUtf8(Values, c);
+  n := DeduplicateRawUtf8Sorted(pointer(Values), c - 1) + 1;
+  if n <> c then
+    SetLength(Values, n);
 end;
 
 procedure MakeUniqueArray(var Values: TRawUtf8DynArray);

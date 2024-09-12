@@ -8,8 +8,9 @@ unit mormot.net.ldap;
 
    Simple LDAP Protocol Client
     - LDAP Protocol Definitions
-    - LDAP Response Storage
+    - LDAP Attribute Types Definitions
     - CLDAP Client Functions
+    - LDAP Response Storage
     - LDAP Client Class
     - HTTP BASIC Authentication via LDAP or Kerberos
 
@@ -189,6 +190,26 @@ const
     'ldap://',
     'ldaps://');
 
+const
+  /// OID of pagedresultsControl attribute
+  ASN1_OID_PAGEDRESULTS = '1.2.840.113556.1.4.319';
+
+  /// OID of namingContexts attribute in the root DSE
+  ASN1_OID_DSE_NAMINGCONTEXTS       = '1.3.6.1.4.1.1466.101.120.5';
+  /// OID of altServer attribute in the root DSE
+  ASN1_OID_DSE_ALTSERVER            = '1.3.6.1.4.1.1466.101.120.6';
+  /// OID of supportedExtension attribute in the root DSE
+  ASN1_OID_DSE_SUPPORTEDEXTENSION   = '1.3.6.1.4.1.1466.101.120.7';
+  /// OID of supportedControl attribute in the root DSE
+  ASN1_OID_DSE_SUPPORTEDCONTROL     = '1.3.6.1.4.1.1466.101.120.13';
+  /// OID of supportedLDAPVersion attribute in the root DSE
+  ASN1_OID_DSE_SUPPORTEDLDAPVERSION = '1.3.6.1.4.1.1466.101.120.15';
+
+  /// OID of LDAPv3 "Password Modify" extended operation (RFC 3062)
+  ASN1_OID_PASSWDMODIFY = '1.3.6.1.4.1.4203.1.11.1';
+  /// OID of LDAPv3 "Who Am I" extended operation (RFC 4532)
+  ASN1_OID_WHOAMI       = '1.3.6.1.4.1.4203.1.11.3';
+
 type
   /// define possible operations for LDAP MODIFY operations
   TLdapModifyOp = (
@@ -283,6 +304,122 @@ function LdapUnescape(const Text: RawUtf8): RawUtf8;
 
 /// escape the . / \ characters as expected by LDAP filters
 function LdapEscapeCN(const Text: RawUtf8): RawUtf8;
+
+/// encode a "unicodePwd" binary value from a UTF-8 password
+function LdapUnicodePwd(const aPassword: SpiUtf8): RawByteString;
+
+const
+  // Well-Known LDAP Objects GUID
+  // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/
+  //   5a00c890-6be5-4575-93c4-8bf8be0ca8d8
+  LDAP_GUID_COMPUTERS                 = 'AA312825768811D1ADED00C04FD8D5CD';
+  LDAP_GUID_DELETED_OBJECTS           = '18E2EA80684F11D2B9AA00C04F79F805';
+  LDAP_GUID_DOMAIN_CONTROLLERS        = 'A361B2FFFFD211D1AA4B00C04FD7D83A';
+  LDAP_GUID_FOREIGNSECURITYPRINCIPALS = '22B70C67D56E4EFB91E9300FCA3DC1AA';
+  LDAP_GUID_INFRASTRUCTURE            = '2FBAC1870ADE11D297C400C04FD8D5CD';
+  LDAP_GUID_LOSTANDFOUND              = 'AB8153B7768811D1ADED00C04FD8D5CD';
+  LDAP_GUID_MICROSOFT_PROGRAM_DATA    = 'F4BE92A4C777485E878E9421D53087DB';
+  LDAP_GUID_NTDS_QUOTAS               = '6227F0AF1FC2410D8E3BB10615BB5B0F';
+  LDAP_GUID_PROGRAM_DATA              = '09460C08AE1E4A4EA0F64AEE7DAA1E5A';
+  LDAP_GUID_SYSTEMS                   = 'AB1D30F3768811D1ADED00C04FD8D5CD';
+  LDAP_GUID_USERS                     = 'A9D1CA15768811D1ADED00C04FD8D5CD';
+  LDAP_GUID_MANAGED_SERVICE_ACCOUNTS  = '1EB93889E40C45DF9F0C64D23BBB6237';
+
+
+{ **************** LDAP Attribute Types Definitions }
+
+type
+  /// common Attribute Types, as stored in TLdapAttribute.AttributeName
+  // - so that the most useful types could be specified as convenient enumerate
+  // - allow complex binary types (like SID/GUID/FileTime) to be recognized and
+  // properly decoded / made readable
+  TLdapAttributeType = (
+    atUndefined,
+    atDistinguishedName,
+    atObjectClass,
+    atObjectCategory,
+    atAlias,
+    atName,
+    atCommonName,
+    atSurName,
+    atGivenName,
+    atDisplayName,
+    atUserPrincipalName,
+    atUserAccountControl,
+    atSAMAccountName,
+    atAdminCount,
+    atDescription,
+    atGenerationQualifier,
+    atInitials,
+    atOrganizationName,
+    atOrganizationUnitName,
+    atMail,
+    atMemberOf,
+    atCountryName,
+    atLocalityName,
+    atStateName,
+    atStreetAddress,
+    atTelephoneNumber,
+    atTitle,
+    atSerialNumber,
+    atMember,
+    atOwner,
+    atGroupType,
+    atPrimaryGroupID,
+    atObjectSid,
+    atObjectGuid,
+    atAccountExpires,
+    atBadPasswordTime,
+    atLastLogon,
+    atLastLogonTimestamp,
+    atLastLogoff,
+    atLockoutTime,
+    atPwdLastSet,
+    atMcsAdmPwdExpirationTime,
+    atWhenCreated,
+    atWhenChanged,
+    atOperatingSystem,
+    atServicePrincipalName,
+    atUnicodePwd);
+
+  /// set of common Attribute Types
+  TLdapAttributeTypes = set of TLdapAttributeType;
+
+var
+  /// the standard NAME of our common Attribute Types
+  // - these value will be interned and recognized internally as raw pointer()
+  // - e.g. AttrTypeName[atOrganizationUnitName] = 'ou'
+  // - by design, atUndefined would return ''
+  AttrTypeName: array[TLdapAttributeType] of RawUtf8;
+
+  /// alternate standard NAME of our common Attribute Types
+  // - e.g. AttrTypeNameAlt[6] = 'organizationName' and
+  // AttrTypeNameAlt[6] = atOrganizationUnitName
+  // - defined for unit testing purpose only
+  AttrTypeNameAlt: array[0 .. 8] of RawUtf8;
+
+const
+  // AttrTypeNameAlt[] types - defined for unit testing purpose only
+  AttrTypeAltType: array[0 .. high(AttrTypeNameAlt)] of TLdapAttributeType = (
+    atCommonName, atSurName, atCountryName, atLocalityName, atStateName,
+    atStreetAddress, atOrganizationName, atOrganizationUnitName, atGivenName);
+
+/// recognize our common Attribute Types from their standard NAME text
+function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
+
+/// convert in-place a raw attribute value into human-readable text
+// - as used by TLdapAttribute.GetReadable/GetAllReadable
+// - will detect SID, GUID, FileTime and text date/time known fields
+// - if s is not truly UTF-8 encoded, will return its hexadecimal representation
+procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
+
+/// convert a set of common Attribute Types into their array text representation
+// - by design, atUndefined would be excluded from the list
+function ToText(Attributes: TLdapAttributeTypes): TRawUtf8DynArray; overload;
+
+/// just a convenient redirection to AttrTypeName[Attribute]
+function ToText(Attribute: TLdapAttributeType): RawUtf8; overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 
 { **************** CLDAP Client Functions }
@@ -428,40 +565,6 @@ function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
 
 { **************** LDAP Response Storage }
 
-const
-  // Well-Known LDAP Objects GUID
-  // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/
-  //   5a00c890-6be5-4575-93c4-8bf8be0ca8d8
-  LDAP_GUID_COMPUTERS                 = 'AA312825768811D1ADED00C04FD8D5CD';
-  LDAP_GUID_DELETED_OBJECTS           = '18E2EA80684F11D2B9AA00C04F79F805';
-  LDAP_GUID_DOMAIN_CONTROLLERS        = 'A361B2FFFFD211D1AA4B00C04FD7D83A';
-  LDAP_GUID_FOREIGNSECURITYPRINCIPALS = '22B70C67D56E4EFB91E9300FCA3DC1AA';
-  LDAP_GUID_INFRASTRUCTURE            = '2FBAC1870ADE11D297C400C04FD8D5CD';
-  LDAP_GUID_LOSTANDFOUND              = 'AB8153B7768811D1ADED00C04FD8D5CD';
-  LDAP_GUID_MICROSOFT_PROGRAM_DATA    = 'F4BE92A4C777485E878E9421D53087DB';
-  LDAP_GUID_NTDS_QUOTAS               = '6227F0AF1FC2410D8E3BB10615BB5B0F';
-  LDAP_GUID_PROGRAM_DATA              = '09460C08AE1E4A4EA0F64AEE7DAA1E5A';
-  LDAP_GUID_SYSTEMS                   = 'AB1D30F3768811D1ADED00C04FD8D5CD';
-  LDAP_GUID_USERS                     = 'A9D1CA15768811D1ADED00C04FD8D5CD';
-  LDAP_GUID_MANAGED_SERVICE_ACCOUNTS  = '1EB93889E40C45DF9F0C64D23BBB6237';
-
-type
-  /// recognize some TLdapAttribute.AttributeName encoding
-  TLdapAttributeType = (
-    latUndefined,
-    latObjectSid,
-    latObjectGuid,
-    latIsoTime,
-    latFileTime);
-
-/// recognize some non-textual attributes by name
-// - as used by TLdapAttribute.Create
-function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
-
-/// convert a raw attribute value into human-readable text
-// - as used by TLdapAttribute.GetReadable/GetAllReadable
-procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
-
 type
   /// store a named LDAP attribute with the list of its values
   TLdapAttribute = class
@@ -472,11 +575,14 @@ type
     fKnownType: TLdapAttributeType;
   public
     /// initialize the attribute(s) storage
-    constructor Create(const AttrName: RawUtf8);
+    constructor Create(const AttrName: RawUtf8; AttrType: TLdapAttributeType);
+    /// finalize the attribute(s) storage
+    destructor Destroy; override;
     /// include a new value to this list
     // - IsBinary values will be stored base-64 encoded
     procedure Add(const aValue: RawByteString);
     /// retrieve a value as human-readable text
+    // - a wrapper around AttributeValueMakeReadable() and the known type
     function GetReadable(index: PtrInt = 0): RawUtf8;
     /// retrieve all values as human-readable text
     function GetAllReadable: TRawUtf8DynArray;
@@ -488,6 +594,8 @@ type
     // - if there is a single value, return it as a single variant text
     // - if Count > 0, return a TDocVariant array with all texts
     function GetVariant: variant;
+    /// add all attributes to a "dn: ###" entry of a ldif-content buffer
+    procedure ExportToLdif(w: TTextWriter);
     /// how many values have been added to this attribute
     property Count: integer
       read fCount;
@@ -498,6 +606,9 @@ type
     /// name of this LDAP attribute
     property AttributeName: RawUtf8
       read fAttributeName;
+    /// the common LDAP Attribute Type corresponding to this AttributeName
+    property KnownType: TLdapAttributeType
+      read fKnownType;
   end;
   /// dynamic array of LDAP attribute, as stored in TLdapAttributeList
   TLdapAttributeDynArray = array of TLdapAttribute;
@@ -508,8 +619,8 @@ type
   TLdapAttributeList = class
   private
     fItems: TLdapAttributeDynArray;
-    fInterning: TRawUtf8Interning; // global hash table of attribute names
     fLastFound: PtrInt;
+    fKnownTypes: TLdapAttributeTypes;
   public
     /// finalize the list
     destructor Destroy; override;
@@ -518,30 +629,50 @@ type
     /// number of TLdapAttribute objects in this list
     function Count: integer;
       {$ifdef HASINLINE} inline; {$endif}
-    /// allocate and a new TLdapAttribute object and its value to the list
+    /// search or allocate a new TLdapAttribute object and its value to the list
     function Add(const AttributeName: RawUtf8;
       const AttributeValue: RawByteString): TLdapAttribute; overload;
-    /// allocate and a new TLdapAttribute object to the list
+    /// search or allocate a new TLdapAttribute object and its value to the list
+    function Add(AttributeType: TLdapAttributeType;
+      const AttributeValue: RawByteString): TLdapAttribute; overload;
+    /// search or allocate a new TLdapAttribute object to the list
     function Add(const AttributeName: RawUtf8): TLdapAttribute; overload;
+    /// search or allocate TLdapAttribute object(s) from name/value pairs to the list
+    procedure Add(const NameValuePairs: array of RawUtf8); overload;
+    /// search or allocate "unicodePwd" TLdapAttribute value to the list
+    function AddUnicodePwd(const aPassword: SpiUtf8): TLdapAttribute;
     /// remove one TLdapAttribute object from the list
     procedure Delete(const AttributeName: RawUtf8);
     /// find and return attribute index with the requested name
     // - returns -1 if not found
-    function FindIndex(const AttributeName: RawUtf8): PtrInt;
+    function FindIndex(const AttributeName: RawUtf8): PtrInt; overload;
     /// find and return attribute with the requested name
     // - returns nil if not found
-    function Find(const AttributeName: RawUtf8): TLdapAttribute;
-    /// add an attribute value to the list, reusing any existing TLdapAttribute
-    function FindAdd(const AttributeName: RawUtf8;
-      const AttributeValue: RawByteString): TLdapAttribute;
+    function Find(const AttributeName: RawUtf8): TLdapAttribute; overload;
     /// Find and return first attribute value with requested name
     // - calls GetReadable(0) on the found attribute
     // - returns empty string if not found
-    function Get(const AttributeName: RawUtf8): RawUtf8;
+    function Get(const AttributeName: RawUtf8): RawUtf8; overload;
+    /// find and return attribute index with the requested attribute type
+    // - returns -1 if not found
+    // - faster than overloaded FindIndex(AttributeName)
+    function FindIndex(AttributeType: TLdapAttributeType): PtrInt; overload;
+    /// find and return attribute with the requested attribute type
+    // - returns nil if not found
+    // - faster than overloaded Find(AttributeName)
+    function Find(AttributeType: TLdapAttributeType): TLdapAttribute; overload;
+    /// Find and return first attribute value with the requested type
+    // - calls GetReadable(0) on the found attribute
+    // - returns empty string if not found
+    // - faster than overloaded Get(AttributeName)
+    function Get(AttributeType: TLdapAttributeType): RawUtf8; overload;
     /// access to the internal list of TLdapAttribute objects
     // - note that length(Items) = Count for this class
     property Items: TLdapAttributeDynArray
       read fItems;
+    /// the common Attribute Types currently stored in this list
+    property KnownTypes: TLdapAttributeTypes
+      read fKnownTypes;
   end;
 
   /// store one LDAP result, i.e. one object name and associated attributes
@@ -566,6 +697,8 @@ type
     /// Copy the 'objectGUID' attribute if present
     // - Return true on success
     function CopyObjectGUID(out objectGUID: TGuid): boolean;
+    /// add a "dn: ###" entry to a ldif-content buffer
+    procedure ExportToLdif(w: TTextWriter);
   end;
   TLdapResultObjArray = array of TLdapResult;
 
@@ -575,10 +708,7 @@ type
     fItems: TLdapResultObjArray;
     fSearchTimeMicroSec: Int64;
     fCount: integer;
-    fInterning: TRawUtf8Interning; // injected to TLdapResult by Add
   public
-    /// initialize the result list
-    constructor Create; reintroduce;
     /// finalize the list
     destructor Destroy; override;
     /// create and add new TLdapResult object to the list
@@ -591,8 +721,10 @@ type
     /// return all Items[].ObjectName as a sorted array
     function ObjectNames(asCN: boolean = false): TRawUtf8DynArray;
     /// return all Items[].Attributes.Get(AttributeName) as a sorted array
-    function ObjectAttributes(const AttributeName: RawUtf8): TRawUtf8DynArray;
-    /// add all result as a TDocVariant object nested tree
+    function ObjectAttributes(const AttributeName: RawUtf8): TRawUtf8DynArray; overload;
+    /// return all Items[].Attributes.Get(AttrType) as a sorted array
+    function ObjectAttributes(AttrType: TLdapAttributeType): TRawUtf8DynArray; overload;
+    /// add all results as a TDocVariant object nested tree
     // - the full CN will be used as path
     // - attributes would be included as ObjectAttributeField (e.g. '_attr')
     // fields (including the "objectName" value), unless ObjectAttributeField
@@ -600,9 +732,11 @@ type
     // sub-field will be generated, and attributes will be written directly
     procedure AppendTo(var Dvo: TDocVariantData;
       const ObjectAttributeField: RawUtf8);
+    /// export all results in the RFC 2234 ldif-content output
+    function ExportToLdifContent: RawUtf8;
     /// dump the result of a LDAP search into human readable form
     // - used for debugging
-    function Dump: RawUtf8;
+    function Dump(NoTime: boolean = false): RawUtf8;
     /// access to the TLdapResult objects
     // - you can write e.g. "for res in Items do writeln(res.ObjectName)"
     property Items: TLdapResultObjArray
@@ -864,17 +998,18 @@ type
     fSearchPageSize: integer;
     fSearchCookie: RawUtf8;
     fSearchResult: TLdapResultList;
-    fExtName: RawUtf8;
-    fExtValue: RawUtf8;
     fDefaultDN, fRootDN, fConfigDN: RawUtf8;
     fNetbiosDN: RawUtf8;
-    fMechanisms: TRawUtf8DynArray;
+    fMechanisms, fControls, fExtensions: TRawUtf8DynArray;
     fSecContext: TSecContext;
-    fSecContextUser: RawUtf8;
+    fBoundUser: RawUtf8;
     fSockBuffer: RawByteString;
     fSockBufferPos: integer;
     fWellKnownObjects: TLdapKnownCommonNamesDual;
     fWellKnownObjectsCached: boolean;
+    // protocol methods
+    function GetTlsContext: PNetTlsContext;
+      {$ifdef HASINLINE} inline; {$endif}
     function BuildPacket(const Asn1Data: TAsnObject): TAsnObject;
     procedure SendPacket(const Asn1Data: TAsnObject);
     procedure ReceivePacket(Dest: pointer; DestLen: integer); overload;
@@ -883,13 +1018,12 @@ type
     function ReceiveResponse: TAsnObject;
     function DecodeResponse(var Pos: integer; const Asn1Response: TAsnObject): TAsnObject;
     function SendAndReceive(const Asn1Data: TAsnObject): TAsnObject;
+    // internal wrapper methods
     function RetrieveWellKnownObjects(const DN: RawUtf8;
       out Dual: TLdapKnownCommonNamesDual): boolean;
     procedure GetByAccountType(AT, Uac, unUac: integer;
       const BaseDN, CustomFilter, Match, AttributeName: RawUtf8;
       out Res: TRawUtf8DynArray);
-    function GetTlsContext: PNetTlsContext;
-      {$ifdef HASINLINE} inline; {$endif}
   public
     /// initialize this LDAP client instance
     constructor Create; overload; override;
@@ -898,6 +1032,9 @@ type
     constructor Create(aSettings: TLdapClientSettings); reintroduce; overload;
     /// finalize this LDAP client instance
     destructor Destroy; override;
+
+    { connection methods }
+
     /// try to connect to LDAP server
     // - if no TargetHost/TargetPort/FullTls has been set, will try the OS
     // DnsLdapControlers() hosts (from mormot.net.dns) following DiscoverMode
@@ -921,12 +1058,36 @@ type
     // - returns e.g. ['GSSAPI','GSS-SPNEGO','EXTERNAL','DIGEST-MD5']
     // - use an internal cache for fast retrieval
     function Mechanisms: TRawUtf8DynArray;
+    /// the controls supported on this LDAP server
+    // - the OIDs are returned sorted, and de-duplicated
+    // - use an internal cache for fast retrieval
+    function Controls: TRawUtf8DynArray;
+    /// the LDAP v3 extensions supported on this LDAP server
+    // - the OIDs are returned sorted, and de-duplicated
+    // - use an internal cache for fast retrieval
+    // - note that SambaAD/OpenLDAP seems to not publish anything under the
+    // 'supportedExtension' attribute, as it should
+    function Extensions: TRawUtf8DynArray;
     /// search if the server supports a given authentication mechanism by name
     // - a typical value to search is e.g. 'GSSAPI' or 'DIGEST-MD5'
-    function Supports(const MechanismName: RawUtf8): boolean;
+    // - search is case-insensitive
+    function SupportsMech(const MechanismName: RawUtf8): boolean;
+    /// search if the server supports a given LDAP control by name
+    // - a typical value to search is e.g. '1.2.840.113556.1.4.319'
+    // - use a very fast O(log(n)) binary search inside the memory cache
+    function SupportsControl(const ControlName: RawUtf8): boolean;
+    /// search if the server supports a given LDAP v3 extension by name
+    // - a typical value to search is e.g. ASN1_OID_WHOAMI
+    // - use a very fast O(log(n)) binary search inside the memory cache
+    // - note that SambaAD/OpenLDAP seems to not publish anything under the
+    // 'supportedExtension' attribute, as it should
+    function SupportsExt(const ExtensionName: RawUtf8): boolean;
     /// retrieve al well known object DN or CN as a single convenient record
     // - use an internal cache for fast retrieval
     function WellKnownObjects(AsCN: boolean = false): PLdapKnownCommonNames;
+
+    { binding methods }
+
     /// authenticate a client to the directory server with Settings.Username/Password
     // - if these are empty strings, then it does annonymous binding
     // - warning: raise ELdap on plaintext transport of the password without a
@@ -944,13 +1105,46 @@ type
     // - can optionally return the KerberosUser which made the authentication
     function BindSaslKerberos(const AuthIdentify: RawUtf8 = '';
       KerberosUser: PRawUtf8 = nil): boolean;
+    /// test whether the client is connected to the server
+    // - if AndBound is set, it also checks that a successful bind request has been made
+    function Connected(AndBound: boolean = true): boolean;
+    /// test whether the client is connected with TLS or Kerberos Signing-Sealing
+    // - it is unsafe to send e.g. a plain Password without lctEncrypted
+    function Transmission: TLdapClientTransmission;
     /// close the connection to the LDAP server, sending an Unbind message
     function Close: boolean;
+    /// low-level call of LDAP v3 extended operations
+    // - e.g. StartTLS, cancel, transactions, user password change
+    // - called e.g. by ModifyUserPassword()
+    function Extended(const Oid: RawUtf8; const Value: TAsnObject;
+      RespName: PRawUtf8; RespValue: PAsnObject): boolean;
+    /// retrieves the current authorization identity for the client connection
+    // - calls the LDAPv3 "Who Am I" extended operation (as defined in RFC 4532)
+    // - the BoundUser property is the value supplied at connection, whereas
+    // this value is an authzId returned by the server (e.g. 'u:xxyyz@EXAMPLE.NET')
+    // as defined in https://www.rfc-editor.org/rfc/rfc4513#section-5.2.1.8
+    // - If the client is authenticated as a Windows security principal, the
+    // authzId returned in the response will contain the string 'u:' followed
+    // by either (1) the NetBIOS domain name, followed by a backslash (\),
+    // followed by the sAMAccountName of the security principal, or (2) the
+    // SID of the security principal, in SDDL SID string format
+    // - If the client is authenticated as an AD LDS security principal, the
+    // returned authzId will contain the string 'dn:' followed by the DN of
+    // the security principal
+    // - If the client has not authenticated, the returned authzId will be
+    // the empty string
+    function ExtWhoAmI: RawUtf8;
+
+    { read methods }
+
     /// enable paging for the searches
     // - you can then loop calling Search() until it returns an empty result,
     // and eventually SearchEnd when done with this query
     // - is just a wrapper to set SearchPageSize
     procedure SearchBegin(PageSize: integer = 100);
+    /// finalize paging for the searches
+    // - is just a wrapper to reset SearchPageSize and the SearchCookie
+    procedure SearchEnd;
     /// retrieve all entries that match a given set of criteria
     // - will generate as many requests/responses as needed to retrieve all
     // the information into the SearchResult property
@@ -959,29 +1153,30 @@ type
     // - by default, all attributes would be retrieved, unless a specific set
     // of Attributes is supplied; if you want no attribute, use ['']
     function Search(const BaseDN: RawUtf8; TypesOnly: boolean;
-      const Filter: RawUtf8; const Attributes: array of RawUtf8): boolean;
+      const Filter: RawUtf8; const Attributes: array of RawUtf8): boolean; overload;
     /// retrieve all entries that match a given set of criteria
     // - here the filter is generated using FormatUtf8()
     function SearchFmt(const BaseDN: RawUtf8; TypesOnly: boolean;
       const FilterFmt: RawUtf8; const FilterArgs: array of const;
-      const Attributes: array of RawUtf8): boolean;
-    /// finalize paging for the searches
-    // - is just a wrapper to reset SearchPageSize and the SearchCookie
-    procedure SearchEnd;
-    /// retrieve all entries that match a given set of criteria and return the
-    // first result
-    // - Will call Search method, therefore SearchResult will contains all the results
-    // - Returns nil if no result is found or if the search failed
-    function SearchFirst(const BaseDN: RawUtf8; Filter: RawUtf8;
-      const Attributes: array of RawUtf8): TLdapResult;
+      const Attributes: array of RawUtf8): boolean; overload;
+    /// retrieve all entries a given set of criteria and return the first result
+    // - will call Search() method, therefore SearchResult will contains all
+    // matching entries
+    // - returns nil if no result is found or if the search failed
+    function SearchFirst(const BaseDN, Filter: RawUtf8;
+      const Attributes: array of RawUtf8): TLdapResult; overload;
+    /// retrieve all entries a given set of criteria and return the first result
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchFirst(const Attributes: TLdapAttributeTypes;
+      const Filter: RawUtf8; const BaseDN: RawUtf8 = ''): TLdapResult; overload;
     /// retrieve the entry matching the given ObjectDN
-    // - Will call Search method, therefore SearchResult will contains all the results
-    // - Returns nil if the object is not found or if the search failed
+    // - will call Search method, therefore SearchResult will contains all the results
+    // - returns nil if the object is not found or if the search failed
     function SearchObject(const ObjectDN, Filter: RawUtf8;
       const Attributes: array of RawUtf8;
       Scope: TLdapSearchScope = lssBaseObject): TLdapResult; overload;
-    /// retrieve the entry matching the given ObjectDN and Attribute
-    // - Returns nil if the object is not found or if the search failed
+    /// retrieve the attribute matching the given ObjectDN and Attribute
+    // - returns nil if the object is not found or if the search failed
     function SearchObject(const ObjectDN, Filter, Attribute: RawUtf8;
       Scope: TLdapSearchScope = lssBaseObject): TLdapAttribute; overload;
     /// retrieve all pages of entries into a TDocVariant instance
@@ -993,19 +1188,45 @@ type
     function SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
       const Filter: RawUtf8; const Attributes: array of RawUtf8;
       const ObjectAttributeField: RawUtf8 = '_attr'; MaxCount: integer = 0;
-      SortByName: boolean = true): variant;
+      SortByName: boolean = true): variant; overload;
+    /// retrieve all entries that match a given set of criteria
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function Search(const Attributes: TLdapAttributeTypes;
+      const Filter: RawUtf8 = ''; const BaseDN: RawUtf8 = '';
+      TypesOnly: boolean = false): boolean; overload;
+    /// retrieve all entries that match a given set of criteria
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchFmt(const Attributes: TLdapAttributeTypes;
+      const FilterFmt: RawUtf8; const FilterArgs: array of const;
+      const BaseDN: RawUtf8 = ''; TypesOnly: boolean = false): boolean; overload;
+    /// retrieve all entries a given set of criteria and return the first result
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchFirst(const Attributes: TLdapAttributeTypes;
+      const FilterFmt: RawUtf8; const FilterArgs: array of const;
+      const BaseDN: RawUtf8 = ''): TLdapResult; overload;
+    /// retrieve the entry matching the given ObjectDN
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchObject(const Attributes: TLdapAttributeTypes;
+      const ObjectDN, Filter: RawUtf8;
+      Scope: TLdapSearchScope = lssBaseObject): TLdapResult; overload;
+    /// retrieve the attribute matching the given ObjectDN and Attribute
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchObject(Attribute: TLdapAttributeType;
+      const ObjectDN, Filter: RawUtf8;
+      Scope: TLdapSearchScope = lssBaseObject): TLdapAttribute; overload;
+    /// retrieve all pages of entries into a TDocVariant instance
+    // - overloaded method using convenient TLdapAttributeTypes for Attributes
+    function SearchAll(const Attributes: TLdapAttributeTypes;
+      const Filter: RawUtf8; const ObjectAttributeField: RawUtf8 = '_attr';
+      const BaseDN: RawUtf8 = ''; MaxCount: integer = 0;
+      SortByName: boolean = true; TypesOnly: boolean = false): variant; overload;
+    /// determine whether a given entry has a specified attribute value
+    function Compare(const Obj, AttributeValue: RawUtf8): boolean;
+
+    { write methods }
+
     /// create a new entry in the directory
     function Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
-    /// Add a new computer in the domain
-    // - If password is empty, it isn't set in the attributes
-    // - If DeleteIfPresent is false and there is already a computer with this
-    // name in the domain, the operation fail
-    // - ErrorMessage contains the failure reason (if the operation failed)
-    // - Return false if the operation failed
-    function AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
-      out ErrorMessage: RawUtf8; const Password: SpiUtf8 = '';
-      DeleteIfPresent : boolean = false;
-      UserAccount: TUserAccountControls = [uacWorkstationTrusted]): boolean;
     /// make one or more changes to the set of attribute values in an entry
     function Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
       Value: TLdapAttribute): boolean;
@@ -1018,11 +1239,22 @@ type
     // - if the object has children and DeleteChildren is false, the deletion
     // will not work and the result will be LDAP_RES_NOT_ALLOWED_ON_NON_LEAF
     function Delete(const Obj: RawUtf8; DeleteChildren: boolean = false): boolean;
-    /// determine whether a given entry has a specified attribute value
-    function Compare(const Obj, AttributeValue: RawUtf8): boolean;
-    /// call any LDAP v3 extended operations
-    // - e.g. StartTLS, cancel, transactions
-    function Extended(const Oid, Value: RawUtf8): boolean;
+
+    { high-level computer methods }
+
+    /// Add a new computer in the domain
+    // - If password is empty, it isn't set in the attributes
+    // - If DeleteIfPresent is false and there is already a computer with this
+    // name in the domain, the operation fail
+    // - ErrorMessage contains the failure reason (if the operation failed)
+    // - Return false if the operation failed
+    function AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
+      out ErrorMessage: RawUtf8; const Password: SpiUtf8 = '';
+      DeleteIfPresent : boolean = false;
+      UserAccount: TUserAccountControls = [uacWorkstationTrusted]): boolean;
+
+    { high-level user/group methods }
+
     /// retrieve all Group names in the LDAP Server
     // - you can refine your query via CustomFilter or TGroupTypes
     // - Match allow to search as a (AttributeName=Match) filter
@@ -1085,15 +1317,21 @@ type
     function GetIsMemberOf(const UserDN, CustomFilter: RawUtf8;
       const GroupAN, GroupDN: array of RawUtf8; Nested: boolean = true;
       const BaseDN: RawUtf8 = ''; GroupsAN: PRawUtf8DynArray = nil): boolean; overload;
-    /// test whether the client is connected to the server
-    // - if AndBound is set, it also checks that a successful bind request has been made
-    function Connected(AndBound: boolean = true): boolean;
-    /// test whether the client is connected with TLS or Kerberos Signing-Sealing
-    // - it is unsafe to send e.g. a plain Password without lctEncrypted
-    function Transmission: TLdapClientTransmission;
+    /// change a user's password using RFC 3062 extension
+    // - raise ELdap if the connection is anonymous or not encrypted
+    // - non-void UserDN is typically 'uid=jdoe,ou=People,dc=example,dc=com'
+    // - if NewPassword was specified, returns NewPassword on success
+    // - if NewPassword was not specified, returns the server-generated password
+    function ExtModifyUserPassword(const UserDN: RawUtf8;
+      const OldPassword, NewPassword: SpiUtf8): SpiUtf8;
+
     /// true after a successful call to Bind or BindSaslKerberos
     property Bound: boolean
       read fBound;
+    /// contains the connected user, after Bind or BindSaslKerberos
+    // - an anonymous connection will return ''
+    property BoundUser: RawUtf8
+      read fBoundUser;
     /// binary string of the last full response from LDAP server
     // - This string is encoded by ASN.1 BER encoding
     // - You need this only for debugging
@@ -1148,12 +1386,6 @@ type
     /// each LDAP operation on server can return some referals URLs
     property Referals: TRawUtf8List
       read fReferals;
-    /// on Extended operation, here is the result Name asreturned by server
-    property ExtName: RawUtf8
-      read fExtName;
-    /// on Extended operation, here is the result Value as returned by server
-    property ExtValue: RawUtf8
-      read fExtValue;
     /// raw TCP socket used by all LDAP operations
     property Sock: TCrtSocket
       read fSock;
@@ -1356,6 +1588,10 @@ type
 
 
 implementation
+
+
+{.$define ASNDEBUG}
+// enable low-level debugging of the LDAP transmitted frames on the console
 
 
 {****** Support procedures and functions }
@@ -1903,6 +2139,211 @@ begin
     result := EscapeChar(Text, LDAP_CN, '\');
 end;
 
+function LdapUnicodePwd(const aPassword: SpiUtf8): RawByteString;
+var
+  u8: SpiUtf8;
+begin
+  try
+    u8 := NetConcat(['"', aPassword, '"']);
+    result := Utf8DecodeToUnicodeRawByteString(u8);
+  finally
+    FillZero(u8);
+  end;
+end;
+
+
+{ **************** LDAP Attribute Types Definitions }
+
+// private copy from constant to global variables because of Delphi which makes
+// a new RefCnt > 0 copy when assigning a RefCnt = -1 constant to a variable :(
+const
+  // reference names to fill the global AttrTypeName[]
+  _AttrTypeName: array[TLdapAttributeType] of RawUtf8 = (
+    '',                            // atUndefined
+    'distinguishedName',           // atDistinguishedName
+    'objectClass',                 // atObjectClass
+    'objectCategory',              // otObjectCategory
+    'alias',                       // atAlias
+    'name',                        // atName
+    'cn',                          // atCommonName
+    'sn',                          // atSurName
+    'gn',                          // atGivenName
+    'displayName',                 // atDisplayName
+    'userPrincipalName',           // atUserPrincipalName
+    'userAccountControl',          // atUserAccountControl
+    'sAMAccountName',              // atSAMAccountName
+    'adminCount',                  // atAdminCount
+    'description',                 // atDescription
+    'generationQualifier',         // atGenerationQualifier
+    'initials',                    // atInitials
+    'o',                           // atOrganizationName
+    'ou',                          // atOrganizationUnitName
+    'mail',                        // atMail
+    'memberOf',                    // atMemberOf
+    'c',                           // atCountryName
+    'l',                           // atLocalityName
+    'st',                          // atStateName
+    'street',                      // atStreetAddress
+    'telephoneNumber',             // atTelephoneNumber
+    'title',                       // atTitle
+    'serialNumber',                // atSerialNumber
+    'member',                      // atMember
+    'owner',                       // atOwner
+    'groupType',                   // atGroupType
+    'primaryGroupID',              // atPrimaryGroupID
+    'objectSid',                   // atObjectSid
+    'objectGUID',                  // atObjectGuid
+    'accountExpires',              // atAccountExpires
+    'badPasswordTime',             // atBadPasswordTime
+    'lastLogon',                   // atLastLogon
+    'lastLogonTimestamp',          // atLastLogonTimestamp
+    'lastLogoff',                  // atLastLogoff
+    'lockoutTime',                 // atLockoutTime
+    'pwdLastSet',                  // atPwdLastSet
+    'ms-MCS-AdmPwdExpirationTime', // atMcsAdmPwdExpirationTime
+    'whenCreated',                 // atWhenCreated
+    'whenChanged',                 // atWhenChanged
+    'operatingSystem',             // atOperatingSystem
+    'servicePrincipalName',        // atServicePrincipalName
+    'unicodePwd');                 // atUnicodePwd
+
+  // reference names to fill the global AttrTypeNameAlt[]
+  _AttrTypeNameAlt: array[0 .. high(AttrTypeNameAlt)] of RawUtf8 = (
+    'commonName',                  // cn
+    'surname',                     // sn
+    'countryName',                 // c
+    'localityName',                // l
+    'stateOrProvinceName',         // st
+    'streetAddress',               // street
+    'organizationName',            // o
+    'organizationalUnitName',      // ou
+    'givenName');                  // gn
+
+var
+  _LdapIntern: TRawUtf8Interning;
+  // allow fast linear search in L1 CPU cache
+  _LdapInternAll: array[0 .. length(_AttrTypeName) + length(_AttrTypeNameAlt) - 2] of pointer;
+  _LdapInternType: array[0 .. high(_LdapInternAll)] of TLdapAttributeType;
+
+procedure InitializeUnit;
+var
+  t: TLdapAttributeType;
+  i, n: PtrInt;
+begin
+  _LdapIntern := TRawUtf8Interning.Create;
+  RegisterGlobalShutdownRelease(_LdapIntern);
+  // register all our common Attribute Types names for quick search as pointer()
+  n := 0;
+  for t := succ(low(t)) to high(t) do
+    if _LdapIntern.Unique(AttrTypeName[t], _AttrTypeName[t]) then
+    begin
+      _LdapInternAll[n] := pointer(AttrTypeName[t]);
+      _LdapInternType[n] := t;
+      inc(n);
+    end
+    else
+      ELdap.RaiseUtf8('dup %', [_AttrTypeName[t]]); // paranoid
+  for i := 0 to high(_AttrTypeNameAlt) do
+    if _LdapIntern.Unique(AttrTypeNameAlt[i], _AttrTypeNameAlt[i]) then
+    begin
+      _LdapInternAll[n] := pointer(AttrTypeNameAlt[i]);
+      _LdapInternType[n] := AttrTypeAltType[i];
+      inc(n);
+    end
+    else
+      ELdap.RaiseUtf8('dup alt %', [_AttrTypeNameAlt[i]]);
+end;
+
+// internal function: fast O(n) search of AttrName interned pointer
+function _AttributeNameType(AttrName: pointer): TLdapAttributeType;
+var
+  i: PtrInt;
+begin
+  result := atUndefined;
+  if AttrName = nil then
+    exit;
+  i := PtrUIntScanIndex(@_LdapInternAll, length(_LdapInternAll), PtrUInt(AttrName));
+  if i >= 0 then
+    result := _LdapInternType[i];
+end;
+
+function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
+begin
+  result := _AttributeNameType(_LdapIntern.Existing(AttrName)); // very fast
+end;
+
+procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
+var
+  ft: QWord;
+  err: integer;
+  ts: TTimeLogBits;
+begin
+  // handle the special encoding of our recognized attribute types
+  case lat of
+    atObjectSid:
+      if IsValidRawSid(s) then
+      begin
+        s := SidToText(pointer(s));
+        exit;
+      end;
+    atObjectGuid:
+      if length(s) = SizeOf(TGuid) then
+      begin
+        s := ToUtf8(PGuid(s)^); // e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
+        exit;
+      end;
+    atAccountExpires .. atMcsAdmPwdExpirationTime: // 64-bit FileTime
+      begin
+        ft := GetQWord(pointer(s), err);
+        if (err = 0) and
+           (ft <> 0) then
+        begin
+          if ft >= $7FFFFFFFFFFFFFFF then
+            s := 'Never expires'
+          else
+            s := UnixMSTimeToString(WindowsFileTime64ToUnixMSTime(ft));
+          exit;
+        end;
+      end;
+    atWhenCreated .. atWhenChanged: // some date/time text
+      begin
+        ts.From(pointer(s), length(s) - 3);
+        if ts.Value <> 0 then
+        begin
+          s := ts.Text({expanded=}true); // normalize as pure ISO-8601
+          exit;
+        end;
+      end;
+  end;
+  // fallback to hexa if the input is not valid UTF-8 (as expected with LDAP v3)
+  if IsValidUtf8(s) then
+    EnsureRawUtf8(s)
+  else
+    s := BinToHexLower(s);
+end;
+
+function ToText(Attributes: TLdapAttributeTypes): TRawUtf8DynArray;
+var
+  n: PtrInt;
+  t: TLdapAttributeType;
+begin
+  exclude(Attributes, atUndefined);
+  n := GetBitsCount(Attributes, {bits=}SizeOf(Attributes) shl 3);
+  SetLength(result, n);
+  n := 0;
+  for t := succ(atUndefined) to high(t) do
+    if GetBitPtr(@Attributes, ord(t)) then
+    begin
+      result[n] := AttrTypeName[t];
+      inc(n);
+    end;
+end;
+
+function ToText(Attribute: TLdapAttributeType): RawUtf8;
+begin
+  result := AttrTypeName[Attribute];
+end;
+
 
 { **************** CLDAP Client Functions }
 
@@ -2195,96 +2636,25 @@ end;
 
 { **************** LDAP Response Storage }
 
-const
-  KNOWN_NAMES: array[0..11] of RawUtf8 = (
-    'ObjectSid',                   // 0 latObjectSid
-    'ObjectGUID',                  // 1 latObjectGuid
-    'accountExpires',              // 2 latFileTime
-    'badPasswordTime',             //      ..
-    'lastLogon',                   //
-    'lastLogonTimestamp',          //
-    'lastLogoff',                  //
-    'lockoutTime',                 //
-    'pwdLastSet',                  //
-    'ms-MCS-AdmPwdExpirationTime', // 9    ..
-    'whenCreated',                 // 10 latIsoTime
-    'whenChanged');                // 11   ..
-
-function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
-begin
-  case FindPropName(@KNOWN_NAMES, AttrName, length(KNOWN_NAMES)) of
-    0:
-      result := latObjectSid;
-    1:
-      result := latObjectGuid;
-    2 .. 9:
-      result := latFileTime;
-    10 .. 11:
-      result := latIsoTime;
-  else
-    result := latUndefined;
-  end;
-end;
-
-procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
-var
-  qw: QWord;
-  ts: TTimeLogBits;
-  err: integer;
-begin
-  // handle the most recognized attribute names encoding
-  case lat of
-    latObjectSid:
-      if IsValidRawSid(s) then
-      begin
-        s := SidToText(pointer(s));
-        exit;
-      end;
-    latObjectGuid:
-      if length(s) = SizeOf(TGuid) then
-      begin
-        s := ToUtf8(PGuid(s)^);
-        exit;
-      end;
-    latFileTime:
-      begin
-        qw := GetQWord(pointer(s), err);
-        if (err = 0) and
-           (qw <> 0) then
-        begin
-          if qw >= $7FFFFFFFFFFFFFFF then
-            s := 'Never expires'
-          else
-            s := UnixMSTimeToString(WindowsFileTime64ToUnixMSTime(qw));
-          exit;
-        end;
-      end;
-    latIsoTime:
-      begin
-        ts.From(pointer(s), length(s) - 3);
-        if ts.Value <> 0 then
-        begin
-          s := ts.Text({expanded=}true); // normalize
-          exit;
-        end;
-      end;
-  end;
-  // fallback to hexa if the input is not valid UTF-8 (as expected with LDAP v3)
-  if IsValidUtf8(s) then
-    EnsureRawUtf8(s)
-  else
-    s := BinToHexLower(s);
-end;
-
-
 { TLdapAttribute }
 
-constructor TLdapAttribute.Create(const AttrName: RawUtf8);
+constructor TLdapAttribute.Create(
+  const AttrName: RawUtf8; AttrType: TLdapAttributeType);
 begin
   inherited Create;
   fAttributeName := AttrName;
-  fKnownType := AttributeNameType(AttrName);
+  fKnownType := AttrType;
   SetLength(fList, 1); // optimized for a single value (most used case)
+end;
+
+destructor TLdapAttribute.Destroy;
+var
+  i: PtrInt;
+begin
+  if fKnownType = atUnicodePwd then
+    for i := 0 to fCount - 1 do
+      FillZero(fList[i]); // anti-forensic measure
+  inherited Destroy;
 end;
 
 procedure TLdapAttribute.Add(const aValue: RawByteString);
@@ -2337,6 +2707,56 @@ begin
       TDocVariantData(result).InitArrayFrom(GetAllReadable, JSON_FAST);
 end;
 
+function IsLdifSafe(p: PUtf8Char; l: integer): boolean; // RFC 2849
+begin
+  if p <> nil then
+  begin
+    result := false;
+    if p^ in [#0 .. ' ', ':', '<', #128 .. #255] then // SAFE-INIT-CHAR
+      exit;
+    inc(p);
+    dec(l);
+    if l <> 0 then
+      repeat
+        if p^ in [#0, #10, #13, #128 .. #255] then    // SAFE-CHAR
+          exit;
+        inc(p);
+        dec(l);
+      until l = 0;
+    if p[-1] = ' ' then
+      exit; // "should not end with a space" RFC 2849 point 8)
+  end;
+  result := true;
+end;
+
+procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
+begin
+  if IsLdifSafe(p, l) then
+  begin
+    w.AddDirect(' ');
+    w.AddNoJsonEscape(p, l);
+  end
+  else
+  begin
+    // UTF-8 or binary content is just stored as name:: <base64>
+    w.AddDirect(':', ' ');
+    w.WrBase64(pointer(p), l, {withmagic=}false);
+  end;
+end;
+
+procedure TLdapAttribute.ExportToLdif(w: TTextWriter);
+var
+  i: PtrInt;
+begin
+  for i := 0 to fCount - 1 do
+  begin
+    w.AddString(fAttributeName); // is either OID or plain alphanum
+    w.AddDirect(':');
+    AddLdif(w, pointer(fList[i]), length(fList[i]));
+    w.AddDirect(#10);
+  end;
+end;
+
 
 { TLdapAttributeList }
 
@@ -2377,7 +2797,7 @@ begin
     end
     else
     begin
-      existing := fInterning.Existing(AttributeName); // fast pointer search
+      existing := _LdapIntern.Existing(AttributeName); // fast pointer search
       if existing <> nil then // no need to search if we know it won't be there
         for result := 0 to result do
           if pointer(fItems[result].AttributeName) = existing then
@@ -2406,10 +2826,52 @@ begin
   result := Find(AttributeName).GetReadable(0);
 end;
 
-function TLdapAttributeList.Add(const AttributeName: RawUtf8): TLdapAttribute;
+function TLdapAttributeList.FindIndex(AttributeType: TLdapAttributeType): PtrInt;
 begin
-  result := TLdapAttribute.Create(fInterning.Unique(AttributeName));
+  if (self <> nil) and
+     (AttributeType <> atUndefined) and
+     (AttributeType in fKnownTypes) then // worth searching it
+    for result := 0 to length(fItems) - 1 do
+      if fItems[result].KnownType = AttributeType then
+        exit;
+  result := -1;
+end;
+
+function TLdapAttributeList.Find(AttributeType: TLdapAttributeType): TLdapAttribute;
+var
+  i: PtrInt;
+begin
+  i := FindIndex(AttributeType);
+  if i >= 0 then
+    result := fItems[i]
+  else
+    result := nil;
+end;
+
+function TLdapAttributeList.Get(AttributeType: TLdapAttributeType): RawUtf8;
+begin
+  result := Find(AttributeType).GetReadable(0);
+end;
+
+function TLdapAttributeList.Add(const AttributeName: RawUtf8): TLdapAttribute;
+var
+  i: PtrInt;
+  n: RawUtf8;
+begin
+  if AttributeName = '' then
+    ELdap.RaiseUtf8('Unexpected %.Add('''')', [self]);
+  // search for existing TLdapAttribute instance
+  if not _LdapIntern.Unique(n, AttributeName) then // n = existing name
+    for i := 0 to length(fItems) - 1 do // fast pointer search as in Find()
+    begin
+      result := fItems[i];
+      if pointer(result.AttributeName) = pointer(n) then
+        exit;
+    end;
+  // need to add a new TLdapAttribute with this interned attribute name
+  result := TLdapAttribute.Create(n, _AttributeNameType(pointer(n)));
   ObjArrayAdd(fItems, result);
+  include(fKnownTypes, result.KnownType);
 end;
 
 function TLdapAttributeList.Add(const AttributeName: RawUtf8;
@@ -2419,13 +2881,29 @@ begin
   result.Add(AttributeValue);
 end;
 
-function TLdapAttributeList.FindAdd(const AttributeName: RawUtf8;
+procedure TLdapAttributeList.Add(const NameValuePairs: array of RawUtf8);
+var
+  i, n: PtrInt;
+begin
+  n := length(NameValuePairs);
+  if (n <> 0) and
+     (n and 1 = 0) then
+    for i := 0 to (n shr 1) - 1 do
+      Add(NameValuePairs[i * 2], NameValuePairs[i * 2 + 1]);
+end;
+
+function TLdapAttributeList.Add(AttributeType: TLdapAttributeType;
   const AttributeValue: RawByteString): TLdapAttribute;
 begin
-  result := Find(AttributeName);
-  if result = nil then
-    result := Add(AttributeName); // first time this attribute is used
+  if AttributeType = atUndefined then
+    ELdap.RaiseUtf8('%.Add(atUndefined)', [self]);
+  result := TLdapAttribute.Create(AttrTypeName[AttributeType], AttributeType);
   result.Add(AttributeValue);
+end;
+
+function TLdapAttributeList.AddUnicodePwd(const aPassword: SpiUtf8): TLdapAttribute;
+begin
+  result := Add(atUnicodePwd, LdapUnicodePwd(aPassword));
 end;
 
 procedure TLdapAttributeList.Delete(const AttributeName: RawUtf8);
@@ -2471,19 +2949,25 @@ begin
   end;
 end;
 
+procedure TLdapResult.ExportToLdif(w: TTextWriter);
+var
+  i: PtrInt;
+begin
+  w.AddShorter('dn:');
+  AddLdif(w, pointer(fObjectName), length(fObjectName));
+  w.AddDirect(#10);
+  for i := 0 to fAttributes.Count - 1 do
+    fAttributes.Items[i].ExportToLdif(w);
+  w.AddDirect(#10);
+end;
+
 
 { TLdapResultList }
-
-constructor TLdapResultList.Create;
-begin
-  fInterning := TRawUtf8Interning.Create;
-end;
 
 destructor TLdapResultList.Destroy;
 begin
   Clear;
   inherited Destroy;
-  fInterning.Free;
 end;
 
 procedure TLdapResultList.Clear;
@@ -2536,6 +3020,31 @@ begin
   QuickSortRawUtf8(result, n);
 end;
 
+function TLdapResultList.ObjectAttributes(AttrType: TLdapAttributeType): TRawUtf8DynArray;
+var
+  i, n: PtrInt;
+  attr: TLdapAttributeList;
+begin
+  result := nil;
+  if (self = nil) or
+     (fCount = 0) or
+     (AttrType = atUndefined) then
+    exit;
+  n := 0;
+  SetLength(result, fCount);
+  for i := 0 to fCount - 1 do
+  begin
+    attr := fItems[i].Attributes;
+    if not (AttrType in attr.KnownTypes) then
+      continue; // no need to search
+    result[n] := attr.Get(AttrType);
+    inc(n);
+  end;
+  if n <> fCount then
+    SetLength(result, n);
+  QuickSortRawUtf8(result, n);
+end;
+
 procedure TLdapResultList.AfterAdd;
 begin
   if fItems <> nil then
@@ -2545,11 +3054,28 @@ end;
 function TLdapResultList.Add: TLdapResult;
 begin
   result := TLdapResult.Create;
-  result.fAttributes.fInterning := fInterning;
   ObjArrayAddCount(fItems, result, fCount);
 end;
 
-function TLdapResultList.Dump: RawUtf8;
+function TLdapResultList.ExportToLdifContent: RawUtf8;
+var
+  tmp: TTextWriterStackBuffer;
+  w: TTextWriter;
+  i: PtrInt;
+begin
+  w := DefaultJsonWriter.CreateOwnedStream(tmp);
+  try
+    W.AddShort('version: 1'#10);
+    for i := 0 to Count - 1 do
+      Items[i].ExportToLdif(w);
+    W.Add('# total number of entries: %'#10, [Count]);
+    w.SetText(result);
+  finally
+    w.Free;
+  end;
+end;
+
+function TLdapResultList.Dump(NoTime: boolean): RawUtf8;
 var
   i, j, k: PtrInt;
   res: TLdapResult;
@@ -2561,8 +3087,11 @@ begin
   try
     w.AddShort('results: ');
     w.Add(count);
-    w.AddShorter(' in ');
-    w.AddShort(MicroSecToString(fSearchTimeMicroSec));
+    if not NoTime then
+    begin
+      w.AddShorter(' in ');
+      w.AddShort(MicroSecToString(fSearchTimeMicroSec));
+    end;
     w.AddCR;
     for i := 0 to Count - 1 do
     begin
@@ -2620,13 +3149,13 @@ begin
     for j := 0 to res.Attributes.Count - 1 do
     begin
       attr := res.Attributes.Items[j];
-      a.AddValue(attr.AttributeName, attr.GetVariant);
+      a.AddValue(attr.AttributeName, attr.GetVariant); // benefit from fInterning
     end;
     if ObjectAttributeField = '*' then
       v^.AddOrUpdateFrom(variant(a), {onlymissing=}true)
     else
       v^.AddValue(ObjectAttributeField, variant(a), {owned=}true);
-    a.Clear;
+    a.Clear; // mandatory to prepare the next a.Init in this loop
   end;
 end;
 
@@ -2814,6 +3343,7 @@ begin
     result := Iso8601ToDateTime(Text);
 end;
 
+
 { TLdapObject }
 
 procedure TLdapObject.Fill(Attributes: TLdapAttributeList;
@@ -2822,16 +3352,16 @@ var
   n, c, i: PtrInt;
   a: TLdapAttribute;
 begin
-  sAMAccountName := Attributes.Get('sAMAccountName');
-  distinguishedName := Attributes.Get('distinguishedName');
+  sAMAccountName := Attributes.Get(atSAMAccountName);
+  distinguishedName := Attributes.Get(atDistinguishedName);
   canonicalName := DNToCN(distinguishedName);
-  name := Attributes.Get('name');
-  CN := Attributes.Get('cn');
-  description := Attributes.Get('description');
-  objectSid := Attributes.Get('objectSid');
-  objectGUID := Attributes.Get('objectGUID');
-  whenCreated := LdapToDate(Attributes.Get('whenCreated'));
-  whenChanged := LdapToDate(Attributes.Get('whenChanged'));
+  name := Attributes.Get(atName);
+  CN := Attributes.Get(atCommonName);
+  description := Attributes.Get(atDescription);
+  objectSid := Attributes.Get(atObjectSid);
+  objectGUID := Attributes.Get(atObjectGUID);
+  whenCreated := LdapToDate(Attributes.Get(atWhenCreated));
+  whenChanged := LdapToDate(Attributes.Get(atWhenChanged));
   n := length(CustomAttributes);
   if n = 0 then
     exit;
@@ -2880,10 +3410,10 @@ var
 begin
   Fill(Attributes, CustomAttributes);
   ToCardinal(SplitRight(objectSID, '-'), PrimaryGroupID);
-  if ToInteger(Attributes.Get('groupType'), uac) then
+  if ToInteger(Attributes.Get(atGroupType), uac) then
     groupType := TGroupTypes(uac);
   if WithMember then
-    member := Attributes.Find('member').GetAllReadable;
+    member := Attributes.Find(atMember).GetAllReadable;
 end;
 
 
@@ -2895,15 +3425,15 @@ var
   uac: integer;
 begin
   Fill(Attributes, CustomAttributes);
-  userPrincipalName := Attributes.Get('userPrincipalName');
-  displayName := Attributes.Get('displayName');
-  mail := Attributes.Get('mail');
-  pwdLastSet := LdapToDate(Attributes.Get('pwdLastSet'));
-  lastLogon := LdapToDate(Attributes.Get('lastLogon'));
-  ToCardinal(Attributes.Get('primaryGroupID'), primaryGroupID);
+  userPrincipalName := Attributes.Get(atUserPrincipalName);
+  displayName := Attributes.Get(atDisplayName);
+  mail := Attributes.Get(atMail);
+  pwdLastSet := LdapToDate(Attributes.Get(atPwdLastSet));
+  lastLogon := LdapToDate(Attributes.Get(atLastLogon));
+  ToCardinal(Attributes.Get(atPrimaryGroupID), primaryGroupID);
   if WithMemberOf then
-    memberOf := Attributes.Find('memberOf').GetAllReadable;
-  if ToInteger(Attributes.Get('userAccountControl'), uac) then
+    memberOf := Attributes.Find(atMemberOf).GetAllReadable;
+  if ToInteger(Attributes.Get(atUserAccountControl), uac) then
     userAccountControl := TUserAccountControls(uac);
 end;
 
@@ -2936,6 +3466,9 @@ begin
   fSettings.Free;
   inherited Destroy;
 end;
+
+
+// **** TLdapClient connection methods
 
 function TLdapClient.Connect(DiscoverMode: TLdapClientConnect;
   DelayMS: integer): boolean;
@@ -3028,28 +3561,14 @@ begin
   result := @fTlsContext;
 end;
 
-function TLdapClient.BuildPacket(const Asn1Data: TAsnObject): TAsnObject;
-begin
-  inc(fSeq);
-  result := Asn(ASN1_SEQ, [
-              Asn(fSeq),
-              Asn1Data
-            ]);
-  if not fSecContextEncrypt then
-    exit;
-  result := SecEncrypt(fSecContext, result);
-  insert('0000', result, 1);
-  PCardinal(result)^ := bswap32(length(result) - 4); // SASL Buffer Length
-end;
-
 function TLdapClient.NetbiosDN: RawUtf8;
 begin
   if (fNetbiosDN = '') and
      fBound and
      fSock.SockConnected then
     fNetbiosDN := SearchObject('CN=Partitions,' + ConfigDN,
-      FormatUtf8('(&(nETBIOSName=*)(nCName=%))',
-        [DefaultDN]), 'nETBIOSName', lssWholeSubtree).GetReadable;
+      FormatUtf8('(&(nETBIOSName=*)(nCName=%))', [DefaultDN]),
+      'nETBIOSName', lssWholeSubtree).GetReadable;
   result := fNetbiosDN;
 end;
 
@@ -3090,7 +3609,29 @@ begin
   result := fMechanisms;
 end;
 
-function TLdapClient.Supports(const MechanismName: RawUtf8): boolean;
+function TLdapClient.Controls: TRawUtf8DynArray;
+begin
+  if (fControls = nil) and
+     fSock.SockConnected then
+  begin
+    fControls := SearchObject('', '*', 'supportedControl').GetAllReadable;
+    DeduplicateRawUtf8(fControls);
+  end;
+  result := fControls;
+end;
+
+function TLdapClient.Extensions: TRawUtf8DynArray;
+begin
+  if (fExtensions = nil) and
+     fSock.SockConnected then
+  begin
+    fExtensions := SearchObject('', '*', 'supportedExtension').GetAllReadable;
+    DeduplicateRawUtf8(fExtensions);
+  end;
+  result := fExtensions;
+end;
+
+function TLdapClient.SupportsMech(const MechanismName: RawUtf8): boolean;
 var
   i: PtrInt;
 begin
@@ -3100,6 +3641,116 @@ begin
       if PropNameEquals(fMechanisms[i], MechanismName) then
         exit;
   result := false;
+end;
+
+function TLdapClient.SupportsControl(const ControlName: RawUtf8): boolean;
+begin
+  result := (Controls <> nil) and
+    (ControlName <> '') and
+    (FastFindPUtf8CharSorted(
+      pointer(fControls), high(fControls), pointer(ControlName)) >= 0);
+end;
+
+function TLdapClient.SupportsExt(const ExtensionName: RawUtf8): boolean;
+begin
+  result := (Extensions <> nil) and
+    (ExtensionName <> '') and
+    (FastFindPUtf8CharSorted(
+      pointer(fExtensions), high(fExtensions), pointer(ExtensionName)) >= 0);
+end;
+
+function TLdapClient.RetrieveWellKnownObjects(const DN: RawUtf8;
+  out Dual: TLdapKnownCommonNamesDual): boolean;
+var
+  tmp: TRawUtf8DynArray;
+  i: PtrInt;
+
+  function One(const guid: RawUtf8): RawUtf8;
+  var
+    i: PtrInt;
+    p: PUtf8Char;
+  begin
+    for i := 0 to high(tmp) do
+    begin
+      p := pointer(tmp[i]);
+      if (p <> nil) and
+         NetStartWith(p + 5, pointer(guid)) then
+        begin
+          result := copy(tmp[i], Length(guid) + 7, MaxInt);
+          tmp[i] := ''; // no need to search this one any more
+          exit;
+        end;
+    end;
+    result := '';
+  end;
+
+begin
+  result := false;
+  if not Connected or
+     (DN = '') then
+    exit;
+  tmp := SearchObject(DN, '', 'wellKnownObjects').GetAllReadable;
+  if tmp = nil then
+    exit;
+  result := true;
+  for i := 0 to high(tmp) do
+    if not NetStartWith(pointer(tmp[i]), 'B:32:') then
+      tmp[i] := '';
+  with Dual[{asCN=}false] do
+  begin
+    Computers                 := One(LDAP_GUID_COMPUTERS);
+    DeletedObjects            := One(LDAP_GUID_DELETED_OBJECTS);
+    DomainControllers         := One(LDAP_GUID_DOMAIN_CONTROLLERS);
+    ForeignSecurityPrincipals := One(LDAP_GUID_FOREIGNSECURITYPRINCIPALS);
+    Infrastructure            := One(LDAP_GUID_INFRASTRUCTURE);
+    LostAndFound              := One(LDAP_GUID_LOSTANDFOUND);
+    MicrosoftProgramData      := One(LDAP_GUID_MICROSOFT_PROGRAM_DATA);
+    NtdsQuotas                := One(LDAP_GUID_NTDS_QUOTAS);
+    ProgramData               := One(LDAP_GUID_PROGRAM_DATA);
+    Systems                   := One(LDAP_GUID_SYSTEMS);
+    Users                     := One(LDAP_GUID_USERS);
+    ManagedServiceAccounts    := One(LDAP_GUID_MANAGED_SERVICE_ACCOUNTS);
+  end;
+  with Dual[{asCN=}true] do
+  begin
+    Computers                 := DNToCn(Dual[false].Computers);
+    DeletedObjects            := DNToCn(Dual[false].DeletedObjects);
+    DomainControllers         := DNToCn(Dual[false].DomainControllers);
+    ForeignSecurityPrincipals := DNToCn(Dual[false].ForeignSecurityPrincipals);
+    Infrastructure            := DNToCn(Dual[false].Infrastructure);
+    LostAndFound              := DNToCn(Dual[false].LostAndFound);
+    MicrosoftProgramData      := DNToCn(Dual[false].MicrosoftProgramData);
+    NtdsQuotas                := DNToCn(Dual[false].NtdsQuotas);
+    ProgramData               := DNToCn(Dual[false].ProgramData);
+    Systems                   := DNToCn(Dual[false].Systems);
+    Users                     := DNToCn(Dual[false].Users);
+    ManagedServiceAccounts    := DNToCn(Dual[false].ManagedServiceAccounts);
+  end;
+end;
+
+function TLdapClient.WellKnownObjects(AsCN: boolean): PLdapKnownCommonNames;
+begin
+  if not fWellKnownObjectsCached then
+    if RetrieveWellKnownObjects(DefaultDN, fWellKnownObjects) then
+        fWellKnownObjectsCached := true;
+  result := @fWellKnownObjects[AsCN];
+end;
+
+
+// **** TLdapClient protocol methods
+
+function TLdapClient.BuildPacket(const Asn1Data: TAsnObject): TAsnObject;
+begin
+  inc(fSeq);
+  result := Asn(ASN1_SEQ, [
+              Asn(fSeq),
+              Asn1Data
+            ]);
+  if not fSecContextEncrypt then
+    exit;
+  result := SecEncrypt(fSecContext, result);
+  insert('0000', result, 1);
+  PCardinal(result)^ := bswap32(length(result) - 4); // SASL Buffer Length
 end;
 
 procedure TLdapClient.SendPacket(const Asn1Data: TAsnObject);
@@ -3280,12 +3931,16 @@ begin
   result := DecodeResponse(x, resp);
 end;
 
+
+// **** TLdapClient binding methods
+
 // see https://ldap.com/ldapv3-wire-protocol-reference-bind
 
 function TLdapClient.Bind: boolean;
 begin
   result := false;
-  if not Connect then
+  if fBound or
+     not Connect then
     exit;
   if (fSettings.Password <> '') and
      not fSettings.Tls and
@@ -3295,8 +3950,11 @@ begin
                    Asn(fVersion),
                    Asn(fSettings.UserName),
                    Asn(fSettings.Password, ASN1_CTX0)]));
-  result := fResultCode = LDAP_RES_SUCCESS;
-  fBound := result;
+  if fResultCode <> LDAP_RES_SUCCESS then
+    exit; // binding error
+  fBound := true;
+  fBoundUser := fSettings.UserName;
+  result := true;
 end;
 
 const
@@ -3333,25 +3991,26 @@ begin
                 Asn(''),
                 Asn(ASN1_CTC3, [
                   Asn(DIGEST_ALGONAME[Algo])])]);
-    t := SendAndReceive(digreq);
+    s := SendAndReceive(digreq);
+    if fResultCode <> LDAP_RES_SASL_BIND_IN_PROGRESS then
+      exit;
+    x := 1;
+    AsnNext(x, s, @t);
+    dig := DigestClient(Algo, t, '', 'ldap/' + LowerCaseU(fSock.Server),
+      fSettings.UserName, fSettings.Password, 'digest-uri');
+    SendAndReceive(Asn(LDAP_ASN1_BIND_REQUEST, [
+                     Asn(fVersion),
+                     Asn(''),
+                     Asn(ASN1_CTC3, [
+                       Asn(DIGEST_ALGONAME[Algo]),
+                       Asn(dig)])]));
     if fResultCode = LDAP_RES_SASL_BIND_IN_PROGRESS then
-    begin
-      s := t;
-      x := 1;
-      AsnNext(x, s, @t);
-      dig := DigestClient(Algo, t, '', 'ldap/' + LowerCaseU(fSock.Server),
-        fSettings.UserName, fSettings.Password, 'digest-uri');
-      SendAndReceive(Asn(LDAP_ASN1_BIND_REQUEST, [
-                       Asn(fVersion),
-                       Asn(''),
-                       Asn(ASN1_CTC3, [
-                         Asn(DIGEST_ALGONAME[Algo]),
-                         Asn(dig)])]));
-      if fResultCode = LDAP_RES_SASL_BIND_IN_PROGRESS then
-        SendAndReceive(digreq);
-      result := fResultCode = LDAP_RES_SUCCESS;
-      fBound := result;
-    end;
+      SendAndReceive(digreq);
+    if fResultCode <> LDAP_RES_SUCCESS then
+      exit; // binding error
+    fBound := true;
+    fBoundUser := fSettings.UserName;
+    result := true;
   end;
 end;
 
@@ -3405,7 +4064,6 @@ begin
     exit;
   end;
   needencrypt := false;
-  fSecContextUser := '';
   if (fSettings.KerberosSpn = '') and
      (fSettings.KerberosDN <> '') then
     fSettings.KerberosSpn := 'LDAP/' + fSettings.TargetHost + {noport}
@@ -3509,24 +4167,39 @@ begin
                   Asn(dataout)])]);
       t := SendAndReceive(req2);
     until not (fResultCode in [LDAP_RES_SUCCESS, LDAP_RES_SASL_BIND_IN_PROGRESS]);
-    result := fResultCode = LDAP_RES_SUCCESS;
-    if result then
-    begin
-      ServerSspiAuthUser(fSecContext, fSecContextUser);
-      if KerberosUser <> nil then
-        KerberosUser^ := fSecContextUser;
-    end;
-    fBound := result;
+    if fResultCode <> LDAP_RES_SUCCESS then
+      exit; // error
+    ServerSspiAuthUser(fSecContext, fBoundUser);
+    if KerberosUser <> nil then
+      KerberosUser^ := fBoundUser;
+    fBound := true;
     fSecContextEncrypt := needencrypt;
+    result := true;
   finally
     if not result then
-    begin
-      fSecContextEncrypt := false;
       FreeSecContext(fSecContext);
-    end;
   end;
 end;
 
+function TLdapClient.Connected(AndBound: boolean): boolean;
+begin
+  result := fSock.SockConnected;
+  if result and
+     AndBound then
+    result := fBound;
+end;
+
+function TLdapClient.Transmission: TLdapClientTransmission;
+begin
+  if (self = nil) or
+     not fSock.SockConnected then
+    result := lctNone
+  else if fSettings.Tls or
+          fSecContextEncrypt then
+    result := lctEncrypted
+  else
+    result := lctPlain;
+end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-unbind
 
@@ -3544,205 +4217,64 @@ begin
     FreeSecContext(fSecContext);
   fSecContextEncrypt := false;
   fBound := false;
+  fBoundUser := '';
   fRootDN := '';
   fDefaultDN := '';
   fConfigDN := '';
   fWellKnownObjectsCached := false;
 end;
 
-// https://ldap.com/ldapv3-wire-protocol-reference-modify
-
-function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
-  Value: TLdapAttribute): boolean;
+// https://ldap.com/ldapv3-wire-protocol-reference-extended
+function TLdapClient.Extended(const Oid: RawUtf8; const Value: TAsnObject;
+  RespName: PRawUtf8; RespValue: PAsnObject): boolean;
 var
-  query: TAsnObject;
-  i: integer;
-begin
-  for i := 0 to Value.Count -1 do
-    AsnAdd(query, Asn(Value.List[i]));
-  SendAndReceive(Asn(LDAP_ASN1_MODIFY_REQUEST, [
-                   Asn(obj),
-                   Asn(ASN1_SEQ, [
-                     Asn(ASN1_SEQ, [
-                       Asn(ord(Op), ASN1_ENUM),
-                       Asn(ASN1_SEQ, [
-                         Asn(Value.AttributeName),
-                         Asn(query, ASN1_SETOF)
-                       ])
-                     ])
-                   ])
-                 ]));
-  result := fResultCode = LDAP_RES_SUCCESS;
-end;
-
-// https://ldap.com/ldapv3-wire-protocol-reference-add
-
-function TLdapClient.Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
-var
-  query, sub: TAsnObject;
-  attr: TLdapAttribute;
-  i, j: PtrInt;
+  query, decoded, v: TAsnObject;
+  pos: integer;
 begin
   result := false;
   if not Connected then
     exit;
-  for i := 0 to Value.Count - 1 do
-  begin
-    attr := Value.Items[i];
-    sub := '';
-    for j := 0 to attr.Count - 1 do
-      AsnAdd(sub, Asn(attr.List[j]));
-    Append(query,
-      Asn(ASN1_SEQ, [
-        Asn(attr.AttributeName),
-        Asn(ASN1_SETOF, [sub])
-      ]));
-  end;
-  SendAndReceive(Asn(LDAP_ASN1_ADD_REQUEST, [
-                   Asn(obj),
-                   Asn(ASN1_SEQ, query)]));
+  query := Asn(Oid, ASN1_CTX0);
+  if Value <> '' then
+    AsnAdd(query, Asn(Value, ASN1_CTX1));
+  decoded := SendAndReceive(Asn(query, LDAP_ASN1_EXT_REQUEST));
   result := fResultCode = LDAP_RES_SUCCESS;
+  if not result then
+    exit;
+  // https://www.rfc-editor.org/rfc/rfc2251#section-4.12
+  pos := 1;
+  while pos < length(decoded) do
+    case AsnNext(pos, decoded, @v) of
+      ASN1_CTX10:
+        if RespName <> nil then
+          RespName^ := v;
+      ASN1_CTX11:
+        if RespValue <> nil then
+          RespValue^ := v;
+    end;
 end;
 
-function TLdapClient.AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
-  out ErrorMessage: RawUtf8; const Password: SpiUtf8; DeleteIfPresent: boolean;
-  UserAccount: TUserAccountControls): boolean;
-var
-  PwdU8: SpiUtf8;
-  ComputerSafe, ComputerDN, ComputerSam: RawUtf8;
-  PwdU16: RawByteString;
-  Attributes: TLdapAttributeList;
-  ComputerObject: TLdapResult;
+function TLdapClient.ExtWhoAmI: RawUtf8;
 begin
-  result := false;
-  if not Connected or
-     not LdapEscapeName(ComputerName, ComputerSafe) then
-    exit;
-  ComputerDN := NetConcat(['CN=', ComputerSafe, ',', ComputerParentDN]);
-  ComputerSam := NetConcat([UpperCase(ComputerSafe), '$']);
-  // Search Computer object in the domain
-  ComputerObject := SearchFirst(DefaultDN,
-    FormatUtf8('(sAMAccountName=%)', [ComputerSam]), ['']);
-  // If the search failed, we exit with the error message
-  if ResultCode <> LDAP_RES_SUCCESS then
-  begin
-    ErrorMessage := FormatUtf8('Search failed: %', [RawLdapErrorString(ResultCode)]);
-    exit;
-  end;
-  // Computer with the same sAMAccountName is already existing
-  if Assigned(ComputerObject) then
-  begin
-    result := true;
-    // We don't want to delete it
-    if not DeleteIfPresent then
-    begin
-      ErrorMessage := 'Computer is already present';
-      exit;
-    end;
-    result := Delete(ComputerObject.ObjectName);
-    // Unable to delete the computer (probably insufficient access rights)
-    if not result then
-    begin
-      ErrorMessage := FormatUtf8('Delete failed: %', [RawLdapErrorString(ResultCode)]);
-      exit;
-    end;
-  end;
-  // Create the new computer object
-  Attributes := TLDAPAttributeList.Create;
-  try
-    Attributes.Add('objectClass', 'computer');
-    Attributes.Add('cn', ComputerSafe);
-    Attributes.Add('sAMAccountName', ComputerSam);
-    Attributes.Add('userAccountControl', UInt32ToUtf8(cardinal(UserAccount)));
-    if Password <> '' then
-    begin
-      PwdU8 := NetConcat(['"', Password, '"']);
-      PwdU16 := Utf8DecodeToUnicodeRawByteString(PwdU8);
-      Attributes.Add('unicodePwd', PwdU16);
-      FillZero(PwdU8);
-      FillZero(PwdU16);
-    end;
-    result := Add(ComputerDN, Attributes);
-    if not result then
-      ErrorMessage := FormatUtf8('Add failed: %', [RawLdapErrorString(ResultCode)]);
-  finally
-    Attributes.Free;
-    FillZero(PwdU8);
-    FillZero(PwdU16);
-  end;
+  if not Extended(ASN1_OID_WHOAMI, '', nil, @result) then
+    result := '';
 end;
 
-// https://ldap.com/ldapv3-wire-protocol-reference-delete
 
-function TLdapClient.Delete(const Obj: RawUtf8; DeleteChildren: boolean): boolean;
-var
-  PreviousSearchScope: TLdapSearchScope;
-  Children: TRawUtf8DynArray;
-  i: PtrInt;
+// **** TLdapClient read methods
+
+procedure TLdapClient.SearchBegin(PageSize: integer);
 begin
-  result := false;
-  if not Connected then
-    exit;
-  PreviousSearchScope := SearchScope;
-  SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
-  if (fResultCode = LDAP_RES_NOT_ALLOWED_ON_NON_LEAF) and
-     DeleteChildren then
-    // Obj had children and DeleteChildren is True
-    try
-      SearchScope := lssSingleLevel;
-      Search(Obj, false, '', []);
-      Children := fSearchResult.ObjectNames;
-      for i := 0 to high(Children) do
-        if not Delete(Children[i], {DeleteChildren=}true) then
-          break; // stop on error
-      if fResultCode = LDAP_RES_SUCCESS then
-        // retry Obj deletion after children have been successfully removed
-        SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
-    finally
-      SearchScope := PreviousSearchScope;
-    end;
-  result := fResultCode = LDAP_RES_SUCCESS;
+  SearchCookie := '';
+  SearchPageSize := PageSize;
 end;
 
-// https://ldap.com/ldapv3-wire-protocol-reference-modify-dn
-
-function TLdapClient.ModifyDN(const obj, newRdn, newSuperior: RawUtf8;
-  DeleteOldRdn: boolean): boolean;
-var
-  query: TAsnObject;
+procedure TLdapClient.SearchEnd;
 begin
-  result := false;
-  if not Connected then
-    exit;
-  query := Asn(obj);
-  Append(query, [Asn(newRdn), ASN1_BOOLEAN_VALUE[DeleteOldRdn]]);
-  if newSuperior <> '' then
-    AsnAdd(query, Asn(newSuperior, ASN1_CTX0));
-  SendAndReceive(Asn(query, LDAP_ASN1_MODIFYDN_REQUEST));
-  result := fResultCode = LDAP_RES_SUCCESS;
-end;
-
-// https://ldap.com/ldapv3-wire-protocol-reference-compare
-
-function TLdapClient.Compare(const Obj, AttributeValue: RawUtf8): boolean;
-begin
-  result := false;
-  if not Connected(False) then
-    exit;
-  SendAndReceive(Asn(LDAP_ASN1_COMPARE_REQUEST, [
-                   Asn(obj),
-                   Asn(ASN1_SEQ, [
-                     Asn(TrimU(GetFirstCsvItem(AttributeValue, '='))),
-                     Asn(TrimU(SeparateRight(AttributeValue, '=')))
-                   ])
-                 ]));
-  result := fResultCode = LDAP_RES_COMPARE_TRUE;
+  SearchBegin(0);
 end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-search
-
-const
-  ASN1_OID_PAGEDRESULTS = '1.2.840.113556.1.4.319';
 
 function TLdapClient.Search(const BaseDN: RawUtf8; TypesOnly: boolean;
   const Filter: RawUtf8; const Attributes: array of RawUtf8): boolean;
@@ -3848,21 +4380,11 @@ function TLdapClient.SearchFmt(const BaseDN: RawUtf8; TypesOnly: boolean;
   const FilterFmt: RawUtf8; const FilterArgs: array of const;
   const Attributes: array of RawUtf8): boolean;
 begin
-  result := Search(BaseDN, TypesOnly, FormatUtf8(FilterFmt, FilterArgs), Attributes);
+  result := Search(BaseDN, TypesOnly,
+    FormatUtf8(FilterFmt, FilterArgs), Attributes);
 end;
 
-procedure TLdapClient.SearchBegin(PageSize: integer);
-begin
-  SearchCookie := '';
-  SearchPageSize := PageSize;
-end;
-
-procedure TLdapClient.SearchEnd;
-begin
-  SearchBegin(0);
-end;
-
-function TLdapClient.SearchFirst(const BaseDN: RawUtf8; Filter: RawUtf8;
+function TLdapClient.SearchFirst(const BaseDN, Filter: RawUtf8;
   const Attributes: array of RawUtf8): TLdapResult;
 begin
   result := nil;
@@ -3874,14 +4396,14 @@ end;
 function TLdapClient.SearchObject(const ObjectDN, Filter: RawUtf8;
   const Attributes: array of RawUtf8; Scope: TLdapSearchScope): TLdapResult;
 var
-  prev: TLdapSearchScope;
+  bak: TLdapSearchScope;
 begin
-  prev := SearchScope;
+  bak := SearchScope;
   try
     SearchScope := Scope;
     result := SearchFirst(ObjectDN, Filter, Attributes);
   finally
-    SearchScope := prev;
+    SearchScope := bak;
   end;
 end;
 
@@ -3894,6 +4416,15 @@ begin
   root := SearchObject(ObjectDN, Filter, [Attribute], Scope);
   if root <> nil then
     result := root.Attributes.Find(Attribute);
+end;
+
+function TLdapClient.SearchObject(Attribute: TLdapAttributeType;
+  const ObjectDN, Filter: RawUtf8; Scope: TLdapSearchScope): TLdapAttribute;
+begin
+  if Attribute = atUndefined then
+    result := nil
+  else
+    result := SearchObject(ObjectDN, Filter, AttrTypeName[Attribute], Scope);
 end;
 
 function TLdapClient.SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
@@ -3920,27 +4451,233 @@ begin
     TDocVariantData(result).SortByName(nil, {reverse=}false, {nested=}true);
 end;
 
-// https://ldap.com/ldapv3-wire-protocol-reference-extended
-function TLdapClient.Extended(const Oid, Value: RawUtf8): boolean;
+function TLdapClient.Search(const Attributes: TLdapAttributeTypes;
+  const Filter, BaseDN: RawUtf8; TypesOnly: boolean): boolean;
+begin
+  result := Search(DefaultDN(BaseDN), TypesOnly, Filter, ToText(Attributes));
+end;
+
+function TLdapClient.SearchFmt(const Attributes: TLdapAttributeTypes;
+  const FilterFmt: RawUtf8; const FilterArgs: array of const;
+  const BaseDN: RawUtf8; TypesOnly: boolean): boolean;
+begin
+  result := Search(Attributes, FormatUtf8(FilterFmt, FilterArgs), BaseDN, TypesOnly);
+end;
+
+function TLdapClient.SearchFirst(const Attributes: TLdapAttributeTypes;
+  const Filter, BaseDN: RawUtf8): TLdapResult;
+begin
+  result := SearchFirst(DefaultDN(BaseDN), Filter, ToText(Attributes));
+end;
+
+function TLdapClient.SearchFirst(const Attributes: TLdapAttributeTypes;
+  const FilterFmt: RawUtf8; const FilterArgs: array of const;
+  const BaseDN: RawUtf8): TLdapResult;
+begin
+  result := SearchFirst(Attributes, FormatUtf8(FilterFmt, FilterArgs), BaseDN);
+end;
+
+function TLdapClient.SearchObject(const Attributes: TLdapAttributeTypes;
+  const ObjectDN, Filter: RawUtf8; Scope: TLdapSearchScope): TLdapResult;
+begin
+  result := SearchObject(ObjectDN, Filter, ToText(Attributes), Scope);
+end;
+
+function TLdapClient.SearchAll(const Attributes: TLdapAttributeTypes;
+  const Filter, ObjectAttributeField, BaseDN: RawUtf8;
+  MaxCount: integer; SortByName, TypesOnly: boolean): variant;
+begin
+  result := SearchAll(DefaultDN(BaseDN), TypesOnly, Filter, ToText(Attributes),
+              ObjectAttributeField, MaxCount, SortByName);
+end;
+
+// https://ldap.com/ldapv3-wire-protocol-reference-compare
+
+function TLdapClient.Compare(const Obj, AttributeValue: RawUtf8): boolean;
+begin
+  result := false;
+  if not Connected(False) then
+    exit;
+  SendAndReceive(Asn(LDAP_ASN1_COMPARE_REQUEST, [
+                   Asn(obj),
+                   Asn(ASN1_SEQ, [
+                     Asn(TrimU(GetFirstCsvItem(AttributeValue, '='))),
+                     Asn(TrimU(SeparateRight(AttributeValue, '=')))
+                   ])
+                 ]));
+  result := fResultCode = LDAP_RES_COMPARE_TRUE;
+end;
+
+
+// **** TLdapClient write methods
+
+// https://ldap.com/ldapv3-wire-protocol-reference-add
+
+function TLdapClient.Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
 var
-  query, decoded: TAsnObject;
-  pos: integer;
+  query, sub: TAsnObject;
+  attr: TLdapAttribute;
+  i, j: PtrInt;
 begin
   result := false;
   if not Connected then
     exit;
-  query := Asn(Oid, ASN1_CTX0);
-  if Value <> '' then
-    AsnAdd(query, Asn(Value, ASN1_CTX1));
-  decoded := SendAndReceive(Asn(query, LDAP_ASN1_EXT_REQUEST));
-  result := fResultCode = LDAP_RES_SUCCESS;
-  if result then
+  for i := 0 to Value.Count - 1 do
   begin
-    pos := 1;
-    AsnNext(pos, decoded, @fExtName);
-    AsnNext(pos, decoded, @fExtValue);
+    attr := Value.Items[i];
+    sub := '';
+    for j := 0 to attr.Count - 1 do
+      AsnAdd(sub, Asn(attr.List[j]));
+    Append(query,
+      Asn(ASN1_SEQ, [
+        Asn(attr.AttributeName),
+        Asn(ASN1_SETOF, [sub])
+      ]));
+  end;
+  SendAndReceive(Asn(LDAP_ASN1_ADD_REQUEST, [
+                   Asn(obj),
+                   Asn(ASN1_SEQ, query)]));
+  result := fResultCode = LDAP_RES_SUCCESS;
+end;
+
+// https://ldap.com/ldapv3-wire-protocol-reference-modify
+
+function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+  Value: TLdapAttribute): boolean;
+var
+  values: TAsnObject;
+  i: integer;
+begin
+  for i := 0 to Value.Count -1 do
+    AsnAdd(values, Asn(Value.List[i]));
+  SendAndReceive(Asn(LDAP_ASN1_MODIFY_REQUEST, [
+                   Asn(obj),
+                   Asn(ASN1_SEQ, [
+                     Asn(ASN1_SEQ, [
+                       Asn(ord(Op), ASN1_ENUM),
+                       Asn(ASN1_SEQ, [
+                         Asn(Value.AttributeName),
+                         Asn(values, ASN1_SETOF)
+                       ])
+                     ])
+                   ])
+                 ]));
+  result := fResultCode = LDAP_RES_SUCCESS;
+end;
+
+// https://ldap.com/ldapv3-wire-protocol-reference-modify-dn
+
+function TLdapClient.ModifyDN(const obj, newRdn, newSuperior: RawUtf8;
+  DeleteOldRdn: boolean): boolean;
+var
+  query: TAsnObject;
+begin
+  result := false;
+  if not Connected then
+    exit;
+  query := Asn(obj);
+  Append(query, [Asn(newRdn), ASN1_BOOLEAN_VALUE[DeleteOldRdn]]);
+  if newSuperior <> '' then
+    AsnAdd(query, Asn(newSuperior, ASN1_CTX0));
+  SendAndReceive(Asn(query, LDAP_ASN1_MODIFYDN_REQUEST));
+  result := fResultCode = LDAP_RES_SUCCESS;
+end;
+
+// https://ldap.com/ldapv3-wire-protocol-reference-delete
+
+function TLdapClient.Delete(const Obj: RawUtf8; DeleteChildren: boolean): boolean;
+var
+  bak: TLdapSearchScope;
+  children: TRawUtf8DynArray;
+  i: PtrInt;
+begin
+  result := false;
+  if not Connected then
+    exit;
+  bak := SearchScope;
+  SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
+  if (fResultCode = LDAP_RES_NOT_ALLOWED_ON_NON_LEAF) and
+     DeleteChildren then
+    // Obj had children and DeleteChildren is True
+    try
+      SearchScope := lssSingleLevel;
+      Search([], Obj);
+      children := fSearchResult.ObjectNames;
+      for i := 0 to high(children) do
+        if not Delete(children[i], {DeleteChildren=}true) then
+          break; // stop on error
+      if fResultCode = LDAP_RES_SUCCESS then
+        // retry Obj deletion after children have been successfully removed
+        SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
+    finally
+      SearchScope := bak;
+    end;
+  result := fResultCode = LDAP_RES_SUCCESS;
+end;
+
+
+// **** TLdapClient high-level Computer methods
+
+function TLdapClient.AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
+  out ErrorMessage: RawUtf8; const Password: SpiUtf8; DeleteIfPresent: boolean;
+  UserAccount: TUserAccountControls): boolean;
+var
+  ComputerSafe, ComputerDN, ComputerSam: RawUtf8;
+  Attributes: TLdapAttributeList;
+  ComputerObject: TLdapResult;
+begin
+  result := false;
+  if not Connected or
+     not LdapEscapeName(ComputerName, ComputerSafe) then
+    exit;
+  ComputerDN := NetConcat(['CN=', ComputerSafe, ',', ComputerParentDN]);
+  ComputerSam := NetConcat([UpperCase(ComputerSafe), '$']);
+  // Search Computer object in the domain
+  ComputerObject := SearchFirst(DefaultDN,
+    FormatUtf8('(sAMAccountName=%)', [ComputerSam]), ['']);
+  // If the search failed, we exit with the error message
+  if ResultCode <> LDAP_RES_SUCCESS then
+  begin
+    FormatUtf8('AddComputer.Search failed: %', [fResultString], ErrorMessage);
+    exit;
+  end;
+  // Computer with the same sAMAccountName is already existing
+  if Assigned(ComputerObject) then
+  begin
+    result := true;
+    // We don't want to delete it
+    if not DeleteIfPresent then
+    begin
+      ErrorMessage := 'Computer is already present';
+      exit;
+    end;
+    result := Delete(ComputerObject.ObjectName);
+    // Unable to delete the computer (probably insufficient access rights)
+    if not result then
+    begin
+      FormatUtf8('AddComputer.Delete failed: %', [fResultString], ErrorMessage);
+      exit;
+    end;
+  end;
+  // Create the new computer object
+  Attributes := TLDAPAttributeList.Create;
+  try
+    Attributes.Add('objectClass', 'computer');
+    Attributes.Add('cn', ComputerSafe);
+    Attributes.Add('sAMAccountName', ComputerSam);
+    Attributes.Add('userAccountControl', UInt32ToUtf8(cardinal(UserAccount)));
+    if Password <> '' then
+      Attributes.AddUnicodePwd(Password);
+    result := Add(ComputerDN, Attributes);
+    if not result then
+      FormatUtf8('AddComputer.Add failed: %', [fResultString], ErrorMessage);
+  finally
+    Attributes.Free;
   end;
 end;
+
+
+// **** TLdapClient high-level User/Group methods
 
 const
   // https://learn.microsoft.com/en-us/windows/win32/adsi/search-filter-syntax
@@ -3989,20 +4726,40 @@ begin
 end;
 
 const
-  // TLdapObject attributes
-  LDAPOBJECT_ATTR = 'sAMAccountName,distinguishedName,name,cn,description,' +
-    'objectSid,objectGUID,whenCreated,whenChanged';
+  // TLdapObject attributes, common to TLdapGroup and TLdapUser
+  LDAPOBJECT_ATTR = [
+    atSAMAccountName,
+    atDistinguishedName,
+    atName,
+    atCommonName,
+    atDescription,
+    atObjectSid,
+    atObjectGuid,
+    atWhenCreated,
+    atWhenChanged];
+  LDAPGROUP_ATTR = LDAPOBJECT_ATTR + [
+    atGroupType];
+  LDAPUSER_ATTR  = LDAPOBJECT_ATTR + [
+    atUserPrincipalName,
+    atDisplayName,
+    atMail,
+    atPwdLastSet,
+    atLastLogon,
+    atUserAccountControl,
+    atPrimaryGroupID];
 
 function TLdapClient.GetGroupInfo(const AN, DN: RawUtf8;
   out Info: TLdapGroup; const BaseDN: RawUtf8; WithMember: boolean;
   const CustomAttributes: TRawUtf8DynArray): boolean;
 var
   attr: TRawUtf8DynArray;
+  attrs: TLdapAttributeTypes;
 begin
   FastRecordClear(@Info, TypeInfo(TLdapGroup));
-  attr := CsvToRawUtf8DynArray(LDAPOBJECT_ATTR + ',groupType');
+  attrs := LDAPGROUP_ATTR;
   if WithMember then
-    AddRawUtf8(attr, 'member');
+    include(attrs, atMember);
+  attr := ToText(attrs);
   AddRawUtf8(attr, CustomAttributes);
   result := Search(DefaultDN(BaseDN), false,
               InfoFilter(AT_GROUP, AN, DN, '', ''), attr) and
@@ -4013,10 +4770,9 @@ end;
 
 function TLdapClient.GetGroupDN(const AN, BaseDN, CustomFilter: RawUtf8): RawUtf8;
 begin
-  if Search(DefaultDN(BaseDN), false,
-       InfoFilter(AT_GROUP, AN, '', '', CustomFilter), ['distinguishedName']) and
+  if Search([atDistinguishedName], InfoFilter(AT_GROUP, AN, '', '', CustomFilter)) and
      (SearchResult.Count = 1) then
-    result := SearchResult.Items[0].Attributes.Get('distinguishedName')
+    result := SearchResult.Items[0].Attributes.Get(atDistinguishedName)
   else
     result := '';
 end;
@@ -4027,11 +4783,10 @@ var
   last: RawUtf8;
 begin
   result := false;
-  if Search(DefaultDN(BaseDN), false,
-       InfoFilter(AT_GROUP, AN, DN, '', CustomFilter), ['objectSid']) and
+  if Search([atObjectSid], InfoFilter(AT_GROUP, AN, DN, '', CustomFilter)) and
      (SearchResult.Count = 1) then
   begin
-    last := SplitRight(SearchResult.Items[0].Attributes.Get('objectSid'), '-');
+    last := SplitRight(SearchResult.Items[0].Attributes.Get(atObjectSid), '-');
     result := (last <> '') and
               ToCardinal(last, PrimaryGroupID);
   end;
@@ -4042,12 +4797,13 @@ function TLdapClient.GetUserInfo(const AN, DN, UPN: RawUtf8;
   const CustomAttributes: TRawUtf8DynArray): boolean;
 var
   attr: TRawUtf8DynArray;
+  attrs: TLdapAttributeTypes;
 begin
   FastRecordClear(@Info, TypeInfo(TLdapUser));
-  attr := CsvToRawUtf8DynArray(LDAPOBJECT_ATTR + ',userPrincipalName,' +
-    'displayName,mail,pwdLastSet,lastLogon,userAccountControl,primaryGroupID');
+  attrs := LDAPUSER_ATTR;
   if WithMemberOf then
-    AddRawUtf8(attr, 'memberOf');
+    include(attrs, atMemberOf);
+  attr := ToText(attrs);
   AddRawUtf8(attr, CustomAttributes);
   result := Search(DefaultDN(BaseDN), false,
               InfoFilter(AT_USER, AN, DN, UPN, ''), attr) and
@@ -4059,17 +4815,16 @@ end;
 function TLdapClient.GetUserDN(const AN, UPN, BaseDN, CustomFilter: RawUtf8;
   PrimaryGroupID: PCardinal; ObjectSid: PRawUtf8): RawUtf8;
 begin
-  if Search(DefaultDN(BaseDN), false,
-       InfoFilter(AT_USER, AN, '', UPN, CustomFilter),
-       ['distinguishedName', 'primaryGroupID', 'objectSid']) and
+  if Search([atDistinguishedName, atPrimaryGroupID, atObjectSid],
+       InfoFilter(AT_USER, AN, '', UPN, CustomFilter)) and
      (SearchResult.Count = 1) then
     with SearchResult.Items[0].Attributes do
     begin
-      result := Get('distinguishedName');
+      result := Get(atDistinguishedName);
       if PrimaryGroupID <> nil then
-        ToCardinal(Get('primaryGroupID'), PrimaryGroupID^);
+        ToCardinal(Get(atPrimaryGroupID), PrimaryGroupID^);
       if ObjectSid <> nil then
-        ObjectSid^ := Get('objectSid');
+        ObjectSid^ := Get(atObjectSid);
     end
     else
       result := '';
@@ -4117,111 +4872,44 @@ begin
     filter := FormatUtf8('(|%)', [filter]); // OR operator
   filter := FormatUtf8('(&(sAMAccountType=%)%%(member%=%))',
     [AT_GROUP, filter, CustomFilter, NESTED_FLAG[Nested], user]);
-  if Search(DefaultDN(BaseDN), false, filter, ['sAMAccountName']) and
+  if Search([atSAMAccountName], filter) and
      (SearchResult.Count > 0) then
   begin
     if GroupsAN <> nil then
-      GroupsAN^ := SearchResult.ObjectAttributes('sAMAccountName');
+      GroupsAN^ := SearchResult.ObjectAttributes(atSAMAccountName);
     result := true;
   end;
 end;
 
-function TLdapClient.Connected(AndBound: boolean): boolean;
-begin
-  result := fSock.SockConnected;
-  if result and
-     AndBound then
-    result := fBound;
-end;
-
-function TLdapClient.Transmission: TLdapClientTransmission;
-begin
-  if (self = nil) or
-     not fSock.SockConnected then
-    result := lctNone
-  else if fSettings.Tls or
-          fSecContextEncrypt then
-    result := lctEncrypted
-  else
-    result := lctPlain;
-end;
-
-function TLdapClient.RetrieveWellKnownObjects(const DN: RawUtf8;
-  out Dual: TLdapKnownCommonNamesDual): boolean;
+function TLdapClient.ExtModifyUserPassword(const UserDN: RawUtf8;
+  const OldPassword, NewPassword: SpiUtf8): SpiUtf8;
 var
-  tmp: TRawUtf8DynArray;
-  i: PtrInt;
-
-  function One(const guid: RawUtf8): RawUtf8;
-  var
-    i: PtrInt;
-    p: PUtf8Char;
-  begin
-    for i := 0 to high(tmp) do
-    begin
-      p := pointer(tmp[i]);
-      if (p <> nil) and
-         NetStartWith(p + 5, pointer(guid)) then
-        begin
-          result := copy(tmp[i], Length(guid) + 7, MaxInt);
-          tmp[i] := ''; // no need to search this one any more
-          exit;
-        end;
-    end;
-    result := '';
-  end;
-
+  req, v: TAsnObject;
+  pos: integer;
 begin
-  result := false;
-  if not Connected or
-     (DN = '') then
+  // the RFC states that ASN1_OID_PASSWDMODIFY supportedExtension SHOULD be
+  // verified in server root DSE - but OpenLDAP does not have this list
+  // and this OID is not listed on MSAD :(
+  result := '';
+  if UserDN = '' then
     exit;
-  tmp := SearchObject(DN, '', 'wellKnownObjects').GetAllReadable;
-  if tmp = nil then
-    exit;
-  result := true;
-  for i := 0 to high(tmp) do
-    if not NetStartWith(pointer(tmp[i]), 'B:32:') then
-      tmp[i] := '';
-  with Dual[{asCN=}false] do
-  begin
-    Computers                 := One(LDAP_GUID_COMPUTERS);
-    DeletedObjects            := One(LDAP_GUID_DELETED_OBJECTS);
-    DomainControllers         := One(LDAP_GUID_DOMAIN_CONTROLLERS);
-    ForeignSecurityPrincipals := One(LDAP_GUID_FOREIGNSECURITYPRINCIPALS);
-    Infrastructure            := One(LDAP_GUID_INFRASTRUCTURE);
-    LostAndFound              := One(LDAP_GUID_LOSTANDFOUND);
-    MicrosoftProgramData      := One(LDAP_GUID_MICROSOFT_PROGRAM_DATA);
-    NtdsQuotas                := One(LDAP_GUID_NTDS_QUOTAS);
-    ProgramData               := One(LDAP_GUID_PROGRAM_DATA);
-    Systems                   := One(LDAP_GUID_SYSTEMS);
-    Users                     := One(LDAP_GUID_USERS);
-    ManagedServiceAccounts    := One(LDAP_GUID_MANAGED_SERVICE_ACCOUNTS);
-  end;
-  with Dual[{asCN=}true] do
-  begin
-    Computers                 := DNToCn(Dual[false].Computers);
-    DeletedObjects            := DNToCn(Dual[false].DeletedObjects);
-    DomainControllers         := DNToCn(Dual[false].DomainControllers);
-    ForeignSecurityPrincipals := DNToCn(Dual[false].ForeignSecurityPrincipals);
-    Infrastructure            := DNToCn(Dual[false].Infrastructure);
-    LostAndFound              := DNToCn(Dual[false].LostAndFound);
-    MicrosoftProgramData      := DNToCn(Dual[false].MicrosoftProgramData);
-    NtdsQuotas                := DNToCn(Dual[false].NtdsQuotas);
-    ProgramData               := DNToCn(Dual[false].ProgramData);
-    Systems                   := DNToCn(Dual[false].Systems);
-    Users                     := DNToCn(Dual[false].Users);
-    ManagedServiceAccounts    := DNToCn(Dual[false].ManagedServiceAccounts);
-  end;
+  if Transmission <> lctEncrypted then
+    ELdap.RaiseUtf8('%.ModifyUserPassword requires encryption', [self]);
+  if BoundUser = '' then
+    ELdap.RaiseUtf8('%.ModifyUserPassword cannot be anonymous', [self]);
+  req := Asn(UserDN, ASN1_CTX0);
+  if OldPassword <> '' then
+    Append(req, Asn(OldPassword, ASN1_CTX1));
+  if NewPassword <> '' then
+    Append(req, Asn(NewPassword, ASN1_CTX2));
+  pos := 1;
+  if Extended(ASN1_OID_PASSWDMODIFY, Asn(ASN1_SEQ, [req]), nil, @v) then
+    if NewPassword <> '' then
+      result := NewPassword     // password supplied by the client
+    else if AsnNext(pos, v) = ASN1_SEQ then
+      AsnNext(pos, v, @result); // password generated by the server
 end;
 
-function TLdapClient.WellKnownObjects(AsCN: boolean): PLdapKnownCommonNames;
-begin
-  if not fWellKnownObjectsCached then
-    if RetrieveWellKnownObjects(DefaultDN, fWellKnownObjects) then
-        fWellKnownObjectsCached := true;
-  result := @fWellKnownObjects[AsCN];
-end;
 
 
 { TLdapCheckMember }
@@ -4622,6 +5310,7 @@ end;
 
 
 initialization
+  InitializeUnit;
   assert((1 shl ord(uacPartialSecretsRodc)) = $04000000);
 
 end.

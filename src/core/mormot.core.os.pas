@@ -94,6 +94,39 @@ const
     fmCreateShared,
     fmOpenWriteShared);
 
+type
+  /// the available HTTP methods transmitted between client and server
+  // - remote ORM supports non-standard mLOCK/mUNLOCK/mABORT/mSTATE verbs
+  // - not all IANA verbs are available, because our TRestRouter will only
+  // support mGET .. mOPTIONS verbs anyway
+  // - for basic CRUD operations, we consider Create=mPOST, Read=mGET,
+  // Update=mPUT and Delete=mDELETE - even if it is not fully RESTful
+  TUriMethod = (
+    mNone,
+    mGET,
+    mPOST,
+    mPUT,
+    mDELETE,
+    mHEAD,
+    mBEGIN,
+    mEND,
+    mABORT,
+    mLOCK,
+    mUNLOCK,
+    mSTATE,
+    mPATCH,
+    mOPTIONS);
+
+  /// set of available HTTP methods transmitted between client and server
+  TUriMethods = set of TUriMethod;
+
+/// convert a string HTTP verb into its TUriMethod enumerate
+// - conversion is case-insensitive
+function ToMethod(const method: RawUtf8): TUriMethod;
+
+/// convert a TUriMethod enumerate to its #0 terminated uppercase text
+function ToText(m: TUriMethod): PUtf8Char; overload;
+
 const
   /// void HTTP Status Code (not a standard value, for internal use only)
   HTTP_NONE = 0;
@@ -202,7 +235,6 @@ function StatusCodeIsSuccess(Code: integer): boolean;
 /// check the supplied HTTP header to not contain more than one EOL
 // - to avoid unexpected HTTP body injection, e.g. from unsafe business code
 function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
-
 
 const
   /// HTTP header name for the content type, as defined in the corresponding RFC
@@ -359,10 +391,10 @@ type
   // - this definition is not detailed on oldest Delphi, and not available on
   // POSIX, whereas it makes sense to also have it, e.g. for server process
   TSid = packed record
-     Revision: byte;
-     SubAuthorityCount: byte;
-     IdentifierAuthority: TSidAuth;
-     SubAuthority: array[byte] of cardinal;
+    Revision: byte;
+    SubAuthorityCount: byte;
+    IdentifierAuthority: TSidAuth;
+    SubAuthority: array[byte] of cardinal;
   end;
   PSid = ^TSid;
   PSids = array of PSid;
@@ -1085,27 +1117,7 @@ const
   // - e.g. 'Delphi 10.3 Rio', 'Delphi 2010' or 'Free Pascal 3.3.1'
   COMPILER_VERSION: RawUtf8 =
   {$ifdef FPC}
-    'Free Pascal'
-    {$ifdef VER2_6_4} + ' 2.6.4'{$endif}
-    {$ifdef VER3_0}   + ' 3.0'
-      {$ifdef VER3_0_4}   + '.4' {$else}
-        {$ifdef VER3_0_2} + '.2' {$endif}
-      {$endif VER3_0_4}
-    {$endif VER3_0}
-    {$ifdef VER3_1}   + ' 3.1'
-       {$ifdef VER3_1_1} + '.1' {$endif}
-    {$endif VER3_1}
-    {$ifdef VER3_2}   + ' 3.2'
-      {$ifdef VER3_2_4}     + '.4' {$else}
-        {$ifdef VER3_2_3}   + '.3' {$else}
-          {$ifdef VER3_2_2} + '.2' {$endif}
-        {$endif VER3_2_3}
-      {$endif VER3_2_4}
-    {$endif VER3_2}
-    {$ifdef VER3_3}   + ' 3.3'
-       {$ifdef VER3_3_1} + '.1' {$endif}
-    {$endif VER3_3}
-    {$ifdef VER3_4}   + ' 3.4'  {$endif}
+    'Free Pascal ' + {$I %FPCVERSION%}
   {$else}
     'Delphi'
     {$if     defined(VER140)} + ' 6'
@@ -1234,8 +1246,6 @@ var
   // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
   SystemMemorySize: PtrUInt;
 
-{$M+} // to have existing RTTI for published properties
-
 type
   /// used to retrieve version information from any EXE
   // - under Linux, all version numbers are set to 0 by default, unless
@@ -1244,7 +1254,7 @@ type
   // - for the main executable, do not create once instance of this class, but
   // call GetExecutableVersion / SetExecutableVersion and access the Executable
   // global variable
-  TFileVersion = class
+  TFileVersion = class(TObjectWithProps)
   protected
     fDetailed: string;
     fFileName: TFileName;
@@ -1293,7 +1303,7 @@ type
     // GetExecutableVersion / SetExecutableVersion and access the Executable
     // global variable
     constructor Create(const aFileName: TFileName; aMajor: integer = 0;
-      aMinor: integer = 0; aRelease: integer = 0; aBuild: integer = 0);
+      aMinor: integer = 0; aRelease: integer = 0; aBuild: integer = 0); reintroduce;
     /// open and extract file information from the executable FileName
     // - note that resource extraction is not available on POSIX, unless the
     // FPCUSEVERSIONINFO conditional has been specified in the project options
@@ -1333,12 +1343,14 @@ type
       read fBuildDateTime write fBuildDateTime;
   end;
 
-{$M-}
-
 /// quickly parse the TFileVersion.UserAgent content
 // - identify e.g. 'myprogram/3.1.0.2W' or 'myprogram/3.1.0.2W32' text
 function UserAgentParse(const UserAgent: RawUtf8;
   out ProgramName, ProgramVersion: RawUtf8; out OS: TOperatingSystem): boolean;
+
+/// detect any & character, and extract it as part of the result array
+// - e.g. UnAmp('alter&nate') returns ['n', 'alternate']
+function UnAmp(const name: RawUtf8): TRawUtf8DynArray;
 
 type
   /// the command line switches supported by TExecutableCommandLine
@@ -1365,7 +1377,7 @@ type
     fDescArg: TRawUtf8DynArray;
     fCaseSensitiveNames: boolean;
     fSwitch: array[{long=}boolean] of RawUtf8;
-    fLineFeed, fExeDescription: RawUtf8;
+    fLineFeed, fExeDescription, fUnknown: RawUtf8;
     procedure Describe(const v: array of RawUtf8;
       k: TExecutableCommandLineKind; d, def: RawUtf8; argindex: integer);
     function Find(const v: array of RawUtf8;
@@ -1373,33 +1385,58 @@ type
       const def: RawUtf8 = ''; f: PtrInt = 0): PtrInt;
   public
     /// mark and describe an "arg" value by 0-based index in Args[]
+    // - if true, you can access the value from Args[index]
     function Arg(index: integer; const description: RawUtf8 = '';
       optional: boolean = true): boolean; overload;
+    /// mark and describe an "arg" value by 0-based index in Args[]
+    // - if existing, returns the value from Args[index] - otherwise returns ''
+    function ArgU(index: integer; const description: RawUtf8 = '';
+      optional: boolean = true): RawUtf8;
     /// mark and describe a string/TFileName "arg" value by 0-based index in Args[]
+    // - if existing, returns Args[index] as string - otherwise returns ''
     function ArgString(index: integer; const description: RawUtf8 = '';
       optional: boolean = true): string;
+    /// mark and describe an existing TFileName "arg" value by 0-based index in Args[]
+    // - if set, will fail in DetectUnknown if the file (or the folder) does not
+    // exist, or returns Args[index] file/folder name as string
+    function ArgFile(index: integer; const description: RawUtf8 = '';
+      optional: boolean = true; isFolder: boolean = false): TFileName;
+    /// will fail in DetectUnknown if the file or folder name does not exist
+    // - also calls and return ExpandFileName() on the supplied file or folder name
+    function CheckFileName(const name: TFileName; isFolder: boolean = false): TFileName;
     /// mark and describe an "arg" value in Args[]
+    // - e.g. returns true if the name appears in Args[]
     function Arg(const name: RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
     /// mark and describe or or several "arg" value(s) in Args[]
+    // - e.g. returns true if any of the name(s) appears in Args[]
     function Arg(const name: array of RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
-    /// search for "-optionname" switches in Options[]
+    /// search for a -xxxx switch in Options[]
+    // - returns true if '-name' or '--name' or '/name' do appear
+    // - if name contains a & character, will also register the following char,
+    // e.g. Option('&concise') is the same as Option(['c', 'concise'])
     function Option(const name: RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
-    /// search for "-optionname" switches in Options[]
+    /// search for one or severl -xxxx switches in Options[]
+    // - returns true if any '-name' or '--name' or '/name' do appear
     function Option(const name: array of RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
     /// search for "-parametername" and return its RawUtf8 "parametervalue"
+    // - returns true if '-name' or '--name' or '/name' do appear with a value
+    // - if name contains a & character, will also register the following char,
+    // e.g. Get('&concise') is the same as Get(['c', 'concise'])
     function Get(const name: RawUtf8; out value: RawUtf8;
       const description: RawUtf8 = ''; const default: RawUtf8 = ''): boolean; overload;
     /// search for "-parametername" and return its RawUtf8 "parametervalue"
+    // - returns true if any '-name' or '--name' or '/name' do appear with a value
     function Get(const name: array of RawUtf8; out value: RawUtf8;
       const description: RawUtf8 = ''; const default: RawUtf8 = ''): boolean; overload;
     /// search for "-parametername" and return all RawUtf8 "parametervalue" occurrences
     function Get(const name: array of RawUtf8; out value: TRawUtf8DynArray;
       const description: RawUtf8 = ''): boolean; overload;
     /// search for "-parametername" and return its plain string "parametervalue"
+    // - if name contains a & character, will also register the following char
     function Get(const name: RawUtf8; out value: string;
       const description: RawUtf8 = ''; const default: string = ''): boolean; overload;
     /// search for "-parametername" and return all string "parametervalue" occurrences
@@ -1409,15 +1446,18 @@ type
     function Get(const name: array of RawUtf8; out value: string;
       const description: RawUtf8 = ''; const default: string = ''): boolean; overload;
     /// search for "-parametername" and return all string "parametervalue" occurrences
+    // - if name contains a & character, will also register the following char
     function Get(const name: RawUtf8; out value: TStringDynArray;
       const description: RawUtf8 = ''): boolean; overload;
     /// search for "-parametername" and return its integer "parametervalue"
+    // - if name contains a & character, will also register the following char
     function Get(const name: RawUtf8; out value: integer;
       const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
     /// search for "-parametername" and return its integer "parametervalue"
     function Get(const name: array of RawUtf8; out value: integer;
       const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
     /// search for "-parametername" and return its integer "parametervalue"
+    // - if name contains a & character, will also register the following char
     function Get(const name: RawUtf8; min, max: integer; out value: integer;
       const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
     /// search for "-parametername" and return its integer "parametervalue"
@@ -1425,10 +1465,12 @@ type
       out value: integer; const description: RawUtf8 = '';
       default: integer = -1): boolean; overload;
     /// search for "-parametername" parameter in Names[]
+    // - if name contains a & character, will also search the following char
     function Has(const name: RawUtf8): boolean; overload;
     /// search for "-parametername" parameter in Names[]
     function Has(const name: array of RawUtf8): boolean; overload;
     /// search for "-parametername" and return '' or its RawUtf8 "parametervalue"
+    // - if name contains a & character, will also register the following char
     function Param(const name: RawUtf8; const description: RawUtf8 = '';
       const default: RawUtf8 = ''): RawUtf8; overload;
     /// search for "-parametername" and return '' or its string "parametervalue"
@@ -1438,6 +1480,7 @@ type
     function Param(const name: array of RawUtf8; const description: RawUtf8 = '';
       const default: RawUtf8 = ''): RawUtf8; overload;
     /// search for "-parametername" and return its integer "parametervalue" or default
+    // - if name contains a & character, will also register the following char
     function Param(const name: RawUtf8; default: integer;
       const description: RawUtf8 = ''): integer; overload;
     /// search for "-parametername" and return its integer "parametervalue" or default
@@ -1448,10 +1491,10 @@ type
     // - the parameter <name> would be extracted from any #word in the
     // description text,
     // - for instance:
-    // ! with Executable.Command do
+    // ! with Executable.Command do // you may better use a local variable
     // ! begin
     // !   ExeDescription := 'An executable to test mORMot Execute.Command';
-    // !   verbose := Option(['v', 'verbose'], 'generate verbose output');
+    // !   verbose := Option('&verbose', 'generate verbose output');
     // !   Get(['t', 'threads'], threads, '#number of threads to run', 5);
     // !   ConsoleWrite(FullDescription);
     // ! end;
@@ -1613,7 +1656,6 @@ var
   // - this unit will include a simple parser of /sys/class/net/* for Linux only
   // - as used e.g. by GetComputerUuid() fallback if SMBIOS is not available
   GetSystemMacAddress: function: TRawUtf8DynArray;
-
 
 type
   /// identify an operating system folder for GetSystemPath()
@@ -4869,13 +4911,13 @@ type
   // - only limitation is that we don't know if WaitFor is signaled or timeout,
   // but this is not a real problem in practice since most code don't need this
   // information or has already its own flag in its implementation logic
-  TSynEvent = class
+  TSynEvent = class(TObjectWithProps)
   protected
     fHandle: pointer; // Windows THandle or FPC PRTLEvent
     fFD: integer;     // for eventfd()
   public
     /// initialize an instance of cross-platform event
-    constructor Create;
+    constructor Create; override;
     /// finalize this instance of cross-platform event
     destructor Destroy; override;
     /// ignore any pending events, so that WaitFor will be set on next SetEvent
@@ -4906,18 +4948,16 @@ type
 function NewSynLocker: PSynLocker;
 
 type
-  {$M+}
-
   /// a persistent-agnostic alternative to TSynPersistentLock
   // - can be used as base class when custom JSON persistence is not needed
   // - consider a TRWLock field as a lighter multi read / exclusive write option
-  TSynLocked = class
+  TSynLocked = class(TObjectWithProps)
   protected
     fSafe: PSynLocker; // TSynLocker would increase inherited fields offset
   public
     /// initialize the instance, and its associated lock
     // - is defined as virtual, just like TObjectWithCustomCreate/TSynPersistent
-    constructor Create; virtual;
+    constructor Create; override;
     /// finalize the instance, and its associated lock
     destructor Destroy; override;
     /// access to the associated instance critical section
@@ -4925,11 +4965,6 @@ type
     property Safe: PSynLocker
       read fSafe;
   end;
-
-  {$M-}
-
-  /// meta-class definition of the TSynLocked hierarchy
-  TSynLockedClass = class of TSynLocked;
 
   /// a thread-safe Pierre L'Ecuyer software random generator
   // - just wrap TLecuyer with a TLighLock
@@ -5452,9 +5487,7 @@ type
       const Dependencies: RawUtf8 = '');
   end;
 
-  {$M+}
   TService = class;
-  {$M-}
 
   /// callback procedure for Windows Service Controller
   TServiceControlHandler = procedure(CtrlCode: cardinal); stdcall;
@@ -5467,7 +5500,7 @@ type
 
   /// abstract class to let an executable implement a Windows Service
   // - do not use this class directly, but TServiceSingle
-  TService = class
+  TService = class(TObjectWithProps)
   protected
     fServiceName: RawUtf8;
     fDisplayName: RawUtf8;
@@ -5896,6 +5929,47 @@ implementation
 
 
 { ****************** Some Cross-System Type and Constant Definitions }
+
+const
+  // sorted by occurrence for in-order O(n) search via IntegerScanIndex()
+  METHODNAME: array[TUriMethod] of PUtf8Char = (
+    'GET',
+    'POST',
+    'PUT',
+    'DELETE',
+    'HEAD',
+    'BEGIN',
+    'END',
+    'ABORT',
+    'LOCK',
+    'UNLOCK',
+    'STATE',
+    'PATCH',
+    'OPTIONS',
+    '');
+var
+  // quick O(n) search of the first 4 characters within L1 cache (56 bytes)
+  METHODNAME32: array[TUriMethod] of cardinal;
+
+function ToMethod(const method: RawUtf8): TUriMethod;
+begin
+  case length(method) of
+    3 .. 7:
+      result := TUriMethod(IntegerScanIndex(@METHODNAME32, length(METHODNAME32) - 1,
+        (PCardinal(method)^) and $dfdfdfdf) + 1);
+  else
+    result := mNone;
+  end;
+end;
+
+function ToText(m: TUriMethod): PUtf8Char;
+begin
+  dec(m); // METHODNAME[] has no mNone entry
+  if cardinal(m) < cardinal(ord(high(METHODNAME))) then
+    result := METHODNAME[m]
+  else
+    result := nil;
+end;
 
 const
   // StatusCodeToReason() StatusCodeToText() table to avoid memory allocations
@@ -8722,12 +8796,45 @@ begin
   Describe([], clkArg, description, '', index + 1);
 end;
 
+function TExecutableCommandLine.ArgU(index: integer; const description: RawUtf8;
+  optional: boolean): RawUtf8;
+begin
+  result := '';
+  if Arg(index, description, optional) then
+    result := Args[index];
+end;
+
 function TExecutableCommandLine.ArgString(index: integer;
   const description: RawUtf8; optional: boolean): string;
 begin
   result := '';
   if Arg(index, description, optional) then
-    result := string(Args[0]);
+    result := string(Args[index]);
+end;
+
+function TExecutableCommandLine.ArgFile(index: integer;
+  const description: RawUtf8; optional, isFolder: boolean): TFileName;
+begin
+  result := ArgString(index, description, optional);
+  if result <> '' then
+    result := CheckFileName(result, isFolder);
+end;
+
+const
+  FD: array[boolean] of string[7] = ('File', 'Folder');
+
+function TExecutableCommandLine.CheckFileName(const name: TFileName;
+  isFolder: boolean): TFileName;
+begin
+  result := ExpandFileName(name);
+  if isFolder then
+  begin
+    if DirectoryExists(result) then
+      exit;
+  end
+  else if FileExists(result) then
+    exit;
+  _fmt('%s%s %s does not exist%s', [fUnknown, FD[isFolder], result, fLineFeed], fUnknown);
 end;
 
 function TExecutableCommandLine.Arg(const name, description: RawUtf8): boolean;
@@ -8741,9 +8848,23 @@ begin
   result := Find(name, clkArg, description) >= 0;
 end;
 
+function UnAmp(const name: RawUtf8): TRawUtf8DynArray;
+var
+  i: PtrInt;
+begin
+  i := PosExChar('&', name);
+  SetLength(result, ord(i <> 0) + 1);
+  result[0] := name;
+  if i = 0 then
+    exit;
+  delete(result[0], i, 1);
+  result[1] := result[0]; // &# char first
+  result[0] := copy(name, i + 1, 1);
+end;
+
 function TExecutableCommandLine.Option(const name, description: RawUtf8): boolean;
 begin
-  result := Find([name], clkOption, description) >= 0;
+  result := Find(UnAmp(name), clkOption, description) >= 0
 end;
 
 function TExecutableCommandLine.Option(const name: array of RawUtf8;
@@ -8755,7 +8876,7 @@ end;
 function TExecutableCommandLine.Get(const name: RawUtf8; out value: RawUtf8;
   const description, default: RawUtf8): boolean;
 begin
-  result := Get([name], value, description, default);
+  result := Get(UnAmp(name), value, description, default);
 end;
 
 procedure AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
@@ -8811,7 +8932,7 @@ end;
 function TExecutableCommandLine.Get(const name: RawUtf8; out value: string;
   const description: RawUtf8; const default: string): boolean;
 begin
-  result := Get([name], value, description, default);
+  result := Get(UnAmp(name), value, description, default);
 end;
 
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
@@ -8829,7 +8950,7 @@ end;
 function TExecutableCommandLine.Get(const name: RawUtf8;
   out value: TStringDynarray; const description: RawUtf8): boolean;
 begin
-  result := Get([name], value, description);
+  result := Get(UnAmp(name), value, description);
 end;
 
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
@@ -8847,7 +8968,7 @@ end;
 function TExecutableCommandLine.Get(const name: RawUtf8;
   out value: integer; const description: RawUtf8; default: integer): boolean;
 begin
-  result := Get([name], value, description, default);
+  result := Get(UnAmp(name), value, description, default);
 end;
 
 function defI(default: integer): RawUtf8;
@@ -8877,7 +8998,7 @@ end;
 function TExecutableCommandLine.Get(const name: RawUtf8; min, max: integer;
   out value: integer; const description: RawUtf8; default: integer): boolean;
 begin
-  result := Get([name], min, max, value, description, default);
+  result := Get(UnAmp(name), min, max, value, description, default);
 end;
 
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
@@ -8891,7 +9012,7 @@ end;
 
 function TExecutableCommandLine.Has(const name: RawUtf8): boolean;
 begin
-  result := Find([name], clkParam) >= 0;
+  result := Find(UnAmp(name), clkParam) >= 0;
 end;
 
 function TExecutableCommandLine.Has(const name: array of RawUtf8): boolean;
@@ -8902,7 +9023,7 @@ end;
 function TExecutableCommandLine.Param(
   const name, description, default: RawUtf8): RawUtf8;
 begin
-  Get([name], result, description, default);
+  Get(UnAmp(name), result, description, default);
 end;
 
 function TExecutableCommandLine.Param(const name: array of RawUtf8;
@@ -8920,7 +9041,7 @@ end;
 function TExecutableCommandLine.Param(const name: RawUtf8;
   default: integer; const description: RawUtf8): integer;
 begin
-  Get([name], result, description, default);
+  Get(UnAmp(name), result, description, default);
 end;
 
 function TExecutableCommandLine.Param(const name: array of RawUtf8;
@@ -8972,7 +9093,7 @@ var
   clk: TExecutableCommandLineKind;
   i: PtrInt;
 begin
-  result := '';
+  result := fUnknown;
   for clk := low(fRetrieved) to high(fRetrieved) do
     for i := 0 to length(fRetrieved[clk]) - 1 do
       if not fRetrieved[clk][i] then
@@ -11042,6 +11163,8 @@ end;
 
 
 procedure InitializeUnit;
+var
+  m: TUriMethod;
 begin
   {$ifdef ISFPC27}
   SetMultiByteConversionCodePage(CP_UTF8);
@@ -11061,6 +11184,8 @@ begin
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
+  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
+    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
   // minimal stubs which will be properly implemented in mormot.core.log.pas
   GetExecutableLocation := _GetExecutableLocation;
   SetThreadName := _SetThreadName;

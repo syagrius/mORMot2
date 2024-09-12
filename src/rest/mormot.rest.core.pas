@@ -1263,31 +1263,6 @@ type
 { ************ TRestUriContext REST Parent Process on Server Side }
 
 type
-  /// the available HTTP methods transmitted between client and server
-  // - remote ORM supports non-standard mLOCK/mUNLOCK/mABORT/mSTATE verbs
-  // - not all IANA verbs are available, because TRestRouter will only
-  // support mGET .. mOPTIONS verbs anyway
-  // - for basic CRUD operations, we consider Create=mPOST, Read=mGET,
-  // Update=mPUT and Delete=mDELETE - even if it is not fully RESTful
-  TUriMethod = (
-    mNone,
-    mGET,
-    mPOST,
-    mPUT,
-    mDELETE,
-    mHEAD,
-    mBEGIN,
-    mEND,
-    mABORT,
-    mLOCK,
-    mUNLOCK,
-    mSTATE,
-    mPATCH,
-    mOPTIONS);
-
-  /// set of available HTTP methods transmitted between client and server
-  TUriMethods = set of TUriMethod;
-
   /// used by TRestUriContext.ClientKind to identify the currently
   // connected client
   TRestClientKind = (
@@ -1524,14 +1499,6 @@ type
   end;
 
 
-/// convert a string HTTP verb into its TUriMethod enumerate
-// - conversion is case-insensitive
-function ToMethod(const method: RawUtf8): TUriMethod;
-  {$ifdef FPC}inline;{$endif}
-
-/// convert a TUriMethod enumerate to its #0 terminated uppercase text
-function ToText(m: TUriMethod): PUtf8Char; overload;
-
 
 {$ifndef PUREMORMOT2}
 type
@@ -1545,7 +1512,6 @@ type
 { ************ TRestThread Background Process of a REST instance }
 
 type
-  {$M+}
   /// a simple TThread for doing some process within the context of a REST instance
   // - inherited classes should override InternalExecute abstract method
   TRestThread = class(TThreadAbstract)
@@ -1602,7 +1568,6 @@ type
     property Executing: boolean
       read fExecuting;
   end;
-  {$M-}
 
 
 
@@ -3732,46 +3697,6 @@ end;
 
 { ************ TRestUriContext REST Parent Process on Server Side }
 
-const
-  // sorted by occurrence for in-order O(n) search via IntegerScanIndex()
-  METHODNAME: array[TUriMethod] of PUtf8Char = (
-    'GET',
-    'POST',
-    'PUT',
-    'DELETE',
-    'HEAD',
-    'BEGIN',
-    'END',
-    'ABORT',
-    'LOCK',
-    'UNLOCK',
-    'STATE',
-    'PATCH',
-    'OPTIONS',
-    '');
-var
-  // quick O(n) search of the first 4 characters within L1 cache (56 bytes)
-  METHODNAME32: array[TUriMethod] of cardinal;
-
-function ToMethod(const method: RawUtf8): TUriMethod;
-begin
-  if length(method) < 3 then
-    result := mNone
-  else
-    result := TUriMethod(IntegerScanIndex(@METHODNAME32, length(METHODNAME32) - 1,
-      (PCardinal(method)^) and $dfdfdfdf) + 1);
-end;
-
-function ToText(m: TUriMethod): PUtf8Char;
-begin
-  dec(m); // METHODNAME[] has no mNone entry
-  if cardinal(m) < cardinal(ord(high(METHODNAME))) then
-    result := METHODNAME[m]
-  else
-    result := nil;
-end;
-
-
 { TRestUriContext }
 
 function TRestUriContext.GetUserAgent: RawUtf8;
@@ -4886,12 +4811,8 @@ begin
 end;
 
 procedure InitializeUnit;
-var
-  m: TUriMethod;
 begin
   DefaultTAuthGroupClass := TAuthGroup;
-  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
-    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
 end;
 
 initialization

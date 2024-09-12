@@ -132,7 +132,6 @@ type
 type
   /// the supported authentication schemes which may be used by HTTP clients
   // - supported only by TWinHttp class yet, and TCurlHttp
-  // - wraBearer is only supported by TCurlHttp
   THttpRequestAuthentication = (
     wraNone,
     wraBasic,
@@ -148,30 +147,47 @@ type
   {$else}
   THttpRequestExtendedOptions = object
   {$endif USERECORDWITHMETHODS}
+  private
+    procedure AuthorizeUserPassword(const UserName, Password: RawUtf8;
+      Scheme: THttpRequestAuthentication);
+  public
     /// allow to customize the HTTPS process
+    // - used only during initial connection
     TLS: TNetTlsContext;
-    /// allow HTTP/HTTPS authentication to take place at server request
-    // - Scheme=wraBearer with Auth.Token is not handled by TWinHttp yet
-    Auth: record
-      Scheme: THttpRequestAuthentication;
-      UserName: SynUnicode;
-      Password: SynUnicode;
-      Token: SpiUtf8;
-    end;
+    /// optional Proxy URI
+    // - if kept to its default '', will try to use the system PROXY
+    // - if set to 'none', won't use any proxy
+    // - otherwise, will use this value as explicit proxy server name
+    // - used only during initial connection
+    Proxy: RawUtf8;
     /// the timeout to be used for the whole connection, as set in Create()
     CreateTimeoutMS: integer;
+    /// allow HTTP/HTTPS authentication to take place at server request
+    Auth: record
+      Scheme: THttpRequestAuthentication;
+      UserName: RawUtf8;
+      Password: SpiUtf8;
+      Token: SpiUtf8;
+    end;
     /// how many times THttpClientSocket should redirect 30x responses
     RedirectMax: integer;
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
     UserAgent: RawUtf8;
-    /// optional Proxy URI
-    // - if kept to its default '', will try to use the system PROXY
-    // - if set to 'none', won't use any proxy
-    // - otherwise, will use this value as explicit proxy server name
-    Proxy: RawUtf8;
     /// may be used to initialize this record on stack
     procedure Init;
+    /// reset this record, calling FillZero() on Password/Token SpiUtf8 values
+    procedure Clear;
+    /// setup web authentication using the Basic access algorithm
+    procedure AuthorizeBasic(const UserName: RawUtf8; const Password: SpiUtf8);
+    /// setup web authentication using the Digest access algorithm
+    procedure AuthorizeDigest(const UserName: RawUtf8; const Password: SpiUtf8);
+    /// setup web authentication using Kerberos/NTLM via SSPI/GSSAPI and credentials
+    // - if you want to authenticate with the current logged user, just set
+    // ! Auth.Scheme := wraNegotiate;
+    procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8);
+    /// setup web authentication using a given Bearer in the request headers
+    procedure AuthorizeBearer(const Value: SpiUtf8);
   end;
   /// pointer to some extended options for HTTP clients
   PHttpRequestExtendedOptions = ^THttpRequestExtendedOptions;
@@ -408,7 +424,7 @@ type
   // true to let the caller try again with the new headers
   // - if you return false, nothing happens and the 401 is reported back
   // - more complex schemes (like SSPI/Kerberos) could be implemented within the
-  // callback - see e.g. THttpClientSocket.AuthorizeSspi class method
+  // callback - see e.g. THttpClientSocket.OnAuthorizeSspi class method
   TOnHttpClientSocketAuthorize = function(Sender: THttpClientSocket;
     var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean of object;
 
@@ -436,16 +452,13 @@ type
   // - don't forget to use Free procedure when you are finished
   THttpClientSocket = class(THttpSocket)
   protected
-    fUserAgent: RawUtf8;
+    fExtendedOptions: THttpRequestExtendedOptions;
     fReferer: RawUtf8;
     fAccept: RawUtf8;
     fProcessName: RawUtf8;
     fRedirected: RawUtf8;
     fRangeStart, fRangeEnd: Int64;
-    fAuthUserName: RawUtf8; // credentials used for wraDigest or wraNegotiate
-    fAuthPassword, fBasicAuthUserPassword, fAuthBearer: SpiUtf8;
     fAuthDigestAlgo: TDigestAlgo;
-    fRedirectMax: integer;
     fOnAuthorize, fOnProxyAuthorize: TOnHttpClientSocketAuthorize;
     fOnBeforeRequest: TOnHttpClientSocketRequest;
     fOnProtocolRequest: TOnHttpClientRequest;
@@ -454,6 +467,7 @@ type
     {$ifdef DOMAINRESTAUTH}
     fAuthorizeSspiSpn: RawUtf8;
     {$endif DOMAINRESTAUTH}
+    procedure SetAuthBearer(const Value: SpiUtf8);
     procedure RequestSendHeader(const url, method: RawUtf8); virtual;
     procedure RequestClear; virtual;
     function OnAuthorizeDigest(Sender: THttpClientSocket;
@@ -533,12 +547,14 @@ type
     /// after an Open(server,port), return 200,202,204 if OK, http status error otherwise
     function Delete(const url: RawUtf8; KeepAlive: cardinal = 0;
       const header: RawUtf8 = ''): integer;
+    /// setup web authentication using the Basic access algorithm
+    procedure AuthorizeBasic(const UserName: RawUtf8; const Password: SpiUtf8);
     /// setup web authentication using the Digest access algorithm
     procedure AuthorizeDigest(const UserName: RawUtf8; const Password: SpiUtf8;
       Algo: TDigestAlgo = daMD5_Sess);
     {$ifdef DOMAINRESTAUTH}
     /// setup web authentication using Kerberos/NTLM via SSPI/GSSAPI for this instance
-    // - will store the user/paswword credentials, and set AuthorizeSspi callback
+    // - will store the user/paswword credentials, and set OnAuthorizeSspi callback
     // - if Password is '', will search for an existing Kerberos token on UserName
     // - an in-memory token will be used to authenticate the connection
     // - WARNING: on MacOS, the default system GSSAPI stack seems to create a
@@ -551,18 +567,18 @@ type
     // or GSSAPI on Linux (only Kerboros)
     // - match the OnAuthorize: TOnHttpClientSocketAuthorize callback signature
     // - see also ClientForceSpn() and AuthorizeSspiSpn property
-    class function AuthorizeSspi(Sender: THttpClientSocket;
+    class function OnAuthorizeSspi(Sender: THttpClientSocket;
       var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
     /// proxy authentication callback of the current logged user using Kerberos/NTLM
     // - calling the Security Support Provider Interface (SSPI) API on Windows,
     // or GSSAPI on Linux (only Kerboros)
     // - match the OnProxyAuthorize: TOnHttpClientSocketAuthorize signature
     // - see also ClientForceSpn() and AuthorizeSspiSpn property
-    class function ProxyAuthorizeSspi(Sender: THttpClientSocket;
+    class function OnProxyAuthorizeSspi(Sender: THttpClientSocket;
       var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
     /// the Kerberos Service Principal Name, as registered in domain
     // - e.g. 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
-    // - used by class procedure AuthorizeSspi/ProxyAuthorizeSspi callbacks
+    // - used by class procedure OnAuthorizeSspi/OnProxyAuthorizeSspi callbacks
     // - on Linux/GSSAPI either this property or ClientForceSpn() is mandatory
     property AuthorizeSspiSpn: RawUtf8
       read fAuthorizeSspiSpn write fAuthorizeSspiSpn;
@@ -588,16 +604,13 @@ type
     /// how many 3xx status code redirections are allowed
     // - default is 0 - i.e. no redirection
     property RedirectMax: integer
-      read fRedirectMax write fRedirectMax;
+      read fExtendedOptions.RedirectMax write fExtendedOptions.RedirectMax;
     /// the effective 'Location:' URI after 3xx redirection(s) of Request()
     property Redirected: RawUtf8
       read fRedirected;
-    /// optional Authorization: Basic header, encoded as 'User:Password' text
-    property BasicAuthUserPassword: SpiUtf8
-      read fBasicAuthUserPassword write fBasicAuthUserPassword;
     /// optional Authorization: Bearer header value
     property AuthBearer: SpiUtf8
-      read fAuthBearer write fAuthBearer;
+      read fExtendedOptions.Auth.Token write SetAuthBearer;
     /// contain the body data retrieved from the server - from inherited Http
     property Content: RawByteString
       read Http.Content;
@@ -606,12 +619,14 @@ type
       read Http.Headers;
     /// optional authorization callback
     // - is triggered by Request() on HTTP_UNAUTHORIZED (401) status
-    // - see e.g. THttpClientSocket.AuthorizeSspi class method for SSPI auth
+    // - as set by AuthorizeDigest() AuthorizeSspiUser()
+    // - as reset by AuthorizeBasic()
+    // - see e.g. THttpClientSocket.OnAuthorizeSspi class method for SSPI auth
     property OnAuthorize: TOnHttpClientSocketAuthorize
       read fOnAuthorize write fOnAuthorize;
     /// optional proxy authorization callback
     // - is triggered by Request() on HTTP_PROXYAUTHREQUIRED (407) status
-    // - see e.g. THttpClientSocket.ProxyAuthorizeSspi class method for SSPI auth
+    // - see e.g. THttpClientSocket.OnProxyAuthorizeSspi class method for SSPI auth
     property OnProxyAuthorize: TOnHttpClientSocketAuthorize
       read fOnProxyAuthorize write fOnProxyAuthorize;
     /// optional callback called before each Request()
@@ -630,7 +645,7 @@ type
     // friendly welcome by most servers :(
     // - you can specify a custom value here
     property UserAgent: RawUtf8
-      read fUserAgent write fUserAgent;
+      read fExtendedOptions.UserAgent write fExtendedOptions.UserAgent;
     /// contain the body data length retrieved from the server
     property ContentLength: Int64
       read Http.ContentLength;
@@ -907,11 +922,11 @@ type
       read fExtendedOptions.Auth.Scheme
       write fExtendedOptions.Auth.Scheme;
     /// optional User Name for Authentication
-    property AuthUserName: SynUnicode
+    property AuthUserName: RawUtf8
       read fExtendedOptions.Auth.UserName
       write fExtendedOptions.Auth.UserName;
     /// optional Password for Authentication
-    property AuthPassword: SynUnicode
+    property AuthPassword: SpiUtf8
       read fExtendedOptions.Auth.Password
       write fExtendedOptions.Auth.Password;
     /// optional Token for TCurlHttp Authentication
@@ -1315,7 +1330,7 @@ type
       const Data: RawByteString; const DataMimeType: RawUtf8;
       KeepAlive: cardinal): integer; overload;
     /// quickly check if we can connect to the corresponding server
-    // - Server.Address is not used bu this method
+    // - Server.Address is not used by this method
     // - return '' on success, or any raised Exception error message
     function Connected(const Server: TUri): string;
     /// finalize any existing HTTP/HTTPS connection
@@ -1348,7 +1363,7 @@ type
   THttpClientAbstract = class(TInterfacedObject, IHttpClient)
   protected
     // the options to be used for connection and authentication
-    fOptions: THttpRequestExtendedOptions;
+    fConnectOptions: THttpRequestExtendedOptions;
     // last request values
     fUri, fHeaders: RawUtf8;
     fBody: RawByteString;
@@ -1359,12 +1374,6 @@ type
     /// abstract low-level connection method of this class, using an TUri as input
     // - should raise an Exception on issue
     procedure RawConnect(const Server: TUri); virtual; abstract;
-    /// read/write access to the HTTP User-Agent to be used
-    property UserAgent: RawUtf8
-      read fOptions.UserAgent write fOptions.UserAgent;
-    /// read/write access to the Proxy text address to be used
-    property Proxy: RawUtf8
-      read fOptions.Proxy write fOptions.Proxy;
     // IHttpClient methods, redirecting to the internal properties or methods
     function Request(const Uri: TUri; const Method, Header: RawUtf8;
       const Data: RawByteString; const DataMimeType: RawUtf8;
@@ -1374,7 +1383,7 @@ type
       const DataMimeType: RawUtf8 = ''; keepalive: cardinal = 10000): integer; overload;
     function Connected(const Server: TUri): string; virtual;
     procedure Close; virtual; abstract;
-    function Options: PHttpRequestExtendedOptions;
+    function Options: PHttpRequestExtendedOptions; virtual; abstract;
     function Tls: PNetTlsContext;
     function Body: RawByteString;
     function Status: integer;
@@ -1389,7 +1398,6 @@ type
   TSimpleHttpClient = class(THttpClientAbstract)
   protected
     fHttp: THttpClientSocket;
-    fHttpOptions: THttpRequestExtendedOptions;
     {$ifdef USEHTTPREQUEST}
     fHttps: THttpRequest;
     fOnlyUseClientSocket: boolean;
@@ -1398,6 +1406,8 @@ type
     /// initialize the instance
     // - aOnlyUseClientSocket=true will use THttpClientSocket even for HTTPS
     constructor Create(aOnlyUseClientSocket: boolean = ONLY_CLIENT_SOCKET); reintroduce;
+    /// finalize this instance
+    destructor Destroy; override;
     /// low-level entry point of this instance, using an TUri as input
     // - rather use the Request() more usable method
     function Request(const Uri: TUri; const Method, Header: RawUtf8;
@@ -1408,6 +1418,7 @@ type
     procedure RawConnect(const Server: TUri); override;
     // IHttpClient methods
     procedure Close; override;
+    function Options: PHttpRequestExtendedOptions; override;
   end;
 
 
@@ -1462,7 +1473,15 @@ type
 
   /// event signature for error callbacks during IJsonClient.Request()
   TOnJsonClientError = procedure(const Sender: IJsonClient;
-    const Response: TJsonResponse; const ErrorMsg: shortstring);
+    const Response: TJsonResponse; const ErrorMsg: shortstring) of object;
+
+  /// event signature for a callback run before each IJsonClient.Request()
+  TOnJsonClientBefore = procedure(const Sender: IJsonClient;
+    const Method, Action, Body: RawUtf8) of object;
+
+  /// event signature for a callback run after each IJsonClient.Request()
+  TOnJsonClientAfter = procedure(const Sender: IJsonClient;
+    const Response: TJsonResponse) of object;
 
   /// an interface to make thread-safe JSON client requests
   // - is implemented e.g. by our TJsonClient class in this unit
@@ -1477,6 +1496,21 @@ type
     // some property helpers
     function GetOnError: TOnJsonClientError;
     procedure SetOnError(const Event: TOnJsonClientError);
+    function GetOnBefore: TOnJsonClientBefore;
+    procedure SetOnBefore(const Event: TOnJsonClientBefore);
+    function GetOnAfter: TOnJsonClientAfter;
+    procedure SetOnAfter(const Event: TOnJsonClientAfter);
+    function GetUrlEncoder: TUrlEncoder;
+    procedure SetUrlEncoder(Value: TUrlEncoder);
+    function GetCookies: RawUtf8;
+    procedure SetCookies(const Value: RawUtf8);
+    function GetDefaultHeaders: RawUtf8;
+    procedure SetDefaultHeaders(const Value: RawUtf8);
+    /// raw access to the HTTP client itself
+    // - Http.Options^ could be used e.g. to tune the connection (proxy or TLS),
+    // or to change the authentication method
+    // - direct access to this interface methods is not thread-safe
+    function Http: IHttpClient;
     /// check if the client is actually connected to the server
     // - return '' on success, or a text error (typically an Exception.Message)
     function Connected: string;
@@ -1489,16 +1523,16 @@ type
       const CustomError: TOnJsonClientError = nil); overload;
     /// parameterized Request execution, with no JSON parsing using RTTI
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       const CustomError: TOnJsonClientError = nil); overload;
     /// parameterized Request execution, with output only JSON parsing using RTTI
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       var Res; ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError = nil); overload;
     /// parameterized Request execution, with input/output JSON parsing using RTTI
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       const Payload; var Res; PayloadInfo, ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError = nil); overload;
     /// main Request execution, with optional input/output JSON parsing using RTTI
@@ -1506,7 +1540,7 @@ type
     // Payload or output Res variable will be ignored
     // - will optionally call CustomError, to thread-safely handle errors
     // dedicated to this actual request - with fallback to OnError global property
-    procedure RttiRequest(const Method, Action: RawUtf8;
+    procedure RttiRequest(const Method, Action, Headers: RawUtf8;
       Payload, Res: pointer; PayloadInfo, ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError);
     /// low-level HTTP request execution
@@ -1515,11 +1549,30 @@ type
     // - is called by RttiRequest(), and implemented e.g. in TJsonClient
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
       var Response: TJsonResponse);
+    /// can specify a cookie value to the HTTP request
+    // - is void by default
+    property Cookies: RawUtf8
+      read GetCookies write SetCookies;
+    /// can specify a default header to the HTTP request
+    // - contains 'Accept: application/json' by default
+    property DefaultHeaders: RawUtf8
+      read GetDefaultHeaders write SetDefaultHeaders;
+    /// event optionally called before any HTTP request
+    property OnBefore: TOnJsonClientBefore
+      read GetOnBefore write SetOnBefore;
+    /// event optionally called after any HTTP request
+    // - is called even in case of error, i.e. just before OnError
+    property OnAfter: TOnJsonClientAfter
+      read GetOnAfter write SetOnAfter;
     /// allow to customize globally any HTTP error
     // - used if CustomError parameter is not set in Request() overloads
     // - if no event is set, TJsonResponse.RaiseForStatus will be called
     property OnError: TOnJsonClientError
       read GetOnError write SetOnError;
+    /// allow to customize the URL encoding of parameters
+    // - by default, contains [ueEncodeNames, ueSkipVoidString]
+    property UrlEncoder: TUrlEncoder
+      read GetUrlEncoder write SetUrlEncoder;
   end;
 
   /// customize how TJsonClientAbstract handle its process, e.g. its parsing
@@ -1537,38 +1590,57 @@ type
   // HTTP connection, which is abstracted to Connected and RawRequest() methods
   TJsonClientAbstract = class(TInterfacedObjectLocked, IJsonClient)
   protected
-    fOnError: TOnJsonClientError;
     fUrlEncoder: TUrlEncoder;
     fOptions: TJsonClientOptions;
+    fOnError: TOnJsonClientError;
+    fOnBefore: TOnJsonClientBefore;
+    fOnAfter: TOnJsonClientAfter;
     fOnLog: TSynLogProc;
     function CheckRequestError(const Response: TJsonResponse;
       const CustomError: TOnJsonClientError): boolean;
   public
-    // IJsonClient thread-safe methods
+    // IJsonClient methods
     function GetOnError: TOnJsonClientError;
     procedure SetOnError(const Event: TOnJsonClientError); virtual;
+    function GetOnBefore: TOnJsonClientBefore;
+    procedure SetOnBefore(const Event: TOnJsonClientBefore); virtual;
+    function GetOnAfter: TOnJsonClientAfter;
+    procedure SetOnAfter(const Event: TOnJsonClientAfter); virtual;
+    function GetUrlEncoder: TUrlEncoder;
+    procedure SetUrlEncoder(Value: TUrlEncoder);
+    function GetCookies: RawUtf8; virtual; abstract;
+    procedure SetCookies(const Value: RawUtf8); virtual; abstract;
+    function GetDefaultHeaders: RawUtf8; virtual; abstract;
+    procedure SetDefaultHeaders(const Value: RawUtf8); virtual; abstract;
+    function Http: IHttpClient; virtual; abstract;
     function Connected: string; virtual; abstract;
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
       var Response: TJsonResponse); virtual; abstract;
-    procedure RttiRequest(const Method, Action: RawUtf8;
+    procedure RttiRequest(const Method, Action, Headers: RawUtf8;
       Payload, Res: pointer; PayloadInfo, ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError); overload;
     procedure Request(const Method, Action: RawUtf8;
       const CustomError: TOnJsonClientError = nil); overload;
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       const CustomError: TOnJsonClientError = nil); overload;
     procedure Request(const Method, Action: RawUtf8;
       var Res; ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError = nil); overload;
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       var Res; ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError = nil); overload;
     procedure Request(const Method, ActionFmt: RawUtf8;
-      const ActionArgs, NameValueParams: array of const;
+      const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
       const Payload; var Res; PayloadInfo, ResInfo: PRttiInfo;
       const CustomError: TOnJsonClientError = nil); overload;
+    /// event optionally called before any HTTP request
+    property OnBefore: TOnJsonClientBefore
+      read GetOnBefore write SetOnBefore;
+    /// event optionally called after any HTTP request
+    property OnAfter: TOnJsonClientAfter
+      read GetOnAfter write SetOnAfter;
     /// allow to globally customize any HTTP error
     // - used if CustomError parameter is not set in Request() overloads
     // - if no event is set, TJsonResponse.RaiseForStatus will be called
@@ -1577,7 +1649,7 @@ type
     /// allow to customize the URL encoding of parameters
     // - by default, contains [ueEncodeNames, ueSkipVoidString]
     property UrlEncoder: TUrlEncoder
-      read fUrlEncoder write fUrlEncoder;
+      read GetUrlEncoder write SetUrlEncoder;
     /// allow to customize the process
     property Options: TJsonClientOptions
       read fOptions write fOptions;
@@ -1595,8 +1667,6 @@ type
     fBaseUri, fDefaultHeaders, fCookies, fInHeaders: RawUtf8;
     fKeepAlive: integer;
     procedure SetInHeaders;
-    procedure SetCookies(const Value: RawUtf8);
-    procedure SetDefaultHeaders(const Value: RawUtf8);
   public
     /// initialize the instance, over a HTTP server
     // - you can then set the needed HttpOptions^, then call the Connected method
@@ -1607,26 +1677,27 @@ type
     destructor Destroy; override;
     /// raw access to the HTTP options for the connection, e.g. TLS or Auth
     function HttpOptions: PHttpRequestExtendedOptions;
-    // IJsonClient thread-safe methods
+    // IJsonClient methods
+    function GetCookies: RawUtf8; override;
+    procedure SetCookies(const Value: RawUtf8); override;
+    function GetDefaultHeaders: RawUtf8; override;
+    procedure SetDefaultHeaders(const Value: RawUtf8); override;
+    function Http: IHttpClient; override;
     function Connected: string; override;
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
       var Response: TJsonResponse); override;
-    /// raw access to the HTTP client itself
-    // - direct access of this interface methods is not thread-safe
-    property Http: IHttpClient
-      read fHttp;
     /// raw access to the base URI text prepended to each request
     property BaseUri: RawUtf8
       read fBaseUri write fBaseUri;
-    /// can specify a cookie value to the HTTP request
-    // - is void by default
-    property Cookies: RawUtf8
-      read fCookies write SetCookies;
-    /// can specify a default header to the HTTP request
-    // - contains 'Accept: application/json' by default
-    property DefaultHeaders: RawUtf8
-      read fDefaultHeaders write SetDefaultHeaders;
   end;
+
+/// a simple wrapper to FindRawUtf8() which converts -1 into 0
+// - so could be used for the enums as generated by mormot.net.openapi,
+// which have the first item always being ##None as '', e.g. defined as
+// ! TEnum1 = (e1None, e1, e2);
+// ! const ENUM1_TXT: array[TEnum1] of RawUtf8 = ('', 'one', 'and 2');
+function FindCustomEnum(const CustomText: array of RawUtf8;
+  const Value: RawUtf8): integer;
 
 
 { ************** Cached HTTP Connection to a Remote Server }
@@ -1820,7 +1891,7 @@ begin
   begin
     // compute multipart content type with the main random boundary
     fBound := MultiPartFormDataNewBound(fBounds);
-    fMultipartContentType  := 'multipart/form-data; boundary=' + fBound;
+    fMultipartContentType  := NetConcat(['multipart/form-data; boundary=', fBound]);
   end;
   if filename = '' then
     // simple form field
@@ -1897,7 +1968,7 @@ begin
   if fBounds = nil then
     exit;
   for i := length(fBounds) - 1 downto 0 do
-    s := {%H-}s + '--' + fBounds[i] + '--'#13#10;
+    mormot.core.text.Append(s, ['--', fBounds[i], '--'#13#10]);
   Append(s);
   inherited Flush; // compute fSize
 end;
@@ -2112,15 +2183,14 @@ begin
   if aTimeOut = 0 then
     aTimeOut := HTTP_DEFAULT_RECEIVETIMEOUT;
   inherited Create(aTimeOut);
-  fUserAgent := DefaultUserAgent(self);
+  if fExtendedOptions.UserAgent = '' then
+    fExtendedOptions.UserAgent := DefaultUserAgent(self);
   fAccept := '*/*';
 end;
 
 destructor THttpClientSocket.Destroy;
 begin
-  FillZero(fBasicAuthUserPassword); // wraBasic
-  FillZero(fAuthPassword);          // wraDigest or wraNegotiate
-  FillZero(fAuthBearer);            // wraBearer
+  fExtendedOptions.Clear;
   inherited Destroy;
 end;
 
@@ -2146,40 +2216,25 @@ end;
 constructor THttpClientSocket.OpenOptions(const aUri: TUri;
   var aOptions: THttpRequestExtendedOptions);
 var
-  usr, pwd: RawUtf8;
   temp: TUri;
   pu: PUri;
 begin
-  Create(aOptions.CreateTimeoutMS);
   // setup the proper options before any connection
-  fRedirectMax := aOptions.RedirectMax;
-  if aOptions.UserAgent <> '' then
-    fUserAgent := aOptions.UserAgent;
-  if aOptions.Auth.Scheme <> wraNone then
-  begin
-    usr := SynUnicodeToUtf8(aOptions.Auth.UserName);
-    pwd := SynUnicodeToUtf8(aOptions.Auth.Password);
-    case aOptions.Auth.Scheme of
-      wraBasic:
-        fBasicAuthUserPassword := Make([usr, ':', pwd]);
-      wraDigest:
-        AuthorizeDigest(usr, pwd);
-      {$ifdef DOMAINRESTAUTH}
-      wraNegotiate:
-        AuthorizeSspiUser(usr, pwd);
-      {$endif DOMAINRESTAUTH}
-      wraBearer:
-        fAuthBearer := aOptions.Auth.Token;
-    else
-      EHttpSocket.RaiseUtf8('SetClientSocketOptions(%): unsupported %',
-        [self, ToText(aOptions.Auth.Scheme)^]);
-    end;
-    FillZero(pwd);
+  fExtendedOptions := aOptions;
+  Create(fExtendedOptions.CreateTimeoutMS);
+  case fExtendedOptions.Auth.Scheme of
+    wraDigest:
+      begin
+        fOnAuthorize := OnAuthorizeDigest; // as AuthorizeDigest()
+        fAuthDigestAlgo := daMD5_Sess;
+      end;
+    wraNegotiate:
+      fOnAuthorize := OnAuthorizeSspi;     // as AuthorizeSspiUser()
   end;
-  pu := GetSystemProxyUri(aUri.URI, aOptions.Proxy, temp);
+  TLS := fExtendedOptions.TLS;
+  pu := GetSystemProxyUri(aUri.URI, fExtendedOptions.Proxy, temp);
   if pu <> nil then
     Tunnel := pu^;
-  TLS := aOptions.TLS;
   // actually connect to the server (inlined TCrtSock.Open)
   OpenBind(aUri.Server, aUri.Port, {bind=}false, aUri.Https, aUri.Layer);
   aOptions.TLS := TLS; // copy back Peer information after connection
@@ -2393,15 +2448,19 @@ begin
       SockSend(['Range: bytes=', fRangeStart, '-', fRangeEnd])
     else
       SockSend(['Range: bytes=', fRangeStart, '-']);
-  if fAuthBearer <> '' then
-    SockSend(['Authorization: Bearer ', fAuthBearer]);
-  if fBasicAuthUserPassword <> '' then
-    SockSend(['Authorization: Basic ', BinToBase64(fBasicAuthUserPassword)]);
+  with fExtendedOptions.Auth do
+    case Scheme of
+      wraBasic:
+        SockSend(['Authorization: Basic ',
+          mormot.core.buffers.BinToBase64(Make([UserName, ':', Password]))]);
+      wraBearer:
+        SockSend(['Authorization: Bearer ', Token]);
+    end; // other Scheme values would have set OnAuthorize
   if fReferer <> '' then
     SockSend(['Referer: ', fReferer]);
   if fAccept <> '' then
     SockSend(['Accept: ', fAccept]);
-  SockSend(['User-Agent: ', UserAgent]);
+  SockSend(['User-Agent: ', fExtendedOptions.UserAgent]);
 end;
 
 procedure THttpClientSocket.RequestClear;
@@ -2417,6 +2476,7 @@ var
   ctxt: THttpClientRequest;
   newuri: TUri;
 begin
+  // prepare the execution
   ctxt.Url := url;
   if (url = '') or
      (url[1] <> '/') then
@@ -2441,6 +2501,7 @@ begin
     ctxt.Retry := [rMain]
   else
     ctxt.Retry := [];
+  // execute the request
   if (not Assigned(fOnBeforeRequest)) or
      fOnBeforeRequest(self, ctxt) then
   begin
@@ -2494,7 +2555,7 @@ begin
       if (ctxt.Status < 300) or              // 300..399 are redirections
          (ctxt.Status = HTTP_NOTMODIFIED) or // but 304 is not
          (ctxt.Status > 399) or              // 400.. are errors
-         (ctxt.Redirected >= fRedirectMax) then
+         (ctxt.Redirected >= fExtendedOptions.RedirectMax) then
         break;
       if retry then
         ctxt.Retry := [rMain]
@@ -2903,17 +2964,28 @@ begin
   result := Request(url, 'DELETE', KeepAlive, header);
 end;
 
+procedure THttpClientSocket.SetAuthBearer(const Value: SpiUtf8);
+begin
+  fOnAuthorize := nil;
+  fExtendedOptions.AuthorizeBearer(Value);
+end;
+
+procedure THttpClientSocket.AuthorizeBasic(const UserName: RawUtf8;
+  const Password: SpiUtf8);
+begin
+  fOnAuthorize := nil;
+  fExtendedOptions.AuthorizeBasic(UserName, Password);
+end;
+
 procedure THttpClientSocket.AuthorizeDigest(const UserName: RawUtf8;
   const Password: SpiUtf8; Algo: TDigestAlgo);
 begin
-  fAuthUserName := UserName;
-  fAuthPassword := Password;
+  fOnAuthorize := nil;
+  fExtendedOptions.AuthorizeDigest(UserName, Password);
+  if UserName = '' then
+    exit;
+  fOnAuthorize := OnAuthorizeDigest;
   fAuthDigestAlgo := Algo;
-  if (UserName = '') or
-     (Algo = daUndefined) then
-    fOnAuthorize := nil
-  else
-    fOnAuthorize := OnAuthorizeDigest;
 end;
 
 function THttpClientSocket.OnAuthorizeDigest(Sender: THttpClientSocket;
@@ -2926,15 +2998,9 @@ begin
   if IdemPChar(p, 'DIGEST ') then
   begin
     auth := DigestClient(fAuthDigestAlgo, p + 7, Context.method, Context.url,
-      fAuthUserName, fAuthPassword);
+      fExtendedOptions.Auth.UserName, fExtendedOptions.Auth.Password);
     if auth <> '' then
-    begin
-      auth := 'Authorization: Digest ' + auth;
-      if Context.header <> '' then
-        Context.header := auth + #13#10 + Context.header
-      else
-        Context.header := auth;
-    end;
+      AppendLine(Context.header, ['Authorization: Digest ', auth]);
   end;
   result := true;
 end;
@@ -2961,16 +3027,16 @@ begin
     repeat
       FindNameValue(Sender.Http.Headers, pointer(InHeaderUp), RawUtf8(datain));
       datain := Base64ToBin(TrimU(datain));
-      if Sender.fAuthUserName <> '' then // from AuthorizeSspiUser()
-        ClientSspiAuthWithPassword(sc, datain, Sender.fAuthUserName,
-          Sender.fAuthPassword, Sender.AuthorizeSspiSpn, dataout)
+      if Sender.fExtendedOptions.Auth.UserName <> '' then // from AuthorizeSspiUser()
+        ClientSspiAuthWithPassword(sc, datain, Sender.fExtendedOptions.Auth.UserName,
+          Sender.fExtendedOptions.Auth.Password, Sender.AuthorizeSspiSpn, dataout)
       else                               // use current logged user
         ClientSspiAuth(sc, datain, Sender.AuthorizeSspiSpn, dataout);
       if dataout = '' then
         break;
       Context.header := OutHeader + BinToBase64(dataout);
       if bak <> '' then
-        Context.header := Context.header + #13#10 + bak;
+        Append(Context.header, #13#10, bak);
       Sender.RequestInternal(Context);
     until Context.status <> unauthstatus;
     // here Context is the final answer (success or auth error) from the server
@@ -2982,7 +3048,7 @@ begin
   end;
 end;
 
-class function THttpClientSocket.AuthorizeSspi(Sender: THttpClientSocket;
+class function THttpClientSocket.OnAuthorizeSspi(Sender: THttpClientSocket;
   var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
 begin
   if InitializeDomainAuth then
@@ -2999,14 +3065,16 @@ begin
   if not InitializeDomainAuth then
     EHttpSocket.RaiseUtf8('%.AuthorizeSspiUser: no % available on this system',
       [self, SECPKGNAMEAPI]);
-  fAuthUserName := UserName;
-  fAuthPassword := Password;
+  fOnAuthorize := nil;
+  fExtendedOptions.AuthorizeSspiUser(UserName, Password);
+  if UserName = '' then
+    exit;
+  fOnAuthorize := OnAuthorizeSspi;
   if KerberosSpn <> '' then
     fAuthorizeSspiSpn := KerberosSpn;
-  fOnAuthorize := AuthorizeSspi;
 end;
 
-class function THttpClientSocket.ProxyAuthorizeSspi(Sender: THttpClientSocket;
+class function THttpClientSocket.OnProxyAuthorizeSspi(Sender: THttpClientSocket;
   var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
 begin
   if InitializeDomainAuth then
@@ -3085,6 +3153,54 @@ procedure THttpRequestExtendedOptions.Init;
 begin
   RecordZero(@self, TypeInfo(THttpRequestExtendedOptions));
 end;
+
+procedure THttpRequestExtendedOptions.Clear;
+begin
+  FillZero(Auth.Password);
+  FillZero(Auth.Token);
+  Init;
+end;
+
+procedure THttpRequestExtendedOptions.AuthorizeUserPassword(
+  const UserName, Password: RawUtf8; Scheme: THttpRequestAuthentication);
+begin
+  Auth.UserName := UserName;
+  Auth.Password := Password;
+  Auth.Token := '';
+  if UserName = '' then
+    Scheme := wraNone;
+  Auth.Scheme := Scheme;
+end;
+
+procedure THttpRequestExtendedOptions.AuthorizeBasic(const UserName: RawUtf8;
+  const Password: SpiUtf8);
+begin
+  AuthorizeUserPassword(UserName, Password, wraBasic);
+end;
+
+procedure THttpRequestExtendedOptions.AuthorizeDigest(const UserName: RawUtf8;
+  const Password: SpiUtf8);
+begin
+  AuthorizeUserPassword(UserName, Password, wraDigest);
+end;
+
+procedure THttpRequestExtendedOptions.AuthorizeSspiUser(
+  const UserName: RawUtf8; const Password: SpiUtf8);
+begin
+  AuthorizeUserPassword(UserName, Password, wraNegotiate);
+end;
+
+procedure THttpRequestExtendedOptions.AuthorizeBearer(const Value: SpiUtf8);
+begin
+  Auth.UserName := '';
+  Auth.Password := '';
+  Auth.Token := Value;
+  if Value = '' then
+    Auth.Scheme := wraNone
+  else
+    Auth.Scheme := wraBearer;
+end;
+
 
 function ToText(wra: THttpRequestAuthentication): PShortString;
 begin
@@ -3184,8 +3300,7 @@ end;
 destructor THttpRequest.Destroy;
 begin
   inherited Destroy;
-  FillZero(fExtendedOptions.Auth.Password);
-  FillZero(fExtendedOptions.Auth.Token);
+  fExtendedOptions.Clear;
 end;
 
 function THttpRequest.Request(const url, method: RawUtf8; KeepAlive: cardinal;
@@ -3208,7 +3323,7 @@ begin
     // common headers
     InternalAddHeader(InHeader);
     if InDataType <> '' then
-      InternalAddHeader(RawUtf8('Content-Type: ') + InDataType);
+      InternalAddHeader(NetConcat(['Content-Type: ', InDataType]));
     // handle custom compression
     aData := InData;
     if integer(fCompressAcceptHeader) <> 0 then
@@ -3216,7 +3331,7 @@ begin
       CompressContent(fCompressAcceptHeader, fCompress, InDataType,
         aData, aDataEncoding);
       if aDataEncoding <> '' then
-        InternalAddHeader(RawUtf8('Content-Encoding: ') + aDataEncoding);
+        InternalAddHeader(NetConcat(['Content-Encoding: ', aDataEncoding]));
     end;
     if fCompressAcceptEncoding <> '' then
       InternalAddHeader(fCompressAcceptEncoding);
@@ -3578,24 +3693,34 @@ procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
 var
   L: integer;
   winAuth: cardinal;
+  usr, pwd: SynUnicode;
 begin
   if AuthScheme <> wraNone then
-  begin
-    case AuthScheme of
-      wraBasic:
-        winAuth := WINHTTP_AUTH_SCHEME_BASIC;
-      wraDigest:
-        winAuth := WINHTTP_AUTH_SCHEME_DIGEST;
-      wraNegotiate:
-        winAuth := WINHTTP_AUTH_SCHEME_NEGOTIATE;
+    if AuthScheme = wraBearer then
+      InternalAddHeader(AuthorizationBearer(AuthToken))
     else
-      raise EWinHttp.CreateUtf8(
-        '%: unsupported AuthScheme=%', [self, ToText(AuthScheme)^]);
+    begin
+      case AuthScheme of
+        wraBasic:
+          winAuth := WINHTTP_AUTH_SCHEME_BASIC;
+        wraDigest:
+          winAuth := WINHTTP_AUTH_SCHEME_DIGEST;
+        wraNegotiate:
+          winAuth := WINHTTP_AUTH_SCHEME_NEGOTIATE;
+      else
+        raise EWinHttp.CreateUtf8(
+          '%: unsupported AuthScheme=%', [self, ToText(AuthScheme)^]);
+      end;
+      Utf8ToSynUnicode(AuthUserName, usr);
+      Utf8ToSynUnicode(AuthPassword, pwd);
+      try
+        if not WinHttpApi.SetCredentials(fRequest, WINHTTP_AUTH_TARGET_SERVER,
+           winAuth, pointer(usr), pointer(pwd), nil) then
+          EWinHttp.RaiseFromLastError;
+      finally
+        FillZero(pwd);
+      end;
     end;
-    if not WinHttpApi.SetCredentials(fRequest, WINHTTP_AUTH_TARGET_SERVER,
-       winAuth, pointer(AuthUserName), pointer(AuthPassword), nil) then
-      EWinHttp.RaiseFromLastError;
-  end;
   if fHttps and
      IgnoreTlsCertificateErrors then
     if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
@@ -4113,28 +4238,12 @@ const
 
 procedure TCurlHttp.InternalSendRequest(const aMethod: RawUtf8;
   const aData: RawByteString);
-var
-  username: RawUtf8;
-  password, tok: SpiUtf8;
 begin
   // 1. handle authentication
-  case AuthScheme of
-    wraBasic,
-    wraDigest,
-    wraNegotiate:
-      begin
-        // expect user/password credentials
-        username := SynUnicodeToUtf8(AuthUserName);
-        password := SynUnicodeToUtf8(AuthPassword);
-      end;
-    wraBearer:
-      tok := AuthToken;
-  end;
-  curl.easy_setopt(fHandle, coUserName, pointer(username));
-  curl.easy_setopt(fHandle, coPassword, pointer(password));
-  curl.easy_setopt(fHandle, coXOAuth2Bearer, pointer(tok));
+  curl.easy_setopt(fHandle, coUserName, pointer(AuthUserName));
+  curl.easy_setopt(fHandle, coPassword, pointer(AuthPassword));
+  curl.easy_setopt(fHandle, coXOAuth2Bearer, pointer(AuthToken));
   curl.easy_setopt(fHandle, coHttpAuth, integer(WRA2CAU[AuthScheme]));
-  FillZero(password);
   // 2. main request options
   // the only verbs which do not expect body in answer are HEAD and OPTIONS
   curl.easy_setopt(fHandle, coNoBody, ord(HttpMethodWithNoBody(fIn.Method)));
@@ -4277,14 +4386,9 @@ begin
   result := GetHeader(fHeaders, Name, Value);
 end;
 
-function THttpClientAbstract.Options: PHttpRequestExtendedOptions;
-begin
-  result := @fOptions;
-end;
-
 function THttpClientAbstract.Tls: PNetTlsContext;
 begin
-  result := @fOptions.TLS;
+  result := @fConnectOptions.TLS;
 end;
 
 function THttpClientAbstract.Request(const Uri, Method, Header: RawUtf8;
@@ -4320,7 +4424,7 @@ end;
 
 constructor TSimpleHttpClient.Create(aOnlyUseClientSocket: boolean);
 begin
-  fOptions.RedirectMax := 4; // seems fair enough
+  fConnectOptions.RedirectMax := 4; // seems fair enough
   {$ifdef USEHTTPREQUEST}
   fOnlyUseClientSocket := aOnlyUseClientSocket or
                           not MainHttpClass.IsAvailable;
@@ -4328,19 +4432,25 @@ begin
   inherited Create;
 end;
 
+destructor TSimpleHttpClient.Destroy;
+begin
+  fConnectOptions.Clear;
+  inherited Destroy;
+end;
+
 procedure TSimpleHttpClient.RawConnect(const Server: TUri);
 begin
   {$ifdef USEHTTPREQUEST}
   if (Server.Https or
-      (fOptions.Proxy <> '')) and
+      (fConnectOptions.Proxy <> '')) and
      not fOnlyUseClientSocket then
   begin
     if (fHttps = nil) or
        (fHttps.Server <> Server.Server) or
        (fHttps.Port <> Server.PortInt) then
     begin
-      Close; // need a new HTTPS connection
-      fHttps := MainHttpClass.Create(Server, @fOptions); // connect
+      Close; // need a new https connection
+      fHttps := MainHttpClass.Create(Server, @fConnectOptions); // connect
     end;
   end
   else
@@ -4352,16 +4462,33 @@ begin
      not fHttp.SockConnected then
   begin
     Close;
-    fHttp := THttpClientSocket.OpenOptions(Server, fOptions); // connect
+    fHttp := THttpClientSocket.OpenOptions(Server, fConnectOptions); // connect
   end;
 end;
 
 procedure TSimpleHttpClient.Close;
 begin
+  if fHttp <> nil then
+    fConnectOptions := fHttp.fExtendedOptions; // for the next RawConnect()
   FreeAndNil(fHttp);
   {$ifdef USEHTTPREQUEST}
+  if fHttps <> nil then
+    fConnectOptions := fHttps.fExtendedOptions;
   FreeAndNil(fHttps);
   {$endif USEHTTPREQUEST}
+end;
+
+function TSimpleHttpClient.Options: PHttpRequestExtendedOptions;
+begin
+  {$ifdef USEHTTPREQUEST}
+  if fHttps <> nil then
+    result := @fHttps.fExtendedOptions
+  else
+  {$endif USEHTTPREQUEST}
+  if fHttp <> nil then
+    result := @fHttp.fExtendedOptions
+  else
+    result := @fConnectOptions; // used outside an actual connection
 end;
 
 function TSimpleHttpClient.Request(const Uri: TUri;
@@ -4395,6 +4522,18 @@ end;
 
 
 { ******************** TJsonClient JSON requests over HTTP }
+
+function FindCustomEnum(const CustomText: array of RawUtf8;
+  const Value: RawUtf8): integer;
+begin
+  if (Value <> '') and
+     (high(CustomText) > 0) then
+    // we can just ignore CustomText[0] which is supposed to be ''
+    result := FindRawUtf8(@CustomText[1], Value, high(CustomText), {casesens=}true) + 1
+  else
+    result := 0;
+end;
+
 
 { EJsonClient }
 
@@ -4458,11 +4597,51 @@ begin
     raise EJsonClient.CreateResp('%.%', [self, err], Response);
 end;
 
+function TJsonClientAbstract.GetOnError: TOnJsonClientError;
+begin
+  result := fOnError;
+end;
+
+procedure TJsonClientAbstract.SetOnError(const Event: TOnJsonClientError);
+begin
+  fOnError := Event;
+end;
+
+function TJsonClientAbstract.GetOnBefore: TOnJsonClientBefore;
+begin
+  result := fOnBefore;
+end;
+
+procedure TJsonClientAbstract.SetOnBefore(const Event: TOnJsonClientBefore);
+begin
+  fOnBefore := Event;
+end;
+
+function TJsonClientAbstract.GetOnAfter: TOnJsonClientAfter;
+begin
+  result := fOnAfter;
+end;
+
+procedure TJsonClientAbstract.SetOnAfter(const Event: TOnJsonClientAfter);
+begin
+  fOnAfter := Event;
+end;
+
+function TJsonClientAbstract.GetUrlEncoder: TUrlEncoder;
+begin
+  result := fUrlEncoder;
+end;
+
+procedure TJsonClientAbstract.SetUrlEncoder(Value: TUrlEncoder);
+begin
+  fUrlEncoder := Value;
+end;
+
 const
   FMT_REQ: array[{full=}boolean] of RawUtf8 = (
     'Request % %', 'Request % % %');
 
-procedure TJsonClientAbstract.RttiRequest(const Method, Action: RawUtf8;
+procedure TJsonClientAbstract.RttiRequest(const Method, Action, Headers: RawUtf8;
   Payload, Res: pointer; PayloadInfo, ResInfo: PRttiInfo;
   const CustomError: TOnJsonClientError);
 var
@@ -4478,6 +4657,8 @@ begin
   if Assigned(fOnLog) then
     fOnLog(sllServiceCall, FMT_REQ[((jcoLogFullRequest in fOptions) or
       (length(b) < 1024))], [Method, Action, b], self);
+  if Assigned(fOnBefore) then
+    fOnBefore(self, Method, Action, b);
   j := nil;
   if Res <> nil then
     j := pointer(Rtti.RegisterType(ResInfo));
@@ -4485,7 +4666,7 @@ begin
      not (jcoResultNoClear in fOptions) then
     j.ValueFinalizeAndClear(Res); // clear result before request or parsing
   try
-    RawRequest(Method, Action, '', b, '', r); // blocking thread-safe request
+    RawRequest(Method, Action, '', b, Headers, r); // blocking thread-safe request
   except
     on E: Exception do
     begin
@@ -4497,6 +4678,8 @@ begin
       r.Content := ObjectToJsonDebug(E);
     end;
   end;
+  if Assigned(fOnAfter) then
+    fOnAfter(self, r);
   if CheckRequestError(r, CustomError) or // HTTP status error
      (j = nil) then          // no response JSON to parse
     exit;
@@ -4518,48 +4701,91 @@ end;
 procedure TJsonClientAbstract.Request(const Method, Action: RawUtf8;
   const CustomError: TOnJsonClientError);
 begin
-  RttiRequest(Method, Action, nil, nil, nil, nil, CustomError); // nil = no RTTI
+  RttiRequest(Method, Action, {Headers=}'',
+    nil, nil, nil, nil, CustomError); // nil = no RTTI
 end;
 
 procedure TJsonClientAbstract.Request(const Method, Action: RawUtf8;
   var Res; ResInfo: PRttiInfo; const CustomError: TOnJsonClientError);
 begin
-  RttiRequest(Method, Action, {Payload=}nil, @Res, {PayloadInfo=}nil, ResInfo, CustomError);
+  RttiRequest(Method, Action, {Headers=}'',
+    {Payload=}nil, @Res, {PayloadInfo=}nil, ResInfo, CustomError);
+end;
+
+procedure DoHeadersEncode(const NameValuePairs: array of const;
+  var OutHeaders: RawUtf8);
+var
+  a: PtrInt;
+  name, value: RawUtf8;
+  p: PVarRec;
+  w: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  w := nil;
+  try
+    p := @NameValuePairs[0];
+    for a := 0 to high(NameValuePairs) shr 1 do
+    begin
+      VarRecToUtf8(p^, name);
+      inc(p);
+      VarRecToUtf8(p^, value);
+      if (name = '') or
+         (value = '') then
+        continue;
+      // append name='X-MyHeader'/value='5' as 'X-MyHeader: 5'#13#10
+      if w = nil then
+        w := DefaultJsonWriter.CreateOwnedStream(tmp);
+      w.AddString(name);
+      if PosExChar(':', name) = 0 then // if name is e.g. 'Cookie: id='
+        w.AddDirect(':', ' ');
+      w.AddString(value); // OpenAPI "simple" style is just a CSV
+      w.AddCR; // CR+LF
+      inc(p);
+    end;
+    if w <> nil then
+      w.SetText(OutHeaders);
+  finally
+    w.Free;
+  end;
+end;
+
+function HeadersEncode(const NameValuePairs: array of const): RawUtf8;
+begin
+  result := '';
+  if (high(NameValuePairs) >= 0) and
+     (high(NameValuePairs) and 1 = 1) then // n should be = 1,3,5,7,..
+    DoHeadersEncode(NameValuePairs, result);
 end;
 
 procedure TJsonClientAbstract.Request(const Method, ActionFmt: RawUtf8;
-  const ActionArgs, NameValueParams: array of const;
+  const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
   const CustomError: TOnJsonClientError);
 begin
-  RttiRequest(Method, UrlEncodeFull(ActionFmt, ActionArgs, NameValueParams, fUrlEncoder),
+  RttiRequest(Method,
+    UrlEncodeFull(ActionFmt, ActionArgs, QueryNameValueParams, fUrlEncoder),
+    HeadersEncode(HeaderNameValueParams),
     nil, nil, nil, nil, CustomError);
 end;
 
 procedure TJsonClientAbstract.Request(const Method, ActionFmt: RawUtf8;
-  const ActionArgs, NameValueParams: array of const;
+  const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
   var Res; ResInfo: PRttiInfo; const CustomError: TOnJsonClientError);
 begin
-  RttiRequest(Method, UrlEncodeFull(ActionFmt, ActionArgs, NameValueParams, fUrlEncoder),
+  RttiRequest(Method,
+    UrlEncodeFull(ActionFmt, ActionArgs, QueryNameValueParams, fUrlEncoder),
+    HeadersEncode(HeaderNameValueParams),
     nil, @Res, nil, ResInfo, CustomError);
 end;
 
 procedure TJsonClientAbstract.Request(const Method, ActionFmt: RawUtf8;
-  const ActionArgs, NameValueParams: array of const;
+  const ActionArgs, QueryNameValueParams, HeaderNameValueParams: array of const;
   const Payload; var Res; PayloadInfo, ResInfo: PRttiInfo;
   const CustomError: TOnJsonClientError);
 begin
-  RttiRequest(Method, UrlEncodeFull(ActionFmt, ActionArgs, NameValueParams, fUrlEncoder),
+  RttiRequest(Method,
+    UrlEncodeFull(ActionFmt, ActionArgs, QueryNameValueParams, fUrlEncoder),
+    HeadersEncode(HeaderNameValueParams),
     @Payload, @Res, PayloadInfo, ResInfo, CustomError);
-end;
-
-function TJsonClientAbstract.GetOnError: TOnJsonClientError;
-begin
-  result := fOnError;
-end;
-
-procedure TJsonClientAbstract.SetOnError(const Event: TOnJsonClientError);
-begin
-  fOnError := Event;
 end;
 
 
@@ -4590,6 +4816,11 @@ begin
   AppendLine(fInHeaders, ['Cookie: ', fCookies]);
 end;
 
+function TJsonClient.GetCookies: RawUtf8;
+begin
+  result := fCookies;
+end;
+
 procedure TJsonClient.SetCookies(const Value: RawUtf8);
 begin
   fCookies := Value;
@@ -4602,9 +4833,19 @@ begin
   SetInHeaders;
 end;
 
+function TJsonClient.GetDefaultHeaders: RawUtf8;
+begin
+  result := fDefaultHeaders;
+end;
+
 function TJsonClient.HttpOptions: PHttpRequestExtendedOptions;
 begin
   result := fHttp.Options;
+end;
+
+function TJsonClient.Http: IHttpClient;
+begin
+  result := fHttp;
 end;
 
 function TJsonClient.Connected: string;
@@ -4727,12 +4968,7 @@ begin
     exit;
   Clear;
   if aToken <> '' then
-  begin
-    fClient.fOptions.Auth.Scheme := wraBearer;
-    fClient.fOptions.Auth.Token := aToken;
-  end
-  else
-    fClient.fOptions.Auth.Scheme := wraNone;
+    fClient.Options^.AuthorizeBearer(aToken);
   result := true;
 end;
 
@@ -4857,7 +5093,7 @@ var
 
   procedure Exec(const Command, answer: RawUtf8);
   begin
-    sock.SockSendFlush(Command + #13#10);
+    sock.SockSendFlush(NetConcat([Command, #13#10]));
     if ioresult <> 0 then
       ESendEmail.RaiseUtf8('Write error for %', [Command]);
     Expect(answer)
@@ -4898,9 +5134,9 @@ begin
         rec := '<' + rec + '>';
       Exec('RCPT TO:' + rec, '25');
       if {%H-}ToList = '' then
-        ToList := #13#10'To: ' + rec
+        ToList := NetConcat([#13#10'To: ', rec])
       else
-        ToList := ToList + ', ' + rec;
+        Append(ToList, ', ', rec);
     until P = nil;
     Exec('DATA', '354');
     sock.SockSend([

@@ -1589,6 +1589,12 @@ function GetSetName(aTypeInfo: PRttiInfo; const value;
   trimmed: boolean = false): RawUtf8;
 
 /// helper to retrieve the CSV text of all enumerate items defined in a set
+// - expects CustomText in the TRttiJson.RegisterCustomEnumValues() format, e.g.
+// ! const MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('one', 'and 2');
+function GetSetNameCustom(aTypeInfo: PRttiInfo; const value;
+  CustomText: PRawUtf8Array; const SepChar: RawUtf8 = ','): RawUtf8;
+
+/// helper to retrieve the CSV text of all enumerate items defined in a set
 procedure GetSetNameShort(aTypeInfo: PRttiInfo; const value;
   out result: ShortString; trimlowercase: boolean = false);
 
@@ -2450,6 +2456,7 @@ type
     fCopy: TRttiCopier;
     fName: RawUtf8;
     fProps: TRttiCustomProps;
+    fPrivateSlotsSafe: TLightLock; // topmost position to force aarch64 alignment
     fOwnedRtti: array of TRttiCustom; // for SetPropsFromText(NoRegister=true)
     fSetRandom: TRttiCustomRandom;
     // used by mormot.core.json.pas
@@ -2463,7 +2470,6 @@ type
     fAutoCreateObjArrays,
     fAutoResolveInterfaces: PRttiCustomPropDynArray;
     fPrivateSlots: TObjectDynArray;
-    fPrivateSlotsSafe: TLightLock;
     fNoRttiInfo: TByteDynArray; // used by NoRttiSetAndRegister()
     // used to customize the class process
     fValueClass: TClass;
@@ -3017,12 +3023,11 @@ type
 { *********** High Level TObjectWithID and TObjectWithCustomCreate Class Types }
 
 type
-  {$M+}
   /// abstract parent class with published properties and a virtual constructor
   // - is the parent of both TSynPersistent and TOrm classes
   // - will ensure the class type is registered to the Rtti global list
   // - also features some protected virtual methods for custom RTTI/JSON process
-  TObjectWithCustomCreate = class(TObject)
+  TObjectWithCustomCreate = class(TObjectWithProps)
   protected
     /// called by TRttiJson.SetParserType when this class is registered
     // - used e.g. to register TOrm.ID field which is not published as RTTI
@@ -3068,11 +3073,6 @@ type
     // - triggered if RttiCustomSetParser defined the rcfHookRead flag
     procedure RttiAfterReadObject; virtual;
   public
-    /// virtual constructor called at instance creation
-    // - is declared as virtual so that inherited classes may have a root
-    // constructor to override
-    // - is recognized by our RTTI serialization/initialization process
-    constructor Create; virtual;
     /// optimized initialization code
     // - will also register the class type to the Rtti global list
     // - somewhat faster than the regular RTL implementation
@@ -3090,7 +3090,6 @@ type
   {$M-}
 
   /// used to determine the exact class type of a TObjectWithCustomCreate
-  // - allow to create instances using its virtual constructor
   TObjectWithCustomCreateClass = class of TObjectWithCustomCreate;
 
   /// root class of an object with a 64-bit ID primary key
@@ -5545,7 +5544,8 @@ begin
     begin
       desc := '';
       dolower := false;
-      if p^.Value.Kind in [rkEnumeration, rkSet] then
+      if (p^.Value.Kind in [rkEnumeration, rkSet]) and
+         not (rcfBoolean in p^.Value.Cache.Flags) then
       begin
         p^.Value.Cache.EnumInfo^.GetEnumNameTrimedAll(desc);
         if p^.Value.Kind = rkEnumeration then
@@ -5561,25 +5561,33 @@ begin
           desc := ' - values: ' + desc;
       end;
       desc := FormatUtf8('%%%', [UnCamelCase(p^.Name), DescriptionSuffix, desc]);
-      if not p.ValueIsDefault(Value) then
+      if (rcfBoolean in p^.Value.Cache.Flags) or
+         not p.ValueIsDefault(Value) then
       begin
         def := '';
         typ := '';
         if p^.Value.Kind in rkOrdinalTypes then
         begin
           v64 := p^.Prop^.GetInt64Value(Value);
-          case p^.Value.Kind of
-            rkEnumeration:
-              def := p^.Value.Cache.EnumInfo.GetEnumNameTrimed(v64);
-            rkSet:
-              if v64 <> 0 then
-                def := p^.Value.Cache.EnumInfo.GetSetName(v64, {trim=}true, ',');
+          if rcfBoolean in p^.Value.Cache.Flags then
+          begin
+            if v64 <> 0 then
+              def := 'true';
+            typ := 'boolean';
+          end
           else
-            begin
-              UInt64ToUtf8(v64, def);
-              typ := 'integer';
+            case p^.Value.Kind of
+              rkEnumeration:
+                def := p^.Value.Cache.EnumInfo.GetEnumNameTrimed(v64);
+              rkSet:
+                if v64 <> 0 then
+                  def := p^.Value.Cache.EnumInfo.GetSetName(v64, {trim=}true, ',');
+            else
+              begin
+                UInt64ToUtf8(v64, def);
+                typ := 'integer';
+              end;
             end;
-          end;
           if dolower then
             def := LowerCaseU(def);
         end
@@ -5712,6 +5720,25 @@ begin
   result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed);
 end;
 
+function GetSetNameCustom(aTypeInfo: PRttiInfo; const value;
+  CustomText: PRawUtf8Array; const SepChar: RawUtf8): RawUtf8;
+var
+  info: PRttiEnumType;
+  i: PtrInt;
+begin
+  result := '';
+  info := aTypeInfo^.SetEnumType;
+  if (info = nil) or
+     (@value = nil) or
+     (CustomText = nil) then
+    exit;
+  for i := info^.MinValue to info^.MaxValue do
+    if GetBitPtr(@value, i) then
+      Append(result, CustomText^[i], SepChar);
+  if result <> '' then
+    FakeSetLength(result, length(result) - 1); // cancel last comma
+end;
+
 procedure GetSetNameShort(aTypeInfo: PRttiInfo; const value;
   out result: ShortString; trimlowercase: boolean);
 var
@@ -5732,7 +5759,7 @@ begin
     inc(PByte(PS), PByte(PS)^ + 1); // next
   end;
   if result[0] <> #0 then
-    dec(result[0]);
+    dec(result[0]); // cancel last comma
 end;
 
 procedure SetNamesValue(SetNames: PShortString; MinValue, MaxValue: integer;
@@ -9799,10 +9826,6 @@ end;
 { *********** High Level TObjectWithID and TObjectWithCustomCreate Class Types }
 
 { TObjectWithCustomCreate }
-
-constructor TObjectWithCustomCreate.Create;
-begin // do nothing by default but may be overriden
-end;
 
 class function TObjectWithCustomCreate.RttiCustom: TRttiCustom;
 begin

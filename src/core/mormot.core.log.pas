@@ -79,7 +79,7 @@ type
   // you would better use an external .dbg file then convert it into a .mab
   // - on FPC, you don't need to specifly the -gl compiler switch
   // - location of a source code information from its address is below 10us
-  TDebugFile = class(TSynPersistent)
+  TDebugFile = class(TObjectWithProps)
   protected
     fDebugFile: TFileName;
     fSymbol: TDebugSymbolDynArray;
@@ -3696,11 +3696,11 @@ type
   // cross-platform / cross-compiler TThread-based flush
   TAutoFlushThread = class(TThread)
   protected
+    fToConsoleSafe: TLightLock; // topmost to ensure aarch64 alignment
     fEvent: TSynEvent;
     fToCompress: TFileName;
     fStartTix: Int64;
     fSecondElapsed: cardinal;
-    fToConsoleSafe: TLightLock; // very short protection of fToConsole RRD store
     fToConsole: TAutoFlushThreadToConsole;
     procedure Execute; override;
     procedure AddToConsole(const s: RawUtf8; c: TConsoleColor);

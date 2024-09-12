@@ -1122,7 +1122,7 @@ type
   // internal JSON format (which is faster than a query to the SQLite3 engine)
   // - internally make use of an efficient hashing algorithm for fast response
   // (i.e. TSynNameValue will use the TDynArrayHashed wrapper mechanism)
-  TSynCache = class(TSynPersistent)
+  TSynCache = class(TObjectWithProps)
   protected
     fNameValue: TSynNameValue;
     fRamUsed: cardinal;
@@ -10300,19 +10300,14 @@ begin
   result := TComponentClass(Rtti.ValueClass).Create(nil);
 end;
 
-function _New_ObjectWithCustomCreate(Rtti: TRttiCustom): pointer;
+function _New_ObjectWithProps(Rtti: TRttiCustom): pointer;
 begin
-  result := TObjectWithCustomCreateClass(Rtti.ValueClass).Create;
+  result := TObjectWithPropsClass(Rtti.ValueClass).Create;
 end;
 
 function _New_SynObjectList(Rtti: TRttiCustom): pointer;
 begin
   result := TSynObjectListClass(Rtti.ValueClass).Create({ownobjects=}true);
-end;
-
-function _New_SynLocked(Rtti: TRttiCustom): pointer;
-begin
-  result := TSynLockedClass(Rtti.ValueClass).Create;
 end;
 
 function _New_InterfacedCollection(Rtti: TRttiCustom): pointer;
@@ -10447,10 +10442,13 @@ begin
         fNewInstance := @_New_InterfacedObjectWithCustomCreate
       else if C = TPersistentWithCustomCreate then
         fNewInstance := @_New_PersistentWithCustomCreate
+      else if C = TObjectWithProps then
+        // e.g. TSynLocked
+        fNewInstance := @_New_ObjectWithProps
       else if C = TObjectWithCustomCreate then
       begin
         // e.g. TSynPersistent, TOrm or TObjectWithID
-        fNewInstance := @_New_ObjectWithCustomCreate;
+        fNewInstance := @_New_ObjectWithProps; // inherit from TObjectWithProps
         // allow any kind of customization for TObjectWithCustomCreate children
         n := Props.Count;
         TObjectWithCustomCreateRttiCustomSetParser(
@@ -10464,8 +10462,6 @@ begin
         fJsonSave := @_JS_TSynObjectList;
         fJsonLoad := @_JL_TSynObjectList;
       end
-      else if C = TSynLocked then
-        fNewInstance := @_New_SynLocked
       else if C = TComponent then
         fNewInstance := @_New_Component
       else if C = TInterfacedCollection then

@@ -85,6 +85,11 @@ type
 
 implementation
 
+type
+   TMyEnum = (eNone, e1, e2);
+const
+  MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('', 'one', 'and 2');
+
 const
   // some reference from https://github.com/OAI/OpenAPI-Specification
   OpenApiRef: array[0..1] of RawUtf8 = (
@@ -99,6 +104,10 @@ var
   pets: TRawUtf8DynArray;
   oa: TOpenApiParser;
 begin
+  CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 2'), 2);
+  CheckEqual(FindCustomEnum(MYENUM2TXT, 'one'), 1);
+  CheckEqual(FindCustomEnum(MYENUM2TXT, ''), 0);
+  CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 3'), 0);
   for i := 1 to high(RESERVED_KEYWORDS) do
     CheckUtf8(StrComp(pointer(RESERVED_KEYWORDS[i - 1]),
       pointer(RESERVED_KEYWORDS[i])) < 0, RESERVED_KEYWORDS[i]);
@@ -135,13 +144,15 @@ begin
   for i := 0 to high(pets) do
     if pets[i] <> '' then
     begin
-      oa := TOpenApiParser.Create;
+      oa := TOpenApiParser.Create(FormatUtf8('Pets%', [i + 1]));
       try
         oa.ParseJson(pets[i]);
-        ud := FormatUtf8('pets%.dto.pas', [i + 1]);
-        uc := FormatUtf8('pets%.client.pas', [i + 1]);
-        //ConsoleWrite(oa.GetDtosUnit(ud));
-        //ConsoleWrite(oa.GetClientUnit(uc, 'TPets', ud));
+        ud := oa.GenerateDtoUnit;
+        Check(ud <> '', 'DTO');
+        uc := oa.GenerateClientUnit;
+        Check(uc <> '', 'CLIENT');
+        //ConsoleWrite(ud);
+        //ConsoleWrite(uc);
       finally
         oa.Free;
       end;
@@ -662,7 +673,11 @@ var
   withntp: boolean;
   guid: TGuid;
   i, j, k: PtrInt;
-  dns, clients: TRawUtf8DynArray;
+  dns, clients, a: TRawUtf8DynArray;
+  rl: TLdapResultList;
+  r: TLdapResult;
+  at: TLdapAttributeType;
+  ats: TLdapAttributeTypes;
   l: TLdapClientSettings;
   one: TLdapClient;
   utc1, utc2: TDateTime;
@@ -760,6 +775,47 @@ begin
   Check(not LdapSafe('abc)'));
   Check(not LdapSafe('*'));
   Check(not LdapSafe('()'));
+  // validate LDAP attributes definitions
+  for at := low(at) to high(at) do
+  begin
+    CheckEqual(ToText(at), AttrTypeName[at]);
+    CheckUtf8(AttributeNameType(AttrTypeName[at]) = at, ToText(at));
+    ats := [at];
+    a := ToText(ats);
+    if at = low(at) then
+      Check(a = nil)
+    else
+    begin
+      CheckEqual(length(a), 1);
+      CheckEqual(a[0], ToText(at));
+    end;
+  end;
+  for i := low(AttrTypeNameAlt) to high(AttrTypeNameAlt) do
+    CheckUtf8(AttributeNameType(AttrTypeNameAlt[i]) = AttrTypeAltType[i],
+      AttrTypeNameAlt[i]);
+  ats := [];
+  Check(ToText(ats) = nil);
+  a := ToText([atOrganizationUnitName, atObjectClass, atCommonName]);
+  CheckEqual(RawUtf8ArrayToCsv(a), 'objectClass,cn,ou');
+  // validate LDAP resultset and LDIF content
+  rl := TLdapResultList.Create;
+  try
+    CheckEqual(rl.Dump({noTime=}true), 'results: 0'#13#10);
+    CheckEqual(rl.ExportToLdifContent,
+      'version: 1'#$0A'# total number of entries: 0'#$0A);
+    r := rl.Add;
+    v := 'John E Doxx';
+    PWord(PAnsiChar(UniqueRawUtf8(v)) + 9)^ := $a9c3; // UTF-8 'e'acute
+    r.ObjectName := 'cn=foo, ou=bar';
+    r.Attributes.Add('objectClass', 'person');
+    r.Attributes.Add(['cn', 'John Doe',
+                      'cn', v,
+                      'sn', 'Doe']);
+    CheckHash(rl.Dump({noTime=}true), $31FDA4D3, 'hashDump');
+    CheckHash(rl.ExportToLdifContent, $A91F23A7, 'hashLdif');
+  finally
+    rl.Free;
+  end;
   // validate LDAP settings
   l := TLdapClientSettings.Create;
   try

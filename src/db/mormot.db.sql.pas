@@ -1256,6 +1256,7 @@ type
     fUserID: RawUtf8;
     fForcedSchemaName: RawUtf8;
     fMainConnection: TSqlDBConnection;
+    fSharedTransactionsSafe: TLightLock; // topmost to ensure aarch64 alignment
     fBatchMaxSentAtOnce: integer;
     fLoggedSqlMaxSize: integer;
     fConnectionTimeOutTicks: Int64;
@@ -1278,7 +1279,6 @@ type
     fStatementCacheReplicates: integer;
     fSqlCreateFieldMax: cardinal;
     fSqlCreateField: TSqlDBFieldTypeDefinition;
-    fSharedTransactionsSafe: TLightLock;
     fSharedTransactions: array of TSqlDBConnectionTransaction;
     fExecuteWhenConnected: TRawUtf8DynArray;
     fForeignKeys: TSynNameValue;
@@ -1940,7 +1940,7 @@ type
   /// abstract connection created from TSqlDBConnectionProperties
   // - more than one TSqlDBConnection instance can be run for the same
   // TSqlDBConnectionProperties
-  TSqlDBConnection = class(TSynPersistent)
+  TSqlDBConnection = class(TObjectWithProps)
   protected
     fProperties: TSqlDBConnectionProperties;
     fErrorException: ExceptClass;

@@ -453,8 +453,8 @@ type
     hfOutsideAttributes,
     hfWithinAttributes);
 
-  /// the available JSON format, for TTextWriter.AddJsonReformat() and its
-  // JsonBufferReformat() and JsonReformat() wrappers
+  /// the available JSON/JSON-like formats, for TTextWriter.AddJsonReformat()
+  // and its JsonBufferReformat() and JsonReformat() wrappers
   // - jsonCompact is the default machine-friendly single-line layout
   // - jsonHumanReadable will add line feeds and indentation, for a more
   // human-friendly result
@@ -737,7 +737,7 @@ type
     /// append an UTF-8 String, with no JSON escaping
     procedure AddString(const Text: RawUtf8);
     /// append several UTF-8 strings
-    procedure AddStrings(const Text: array of RawUtf8); overload;
+    procedure AddStrings(const Values: array of RawUtf8); overload;
     /// append an UTF-8 string several times
     procedure AddStrings(const Text: RawUtf8; count: PtrInt); overload;
     /// append a ShortString
@@ -1994,12 +1994,11 @@ function DefaultSynLogExceptionToStr(WR: TTextWriter;
 
 
 type
-  {$M+}
   /// generic parent class of all custom Exception types of this unit
   // - all our classes inheriting from ESynException are serializable,
   // so you could use ObjectToJsonDebug(any ESynException) to retrieve some
   // extended information
-  ESynException = class(Exception)
+  ESynException = class(ExceptionWithProps)
   protected
     fRaisedAt: pointer;
     fMessageUtf8: RawUtf8;
@@ -2052,7 +2051,6 @@ type
     /// the Exception Message string, as defined in parent Exception class
     property Message;
   end;
-  {$M-}
 
   /// meta-class of the ESynException hierarchy
   ESynExceptionClass = class of ESynException;
@@ -2356,6 +2354,11 @@ function GuidToRawUtf8(const guid: TGuid): RawUtf8;
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
 // - if you need the embracing { }, use GuidToRawUtf8() function instead
 function ToUtf8(const guid: TGuid): RawUtf8; overload;
+
+/// convert one or several TGuid into 36 chars encoded CSV text
+// - will return e.g.
+// ! '3F2504E0-4F89-11D3-9A0C-0305E82C3301,C595476E-73D1-4B9C-9725-308C4A72DEC8'
+function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar = ','): RawUtf8;
 
 /// convert a TGuid into into 38 chars encoded { text } as RTL string
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
@@ -5116,12 +5119,18 @@ begin
   end;
 end;
 
-procedure TTextWriter.AddStrings(const Text: array of RawUtf8);
+procedure TTextWriter.AddStrings(const Values: array of RawUtf8);
 var
   i: PtrInt;
+  p: PPUtf8Char;
 begin
-  for i := 0 to high(Text) do
-    AddString(Text[i]);
+  p := @Values[0];
+  for i := 0 to high(Values) do
+  begin
+    if p^ <> nil then
+      AddNoJsonEscape(p^, PStrLen(p^ - _STRLEN)^);
+    inc(p);
+  end;
 end;
 
 procedure TTextWriter.AddStrings(const Text: RawUtf8; count: PtrInt);
@@ -8636,13 +8645,13 @@ begin
     begin
       c := @blocks;
       repeat
-        inc(L, VarRecToTempUtf8(Arg^, c^));
+        inc(L, VarRecToTempUtf8(Arg^, c^)); // add param
         inc(Arg);
         if (EndWithDelim and
             (ArgCount = 1)) or
            ((ArgCount <> 1) and
             (c^.Len <> 0) and
-            (c^.Text[c^.Len - 1] <> Delim)) then
+            (c^.Text[c^.Len - 1] <> Delim)) then // append delimiter
         begin
           inc(c);
           c^.Len := 1;
@@ -8700,7 +8709,10 @@ begin
   L := length(Text);
   c := @blocks;
   if (Text <> '') and
-     (Separator[0] <> #0) then
+     (Separator[0] <> #0) and
+     (ord(Separator[0]) <= L) and // not already terminated by the Separator
+     not CompareMemSmall(@PByteArray(Text)[L - ord(Separator[0])],
+       @Separator[1], ord(Separator[0])) then
   begin
     c^.Len := ord(Separator[0]);
     inc(L, c^.Len);
@@ -10243,6 +10255,31 @@ begin
   GuidToText(pointer(result), @Guid);
 end;
 
+function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar): RawUtf8;
+var
+  n: integer;
+  g: PGuid;
+  P: PUtf8Char;
+begin
+  result := '';
+  n := length(guid);
+  if n = 0 then
+    exit;
+  FastSetString(result, (37 * n) - 1);
+  g := @guid[0];
+  p := pointer(result);
+  repeat
+    GuidToText(p, pointer(g));
+    dec(n);
+    if n = 0 then
+      exit;
+    inc(p, 36);
+    p^ := SepChar;
+    inc(p);
+    inc(g);
+  until false;
+end;
+
 function GuidToShort(const guid: TGuid): TGuidShortString;
 begin
   GuidToShort(Guid, result);
@@ -10566,6 +10603,8 @@ begin
         v := 8;
       #1..#8, #11, #12, #14..#31:
         v := 9; // ignore invalid character - see http://www.w3.org/TR/xml/#NT-Char
+    else
+      v := 0;
     end;
     XML_ESC[c] := v;
     case c of // HTML_ESCAPED: array[1..4] = '&lt;', '&gt;', '&amp;', '&quot;'
