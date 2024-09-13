@@ -464,6 +464,21 @@ function LdapToDate(const Text: RawUtf8): TDateTime;
 { **************** LDAP Attributes Definitions }
 
 type
+  /// define how a TLdapAttributeType is actually stored in the LDAP raw value
+  TLdapAttributeTypeStorage = (
+    atsAny,
+    atsRawUtf8,
+    atsInteger,
+    atsIntegerUserAccountControl,
+    atsIntegerSystemFlags,
+    atsIntegerGroupType,
+    atsIntegerSamAccountType,
+    atsFileTime,
+    atsTextTime,
+    atsSid,
+    atsGuid,
+    atsUnicodePwd);
+
   /// common Attribute Types, as stored in TLdapAttribute.AttributeName
   // - so that the most useful types could be specified as convenient enumerate
   // - allow complex binary types (like SID/GUID/FileTime) to be recognized and
@@ -481,6 +496,7 @@ type
     atDisplayName,
     atUserPrincipalName,
     atUserAccountControl,
+    atSystemFlags,
     atSAMAccountName,
     atSAMAccountType,
     atAdminCount,
@@ -502,19 +518,23 @@ type
     atOwner,
     atGroupType,
     atPrimaryGroupID,
-    atObjectSid,
-    atObjectGuid,
-    atAccountExpires,
+    atObjectSid,                   // encoded as binary RawSid
+    atObjectGuid,                  // encoded as binary TGuid
+    atLogonCount,
+    atBadPwdCount,
+    atDnsHostName,
+    atAccountExpires,              // first 64-bit FileTime
     atBadPasswordTime,
     atLastLogon,
     atLastLogonTimestamp,
     atLastLogoff,
     atLockoutTime,
     atPwdLastSet,
-    atMcsAdmPwdExpirationTime,
-    atWhenCreated,
-    atWhenChanged,
+    atMcsAdmPwdExpirationTime,     // last 64-bit FileTime
+    atWhenCreated,                 // first date/time text
+    atWhenChanged,                 // last date/time text
     atOperatingSystem,
+    atOperatingSystemVersion,
     atServicePrincipalName,
     atUnicodePwd);
 
@@ -540,6 +560,67 @@ const
     atCommonName, atSurName, atCountryName, atLocalityName, atStateName,
     atStreetAddress, atOrganizationName, atOrganizationUnitName, atGivenName);
 
+  /// how all TLdapAttributeType are actually stored in the LDAP raw value
+  AttrTypeStorage: array[TLdapAttributeType] of TLdapAttributeTypeStorage = (
+    atsAny,                         // atUndefined
+    atsRawUtf8,                     // atDistinguishedName
+    atsRawUtf8,                     // atObjectClass
+    atsRawUtf8,                     // otObjectCategory
+    atsRawUtf8,                     // atAlias
+    atsRawUtf8,                     // atName
+    atsRawUtf8,                     // atCommonName
+    atsRawUtf8,                     // atSurName
+    atsRawUtf8,                     // atGivenName
+    atsRawUtf8,                     // atDisplayName
+    atsRawUtf8,                     // atUserPrincipalName
+    atsIntegerUserAccountControl,   // atUserAccountControl
+    atsIntegerSystemFlags,          // atSystemFlags
+    atsRawUtf8,                     // atSAMAccountName
+    atsIntegerSamAccountType,       // atSAMAccountType
+    atsInteger,                     // atAdminCount
+    atsRawUtf8,                     // atDescription
+    atsRawUtf8,                     // atGenerationQualifier
+    atsRawUtf8,                     // atInitials
+    atsRawUtf8,                     // atOrganizationName
+    atsRawUtf8,                     // atOrganizationUnitName
+    atsRawUtf8,                     // atMail
+    atsRawUtf8,                     // atMemberOf
+    atsRawUtf8,                     // atCountryName
+    atsRawUtf8,                     // atLocalityName
+    atsRawUtf8,                     // atStateName
+    atsRawUtf8,                     // atStreetAddress
+    atsRawUtf8,                     // atTelephoneNumber
+    atsRawUtf8,                     // atTitle
+    atsRawUtf8,                     // atSerialNumber
+    atsRawUtf8,                     // atMember
+    atsRawUtf8,                     // atOwner
+    atsIntegerGroupType,            // atGroupType
+    atsInteger,                     // atPrimaryGroupID
+    atsSid,                         // atObjectSid
+    atsGuid,                        // atObjectGuid
+    atsInteger,                     // atLogonCount
+    atsInteger,                     // atBadPwdCount
+    atsRawUtf8,                     // atDnsHostName
+    atsFileTime,                    // atAccountExpires
+    atsFileTime,                    // atBadPasswordTime
+    atsFileTime,                    // atLastLogon
+    atsFileTime,                    // atLastLogonTimestamp
+    atsFileTime,                    // atLastLogoff
+    atsFileTime,                    // atLockoutTime
+    atsFileTime,                    // atPwdLastSet
+    atsFileTime,                    // atMcsAdmPwdExpirationTime
+    atsTextTime,                    // atWhenCreated
+    atsTextTime,                    // atWhenChanged
+    atsRawUtf8,                     // atOperatingSystem
+    atsRawUtf8,                     // atOperatingSystemVersion
+    atsRawUtf8,                     // atServicePrincipalName
+    atsUnicodePwd);                 // atUnicodePwd
+
+  /// the LDAP raw values stored as UTF-8, which do not require any conversion
+  ATS_READABLE = [atsRawUtf8 .. atsIntegerSamAccountType];
+  /// the LDAP raw values stored as integer
+  ATS_INTEGER = [atsInteger .. atsIntegerSamAccountType];
+
 /// recognize our common Attribute Types from their standard NAME text
 function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
 
@@ -547,7 +628,7 @@ function AttributeNameType(const AttrName: RawUtf8): TLdapAttributeType;
 // - as used by TLdapAttribute.GetReadable/GetAllReadable
 // - will detect SID, GUID, FileTime and text date/time known fields
 // - if s is not truly UTF-8 encoded, will return its hexadecimal representation
-procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
+procedure AttributeValueMakeReadable(var s: RawUtf8; ats: TLdapAttributeTypeStorage);
 
 /// convert a set of common Attribute Types into their array text representation
 // - by design, atUndefined would be excluded from the list
@@ -575,7 +656,7 @@ type
     gtUniversal,
     gtAppBasic,
     gtAppQuery,
-    gtSecurity = 31);
+    gtSecurity);
   TGroupTypes = set of TGroupType;
 
   /// the decoded fields of TLdapUser.userAccountControl
@@ -583,17 +664,17 @@ type
   TUserAccountControl = (
     uacScript,                            //       1
     uacAccountDisable,                    //       2
-    uacHomeDirRequired = 3,               //       8
+    uacHomeDirRequired,                   //       8
     uacLockedOut,                         //      10 = 16
     uacPasswordNotRequired,               //      20 = 32
     uacPasswordCannotChange,              //      40 = 64
     uacPasswordUnencrypted,               //      80 = 128
     uacTempDuplicateAccount,              //     100 = 256
     uacNormalAccount,                     //     200 = 512
-    uacInterDomainTrusted = 11,           //     800 = 2048
+    uacInterDomainTrusted,                //     800 = 2048
     uacWorkstationTrusted,                //    1000 = 4096
     uacServerTrusted,                     //    2000 = 8192
-    uacPasswordDonotExpire = 16,          //   10000 = 65536
+    uacPasswordDoNotExpire,               //   10000 = 65536
     uacLogonAccount,                      //   20000 = 131072
     uacSmartcardRequired,                 //   40000 = 262144
     uacKerberosTrustedForDelegation,      //   80000 = 524288
@@ -619,6 +700,22 @@ type
     satAppBasicGroup,
     satAppQueryGroup);
 
+  /// known systemFlags values
+  TSystemFlag = (
+    sfAttrNotReplicated,          // 1
+    sfAttrReqPartialSetMember,    // 2
+    sfAttrIsConstructed,          // 4
+    sfAttrIsOperational,          // 8
+    sfSchemaBaseObject,           // 10
+    sfAttrIsRdn,                  // 20
+    sfDomainDisallowMove,         // 400000
+    sfDomainDisallowRename,       // 800000
+    sfConfigAllowLimitedMove,     // 1000000
+    sfConfigAllowMove,            // 2000000
+    sfConfigAllowRename,          // 4000000
+    sfConfigAllowDelete);         // 8000000
+  TSystemFlags = set of TSystemFlag;
+
   /// customize the TLdapAttributeList.Add(name, value) process
   // - default aoAlways will append the name/value pair to the existing content
   // - aoReplaceValue: if name already exists, replace its value
@@ -637,6 +734,9 @@ type
     fAttributeName: RawUtf8;
     fCount: integer;
     fKnownType: TLdapAttributeType;
+    fKnownTypeStorage: TLdapAttributeTypeStorage;
+    procedure SetVariantOne(var v: TVarData; const s: RawUtf8);
+    procedure SetVariantArray(var v: TDocVariantData);
   public
     /// initialize the attribute(s) storage
     constructor Create(const AttrName: RawUtf8; AttrType: TLdapAttributeType);
@@ -651,7 +751,7 @@ type
     procedure AddFmt(const aValueFmt: RawUtf8; const aValueArgs: array of const;
       Option: TLdapAddOption = aoAlways); 
     /// retrieve a value as human-readable text
-    // - a wrapper around AttributeValueMakeReadable() and the known type
+    // - wraps AttributeValueMakeReadable() and the known storage type
     function GetReadable(index: PtrInt = 0): RawUtf8;
     /// retrieve all values as human-readable text
     function GetAllReadable: TRawUtf8DynArray;
@@ -659,10 +759,14 @@ type
     // - return '' if the index is out of range, or the attribute is void
     function GetRaw(index: PtrInt = 0): RawByteString;
     /// retrieve this attribute value(s) as a variant
-    // - return nil if there is no value (self=nil or Count=0)
+    // - return null if there is no value (self=nil or Count=0)
     // - if there is a single value, return it as a single variant text
     // - if Count > 0, return a TDocVariant array with all texts
     function GetVariant: variant;
+    /// retrieve this attribute value(s) as a variant
+    // - expects v to be void (e.g. just allocated from an array of variant)
+    // - as called by GetVariant()
+    procedure SetNewVariant(var v: variant);
     /// search for a given value within this list
     function FindIndex(const aValue: RawByteString): PtrInt;
     /// add all attributes to a "dn: ###" entry of a ldif-content buffer
@@ -676,6 +780,9 @@ type
     /// the common LDAP Attribute Type corresponding to this AttributeName
     property KnownType: TLdapAttributeType
       read fKnownType;
+    /// the common LDAP Attribute Type Storage corresponding to this AttributeName
+    property KnownTypeStorage: TLdapAttributeTypeStorage
+      read fKnownTypeStorage;
     /// raw direct access to the individual values
     // - note that length(List) = capacity - use Count property instead, and
     // don't iterate on this array as "for u in attribute.List do..."
@@ -686,7 +793,7 @@ type
   TLdapAttributeDynArray = array of TLdapAttribute;
 
   /// list one or several TLdapAttribute
-  // - will use TLdapResultList.fInterning as hashed list of names to minimize
+  // - will use a global TRawUtf8Interning as hashed list of names to minimize
   // memory allocation, and makes efficient lookup
   TLdapAttributeList = class
   private
@@ -747,11 +854,18 @@ type
     // - returns empty string if not found
     // - faster than overloaded Get(AttributeName)
     function Get(AttributeType: TLdapAttributeType): RawUtf8; overload;
-    /// access a atSAMAccountType attribute value with proper decoding
+    /// find and return first attribute value with the requested type
+    // - calls GetAllReadable on the found attribute
+    function GetAll(AttributeType: TLdapAttributeType): TRawUtf8DynArray;
+    /// access atSAMAccountType attribute value with proper decoding
     function AccountType: TSamAccountType;
-    /// access a atGroupType attribute value with proper decoding
+    /// access atGroupType attribute value with proper decoding
     function GroupTypes: TGroupTypes;
-    /// access a atUserAccountControl attribute value with proper decode/encode
+    /// access atSAMAccountType attribute value with proper decoding
+    function SamAccountType: TSamAccountType;
+    /// access atSystemFlags attribute value with proper decoding
+    function SystemFlags: TSystemFlags;
+    /// access atUserAccountControl attribute value with proper decoding/encoding
     property UserAccountControl: TUserAccountControls
       read GetUserAccountControl write SetUserAccountControl;
     /// access to the internal list of TLdapAttribute objects
@@ -764,18 +878,42 @@ type
   end;
 
 /// recognize the integer value stored in a LDAP atSAMAccountType entry as TSamAccountType
-function SamAccountType(const value: RawUtf8): TSamAccountType;
+function SamAccountTypeFromText(const value: RawUtf8): TSamAccountType;
+function SamAccountTypeFromInteger(value: cardinal): TSamAccountType;
 
 /// convert a TSamAccountType as integer value stored in a LDAP atSAMAccountType entry
-function SamAccountTypeValue(sat: TSamAccountType): RawUtf8;
+function SamAccountTypeValue(sat: TSamAccountType): integer;
+
+/// recognize the integer value stored in a LDAP atGroupType entry
+function GroupTypesFromText(const value: RawUtf8): TGroupTypes;
+function GroupTypesFromInteger(value: integer): TGroupTypes;
+
+/// compute the integer value stored in a LDAP atGroupType entry
+function GroupTypesValue(gt: TGroupTypes): integer;
+
+/// recognize the integer value stored in a LDAP atUserAccountControl entry
+function UserAccountControlsFromText(const value: RawUtf8): TUserAccountControls;
+function UserAccountControlsFromInteger(value: integer): TUserAccountControls;
+
+/// compute the integer value stored in a LDAP atUserAccountControl entry
+function UserAccountControlsValue(uac: TUserAccountControls): integer;
+
+/// recognize the integer value stored in a LDAP atSystemFlags entry
+function SystemFlagsFromInteger(value: integer): TSystemFlags;
+function SystemFlagsFromText(const value: RawUtf8): TSystemFlags;
+
+/// compute the integer value stored in a LDAP atSystemFlags entry
+function SystemFlagsValue(sf: TSystemFlags): integer;
 
 function ToText(sat: TSamAccountType): PShortString; overload;
+procedure ToTextTrimmed(sat: TSamAccountType; var text: RawUtf8);
 
 /// compute a TLdapClient.Search filter for a given account
 // - specify the entry by AccountName, DistinguishedName or UserPrincipalName
 // - and also per sAMAccountType and a custom filter
-function InfoFilter(AccountType: TSamAccountType; const AccountName,
-  DistinguishedName, UserPrincipalName, CustomFilter: RawUtf8): RawUtf8;
+function InfoFilter(AccountType: TSamAccountType;
+  const AccountName: RawUtf8 = ''; const DistinguishedName: RawUtf8 = '';
+  const UserPrincipalName: RawUtf8 = ''; const CustomFilter: RawUtf8 = ''): RawUtf8;
 
 
 { **************** LDAP Response Storage }
@@ -908,6 +1046,19 @@ type
     function Custom(const AttributeName: RawUtf8): RawUtf8;
   end;
 
+  /// high-level information of a Computer in the LDAP database
+  TLdapComputer = object(TLdapObject)
+  public
+    pwdLastSet, lastLogonTimestamp, admPwdExpirationTime: TDateTime;
+    userAccountControl: TUserAccountControls;
+    primaryGroupID, logonCount, badPwdCount: cardinal;
+    dNSHostName, operatingSystem, operatingSystemVersion: RawUtf8;
+    servicePrincipalName: TRawUtf8DynArray;
+    procedure Fill(Attributes: TLdapAttributeList;
+      const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
+  end;
+  PLdapComputer = ^TLdapComputer;
+
   /// high-level information of a Group in the LDAP database
   // - note that "member" array won't include nested groups - use rather the
   // TLdapClient.GetIsMemberOf() method or TLdapCheckMember class instead
@@ -916,12 +1067,11 @@ type
     primaryGroupID: cardinal;
     groupType: TGroupTypes;
     member: TRawUtf8DynArray;
-    procedure FillGroup(Attributes: TLdapAttributeList; WithMember: boolean;
+    procedure Fill(Attributes: TLdapAttributeList; WithMember: boolean;
       const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
   end;
 
   /// high-level information of a User in the LDAP database
-  // - inherit from TLdapGroup to share some common fields
   // - some of the fields are only populated if the User matches the logged one
   // - note that "memberof" array won't include nested groups - use rather the
   // TLdapClient.GetIsMemberOf() method or TLdapCheckMember class instead
@@ -932,7 +1082,7 @@ type
     memberof: TRawUtf8DynArray;
     userAccountControl: TUserAccountControls;
     primaryGroupID: cardinal;
-    procedure FillUser(Attributes: TLdapAttributeList; WithMemberOf: boolean;
+    procedure Fill(Attributes: TLdapAttributeList; WithMemberOf: boolean;
       const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
   end;
   PLdapUser = ^TLdapUser;
@@ -1330,6 +1480,12 @@ type
       const Match: RawUtf8 = ''; const CustomFilter: RawUtf8 = '';
       const BaseDN: RawUtf8 = ''; ObjectNames: PRawUtf8DynArray = nil;
       Attribute: TLdapAttributeType = atSAMAccountName): TRawUtf8DynArray;
+    /// retrieve the basic information of a LDAP Computer
+    // - could lookup by sAMAccountName or distinguishedName
+    function GetComputerInfo(const AccountName, DistinguishedName: RawUtf8;
+      out Info: TLdapComputer; const BaseDN: RawUtf8 = '';
+      const CustomAttributes: TRawUtf8DynArray = nil;
+      const CustomTypes: TLdapAttributeTypes = []): boolean;
     /// Add a new computer in the domain
     // - If password is empty, it isn't set in the attributes
     // - If DeleteIfPresent is false and there is already a computer with this
@@ -1830,7 +1986,7 @@ var
   sock: TNetSocket;
   tmp: array[0..1999] of byte; // big enough for a UDP frame
 begin
-  FastRecordClear(@Info, TypeInfo(TCldapDomainInfo));
+  RecordZero(@Info, TypeInfo(TCldapDomainInfo));
   result := false;
   if addr.SetFrom(LdapServerAddress, LdapServerPort, nlUdp) <> nrOk then
     exit;
@@ -2605,6 +2761,7 @@ const
     'displayName',                 // atDisplayName
     'userPrincipalName',           // atUserPrincipalName
     'userAccountControl',          // atUserAccountControl
+    'systemFlags',                 // atSystemFlags
     'sAMAccountName',              // atSAMAccountName
     'sAMAccountType',              // atSAMAccountType
     'adminCount',                  // atAdminCount
@@ -2628,6 +2785,9 @@ const
     'primaryGroupID',              // atPrimaryGroupID
     'objectSid',                   // atObjectSid
     'objectGUID',                  // atObjectGuid
+    'logonCount',                  // atLogonCount
+    'badPwdCount',                 // atBadPwdCount
+    'dNSHostName',                 // atDnsHostName
     'accountExpires',              // atAccountExpires
     'badPasswordTime',             // atBadPasswordTime
     'lastLogon',                   // atLastLogon
@@ -2639,6 +2799,7 @@ const
     'whenCreated',                 // atWhenCreated
     'whenChanged',                 // atWhenChanged
     'operatingSystem',             // atOperatingSystem
+    'operatingSystemVersion',      // atOperatingSystemVersion
     'servicePrincipalName',        // atServicePrincipalName
     'unicodePwd');                 // atUnicodePwd
 
@@ -2707,27 +2868,36 @@ begin
   result := _AttributeNameType(_LdapIntern.Existing(AttrName)); // very fast
 end;
 
-procedure AttributeValueMakeReadable(var s: RawUtf8; lat: TLdapAttributeType);
+procedure AttributeValueMakeReadable(var s: RawUtf8; ats: TLdapAttributeTypeStorage);
 var
   ft: QWord;
-  err: integer;
-  ts: TTimeLogBits;
+  guid: TGuid;
+  err: integer absolute guid;
+  ts: TTimeLogBits absolute guid;
 begin
-  // handle the special encoding of our recognized attribute types
-  case lat of
-    atObjectSid:
+  // handle the storage kind of our recognized attribute types
+  case ats of
+    atsRawUtf8, // most used - LDAP v3 requires UTF-8 encoding
+    atsInteger,
+    atsIntegerUserAccountControl,
+    atsIntegerSystemFlags,
+    atsIntegerGroupType,
+    atsIntegerSamAccountType:
+      exit; // no need to make any conversion since is true UTF-8 or number
+    atsSid:
       if IsValidRawSid(s) then
       begin
-        s := SidToText(pointer(s));
+        SidToText(pointer(s), s);
         exit;
       end;
-    atObjectGuid:
+    atsGuid:
       if length(s) = SizeOf(TGuid) then
       begin
-        s := ToUtf8(PGuid(s)^); // e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
+        guid := PGuid(s)^; // temp copy to avoid issues with s content
+        ToUtf8(guid, s);  // e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
         exit;
       end;
-    atAccountExpires .. atMcsAdmPwdExpirationTime: // 64-bit FileTime
+    atsFileTime: // 64-bit FileTime
       begin
         ft := GetQWord(pointer(s), err);
         if (err = 0) and
@@ -2736,25 +2906,33 @@ begin
           if ft >= $7FFFFFFFFFFFFFFF then
             s := 'Never expires'
           else
-            s := UnixMSTimeToString(WindowsFileTime64ToUnixMSTime(ft));
+          begin
+            ts.FromUnixMSTime(WindowsFileTime64ToUnixMSTime(ft));
+            ts.SetText(s, {expanded=}true); // normalize as pure ISO-8601
+          end;
           exit;
         end;
       end;
-    atWhenCreated .. atWhenChanged: // some date/time text
+    atsTextTime: // some date/time text
       begin
         ts.From(pointer(s), length(s) - 3);
         if ts.Value <> 0 then
         begin
-          s := ts.Text({expanded=}true); // normalize as pure ISO-8601
+          ts.SetText(s, {expanded=}true); // normalize as pure ISO-8601
           exit;
         end;
       end;
+    atsUnicodePwd:
+      begin
+        s := 'xxxxxxxx'; // anti-forensic measure
+        exit;
+      end;
   end;
-  // fallback to hexa if the input is not valid UTF-8 (as expected with LDAP v3)
+  // atsAny or not expected format: check valid UTF-8, or fallback to hexa
   if IsValidUtf8(s) then
     EnsureRawUtf8(s)
   else
-    s := BinToHexLower(s);
+    BinToHexLowerSelf(RawByteString(s));
 end;
 
 function ToText(Attributes: TLdapAttributeTypes): TRawUtf8DynArray;
@@ -2793,28 +2971,163 @@ const
     $40000000,  // satAppBasicGroup
     $40000001); // satAppQueryGroup
 
-function SamAccountType(const value: RawUtf8): TSamAccountType;
-var
-  sat: cardinal;
+  // see https://ldapwiki.com/wiki/Wiki.jsp?page=GroupType
+  GT_VALUE: array[TGroupType] of integer = (
+    1, 2, 4, 8, 16, 32, integer($80000000));
+
+  // see https://ldapwiki.com/wiki/Wiki.jsp?page=userAccountControl
+  UAC_VALUE: array[TUserAccountControl] of integer = (
+    1, 2, 8, 16, 32, 64, 128, 256, 512, 2048, 4096, 8192, 65536,
+    131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216,
+    33554432, 67108864);
+
+  // see https://ldapwiki.com/wiki/Wiki.jsp?page=X-SYSTEMFLAGS
+  SF_VALUE: array[TSystemFlag] of integer = (
+    1, 2, 4, 8, 16, 32, 64, 4194304, 8388608, 16777216, 33554432, 67108864);
+
+function SamAccountTypeFromInteger(value: cardinal): TSamAccountType;
 begin
-  if ToCardinal(value, sat) then
-    result := TSamAccountType(IntegerScanIndex(
-      @AT_VALUE[satGroup], length(AT_VALUE) - 1, sat) + 1)
+  result := TSamAccountType(IntegerScanIndex(
+    @AT_VALUE[succ(low(result))], length(AT_VALUE) - 1, value) + 1)
+end;
+
+function SamAccountTypeFromText(const value: RawUtf8): TSamAccountType;
+var
+  c: cardinal;
+begin
+  if ToCardinal(value, c) then
+    result := SamAccountTypeFromInteger(c)
   else
     result := satUnknown;
 end;
 
-function SamAccountTypeValue(sat: TSamAccountType): RawUtf8;
+function SamAccountTypeValue(sat: TSamAccountType): integer;
 begin
-  if sat = satUnknown then
-    result := ''
-  else
-    UInt32ToUtf8(AT_VALUE[sat], result);
+  result := AT_VALUE[sat];
+end;
+
+function GroupTypesFromInteger(value: integer): TGroupTypes;
+var
+  g: TGroupType;
+  f: integer;
+begin
+  result := [];
+  if value <> 0 then
+    for g := low(g) to high(g) do
+    begin
+      f := GT_VALUE[g];
+      if value and f = 0 then
+        continue;
+      include(result, g);
+      dec(value, f);
+      if value = 0 then
+        break;
+    end;
+end;
+
+function GroupTypesFromText(const value: RawUtf8): TGroupTypes;
+var
+  v: integer;
+begin
+  result := [];
+  if ToInteger(value, v) then
+    result := GroupTypesFromInteger(v);
+end;
+
+function GroupTypesValue(gt: TGroupTypes): integer;
+var
+  g: TGroupType;
+begin
+  result := 0;
+  for g := low(g) to high(g) do
+    if g in gt then
+      result := result or GT_VALUE[g];
+end;
+
+function UserAccountControlsFromInteger(value: integer): TUserAccountControls;
+var
+  uac: TUserAccountControl;
+  f: integer;
+begin
+  result := [];
+  if value <> 0 then
+    for uac := low(uac) to high(uac) do
+    begin
+      f := UAC_VALUE[uac];
+      if value and f = 0 then
+        continue;
+      include(result, uac);
+      dec(value, f);
+      if value = 0 then
+        break;
+    end;
+end;
+
+function UserAccountControlsFromText(const value: RawUtf8): TUserAccountControls;
+var
+  v: integer;
+begin
+  result := [];
+  if ToInteger(value, v) then
+    result := UserAccountControlsFromInteger(v);
+end;
+
+function UserAccountControlsValue(uac: TUserAccountControls): integer;
+var
+  u: TUserAccountControl;
+begin
+  result := 0;
+  for u := low(u) to high(u) do
+    if u in uac then
+      result := result or UAC_VALUE[u];
+end;
+
+function SystemFlagsFromInteger(value: integer): TSystemFlags;
+var
+  sf: TSystemFlag;
+  f: integer;
+begin
+  result := [];
+  if value <> 0 then
+    for sf := low(sf) to high(sf) do
+    begin
+      f := SF_VALUE[sf];
+      if value and f = 0 then
+        continue;
+      include(result, sf);
+      dec(value, f);
+      if value = 0 then
+        break;
+    end;
+end;
+
+function SystemFlagsFromText(const value: RawUtf8): TSystemFlags;
+var
+  v: integer;
+begin
+  result := [];
+  if ToInteger(value, v) then
+    result := SystemFlagsFromInteger(v);
+end;
+
+function SystemFlagsValue(sf: TSystemFlags): integer;
+var
+  f: TSystemFlag;
+begin
+  result := 0;
+  for f := low(f) to high(f) do
+    if f in sf then
+      result := result or SF_VALUE[f];
 end;
 
 function ToText(sat: TSamAccountType): PShortString;
 begin
   result := GetEnumName(TypeInfo(TSamAccountType), ord(sat));
+end;
+
+procedure ToTextTrimmed(sat: TSamAccountType; var text: RawUtf8);
+begin
+  TrimLeftLowerCaseShort(GetEnumName(TypeInfo(TSamAccountType), ord(sat)), text);
 end;
 
 var
@@ -2836,11 +3149,6 @@ begin
   if UserPrincipalName <> '' then
     result := FormatUtf8('%(userPrincipalName=%)',
       [result, LdapEscapeName(UserPrincipalName)]);
-  if result = '' then
-  begin
-    result := '(cn=)'; // return no answer whatsoever
-    exit;
-  end;
   if ord(AccountName <> '') +
      ord(DistinguishedName <> '') +
      ord(UserPrincipalName <> '') > 1 then
@@ -2861,6 +3169,7 @@ begin
   inherited Create;
   fAttributeName := AttrName;
   fKnownType := AttrType;
+  fKnownTypeStorage := AttrTypeStorage[AttrType];
   SetLength(fList, 1); // optimized for a single value (most used case)
 end;
 
@@ -2910,14 +3219,15 @@ end;
 
 function TLdapAttribute.GetReadable(index: PtrInt): RawUtf8;
 begin
-  if (self = nil) or
-     (index >= fCount) then
-    result := ''
-  else
+  if (self <> nil) and
+     (index < fCount) then
   begin
     result := fList[index];
-    AttributeValueMakeReadable(result, fKnownType);
-  end;
+    if not (fKnownTypeStorage in ATS_READABLE) then
+      AttributeValueMakeReadable(result, fKnownTypeStorage);
+  end
+  else
+    result := '';
 end;
 
 function TLdapAttribute.GetAllReadable: TRawUtf8DynArray;
@@ -2928,9 +3238,19 @@ begin
   if (self = nil) or
      (fCount = 0) then
     exit;
+  if fKnownTypeStorage in ATS_READABLE then
+  begin
+    // no need to make any conversion, nor any allocation
+    DynArrayFakeLength(fList, fCount);
+    result := TRawUtf8DynArray(fList);
+    exit;
+  end;
   SetLength(result, fCount);
   for i := 0 to fCount - 1 do
-    result[i] := GetReadable(i);
+  begin
+    result[i] := fList[i];
+    AttributeValueMakeReadable(result[i], fKnownTypeStorage);
+  end;
 end;
 
 function TLdapAttribute.GetRaw(index: PtrInt): RawByteString;
@@ -2942,15 +3262,114 @@ begin
     result := fList[index];
 end;
 
+procedure TLdapAttribute.SetVariantOne(var v: TVarData; const s: RawUtf8);
+var
+  i: integer;
+  uac: TUserAccountControls;
+  gt: TGroupTypes;
+  sat: TSamAccountType;
+  sf: TSystemFlags;
+begin
+  case fKnownTypeStorage of
+    atsAny,
+    atsInteger:
+      if ToInt64(s, v.VInt64) then
+      begin
+        v.VType := varInt64;
+        exit;
+      end
+      else
+      begin
+        v.VInt64 := 0; // avoid GPF below
+        if fKnownTypeStorage = atsAny then
+          if s = 'FALSE' then
+          begin
+            v.VType := varBoolean;
+            exit;
+          end
+          else if s = 'TRUE' then
+          begin
+            v.VType := varBoolean;
+            v.VInteger := ord(true);
+            exit;
+          end;
+      end;
+    atsIntegerUserAccountControl:
+      if ToInteger(s, i) then
+      begin
+        uac := UserAccountControlsFromInteger(i);
+        TDocVariantData(v).InitArrayFromSet(
+          TypeInfo(TUserAccountControls), uac, JSON_FAST, {trimmed=}true);
+        exit;
+      end;
+    atsIntegerSystemFlags:
+      if ToInteger(s, i) then
+      begin
+        sf := SystemFlagsFromInteger(i);
+        TDocVariantData(v).InitArrayFromSet(
+          TypeInfo(TSystemFlags), sf, JSON_FAST, {trimmed=}true);
+        exit;
+      end;
+    atsIntegerGroupType:
+      if ToInteger(s, i) then
+      begin
+        gt := GroupTypesFromInteger(i);
+        TDocVariantData(v).InitArrayFromSet(
+          TypeInfo(TGroupTypes), gt, JSON_FAST, {trimmed=}true);
+        exit;
+      end;
+    atsIntegerSamAccountType:
+      if ToInteger(s, i) then
+      begin
+        sat := SamAccountTypeFromInteger(i);
+        if sat <> satUnknown then
+        begin
+          v.VType := varString;
+          ToTextTrimmed(sat, RawUtf8(v.VAny));
+        end
+        else
+        begin
+          v.VType := varInteger; // store satUnknown as integer
+          v.VInteger := i;
+        end;
+        exit;
+      end;
+    atsFileTime:
+      if s = '0' then
+        exit; // 0 = null
+  end;
+  v.VType := varString;
+  RawUtf8(v.VAny) := s;
+  if not (fKnownTypeStorage in ATS_READABLE) then
+    AttributeValueMakeReadable(RawUtf8(v.VAny), fKnownTypeStorage);
+end;
+
+procedure TLdapAttribute.SetVariantArray(var v: TDocVariantData);
+var
+  i: PtrInt;
+begin // avoid implit try..finally in TLdapAttribute.GetVariant
+  v.InitFast(fCount, dvArray);
+  v.SetCount(fCount);
+  for i := 0 to fCount - 1 do
+    SetVariantOne(PVarData(@v.Values[i])^, fList[i]);
+end;
+
+procedure TLdapAttribute.SetNewVariant(var v: variant);
+begin
+  if fCount = 1 then
+    SetVariantOne(TVarData(v), fList[0])
+  else if fKnownTypeStorage = atsRawUtf8 then
+    TDocVariantData(v).InitArrayFrom(TRawUtf8DynArray(fList), JSON_FAST, fCount)
+  else
+    SetVariantArray(TDocVariantData(v));
+end;
+
 function TLdapAttribute.GetVariant: variant;
 begin
   SetVariantNull(result);
   if (self <> nil) and
      (fCount > 0) then
-    if fCount = 1 then
-      RawUtf8ToVariant(GetReadable, result)
-    else
-      TDocVariantData(result).InitArrayFrom(GetAllReadable, JSON_FAST);
+    SetNewVariant(result);
 end;
 
 function TLdapAttribute.FindIndex(const aValue: RawByteString): PtrInt;
@@ -3071,6 +3490,11 @@ begin
   result := Find(AttributeType).GetReadable(0);
 end;
 
+function TLdapAttributeList.GetAll(AttributeType: TLdapAttributeType): TRawUtf8DynArray;
+begin
+  result := Find(AttributeType).GetAllReadable;
+end;
+
 function TLdapAttributeList.DoAdd(const aName: RawUtf8;
   aType: TLdapAttributeType): TLdapAttribute;
 begin
@@ -3157,32 +3581,32 @@ end;
 
 function TLdapAttributeList.AccountType: TSamAccountType;
 begin
-  result := SamAccountType(Get(atSAMAccountType));
+  result := SamAccountTypeFromText(Get(atSAMAccountType));
 end;
 
 function TLdapAttributeList.GroupTypes: TGroupTypes;
-var
-  v: cardinal;
 begin
-  if ToCardinal(Get(atGroupType), v) then
-    result := TGroupTypes(v)
-  else
-    result := [];
+  result := GroupTypesFromText(Get(atGroupType));
+end;
+
+function TLdapAttributeList.SamAccountType: TSamAccountType;
+begin
+  result := SamAccountTypeFromText(Get(atSAMAccountType));
+end;
+
+function TLdapAttributeList.SystemFlags: TSystemFlags;
+begin
+  result := SystemFlagsFromText(Get(atSystemFlags));
 end;
 
 function TLdapAttributeList.GetUserAccountControl: TUserAccountControls;
-var
-  uac: integer;
 begin
-  if ToInteger(Get(atUserAccountControl), uac) then
-    result := TUserAccountControls(uac)
-  else
-    result := [];
+  result := UserAccountControlsFromText(Get(atUserAccountControl));
 end;
 
 procedure TLdapAttributeList.SetUserAccountControl(Value: TUserAccountControls);
 begin
-  Add(atUserAccountControl, ToUtf8(integer(Value)), aoReplaceValue);
+  Add(atUserAccountControl, ToUtf8(UserAccountControlsValue(Value)), aoReplaceValue);
 end;
 
 
@@ -3412,7 +3836,7 @@ procedure TLdapResultList.AppendTo(var Dvo: TDocVariantData;
 var
   i, j: PtrInt;
   res: TLdapResult;
-  attr: TLdapAttribute;
+  attr: ^TLdapAttribute;
   dc, ou, cn: TRawUtf8DynArray;
   a: TDocVariantData;
   v: PDocVariantData;
@@ -3431,12 +3855,16 @@ begin
     if ObjectAttributeField = '' then
       continue; // no attribute
     a.Init(mNameValue, dvObject);
-    a.Capacity := res.Attributes.Count + 1;
-    a.AddValueFromText('objectName', res.ObjectName);
-    for j := 0 to res.Attributes.Count - 1 do
+    a.SetCount(res.Attributes.Count + 1);
+    a.Capacity := a.Count;
+    a.Names[0] := 'objectName';
+    RawUtf8ToVariant(res.ObjectName, a.Values[0]);
+    attr := pointer(res.Attributes.Items);
+    for j := 1 to res.Attributes.Count do
     begin
-      attr := res.Attributes.Items[j];
-      a.AddValue(attr.AttributeName, attr.GetVariant); // benefit from fInterning
+      a.Names[j] := attr^.AttributeName; // use TRawUtf8Interning
+      attr^.SetNewVariant(a.Values[j]);
+      inc(attr);
     end;
     if ObjectAttributeField = '*' then
       v^.AddOrUpdateFrom(variant(a), {onlymissing=}true)
@@ -3653,7 +4081,7 @@ end;
 
 { TLdapGroup }
 
-procedure TLdapGroup.FillGroup(Attributes: TLdapAttributeList; WithMember: boolean;
+procedure TLdapGroup.Fill(Attributes: TLdapAttributeList; WithMember: boolean;
   const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
 begin
   FillObject(Attributes, CustomAttributes, CustomTypes);
@@ -3666,7 +4094,7 @@ end;
 
 { TLdapUser }
 
-procedure TLdapUser.FillUser(Attributes: TLdapAttributeList; WithMemberOf: boolean;
+procedure TLdapUser.Fill(Attributes: TLdapAttributeList; WithMemberOf: boolean;
   const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
 begin
   FillObject(Attributes, CustomAttributes, CustomTypes);
@@ -3679,6 +4107,26 @@ begin
   if WithMemberOf then
     memberOf := Attributes.Find(atMemberOf).GetAllReadable;
   userAccountControl := Attributes.UserAccountControl;
+end;
+
+
+{ TLdapComputer }
+
+procedure TLdapComputer.Fill(Attributes: TLdapAttributeList;
+  const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes);
+begin
+  FillObject(Attributes, CustomAttributes, CustomTypes);
+  pwdLastSet := LdapToDate(Attributes.Get(atPwdLastSet));
+  lastLogonTimestamp := LdapToDate(Attributes.Get(atLastLogon));
+  admPwdExpirationTime := LdapToDate(Attributes.Get(atMcsAdmPwdExpirationTime));
+  userAccountControl := Attributes.UserAccountControl;
+  ToCardinal(Attributes.Get(atPrimaryGroupID), primaryGroupID);
+  ToCardinal(Attributes.Get(atLogonCount), logonCount);
+  ToCardinal(Attributes.Get(atBadPwdCount), badPwdCount);
+  dNSHostName := Attributes.Get(atDnsHostName);
+  operatingSystem := Attributes.Get(atOperatingSystem);
+  operatingSystemVersion := Attributes.Get(atOperatingSystemVersion);
+  servicePrincipalName := Attributes.GetAll(atServicePrincipalName);
 end;
 
 
@@ -4858,12 +5306,70 @@ end;
 
 // **** TLdapClient high-level Computer methods
 
+const
+  // TLdapObject attributes, common to TLdapComputer, TLdapGroup and TLdapUser
+  LDAPOBJECT_ATTR = [
+    atSAMAccountName,
+    atDistinguishedName,
+    atName,
+    atCommonName,
+    atDescription,
+    atObjectSid,
+    atObjectGuid,
+    atWhenCreated,
+    atWhenChanged];
+  // TLdapComputer attributes
+  LDAPMACHINE_ATTR = LDAPOBJECT_ATTR + [
+    atPwdLastSet,
+    atLastLogonTimestamp,
+    atMcsAdmPwdExpirationTime,
+    atUserAccountControl,
+    atPrimaryGroupID,
+    atLogonCount,
+    atBadPwdCount,
+    atDnsHostName,
+    atOperatingSystem,
+    atOperatingSystemVersion,
+    atServicePrincipalName];
+  // TLdapGroup attributes
+  LDAPGROUP_ATTR = LDAPOBJECT_ATTR + [
+    atGroupType];
+  // TLdapUser attributes
+  LDAPUSER_ATTR  = LDAPOBJECT_ATTR + [
+    atUserPrincipalName,
+    atDisplayName,
+    atMail,
+    atPwdLastSet,
+    atLastLogon,
+    atUserAccountControl,
+    atPrimaryGroupID];
+
 function TLdapClient.GetComputers(FilterUac, UnFilterUac: TUserAccountControls;
   const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
   Attribute: TLdapAttributeType): TRawUtf8DynArray;
 begin
-  GetByAccountType(satMachineAccount, integer(FilterUac), integer(UnFilterUac),
+  GetByAccountType(satMachineAccount,
+    UserAccountControlsValue(FilterUac), UserAccountControlsValue(UnFilterUac),
     BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
+end;
+
+function TLdapClient.GetComputerInfo(const AccountName, DistinguishedName: RawUtf8;
+  out Info: TLdapComputer; const BaseDN: RawUtf8;
+  const CustomAttributes: TRawUtf8DynArray; const CustomTypes: TLdapAttributeTypes): boolean;
+var
+  attr: TRawUtf8DynArray;
+begin
+  RecordZero(@Info, TypeInfo(TLdapComputer));
+  attr := ToText(LDAPMACHINE_ATTR + CustomTypes);
+  AddRawUtf8(attr, CustomAttributes);
+  result := ((AccountName <> '') or
+             (DistinguishedName <> '')) and
+            Search(DefaultDN(BaseDN), false, InfoFilter(
+              satMachineAccount, AccountName, DistinguishedName), attr) and
+            (SearchResult.Count = 1);
+  if result then
+    Info.Fill(SearchResult.Items[0].Attributes,
+      CustomAttributes, CustomTypes);
 end;
 
 function TLdapClient.AddComputer(const ComputerParentDN, ComputerName: RawUtf8;
@@ -4970,7 +5476,8 @@ function TLdapClient.GetGroups(FilterUac, UnFilterUac: TGroupTypes;
   const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
   Attribute: TLdapAttributeType): TRawUtf8DynArray;
 begin
-  GetByAccountType(satGroup, integer(FilterUac), integer(UnFilterUac),
+  GetByAccountType(satGroup,
+    GroupTypesValue(FilterUac), GroupTypesValue(UnFilterUac),
     BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
 end;
 
@@ -4978,32 +5485,10 @@ function TLdapClient.GetUsers(FilterUac, UnFilterUac: TUserAccountControls;
   const Match, CustomFilter, BaseDN: RawUtf8; ObjectNames: PRawUtf8DynArray;
   Attribute: TLdapAttributeType): TRawUtf8DynArray;
 begin
-  GetByAccountType(satUserAccount, integer(FilterUac), integer(UnFilterUac),
+  GetByAccountType(satUserAccount,
+    UserAccountControlsValue(FilterUac), UserAccountControlsValue(UnFilterUac),
     BaseDN, CustomFilter, Match, Attribute, result, ObjectNames);
 end;
-
-const
-  // TLdapObject attributes, common to TLdapGroup and TLdapUser
-  LDAPOBJECT_ATTR = [
-    atSAMAccountName,
-    atDistinguishedName,
-    atName,
-    atCommonName,
-    atDescription,
-    atObjectSid,
-    atObjectGuid,
-    atWhenCreated,
-    atWhenChanged];
-  LDAPGROUP_ATTR = LDAPOBJECT_ATTR + [
-    atGroupType];
-  LDAPUSER_ATTR  = LDAPOBJECT_ATTR + [
-    atUserPrincipalName,
-    atDisplayName,
-    atMail,
-    atPwdLastSet,
-    atLastLogon,
-    atUserAccountControl,
-    atPrimaryGroupID];
 
 function TLdapClient.GetGroupInfo(const AccountName, DistinguishedName: RawUtf8;
   out Info: TLdapGroup; const BaseDN: RawUtf8; WithMember: boolean;
@@ -5012,23 +5497,26 @@ var
   attr: TRawUtf8DynArray;
   attrs: TLdapAttributeTypes;
 begin
-  FastRecordClear(@Info, TypeInfo(TLdapGroup));
+  RecordZero(@Info, TypeInfo(TLdapGroup));
   attrs := LDAPGROUP_ATTR + CustomTypes;
   if WithMember then
     include(attrs, atMember);
   attr := ToText(attrs);
   AddRawUtf8(attr, CustomAttributes);
-  result := Search(DefaultDN(BaseDN), false,
-              InfoFilter(satGroup, AccountName, DistinguishedName, '', ''), attr) and
+  result := ((AccountName <> '') or
+             (DistinguishedName <> '')) and
+            Search(DefaultDN(BaseDN), false, InfoFilter(
+              satGroup, AccountName, DistinguishedName), attr) and
             (SearchResult.Count = 1);
   if result then
-    Info.FillGroup(SearchResult.Items[0].Attributes, WithMember,
+    Info.Fill(SearchResult.Items[0].Attributes, WithMember,
       CustomAttributes, CustomTypes);
 end;
 
 function TLdapClient.GetGroupDN(const AccountName, BaseDN, CustomFilter: RawUtf8): RawUtf8;
 begin
-  if Search([atDistinguishedName],
+  if (AccountName <> '') and
+     Search([atDistinguishedName],
        InfoFilter(satGroup, AccountName, '', '', CustomFilter)) and
      (SearchResult.Count = 1) then
     result := SearchResult.Items[0].Attributes.Get(atDistinguishedName)
@@ -5042,8 +5530,10 @@ var
   last: RawUtf8;
 begin
   result := false;
-  if Search([atObjectSid],
-       InfoFilter(satGroup, AccountName, DistinguishedName, '', CustomFilter)) and
+  if ((AccountName <> '') or
+      (DistinguishedName <> '')) and
+     Search([atObjectSid], InfoFilter(
+       satGroup, AccountName, DistinguishedName, '', CustomFilter)) and
      (SearchResult.Count = 1) then
   begin
     last := SplitRight(SearchResult.Items[0].Attributes.Get(atObjectSid), '-');
@@ -5060,18 +5550,20 @@ var
   attr: TRawUtf8DynArray;
   attrs: TLdapAttributeTypes;
 begin
-  FastRecordClear(@Info, TypeInfo(TLdapUser));
+  RecordZero(@Info, TypeInfo(TLdapUser));
   attrs := LDAPUSER_ATTR + CustomTypes;
   if WithMemberOf then
     include(attrs, atMemberOf);
   attr := ToText(attrs);
   AddRawUtf8(attr, CustomAttributes);
-  result := Search(DefaultDN(BaseDN), false,
-              InfoFilter(satUserAccount,
-                AccountName, DistinguishedName, UserPrincipalName, ''), attr) and
+  result := ((AccountName <> '') or
+             (DistinguishedName <> '') or
+             (UserPrincipalName <> '')) and
+            Search(DefaultDN(BaseDN), false, InfoFilter(satUserAccount,
+              AccountName, DistinguishedName, UserPrincipalName), attr) and
             (SearchResult.Count = 1);
   if result then
-    Info.FillUser(SearchResult.Items[0].Attributes,
+    Info.Fill(SearchResult.Items[0].Attributes,
       WithMemberOf, CustomAttributes, CustomTypes);
 end;
 
@@ -5079,7 +5571,9 @@ function TLdapClient.GetUserDN(
   const AccountName, UserPrincipalName, BaseDN, CustomFilter: RawUtf8;
   PrimaryGroupID: PCardinal; ObjectSid: PRawUtf8): RawUtf8;
 begin
-  if Search([atDistinguishedName, atPrimaryGroupID, atObjectSid],
+  if ((AccountName <> '') or
+      (UserPrincipalName <> '')) and
+     Search([atDistinguishedName, atPrimaryGroupID, atObjectSid],
        InfoFilter(satUserAccount,
          AccountName, '', UserPrincipalName, CustomFilter)) and
      (SearchResult.Count = 1) then
@@ -5576,7 +6070,6 @@ end;
 
 initialization
   InitializeUnit;
-  assert((1 shl ord(uacPartialSecretsRodc)) = $04000000);
 
 end.
 

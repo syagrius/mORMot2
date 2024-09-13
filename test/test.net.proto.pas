@@ -679,13 +679,18 @@ var
   at: TLdapAttributeType;
   ats: TLdapAttributeTypes;
   sat: TSamAccountType;
+  gt: TGroupType;
+  gts: TGroupTypes;
+  ua: TUserAccountControl;
+  uas: TUserAccountControls;
+  sf: TSystemFlag;
+  sfs: TSystemFlags;
   l: TLdapClientSettings;
   one: TLdapClient;
   utc1, utc2: TDateTime;
   ntp, usr, pwd, ku, main, txt: RawUtf8;
   hasinternet: boolean;
 begin
-  CheckEqual(1 shl ord(uacPartialSecretsRodc), $04000000, 'uacHigh');
   // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
   if not Executable.Command.Get('ntp', ntp) then
     ntp := NTP_DEFAULT_SERVER;
@@ -798,11 +803,48 @@ begin
   Check(ToText(ats) = nil);
   a := ToText([atOrganizationUnitName, atObjectClass, atCommonName]);
   CheckEqual(RawUtf8ArrayToCsv(a), 'objectClass,cn,ou');
+  // validate LDAP attributes values and high-level recognition
   for sat := low(sat) to high(sat) do
   begin
-    u := SamAccountTypeValue(sat);
-    Check((u = '') = (sat = satUnknown));
-    Check(SamAccountType(u) = sat);
+    c := SamAccountTypeValue(sat);
+    Check((c = 0) = (sat = satUnknown));
+    Check(SamAccountTypeFromText(UInt32ToUtf8(c)) = sat);
+  end;
+  for gt := low(gt) to high(gt) do
+  begin
+    gts := [gt];
+    Check(GroupTypesFromInteger(GroupTypesValue(gts)) = gts);
+  end;
+  gts := [];
+  Check(GroupTypesValue(gts) = 0);
+  for gt := low(gt) to high(gt) do
+  begin
+    include(gts, gt);
+    Check(GroupTypesFromInteger(GroupTypesValue(gts)) = gts);
+  end;
+  for ua := low(ua) to high(ua) do
+  begin
+    uas := [ua];
+    Check(UserAccountControlsFromInteger(UserAccountControlsValue(uas)) = uas);
+  end;
+  uas := [];
+  Check(UserAccountControlsValue(uas) = 0);
+  for ua := low(ua) to high(ua) do
+  begin
+    include(uas, ua);
+    Check(UserAccountControlsFromInteger(UserAccountControlsValue(uas)) = uas);
+  end;
+  for sf := low(sf) to high(sf) do
+  begin
+    sfs := [sf];
+    Check(SystemFlagsFromInteger(SystemFlagsValue(sfs)) = sfs);
+  end;
+  sfs := [];
+  Check(SystemFlagsValue(sfs) = 0);
+  for sf := low(sf) to high(sf) do
+  begin
+    include(sfs, sf);
+    Check(SystemFlagsFromInteger(SystemFlagsValue(sfs)) = sfs);
   end;
   // validate LDAP resultset and LDIF content
   rl := TLdapResultList.Create;
@@ -812,7 +854,7 @@ begin
       'version: 1'#$0A'# total number of entries: 0'#$0A);
     r := rl.Add;
     v := 'John E Doxx';
-    PWord(PAnsiChar(UniqueRawUtf8(v)) + 9)^ := $a9c3; // UTF-8 'e'acute
+    PWord(PAnsiChar(UniqueRawUtf8(v)) + 9)^ := $a9c3; // UTF-8 'e'acute (Delphi)
     r.ObjectName := 'cn=foo, ou=bar';
     r.Attributes.Add('objectClass', 'person');
     r.Attributes.AddPairs(['cn', 'John Doe',

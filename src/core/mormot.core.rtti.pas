@@ -581,6 +581,9 @@ type
     /// get the enumeration names corresponding to a set value as CSV
     function GetSetName(const value; trimmed: boolean = false;
       const sep: RawUtf8 = ','): RawUtf8;
+    /// get the enumeration names corresponding to a set value as a RawUtf8 rray
+    procedure GetSetNameArray(const value; var res: TRawUtf8DynArray;
+      trimmed: boolean = false);
     /// get the enumeration names corresponding to a set value as JSON array
     function GetSetNameJsonArray(Value: cardinal; SepChar: AnsiChar = ',';
       FullSetsAsStar: boolean = false): RawUtf8; overload;
@@ -599,8 +602,8 @@ type
     /// compute how many bytes this type will use to be stored as a enumerate
     function SizeInStorageAsEnum: integer;
       {$ifdef HASSAFEINLINE}inline;{$endif}
-    /// compute how many bytes (1, 2, 4) this type will use to be stored as a set
-    // - consider using TRttiInfo.SetEnumSize if ISFPC32 conditional is defined
+    /// compute how many bytes (1, 2, 4, 8) this type will use to be stored as a set
+    // - if ISFPC32 conditional is defined, will execute in O(1)
     function SizeInStorageAsSet: integer;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// store an enumeration value from its ordinal representation
@@ -842,8 +845,8 @@ type
       out Min, Max: integer): PRttiEnumType; overload;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkSet: in how many bytes this type is stored
-    // - is very efficient on latest FPC only - i.e. ifdef ISFPC32
-    function SetEnumSize: PtrInt; {$ifdef ISFPC32} inline; {$endif}
+    function SetEnumSize: PtrInt;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// compute in how many bytes this type is stored
     // - will use Kind (and RttiOrd/RttiFloat) to return the exact value
     function RttiSize: PtrInt;
@@ -1587,6 +1590,10 @@ procedure SetEnumFromOrdinal(aTypeInfo: PRttiInfo; out Value; Ordinal: PtrUInt);
 /// helper to retrieve the CSV text of all enumerate items defined in a set
 function GetSetName(aTypeInfo: PRttiInfo; const value;
   trimmed: boolean = false): RawUtf8;
+
+/// retrieve the text of all enumerate items defined in a set as dynamic array
+function GetSetNameArray(aTypeInfo: PRttiInfo; const value;
+  trimmed: boolean = false): TRawUtf8DynArray;
 
 /// helper to retrieve the CSV text of all enumerate items defined in a set
 // - expects CustomText in the TRttiJson.RegisterCustomEnumValues() format, e.g.
@@ -3273,6 +3280,7 @@ function TRttiEnumType.SizeInStorageAsSet: integer;
 begin
   if @self <> nil then
   begin
+    // PTypeData(@self)^.SetSize on ISFPC32 fails from base enum type
     result := MaxValue;
     if result < 8 then
       result := SizeOf(byte)
@@ -3373,7 +3381,7 @@ begin
   for i := 0 to max do
   begin
     if TrimLeftLowerCase then
-      result[i] := TrimLeftLowerCaseShort(V)
+      TrimLeftLowerCaseShort(V, result[i])
     else
       ShortStringToAnsi7String(V^, result[i]);
     inc(PByte(V), length(V^) + 1);
@@ -3472,7 +3480,7 @@ end;
 
 function TRttiEnumType.GetEnumNameTrimed(const Value): RawUtf8;
 begin
-  result := TrimLeftLowerCaseShort(GetEnumName(Value));
+  TrimLeftLowerCaseShort(GetEnumName(Value), result);
 end;
 
 function TRttiEnumType.GetSetName(const value; trimmed: boolean;
@@ -3502,6 +3510,40 @@ begin
   end;
   if result <> '' then
     FakeLength(result, length(result) - length(sep)); // trim last separator
+end;
+
+procedure TRttiEnumType.GetSetNameArray(const value; var res: TRawUtf8DynArray;
+  trimmed: boolean);
+var
+  n, j: PtrInt;
+  PS: PShortString;
+  d: PRawUtf8;
+begin
+  res := nil;
+  if (@self = nil) or
+     (@value = nil) then
+    exit;
+  n := GetBitsCount(value, {bits=}SizeInStorageAsSet shl 3);
+  if n = 0 then
+    exit;
+  SetLength(res, n);
+  d := pointer(res);
+  PS := NameList;
+  for j := MinValue to MaxValue do
+  begin
+    if GetBitPtr(@value, j) then
+    begin
+      if trimmed then
+        TrimLeftLowerCaseShort(PS, d^)
+      else
+        FastSetString(d^, @PS^[1], PByte(PS)^);
+      dec(n);
+      if n = 0 then
+        exit;
+      inc(d);
+    end;
+    inc(PByte(PS), PByte(PS)^ + 1); // next
+  end;
 end;
 
 procedure TRttiEnumType.GetSetNameJsonArray(W: TTextWriter; Value: cardinal;
@@ -3645,12 +3687,11 @@ begin
   result := TRttiFloat(GetTypeData(@self)^.FloatType);
 end;
 
-{$ifndef ISFPC32}
 function TRttiInfo.SetEnumSize: PtrInt;
 begin
-  result := SetEnumType^.SizeInStorageAsSet;
+  // PTypeData(@self)^.SetSize on ISFPC32 fails fails from base enum type
+  result := SetEnumType^.SizeInStorageAsSet; // compute from MaxValue
 end;
-{$endif ISFPC32}
 
 function TRttiInfo.DynArrayItemSize: PtrInt;
 begin
@@ -5631,7 +5672,7 @@ end;
 
 function GetEnumNameTrimed(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
 begin
-  result := TrimLeftLowerCaseShort(GetEnumName(aTypeInfo, aIndex));
+  TrimLeftLowerCaseShort(GetEnumName(aTypeInfo, aIndex), result);
 end;
 
 function GetEnumNameUnCamelCase(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
@@ -5670,7 +5711,7 @@ begin
     p := info^.NameList;
     for i := info^.MinValue to info^.MaxValue do
     begin
-      aDest^ := TrimLeftLowerCaseShort(p);
+      TrimLeftLowerCaseShort(p, aDest^);
       p := @PByteArray(p)^[ord(p^[0]) + 1];
       inc(aDest);
     end;
@@ -5718,6 +5759,12 @@ end;
 function GetSetName(aTypeInfo: PRttiInfo; const value; trimmed: boolean): RawUtf8;
 begin
   result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed);
+end;
+
+function GetSetNameArray(aTypeInfo: PRttiInfo; const value;
+  trimmed: boolean): TRawUtf8DynArray;
+begin
+  aTypeInfo^.SetEnumType^.EnumBaseType.GetSetNameArray(value, result, trimmed);
 end;
 
 function GetSetNameCustom(aTypeInfo: PRttiInfo; const value;
