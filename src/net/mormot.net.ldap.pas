@@ -218,8 +218,8 @@ procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
 function DNToCN(const DN: RawUtf8): RawUtf8;
 
 /// low-level parse a Distinguished Name text into its DC= OU= CN= parts
-procedure ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
-  ValueEscapeCN: boolean = false);
+function ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
+  ValueEscapeCN: boolean = false; NoRaise: boolean = false): boolean;
 
 const
   // LDAP result codes
@@ -360,6 +360,9 @@ const
   ASN1_OID_WHOAMI       = '1.3.6.1.4.1.4203.1.11.3';
 
 type
+  /// exception class raised by this unit
+  ELdap = class(ESynException);
+
   /// define possible operations for LDAP MODIFY operations
   TLdapModifyOp = (
     lmoAdd,
@@ -727,6 +730,19 @@ type
     aoKeepExisting,
     aoNoDuplicateValue);
 
+  /// customize TLdapResult.SearchAll/TLdapResultList.AppendTo output
+  TLdapResultOptions = set of (
+    roObjectNameAtRoot,
+    roObjectNameWithoutDCAtRoot,
+    roCanonicalNameAtRoot,
+    roCommonNameAtRoot,
+    roNoObjectName,
+    roRawBoolean,
+    roRawUac,
+    roRawFlags,
+    roRawGroupType,
+    roRawSamAccountType);
+
   /// store a named LDAP attribute with the list of its values
   TLdapAttribute = class
   private
@@ -735,8 +751,10 @@ type
     fCount: integer;
     fKnownType: TLdapAttributeType;
     fKnownTypeStorage: TLdapAttributeTypeStorage;
-    procedure SetVariantOne(var v: TVarData; const s: RawUtf8);
-    procedure SetVariantArray(var v: TDocVariantData);
+    procedure SetVariantOne(var v: TVarData; const s: RawUtf8;
+      options: TLdapResultOptions);
+    procedure SetVariantArray(var v: TDocVariantData;
+      options: TLdapResultOptions);
   public
     /// initialize the attribute(s) storage
     constructor Create(const AttrName: RawUtf8; AttrType: TLdapAttributeType);
@@ -762,11 +780,11 @@ type
     // - return null if there is no value (self=nil or Count=0)
     // - if there is a single value, return it as a single variant text
     // - if Count > 0, return a TDocVariant array with all texts
-    function GetVariant: variant;
+    function GetVariant(options: TLdapResultOptions = []): variant;
     /// retrieve this attribute value(s) as a variant
     // - expects v to be void (e.g. just allocated from an array of variant)
     // - as called by GetVariant()
-    procedure SetNewVariant(var v: variant);
+    procedure SetNewVariant(var v: variant; options: TLdapResultOptions);
     /// search for a given value within this list
     function FindIndex(const aValue: RawByteString): PtrInt;
     /// add all attributes to a "dn: ###" entry of a ldif-content buffer
@@ -978,13 +996,22 @@ type
     function ObjectAttributes(AttrType: TLdapAttributeType;
       ObjectNames: PRawUtf8DynArray = nil): TRawUtf8DynArray; overload;
     /// add all results as a TDocVariant object nested tree
-    // - the full CN will be used as path
+    // - the full DN will be used as path, according to the options
     // - attributes would be included as ObjectAttributeField (e.g. '_attr')
     // fields (including the "objectName" value), unless ObjectAttributeField
     // is '', and no attribute will be set; if ObjectAttributeField is '*' no
     // sub-field will be generated, and attributes will be written directly
-    procedure AppendTo(var Dvo: TDocVariantData;
+    // - as called by TLdapResultList.GetVariant and TLdapClient.SearchAll
+    procedure AppendTo(var Dvo: TDocVariantData; Options: TLdapResultOptions;
       const ObjectAttributeField: RawUtf8);
+    /// export all results as a TDocVariant object variant
+    function GetVariant(Options: TLdapResultOptions = [];
+      const ObjectAttributeField: RawUtf8 = '*'): variant;
+    /// export all results as a JSON object
+    // - use a transient TDocVariant for the conversion
+    function GetJson(Options: TLdapResultOptions = [];
+      const ObjectAttributeField: RawUtf8 = '*';
+      Format: TTextWriterJsonFormat = jsonCompact): RawUtf8;
     /// export all results in the RFC 2234 ldif-content output
     function ExportToLdifContent: RawUtf8;
     /// dump the result of a LDAP search into human readable form
@@ -1008,8 +1035,6 @@ type
 { **************** LDAP Client Class }
 
 type
-  ELdap = class(ESynException);
-
   /// well-known LDAP Objects, as defined from their GUID by Microsoft
   TLdapKnownObject = (
     lkoComputers,
@@ -1411,8 +1436,8 @@ type
     // ObjectAttributeField is '*', and attributes are written as no sub-field
     function SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
       const Filter: RawUtf8; const Attributes: array of RawUtf8;
-      const ObjectAttributeField: RawUtf8 = '_attr'; MaxCount: integer = 0;
-      SortByName: boolean = true): variant; overload;
+      Options: TLdapResultOptions; const ObjectAttributeField: RawUtf8 = '_attr';
+      MaxCount: integer = 0; SortByName: boolean = true): variant; overload;
     /// retrieve all entries that match a given set of criteria
     // - overloaded method using convenient TLdapAttributeTypes for Attributes
     function Search(const Attributes: TLdapAttributeTypes;
@@ -1445,7 +1470,8 @@ type
     /// retrieve all pages of entries into a TDocVariant instance
     // - overloaded method using convenient TLdapAttributeTypes for Attributes
     function SearchAll(const Attributes: TLdapAttributeTypes;
-      const Filter: RawUtf8; const ObjectAttributeField: RawUtf8 = '_attr';
+      const Filter: RawUtf8; Options: TLdapResultOptions;
+      const ObjectAttributeField: RawUtf8 = '_attr';
       const BaseDN: RawUtf8 = ''; MaxCount: integer = 0;
       SortByName: boolean = true; TypesOnly: boolean = false): variant; overload;
     /// determine whether a given entry has a specified attribute value
@@ -2301,13 +2327,14 @@ end;
 
 { **************** LDAP Protocol Definitions }
 
-procedure ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
-  ValueEscapeCN: boolean);
+function ParseDN(const DN: RawUtf8; out dc, ou, cn: TRawUtf8DynArray;
+  ValueEscapeCN, NoRaise: boolean): boolean;
 var
   p: PUtf8Char;
   kind, value: RawUtf8;
   dcn, oun, cnn: integer;
 begin
+  result := false;
   p := pointer(DN);
   if p = nil then
     exit;
@@ -2319,12 +2346,15 @@ begin
     GetNextItemTrimedEscaped(p, ',', '\', value);
     if (kind = '') or
        (value = '') then
-      ELdap.RaiseUtf8('ParsDN(%): invalid Distinguished Name', [DN]);
+      if NoRaise then
+        exit
+      else
+        ELdap.RaiseUtf8('ParseDN(%): invalid Distinguished Name', [DN]);
     if not PropNameValid(pointer(value)) then // simple alphanum is just fine
     begin
       value := LdapUnescape(value); // may need some (un)escape
       if ValueEscapeCN then
-        value := EscapeChar(value , LDAP_CN, '\'); // inlined LdapEscapeCN()
+        value := EscapeChar(value, LDAP_CN, '\'); // inlined LdapEscapeCN()
     end;
     case PCardinal(kind)^ and $ffdfdf of
       ord('D') + ord('C') shl 8:
@@ -2333,6 +2363,11 @@ begin
         AddRawUtf8(ou, oun, value);
       ord('C') + ord('N') shl 8:
         AddRawUtf8(cn, cnn, value);
+    else
+      if NoRaise then
+        exit
+      else
+        ELdap.RaiseUtf8('ParseDN(%): unexpected %= field', [DN, kind]);
     end;
   until p = nil;
   if dc <> nil then
@@ -2341,6 +2376,30 @@ begin
     DynArrayFakeLength(ou, oun);
   if cn <> nil then
     DynArrayFakeLength(cn, cnn);
+  result := true;
+end;
+
+function DNsToCN(const dc, ou, cn: TRawUtf8DynArray): RawUtf8;
+var
+  w: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  w := TTextWriter.CreateOwnedStream(tmp);
+  try
+    w.AddCsvStrings(dc, '.', -1, {reverse=}false);
+    w.AddDirect('/');
+    if ou <> nil then
+      w.AddCsvStrings(ou, '/', -1, {reverse=}true);
+    if cn <> nil then
+    begin
+      if ou <> nil then
+        w.AddDirect('/');
+      w.AddCsvStrings(cn, '/', -1, {reverse=}true);
+    end;
+    w.SetText(result);
+  finally
+    w.Free;
+  end;
 end;
 
 function DNToCN(const DN: RawUtf8): RawUtf8;
@@ -2351,11 +2410,7 @@ begin
   if DN = '' then
     exit;
   ParseDN(DN, dc, ou, cn, {valueEscapeCN=}true);
-  result := RawUtf8ArrayToCsv(dc, '.', -1, {reverse=}false);
-  if ou <> nil then
-    Append(result, RawUtf8('/'), RawUtf8ArrayToCsv(ou, '/', -1, {reverse=}true));
-  if cn <> nil then
-    Append(result, RawUtf8('/'), RawUtf8ArrayToCsv(cn, '/', -1, {reverse=}true));
+  result := DNsToCN(dc, ou, cn);
 end;
 
 function RawLdapErrorString(ErrorCode: integer): RawUtf8;
@@ -3131,7 +3186,7 @@ begin
 end;
 
 var
-  // traditionnally, computer sAMAccountName ends with $ on computers
+  // traditionally, computer sAMAccountName ends with $
   MACHINE_CHAR: array[boolean] of string[1] = ('', '$');
 
 function InfoFilter(AccountType: TSamAccountType; const AccountName,
@@ -3262,7 +3317,8 @@ begin
     result := fList[index];
 end;
 
-procedure TLdapAttribute.SetVariantOne(var v: TVarData; const s: RawUtf8);
+procedure TLdapAttribute.SetVariantOne(var v: TVarData; const s: RawUtf8;
+  options: TLdapResultOptions);
 var
   i: integer;
   uac: TUserAccountControls;
@@ -3281,7 +3337,8 @@ begin
       else
       begin
         v.VInt64 := 0; // avoid GPF below
-        if fKnownTypeStorage = atsAny then
+        if (fKnownTypeStorage = atsAny) and
+           not (roRawBoolean in options) then
           if s = 'FALSE' then
           begin
             v.VType := varBoolean;
@@ -3296,32 +3353,56 @@ begin
       end;
     atsIntegerUserAccountControl:
       if ToInteger(s, i) then
-      begin
-        uac := UserAccountControlsFromInteger(i);
-        TDocVariantData(v).InitArrayFromSet(
-          TypeInfo(TUserAccountControls), uac, JSON_FAST, {trimmed=}true);
-        exit;
-      end;
+        if roRawUac in options then
+        begin
+          v.VType := varInteger;
+          v.VInteger := i;
+          exit;
+        end
+        else
+        begin
+          uac := UserAccountControlsFromInteger(i);
+          TDocVariantData(v).InitArrayFromSet(
+            TypeInfo(TUserAccountControls), uac, JSON_FAST, {trimmed=}true);
+          exit;
+        end;
     atsIntegerSystemFlags:
       if ToInteger(s, i) then
-      begin
-        sf := SystemFlagsFromInteger(i);
-        TDocVariantData(v).InitArrayFromSet(
-          TypeInfo(TSystemFlags), sf, JSON_FAST, {trimmed=}true);
-        exit;
-      end;
+        if roRawFlags in options then
+        begin
+          v.VType := varInteger;
+          v.VInteger := i;
+          exit;
+        end
+        else
+        begin
+          sf := SystemFlagsFromInteger(i);
+          TDocVariantData(v).InitArrayFromSet(
+            TypeInfo(TSystemFlags), sf, JSON_FAST, {trimmed=}true);
+          exit;
+        end;
     atsIntegerGroupType:
       if ToInteger(s, i) then
-      begin
-        gt := GroupTypesFromInteger(i);
-        TDocVariantData(v).InitArrayFromSet(
-          TypeInfo(TGroupTypes), gt, JSON_FAST, {trimmed=}true);
-        exit;
-      end;
+        if roRawGroupType in options then
+        begin
+          v.VType := varInteger;
+          v.VInteger := i;
+          exit;
+        end
+        else
+        begin
+          gt := GroupTypesFromInteger(i);
+          TDocVariantData(v).InitArrayFromSet(
+            TypeInfo(TGroupTypes), gt, JSON_FAST, {trimmed=}true);
+          exit;
+        end;
     atsIntegerSamAccountType:
       if ToInteger(s, i) then
       begin
-        sat := SamAccountTypeFromInteger(i);
+        if roRawSamAccountType in options then
+          sat := satUnknown
+        else
+          sat := SamAccountTypeFromInteger(i);
         if sat <> satUnknown then
         begin
           v.VType := varString;
@@ -3344,32 +3425,33 @@ begin
     AttributeValueMakeReadable(RawUtf8(v.VAny), fKnownTypeStorage);
 end;
 
-procedure TLdapAttribute.SetVariantArray(var v: TDocVariantData);
+procedure TLdapAttribute.SetVariantArray(var v: TDocVariantData;
+  options: TLdapResultOptions);
 var
   i: PtrInt;
 begin // avoid implit try..finally in TLdapAttribute.GetVariant
   v.InitFast(fCount, dvArray);
   v.SetCount(fCount);
   for i := 0 to fCount - 1 do
-    SetVariantOne(PVarData(@v.Values[i])^, fList[i]);
+    SetVariantOne(PVarData(@v.Values[i])^, fList[i], options);
 end;
 
-procedure TLdapAttribute.SetNewVariant(var v: variant);
+procedure TLdapAttribute.SetNewVariant(var v: variant; options: TLdapResultOptions);
 begin
   if fCount = 1 then
-    SetVariantOne(TVarData(v), fList[0])
+    SetVariantOne(TVarData(v), fList[0], options)
   else if fKnownTypeStorage = atsRawUtf8 then
     TDocVariantData(v).InitArrayFrom(TRawUtf8DynArray(fList), JSON_FAST, fCount)
   else
-    SetVariantArray(TDocVariantData(v));
+    SetVariantArray(TDocVariantData(v), options);
 end;
 
-function TLdapAttribute.GetVariant: variant;
+function TLdapAttribute.GetVariant(options: TLdapResultOptions): variant;
 begin
   SetVariantNull(result);
   if (self <> nil) and
      (fCount > 0) then
-    SetNewVariant(result);
+    SetNewVariant(result, options);
 end;
 
 function TLdapAttribute.FindIndex(const aValue: RawByteString): PtrInt;
@@ -3832,38 +3914,71 @@ begin
 end;
 
 procedure TLdapResultList.AppendTo(var Dvo: TDocVariantData;
-  const ObjectAttributeField: RawUtf8);
+  Options: TLdapResultOptions; const ObjectAttributeField: RawUtf8);
 var
-  i, j: PtrInt;
+  i, j, k: PtrInt;
   res: TLdapResult;
   attr: ^TLdapAttribute;
-  dc, ou, cn: TRawUtf8DynArray;
+  dc, ou, cn, lastdc: TRawUtf8DynArray;
   a: TDocVariantData;
-  v: PDocVariantData;
+  v, last: PDocVariantData;
 begin
+  if ord(roObjectNameAtRoot in Options) +
+     ord(roObjectNameWithoutDCAtRoot in Options) +
+     ord(roCanonicalNameAtRoot in Options) +
+     ord(roCommonNameAtRoot in Options) > 1 then
+    ELdap.RaiseUtf8('%.AppendTo: roNoRoot, roObjectNameAtRoot, ' +
+      'roCanonicalNameAtRoot and roCommonNameAtRoot are exclusive', [self]);
+  last := nil;
   for i := 0 to Count - 1 do
   begin
     res := Items[i];
-    ParseDN(res.ObjectName, dc, ou, cn);
-    if dc = nil then
-      continue;
-    v := Dvo.O_[RawUtf8ArrayToCsv(dc, '.')];
-    for j := high(ou) downto 0 do
-      v := v^.O_[ou[j]];
-    for j := high(cn) downto 0 do
-      v := v^.O_[cn[j]];
+    if roObjectNameAtRoot in Options then
+      v := Dvo.O_[res.ObjectName]
+    else
+    begin
+      if not ParseDN(res.ObjectName, dc, ou, cn, {esc=}false, {noraise=}true) then
+        continue;
+      if roObjectNameWithoutDCAtRoot in Options then
+        v := Dvo.O_[DNsToCN(nil, ou, cn)]
+      else if roCanonicalNameAtRoot in Options then
+        v := Dvo.O_[DNsToCN(dc, ou, cn)]
+      else if roCommonNameAtRoot in Options then
+        v := Dvo.O_[RawUtf8ArrayToCsv(cn, '/', -1, {reverse=}true)]
+      else
+      begin
+        if dc = nil then
+          v := @Dvo
+        else if RawUtf8DynArrayEquals(dc, lastdc) then
+          v := last
+        else
+        begin
+          v := Dvo.O_[RawUtf8ArrayToCsv(dc, '.')];
+          lastdc := dc;
+          last := v;
+        end;
+        for j := high(ou) downto 0 do
+          v := v^.O_[ou[j]];
+        for j := high(cn) downto 0 do
+          v := v^.O_[cn[j]];
+      end;
+    end;
     if ObjectAttributeField = '' then
       continue; // no attribute
     a.Init(mNameValue, dvObject);
-    a.SetCount(res.Attributes.Count + 1);
+    k := ord(not(roNoObjectName in options));
+    a.SetCount(res.Attributes.Count + k);
     a.Capacity := a.Count;
-    a.Names[0] := 'objectName';
-    RawUtf8ToVariant(res.ObjectName, a.Values[0]);
+    if k <> 0 then
+    begin
+      a.Names[0] := 'objectName';
+      RawUtf8ToVariant(res.ObjectName, a.Values[0]);
+    end;
     attr := pointer(res.Attributes.Items);
-    for j := 1 to res.Attributes.Count do
+    for j := k to k + res.Attributes.Count - 1 do
     begin
       a.Names[j] := attr^.AttributeName; // use TRawUtf8Interning
-      attr^.SetNewVariant(a.Values[j]);
+      attr^.SetNewVariant(a.Values[j], options);
       inc(attr);
     end;
     if ObjectAttributeField = '*' then
@@ -3872,6 +3987,23 @@ begin
       v^.AddValue(ObjectAttributeField, variant(a), {owned=}true);
     a.Clear; // mandatory to prepare the next a.Init in this loop
   end;
+end;
+
+function TLdapResultList.GetVariant(Options: TLdapResultOptions;
+  const ObjectAttributeField: RawUtf8): variant;
+begin
+  VarClear(result);
+  TDocVariantData(result).Init(mNameValue, dvObject); // case sensitive names
+  AppendTo(TDocVariantData(result), Options, ObjectAttributeField);
+end;
+
+function TLdapResultList.GetJson(Options: TLdapResultOptions;
+  const ObjectAttributeField: RawUtf8; Format: TTextWriterJsonFormat): RawUtf8;
+var
+  v: variant;
+begin
+  v := GetVariant(Options, ObjectAttributeField);
+  DocVariantType.ToJson(@v, result, '', '', Format);
 end;
 
 
@@ -5117,8 +5249,8 @@ end;
 
 function TLdapClient.SearchAll(const BaseDN: RawUtf8; TypesOnly: boolean;
   const Filter: RawUtf8; const Attributes: array of RawUtf8;
-  const ObjectAttributeField: RawUtf8; MaxCount: integer;
-  SortByName: boolean): variant;
+  Options: TLdapResultOptions; const ObjectAttributeField: RawUtf8;
+  MaxCount: integer; SortByName: boolean): variant;
 var
   n: integer;
 begin
@@ -5129,7 +5261,7 @@ begin
   repeat
     if not Search(BaseDN, TypesOnly, Filter, Attributes) then
       break;
-    SearchResult.AppendTo(TDocVariantData(result), ObjectAttributeField);
+    SearchResult.AppendTo(TDocVariantData(result), Options, ObjectAttributeField);
     inc(n, SearchResult.Count);
   until (SearchCookie = '') or
         ((MaxCount > 0) and
@@ -5172,11 +5304,12 @@ begin
 end;
 
 function TLdapClient.SearchAll(const Attributes: TLdapAttributeTypes;
-  const Filter, ObjectAttributeField, BaseDN: RawUtf8;
+  const Filter: RawUtf8; Options: TLdapResultOptions;
+  const ObjectAttributeField, BaseDN: RawUtf8;
   MaxCount: integer; SortByName, TypesOnly: boolean): variant;
 begin
   result := SearchAll(DefaultDN(BaseDN), TypesOnly, Filter, ToText(Attributes),
-              ObjectAttributeField, MaxCount, SortByName);
+              Options, ObjectAttributeField, MaxCount, SortByName);
 end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-compare
