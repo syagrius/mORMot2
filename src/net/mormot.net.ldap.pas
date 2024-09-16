@@ -590,6 +590,7 @@ type
     atsTextTime,
     atsSid,
     atsGuid,
+    atsSecurityDescriptor,
     atsUnicodePwd);
 
   /// common Attribute Types, as stored in TLdapAttribute.AttributeName
@@ -631,6 +632,7 @@ type
     atOwner,
     atGroupType,
     atPrimaryGroupID,
+    atNTSecurityDescriptor,
     atObjectSid,                   // encoded as binary RawSid
     atObjectGuid,                  // encoded as binary TGuid
     atLogonCount,
@@ -709,6 +711,7 @@ const
     atsRawUtf8,                     // atOwner
     atsIntegerGroupType,            // atGroupType
     atsInteger,                     // atPrimaryGroupID
+    atsSecurityDescriptor,          // atNTSecurityDescriptor
     atsSid,                         // atObjectSid
     atsGuid,                        // atObjectGuid
     atsInteger,                     // atLogonCount
@@ -1017,9 +1020,15 @@ type
     /// access atUserAccountControl attribute value with proper decoding/encoding
     property UserAccountControl: TUserAccountControls
       read GetUserAccountControl write SetUserAccountControl;
+    /// access any attribute value from its known type
+    // - calls GetReadable(0) on the found attribute
+    // - returns empty string if not found
+    // - is defined as the default property for conveniency
+    property Attr[AttributeType: TLdapAttributeType]: RawUtf8
+      read Get; default;
     /// access to the internal list of TLdapAttribute objects
     // - note that length(Items) may be <> Count for this class, if AfterAdd has not
-    // been called, so so you should NOT use an enumerate "for a in list.Items do" loop
+    // been called, so you should NOT use an enumerate "for a in list.Items do" loop
     property Items: TLdapAttributeDynArray
       read fItems;
     /// number of TLdapAttribute objects in this list
@@ -2941,6 +2950,7 @@ const
     'owner',                       // atOwner
     'groupType',                   // atGroupType
     'primaryGroupID',              // atPrimaryGroupID
+    'ntSecurityDescriptor',        // atNTSecurityDescriptor
     'objectSid',                   // atObjectSid
     'objectGUID',                  // atObjectGuid
     'logonCount',                  // atLogonCount
@@ -2978,6 +2988,7 @@ var
   // allow fast linear search in L1 CPU cache
   _LdapInternAll: array[0 .. length(_AttrTypeName) + length(_AttrTypeNameAlt) - 2] of pointer;
   _LdapInternType: array[0 .. high(_LdapInternAll)] of TLdapAttributeType;
+  sObjectName, sCanonicalName: RawUtf8;
 
 procedure InitializeUnit;
 var
@@ -3007,6 +3018,8 @@ begin
     end
     else
       ELdap.RaiseUtf8('dup alt %', [_AttrTypeNameAlt[i]]);
+  _LdapIntern.Unique(sObjectName, 'objectName');
+  _LdapIntern.Unique(sCanonicalName, 'canonicalName');
 end;
 
 // internal function: fast O(n) search of AttrName interned pointer
@@ -3044,16 +3057,22 @@ begin
     atsIntegerAccountType:
       exit; // no need to make any conversion for ATS_READABLE content
     atsSid:
-      if IsValidRawSid(s) then
+      if IsValidRawSid(s) then // stored as binary SID
       begin
         SidToText(pointer(s), s);
         exit;
       end;
     atsGuid:
-      if length(s) = SizeOf(TGuid) then
+      if length(s) = SizeOf(TGuid) then // stored as binary GUID
       begin
         guid := PGuid(s)^; // temp copy to avoid issues with s content
         ToUtf8(guid, s);  // e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
+        exit;
+      end;
+    atsSecurityDescriptor:
+      if IsValidNdr(s) then // stored as binary NDR
+      begin
+        NdrToText(pointer(s), length(s), s);
         exit;
       end;
     atsFileTime: // 64-bit FileTime
@@ -4097,7 +4116,7 @@ begin
   begin
     res := Items[i];
     if res.ObjectName = '' then
-      continue; // malformed data
+      continue; // malformed data - a primary key is required
     v := @Dvo;
     if (roObjectNameAtRoot in Options) or
        not ParseDN(res.ObjectName, dc, ou, cn, {esc=}false, {noraise=}true) then
@@ -4138,13 +4157,13 @@ begin
     k := 0;
     if not(roNoObjectName in options) then
     begin
-      a.Names[0] := 'objectName';
+      a.Names[0] := sObjectName;
       RawUtf8ToVariant(res.ObjectName, a.Values[0]);
       inc(k);
     end;
     if roWithCanonicalName in options then
     begin
-      a.Names[k] := 'canonicalName';
+      a.Names[k] := sCanonicalName;
       RawUtf8ToVariant(ComputeCanonicalName, a.Values[k]);
       inc(k);
     end;
@@ -5535,7 +5554,7 @@ begin
       ]));
   end;
   SendAndReceive(Asn(LDAP_ASN1_ADD_REQUEST, [
-                   Asn(obj),
+                   Asn(Obj),
                    Asn(ASN1_SEQ, query)]));
   result := fResultCode = LDAP_RES_SUCCESS;
 end;

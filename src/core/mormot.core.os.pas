@@ -541,6 +541,7 @@ function SidToText(sid: PSid): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a Security IDentifier as text, following the standard representation
+// - this function is able to convert into itself, i.e. sid=pointer(text)
 procedure SidToText(sid: PSid; var text: RawUtf8); overload;
 
 /// convert several Security IDentifier as text dynamic array
@@ -675,7 +676,8 @@ type
     wEleven,
     wEleven_64,
     wServer2019_64,
-    wServer2022_64);
+    wServer2022_64,
+    wServer2025_64);
 
   /// the running Operating System, encoded as a 32-bit integer
   TOperatingSystemVersion = packed record
@@ -692,7 +694,7 @@ type
 const
   /// the recognized MacOS versions, as plain text
   // - indexed from OSVersion32.utsrelease[2] kernel revision
-  MACOS_NAME: array[8 .. 24] of RawUtf8 = (
+  MACOS_NAME: array[8 .. 25] of RawUtf8 = (
     '10.4 Tiger',
     '10.5 Leopard',
     '10.6 Snow Leopard',
@@ -709,7 +711,8 @@ const
     '12 Monterey',
     '13 Ventura',
     '14 Sonoma',
-    '15 Glow'); // use known internal codename for upcoming version
+    '15 Sequoia',
+    '16 Next');
 
   /// the recognized Windows versions, as plain text
   // - defined even outside OSWINDOWS to allow process e.g. from monitoring tools
@@ -743,7 +746,8 @@ const
     '11',
     '11 64bit',
     'Server 2019 64bit',
-    'Server 2022 64bit');
+    'Server 2022 64bit',
+    'Server 2025 64bit');
 
   /// the recognized Windows versions which are 32-bit
   WINDOWS_32 = [
@@ -1479,11 +1483,15 @@ type
     function Param(const name: RawUtf8; const description: RawUtf8 = '';
       const default: RawUtf8 = ''): RawUtf8; overload;
     /// search for "-parametername" and return '' or its string "parametervalue"
-    function ParamS(const name: array of RawUtf8; const description: RawUtf8 = '';
-      const default: string = ''): string;
+    // - if name contains a & character, will also register the following char
+    function ParamS(const name: RawUtf8; const description: RawUtf8 = '';
+      const default: string = ''): string; overload;
     /// search for "-parametername" and return '' or its RawUtf8 "parametervalue"
     function Param(const name: array of RawUtf8; const description: RawUtf8 = '';
       const default: RawUtf8 = ''): RawUtf8; overload;
+    /// search for "-parametername" and return '' or its string "parametervalue"
+    function ParamS(const name: array of RawUtf8; const description: RawUtf8 = '';
+      const default: string = ''): string; overload;
     /// search for "-parametername" and return its integer "parametervalue" or default
     // - if name contains a & character, will also register the following char
     function Param(const name: RawUtf8; default: integer;
@@ -9053,6 +9061,12 @@ end;
 
 function TExecutableCommandLine.Param(const name: RawUtf8;
   default: integer; const description: RawUtf8): integer;
+begin
+  Get(UnAmp(name), result, description, default);
+end;
+
+function TExecutableCommandLine.ParamS(const name: RawUtf8;
+  const description: RawUtf8; const default: string): string;
 begin
   Get(UnAmp(name), result, description, default);
 end;
