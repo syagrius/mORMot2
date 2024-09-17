@@ -445,8 +445,12 @@ const
     LDAP_ASN1_EXT_RESPONSE];
 
 const
-  /// OID of pagedresultsControl attribute
-  ASN1_OID_PAGEDRESULTS = '1.2.840.113556.1.4.319';
+  /// the OID used to specify TLdapClient.SearchPageSize
+  // - https://ldapwiki.com/wiki/Wiki.jsp?page=Simple%20Paged%20Results%20Control
+  LDAP_PAGED_RESULT_OID_STRING = '1.2.840.113556.1.4.319';
+  /// the OID used to specify TLdapClient.SearchSDFlags
+  // - https://ldapwiki.com/wiki/Wiki.jsp?page=LDAP_SERVER_SD_FLAGS_OID
+  LDAP_SERVER_SD_FLAGS_OID     = '1.2.840.113556.1.4.801';
 
   /// OID of namingContexts attribute in the root DSE
   ASN1_OID_DSE_NAMINGCONTEXTS       = '1.3.6.1.4.1.1466.101.120.5';
@@ -875,6 +879,7 @@ type
       options: TLdapResultOptions);
     procedure SetVariantArray(var v: TDocVariantData;
       options: TLdapResultOptions);
+    function ToAsnSeq: TAsnObject;
   public
     /// initialize the attribute(s) storage
     constructor Create(const AttrName: RawUtf8; AttrType: TLdapAttributeType);
@@ -943,7 +948,7 @@ type
   /// list one or several TLdapAttribute
   // - will use a global TRawUtf8Interning as hashed list of names to minimize
   // memory allocation, and makes efficient lookup
-  TLdapAttributeList = class
+  TLdapAttributeList = class(TObjectWithProps)
   private
     fItems: TLdapAttributeDynArray;
     fCount: integer;
@@ -956,6 +961,9 @@ type
     function GetAccountType: TSamAccountType;
     procedure SetAccountType(Value: TSamAccountType);
   public
+    /// initialize the attribute list with some type/value pairs
+    constructor Create(const Types: array of TLdapAttributeType;
+                       const Values: array of const); overload;
     /// finalize the list
     destructor Destroy; override;
     /// clear the list
@@ -975,7 +983,7 @@ type
       Option: TLdapAddOption = aoAlways): TLdapAttribute; overload;
     /// search or allocate TLdapAttribute object(s) from type/value to the list
     procedure Add(const Types: array of TLdapAttributeType;
-      const Values: array of RawByteString; Option: TLdapAddOption = aoAlways); overload;
+      const Values: array of const; Option: TLdapAddOption = aoAlways); overload;
     /// search or allocate "unicodePwd" TLdapAttribute value to the list
     function AddUnicodePwd(const aPassword: SpiUtf8): TLdapAttribute;
     /// remove one TLdapAttribute object from the list
@@ -989,7 +997,7 @@ type
     /// find and return first attribute value with requested name
     // - calls GetReadable(0) on the found attribute
     // - returns empty string if not found
-    function Get(const AttributeName: RawUtf8): RawUtf8; overload;
+    function GetByName(const AttributeName: RawUtf8): RawUtf8; 
     /// remove one TLdapAttribute object from the list
     procedure Delete(AttributeType: TLdapAttributeType); overload;
     /// find and return attribute index with the requested attribute type
@@ -1006,7 +1014,7 @@ type
     // - calls GetReadable(0) on the found attribute
     // - returns empty string if not found
     // - faster than overloaded Get(AttributeName)
-    function Get(AttributeType: TLdapAttributeType): RawUtf8; overload;
+    function Get(AttributeType: TLdapAttributeType): RawUtf8; 
     /// find and return first attribute value with the requested type
     // - calls GetAllReadable on the found attribute
     function GetAll(AttributeType: TLdapAttributeType): TRawUtf8DynArray;
@@ -1077,6 +1085,31 @@ function InfoFilter(AccountType: TSamAccountType;
   const AccountName: RawUtf8 = ''; const DistinguishedName: RawUtf8 = '';
   const UserPrincipalName: RawUtf8 = ''; const CustomFilter: RawUtf8 = ''): RawUtf8;
 
+/// compute a sequence of modifications from its raw encoded attribute(s) sequence
+function Modifier(Op: TLdapModifyOp; const Sequence: TAsnObject): TAsnObject; overload;
+
+/// compute a sequence of modifications of a given attribute and its raw value
+// - as used by TLdapClient.Modify(Obj, Op, AttrType, AttrValue)
+// - the AttrValue should be properly encoded, as expected by the LDAP server
+function Modifier(Op: TLdapModifyOp; AttrType: TLdapAttributeType;
+  const AttrValue: RawByteString): TAsnObject; overload;
+
+/// compute a sequence of modifications of a given attribute and its raw value
+// - the AttrValue should be properly encoded, as expected by the LDAP server
+function Modifier(Op: TLdapModifyOp; const AttrName: RawUtf8;
+  const AttrValue: RawByteString): TAsnObject; overload;
+
+/// compute a sequence of modifications of several attribute/raw value pairs
+// - the Values should be properly encoded, as expected by the LDAP server
+function Modifier(Op: TLdapModifyOp; const Types: array of TLdapAttributeType;
+  const Values: array of const): TAsnObject; overload;
+
+/// compute a sequence of modifications of several attribute/raw value pairs
+// - here the modified attribute names are specified as text
+function Modifier(Op: TLdapModifyOp;
+  const NameValuePairs: array of RawUtf8): TAsnObject; overload;
+
+
 
 { **************** LDAP Response Storage }
 
@@ -1114,7 +1147,7 @@ type
     function CopyObjectSid(out objectSid: RawUtf8): boolean;
     /// copy the binary 'objectGUID' attribute if present
     // - return true on success
-    function CopyObjectGuid(out objectGUID: TGuid): boolean;
+    function CopyObjectGuid(out objectGuid: TGuid): boolean;
     /// add a "dn: ###" entry to a ldif-content buffer
     procedure ExportToLdif(w: TTextWriter);
   end;
@@ -1288,6 +1321,14 @@ type
     lctPlain,
     lctEncrypted);
 
+  /// define possible values for TLdapClient.SearchSDFlags
+  // - LDAP_SERVER_SD_FLAGS_OID control
+  TLdapSearchSDFlags = set of (
+    lsfOwnerSecurityInformation,
+    lsfGroupSecurityInformation,
+    lsfDaclSecurityInformation,
+    lsfSaclSecurityInformation);
+
   /// store the authentication and connection settings of a TLdapClient instance
   TLdapClientSettings = class(TSynPersistent)
   protected
@@ -1406,6 +1447,7 @@ type
     fSearchSizeLimit: integer;
     fSearchTimeLimit: integer;
     fSearchPageSize: integer;
+    fSearchSDFlags: TLdapSearchSDFlags;
     fSearchCookie: RawUtf8;
     fSearchResult: TLdapResultList;
     fDefaultDN, fRootDN, fConfigDN: RawUtf8;
@@ -1485,6 +1527,8 @@ type
     function SupportsMech(const MechanismName: RawUtf8): boolean;
     /// search if the server supports a given LDAP control by name
     // - a typical value to search is e.g. '1.2.840.113556.1.4.319'
+    // (LDAP_PAGED_RESULT_OID_STRING) or '1.2.840.113556.1.4.801'
+    // (LDAP_SERVER_SD_FLAGS_OID)
     // - use a very fast O(log(n)) binary search inside the memory cache
     function SupportsControl(const ControlName: RawUtf8): boolean;
     /// search if the server supports a given LDAP v3 extension by name
@@ -1633,15 +1677,33 @@ type
       const BaseDN: RawUtf8 = ''; MaxCount: integer = 0;
       SortByName: boolean = true; TypesOnly: boolean = false): variant; overload;
     /// determine whether a given entry has a specified attribute value
-    function Compare(const Obj, AttributeValue: RawUtf8): boolean;
+    function Compare(const Obj, AttrName, AttrValue: RawUtf8): boolean;
 
     { write methods }
 
     /// create a new entry in the directory
     function Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
+    /// make one or more changes to an entry
+    // - the Modifications are one or several Modifier() operations
+    // - is the main modification method, called by other Modify() overloads
+    function Modify(const Obj: RawUtf8;
+      const Modifications: array of TAsnObject): boolean; overload;
+    /// make one change as specified by attribute type and raw value
+    // - the AttrValue should be properly encoded, as expected by the LDAP server
+    function Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+      AttrType: TLdapAttributeType; const AttrValue: RawByteString): boolean; overload;
+    /// make one change as specified by attribute type and raw value
+    // - the AttrValue should be properly encoded, as expected by the LDAP server
+    function Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+      const AttrName: RawUtf8; const AttrValue: RawByteString): boolean; overload;
+    /// make one or more changes with several attribute/raw value pairs
+    // - the Values should be properly encoded, as expected by the LDAP server
+    function Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+      const Types: array of TLdapAttributeType;
+      const Values: array of const): boolean; overload;
     /// make one or more changes to the set of attribute values in an entry
     function Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
-      Value: TLdapAttribute): boolean;
+      Attribute: TLdapAttribute): boolean; overload;
     /// change an entry Distinguished Name
     // - it can be used to rename the entry (by changing its RDN), move it to a
     // different location in the DIT (by specifying a new parent entry), or both
@@ -1802,21 +1864,28 @@ type
       read fSearchTimeLimit write fSearchTimeLimit;
     /// number of results to return per search request
     // - default 0 means no paging
-    // - you may rather call SearchBegin/SearchEnd wrapper functions
+    // - you may rather call SearchBegin/SearchEnd or SearchAll wrapper functions
+    // - if not [], append a LDAP_PAGED_RESULT_OID_STRING control to each Search()
     // - note: if you expect a single result row, settting 1 won't necessary
     // reduce the data stream, because it would include an additional block with
     // a SearchCookie, and is likely to use more server resource for paging
     property SearchPageSize: integer
       read fSearchPageSize write fSearchPageSize;
-    /// cookie returned by paged search results
+    /// cookie returned by paged search results, i.e. for SearchPageSize > 0
     // - use an empty string for the first search request
     // - if not empty, you should call Search() again for the next page until it
     // is eventually empty
     // - you can force to an empty string to reset the pagination or for a new
     // Search()
-    // - you may rather call SearchBegin/SearchEnd wrapper functions
+    // - you may rather call SearchBegin/SearchEnd or SearchAll wrapper functions
     property SearchCookie: RawUtf8
       read fSearchCookie write fSearchCookie;
+    /// the optional security flags to include in the response
+    // - default [] means no atNTSecurityDescriptor
+    // - if not [], append a LDAP_SERVER_SD_FLAGS_OID control to each Search(),
+    // so that atNTSecurityDescriptor will contain the specified flags
+    property SearchSDFlags: TLdapSearchSDFlags
+      read fSearchSDFlags write fSearchSDFlags;
     /// result of the search command
     property SearchResult: TLdapResultList
       read fSearchResult;
@@ -3070,11 +3139,8 @@ begin
         exit;
       end;
     atsSecurityDescriptor:
-      if IsValidNdr(s) then // stored as binary NDR
-      begin
-        NdrToText(pointer(s), length(s), s);
-        exit;
-      end;
+      if SecurityDescriptorToText(pointer(s), length(s), s) then
+        exit; // use WinAPI or hexa representation
     atsFileTime: // 64-bit FileTime
       begin
         ft := GetQWord(pointer(s), err);
@@ -3338,6 +3404,71 @@ begin
     result := FormatUtf8('(&%%)', [result, CustomFilter])
 end;
 
+function Modifier(Op: TLdapModifyOp; const Sequence: TAsnObject): TAsnObject;
+begin
+  result := Asn(ASN1_SEQ, [
+              Asn(ord(Op), ASN1_ENUM), // modification type as enum
+              Sequence]);              // attribute(s) sequence
+end;
+
+function Modifier(Op: TLdapModifyOp; AttrType: TLdapAttributeType;
+  const AttrValue: RawByteString): TAsnObject;
+begin
+  result := Modifier(Op, AttrTypeName[AttrType], AttrValue);
+end;
+
+function Modifier(Op: TLdapModifyOp; const AttrName: RawUtf8;
+  const AttrValue: RawByteString): TAsnObject;
+begin
+  result := Modifier(Op,
+              Asn(ASN1_SEQ, [                   // attribute sequence
+                Asn(AttrName),                  // attribute description
+                Asn(Asn(AttrValue), ASN1_SETOF) // attribute value set
+              ]));
+end;
+
+function Modifier(Op: TLdapModifyOp; const Types: array of TLdapAttributeType;
+  const Values: array of const): TAsnObject;
+var
+  i, n: PtrInt;
+  v: RawUtf8;
+begin
+  result := '';
+  n := high(Types);
+  if (n < 0) or
+     (n <> length(Values)) then
+    exit;
+  for i := 0 to n - 1 do // see TLdapAttribute.ToAsnSeq
+    if Types[i] <> atUndefined then
+    begin
+      VarRecToUtf8(Values[i], v); // Values[] are typically RawUtf8 or integer
+      Append(result,
+        Asn(AttrTypeName[Types[i]]), // attribute description
+        Asn(Asn(v), ASN1_SETOF));    // attribute value set
+    end;
+  if result <> '' then
+    result := Modifier(Op, Asn(result, ASN1_SEQ));
+end;
+
+function Modifier(Op: TLdapModifyOp;
+  const NameValuePairs: array of RawUtf8): TAsnObject;
+var
+  i, n: PtrInt;
+begin
+  result := '';
+  n := length(NameValuePairs);
+  if (n = 0) or
+     (n and 1 <> 0) then
+    exit;
+  for i := 0 to (n shr 1) - 1 do
+    Append(result,
+      Asn(NameValuePairs[i * 2]),                       // attribute description
+      Asn(Asn(NameValuePairs[i * 2 + 1]), ASN1_SETOF)); // attribute value set
+  result := Asn(ASN1_SEQ, [
+              Asn(ord(Op), ASN1_ENUM),  // modification type as enum
+              Asn(result, ASN1_SEQ)]);  // attribute(s) sequence
+end;
+
 
 { TLdapAttribute }
 
@@ -3593,6 +3724,22 @@ begin
     SetNewVariant(result, options);
 end;
 
+function TLdapAttribute.ToAsnSeq: TAsnObject;
+var
+  i: PtrInt;
+begin
+  result := '';
+  if (self = nil) or
+     (fCount = 0) then
+    exit;
+  for i := 0 to fCount - 1 do
+    AsnAdd(result, Asn(fList[i]));
+  result := Asn(ASN1_SEQ, [            // attribute(s) sequence
+              Asn(fAttributeName),     // attribute description
+              Asn(result, ASN1_SETOF)  // attribute value set
+            ]);
+end;
+
 function TLdapAttribute.FindIndex(const aValue: RawByteString): PtrInt;
 begin
   if (self <> nil) and
@@ -3617,6 +3764,13 @@ end;
 
 
 { TLdapAttributeList }
+
+constructor TLdapAttributeList.Create(
+  const Types: array of TLdapAttributeType; const Values: array of const);
+begin
+  inherited Create;
+  Add(Types, Values);
+end;
 
 destructor TLdapAttributeList.Destroy;
 begin
@@ -3674,7 +3828,7 @@ begin
     result := nil;
 end;
 
-function TLdapAttributeList.Get(const AttributeName: RawUtf8): RawUtf8;
+function TLdapAttributeList.GetByName(const AttributeName: RawUtf8): RawUtf8;
 begin
   Find(AttributeName).GetReadable(0, result);
 end;
@@ -3775,13 +3929,17 @@ begin
 end;
 
 procedure TLdapAttributeList.Add(const Types: array of TLdapAttributeType;
-  const Values: array of RawByteString; Option: TLdapAddOption);
+  const Values: array of const; Option: TLdapAddOption);
 var
   i: PtrInt;
+  v: RawUtf8;
 begin
   if high(Types) = high(Values) then
     for i := 0 to high(Types) do
-      Add(Types[i], Values[i], Option)
+    begin
+      VarRecToUtf8(Values[i], v); // typically RawUtf8 or integer value
+      Add(Types[i], v, Option)
+    end
   else
     ELdap.RaiseUtf8('Inconsistent %.Add', [self]);
 end;
@@ -3882,19 +4040,19 @@ begin
   result := objectSid <> '';
 end;
 
-function TLdapResult.CopyObjectGUID(out objectGUID: TGuid): boolean;
+function TLdapResult.CopyObjectGuid(out objectGuid: TGuid): boolean;
 var
-  GuidAttr: TLdapAttribute;
-  GuidBinary: RawByteString;
+  attr: TLdapAttribute;
+  bin: RawByteString;
 begin
   result := false;
-  GuidAttr := Attributes.Find(atObjectSid);
-  if GuidAttr = nil then
+  attr := Attributes.Find(atObjectGuid);
+  if attr = nil then
     exit;
-  GuidBinary := GuidAttr.GetRaw;
-  if length(GuidBinary) = SizeOf(TGuid) then
+  bin := attr.GetRaw;
+  if length(bin) = SizeOf(TGuid) then
   begin
-    objectGUID := PGuid(GuidBinary)^;
+    objectGuid := PGuid(bin)^;
     result := true;
   end;
 end;
@@ -3968,7 +4126,7 @@ begin
   begin
     r := fItems[i];
     if AttrType = atUndefined then
-      a := r.Attributes.Get(AttrName)
+      a := r.Attributes.GetByName(AttrName)
     else
       a := r.Attributes.Get(AttrType);
     if a = '' then
@@ -5294,7 +5452,7 @@ end;
 function TLdapClient.Search(const BaseDN: RawUtf8; TypesOnly: boolean;
   const Filter: RawUtf8; const Attributes: array of RawUtf8): boolean;
 var
-  s, resp, packet: TAsnObject;
+  s, resp, packet, controls: TAsnObject;
   start, stop: Int64;
   u: RawUtf8;
   x, n, seqend: integer;
@@ -5304,22 +5462,37 @@ begin
   result := false;
   if not fSock.SockConnected then
     exit;
+  // compute the main request
   QueryPerformanceMicroSeconds(start);
   fSearchResult.Clear;
   fReferals.Clear;
   s := RawLdapSearch(BaseDN, TypesOnly, Filter, Attributes, fSearchScope,
     fSearchAliases, fSearchSizeLimit, fSearchTimeLimit);
+  // append optional control extensions
   if fSearchPageSize > 0 then // https://www.rfc-editor.org/rfc/rfc2696
-    Append(s, Asn(
-        Asn(ASN1_SEQ, [
-           Asn(ASN1_OID_PAGEDRESULTS), // controlType: pagedresultsControl
-           ASN1_BOOLEAN_VALUE[false],  // criticality: false
-           Asn(Asn(ASN1_SEQ, [
-                 Asn(fSearchPageSize),
-                 Asn(fSearchCookie)
-               ]))
-        ]), LDAP_ASN1_CONTROLS));
+    controls :=
+      Asn(ASN1_SEQ, [
+         Asn(LDAP_PAGED_RESULT_OID_STRING), // controlType: pagedresultsControl
+         ASN1_BOOLEAN_VALUE[false],         // criticality: false
+         Asn(Asn(ASN1_SEQ, [
+               Asn(fSearchPageSize),
+               Asn(fSearchCookie)
+             ]))
+      ]);
+  if fSearchSDFlags <> [] then
+    Append(controls,
+      Asn(ASN1_SEQ, [
+         Asn(LDAP_SERVER_SD_FLAGS_OID), // controlType: SDFlagsRequestValue
+         ASN1_BOOLEAN_VALUE[false],     // criticality: false
+         Asn(Asn(ASN1_SEQ, [
+               Asn(byte(fSearchSDFlags))
+             ]))
+      ]));
+  if controls <> '' then
+    Append(s, Asn(controls, LDAP_ASN1_CONTROLS));
+  // actually send the request
   SendPacket(s);
+  // receive and parse the response
   x := 1;
   repeat
     if x >= length(packet) then
@@ -5375,7 +5548,7 @@ begin
     if AsnNext(n, resp) = ASN1_SEQ then
     begin
       AsnNext(n, resp, @s);
-      if s = ASN1_OID_PAGEDRESULTS then
+      if s = LDAP_PAGED_RESULT_OID_STRING then
       begin
         AsnNext(n, resp, @s); // searchControlValue
         n := 1;
@@ -5512,7 +5685,7 @@ end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-compare
 
-function TLdapClient.Compare(const Obj, AttributeValue: RawUtf8): boolean;
+function TLdapClient.Compare(const Obj, AttrName, AttrValue: RawUtf8): boolean;
 begin
   result := false;
   if not Connected(False) then
@@ -5520,8 +5693,8 @@ begin
   SendAndReceive(Asn(LDAP_ASN1_COMPARE_REQUEST, [
                    Asn(obj),
                    Asn(ASN1_SEQ, [
-                     Asn(TrimU(GetFirstCsvItem(AttributeValue, '='))),
-                     Asn(TrimU(SeparateRight(AttributeValue, '=')))
+                     Asn(AttrName),
+                     Asn(AttrValue)
                    ])
                  ]));
   result := fResultCode = LDAP_RES_COMPARE_TRUE;
@@ -5534,25 +5707,15 @@ end;
 
 function TLdapClient.Add(const Obj: RawUtf8; Value: TLdapAttributeList): boolean;
 var
-  query, sub: TAsnObject;
-  attr: TLdapAttribute;
-  i, j: PtrInt;
+  query: TAsnObject;
+  i: PtrInt;
 begin
   result := false;
-  if not Connected then
+  if (Value = nil) or
+     not Connected then
     exit;
   for i := 0 to Value.Count - 1 do
-  begin
-    attr := Value.Items[i];
-    sub := '';
-    for j := 0 to attr.Count - 1 do
-      AsnAdd(sub, Asn(attr.List[j]));
-    Append(query,
-      Asn(ASN1_SEQ, [
-        Asn(attr.AttributeName),
-        Asn(ASN1_SETOF, [sub])
-      ]));
-  end;
+    Append(query, Value.Items[i].ToAsnSeq);
   SendAndReceive(Asn(LDAP_ASN1_ADD_REQUEST, [
                    Asn(Obj),
                    Asn(ASN1_SEQ, query)]));
@@ -5561,28 +5724,46 @@ end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-modify
 
-function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
-  Value: TLdapAttribute): boolean;
-var
-  values: TAsnObject;
-  i: integer;
+function TLdapClient.Modify(const Obj: RawUtf8;
+  const Modifications: array of TAsnObject): boolean;
 begin
-  for i := 0 to Value.Count -1 do
-    AsnAdd(values, Asn(Value.List[i]));
+  result := false;
+  if (high(Modifications) < 0) or
+     ((high(Modifications) = 0) and
+      (Modifications[0] = '')) then
+    exit;
   SendAndReceive(Asn(LDAP_ASN1_MODIFY_REQUEST, [
-                   Asn(Obj),
-                   Asn(ASN1_SEQ, [
-                     Asn(ASN1_SEQ, [
-                       Asn(ord(Op), ASN1_ENUM),
-                       Asn(ASN1_SEQ, [
-                         Asn(Value.AttributeName),
-                         Asn(values, ASN1_SETOF)
-                       ])
-                     ])
-                   ])
+                   Asn(Obj),                    // the DN of the entry to modify
+                   Asn(ASN1_SEQ, Modifications) // sequence of modifications
                  ]));
   result := fResultCode = LDAP_RES_SUCCESS;
 end;
+
+function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+  AttrType: TLdapAttributeType; const AttrValue: RawByteString): boolean;
+begin
+  result := (AttrType <> atUndefined) and
+            Modify(Obj, [Modifier(Op, AttrTypeName[AttrType], AttrValue)]);
+end;
+
+function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+  const AttrName: RawUtf8; const AttrValue: RawByteString): boolean;
+begin
+  result := Modify(Obj, [Modifier(Op, AttrName, AttrValue)]);
+end;
+
+function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+  const Types: array of TLdapAttributeType; const Values: array of const): boolean;
+begin
+  result := Modify(Obj, [Modifier(Op, Types, Values)]);
+end;
+
+function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
+  Attribute: TLdapAttribute): boolean;
+begin
+  result := Modify(Obj, [Modifier(Op, Attribute.ToAsnSeq)]);
+end;
+
 
 // https://ldap.com/ldapv3-wire-protocol-reference-modify-dn
 
@@ -5595,7 +5776,7 @@ begin
   if not Connected then
     exit;
   query := Asn(Obj);
-  Append(query, [Asn(NewRdn), ASN1_BOOLEAN_VALUE[DeleteOldRdn]]);
+  Append(query, Asn(NewRdn), ASN1_BOOLEAN_VALUE[DeleteOldRdn]);
   if NewSuperior <> '' then
     AsnAdd(query, Asn(NewSuperior, ASN1_CTX0));
   SendAndReceive(Asn(query, LDAP_ASN1_MODIFYDN_REQUEST));
@@ -5757,7 +5938,7 @@ begin
      not LdapEscapeName(ComputerName, cSafe) then
     exit;
   cDn := NormalizeDN(NetConcat(['CN=', cSafe, ',', ComputerParentDN]));
-  cSam := NetConcat([UpperCase(cSafe), '$']); // tradition is upper with end $
+  cSam := NetConcat([UpperCase(cSafe), '$']); // traditional upper with ending $
   // Search Computer object in the domain
   cExisting := SearchFirstFmt([atSAMAccountName], '(sAMAccountName=%)', [cSam]);
   // If the search failed, we exit with the error message
@@ -5783,14 +5964,12 @@ begin
       exit;
     end;
   end;
-  // Create the new computer object
-  attrs := TLdapAttributeList.Create;
+  // Create the new computer entry
+  attrs := TLdapAttributeList.Create(
+    [atObjectClass, atCommonName, atName, atSAMAccountName],
+    ['computer',    cSafe,        cSafe,  cSam]);
   try
-    attrs.Add(atObjectClass, 'computer');
-    attrs.Add(atCommonName, cSafe);
-    attrs.Add(atName, cSafe);
-    attrs.Add(atSAMAccountName, cSam);
-    attrs.AccountType := satMachineAccount;
+    attrs.AccountType        := satMachineAccount;
     attrs.UserAccountControl := UserAccount;
     if Password <> '' then
       attrs.AddUnicodePwd(Password);
