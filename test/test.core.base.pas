@@ -265,6 +265,8 @@ type
     procedure DmiSmbios;
     /// test Security IDentifier (SID) process
     procedure _SID;
+    /// test the SecurityDescriptor / SDDL process
+    procedure _SDDL;
     /// validates the median computation using the "Quick Select" algorithm
     procedure QuickSelect;
     /// test the TSynCache class
@@ -4407,6 +4409,20 @@ begin
   Check(xxHash32(0, 'ABBREVIATIONS', 13) = 3058487595);
   Check(xxHash32(0, 'LORD', 4) = 3395586315);
   Check(xxHash32(0, 'MICROINSTRUCTION''S', 18) = 1576115228);
+  a[0] := #0;
+  AppendShortIntHex(0, a);
+  Check(a = '00');
+  AppendShortIntHex(1, a);
+  Check(a = '0001');
+  AppendShortIntHex(255, a);
+  Check(a = '0001ff');
+  AppendShortIntHex($12345, a);
+  Check(a = '0001ff012345');
+  a[0] := #0;
+  AppendShortIntHex(PtrUInt(-1), a);
+  CheckEqual(length(a), POINTERBYTES * 2);
+  for i := 1 to length(a) do
+    Check(a[1] = 'f');
   for i := -10000 to 10000 do
     Check(GetInteger(Pointer(Int32ToUtf8(i))) = i);
   for i := 0 to 10000 do
@@ -4520,6 +4536,9 @@ begin
     Check(SysUtils.IntToStr(j) = string(a));
     Check(format('%d', [j]) = string(a));
     Check(format('%.8x', [j]) = IntToHex(j, 8));
+    a[0] := #0;
+    AppendShortIntHex(j, a);
+    CheckEqual(RawUtf8(a), RawUtf8(PointerToHexShort(pointer(PtrInt(j)))));
     case i of
       9990:
         d := 1E110;
@@ -6230,6 +6249,7 @@ var
   raw: TRawSmbiosInfo;
   os:  TSmbiosBasicInfos;
   dec: TSmbiosInfo;
+  bak: byte;
   s: RawUtf8;
   b: RawByteString;
 
@@ -6269,15 +6289,16 @@ begin
      CheckFailed(CompressSynLZ(raw.Data, false) <> '', '_REFSMB synlz') then
     exit;
   PCardinal(@raw)^ := $010003ff;
+  bak := PByte(@_SmbiosDecodeUuid)^;
+  _SmbiosDecodeUuid := sduVersion; // consistent UUID decoding on all platforms
   CheckEqual(DecodeSmbios(raw, os), 3066, 'DecodeSmbios');
   Check(DecodeSmbiosInfo(raw, dec), 'DecodeSmbiosInfo');
+  PByte(@_SmbiosDecodeUuid)^ := bak;
   CheckAgainst(dec, os);
   CheckHash(BinarySave(@dec.Bios,
     TypeInfo(TSmbiosBios), rkRecordTypes), $9362A439, 'Bios');
-  {$ifndef OSDARWIN}
   CheckHash(BinarySave(@dec.System,
-    TypeInfo(TSmbiosSystem), rkRecordTypes), $A5E69307, 'System');
-  {$endif OSDARWIN}
+    TypeInfo(TSmbiosSystem), rkRecordTypes), $E9451367, 'System');
   CheckHash(BinarySave(@dec.Board[0],
     TypeInfo(TSmbiosBoard), rkRecordTypes), $25B6CB6C, 'Board');
   CheckHash(BinarySave(@dec.Chassis[0],
@@ -6303,12 +6324,10 @@ begin
     TypeInfo(TSmbiosSlot), rkRecordTypes), $0BE08E2D, 'Slot');
   CheckHash(BinarySave(@dec.Battery[0],
     TypeInfo(TSmbiosBattery), rkRecordTypes), $7FDA54A0, 'Battery');
-  {$ifndef OSDARWIN}
   CheckHash(BinarySave(@dec,
-    TypeInfo(TSmbiosInfo), rkRecordTypes), $807823B2, 'BinarySave1');
+    TypeInfo(TSmbiosInfo), rkRecordTypes), $C038E432, 'BinarySave1');
   SaveJson(dec, TypeInfo(TSmbiosInfo), [twoIgnoreDefaultInRecord], s);
-  CheckHash(s, $7A3BEEB8, 'BinarySave2');
-  {$endif OSDARWIN}
+  CheckHash(s, $87F82F78, 'BinarySave2');
 end;
 
 {$ifdef OSWINDOWS}
@@ -6369,6 +6388,180 @@ begin
       CheckUtf8(not CurrentUserHasGroup(s), s);
   end;
   {$endif OSWINDOWS}
+end;
+
+const
+  // some reference Security Descriptor self-relative buffers
+  SD_B64: array[0..6] of RawUtf8 = (
+    // https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+    'AQAUgCgBAAA4AQAAFAAAADAAAAACABwAAQAAAALAFAArAA0AAQEAAAAAAAEAAAAABAD4AAcAAAAAABQA' +
+    'PwAPAAEBAAAAAAAFEgAAAAAAGAA/AA8AAQIAAAAAAAUgAAAAJAIAAAUALAADAAAAAQAAALp6lr/mDdAR' +
+    'ooUAqgAwSeIBAgAAAAAABSAAAAAkAgAABQAsAAMAAAABAAAAnHqWv+YN0BGihQCqADBJ4gECAAAAAAAF' +
+    'IAAAACQCAAAFACwAAwAAAAEAAAD/pKhtUg7QEaKGAKoAMEniAQIAAAAAAAUgAAAAJAIAAAUALAADAAAA' +
+    'AQAAAKh6lr/mDdARooUAqgAwSeIBAgAAAAAABSAAAAAmAgAAAAAUABQAAgABAQAAAAAABQsAAAABAgAA' +
+    'AAAABSAAAAAkAgAAAQEAAAAAAAUSAAAA',
+    'AQAEgDAAAABAAAAAAAAAABQAAAACABwAAQAAAAAAFAA/AA4QAQEAAAAAAAAAAAAAAQIAAAAAAAUgAAAA' +
+    'JAIAAAEBAAAAAAAFEgAAAA==',
+    'AQAEgAAAAAAAAAAAAAAAABQAAAACABwAAQAAAAAAFAAAAAAQAQEAAAAAAAUHAAAA',
+    'AQAEgBQAAAAwAAAAAAAAAEwAAAABBQAAAAAABRUAAADRYBkx0xfaYIKt9RgBAgAAAQUAAAAAAAUVAAAA' +
+    '0WAZMdMX2mCCrfUYAAIAAAIALAABAAAAAAAkAP8BHwABBQAAAAAABRUAAADRYBkx0xfaYIKt9RgAAgAA',
+    // executable file access security descriptors, exported from several Windows VMs
+    'AQAEgBQAAAAwAAAAAAAAAEwAAAABBQAAAAAABRUAAACCi6YoI/P2Y4qnMj/rAwAAAQUAAAAAAAUVAAAA' +
+    'goumKCPz9mOKpzI/AQIAAAIAcAAEAAAAAAAYAP8BHwABAgAAAAAABSAAAAAgAgAAAAAUAP8BHwABAQAA' +
+    'AAAABRIAAAAAACQA/wEfAAEFAAAAAAAFFQAAAIKLpigj8/ZjiqcyP+sDAAAAABgAqQASAAECAAAAAAAF' +
+    'IAAAACECAAA=',
+    'AQAEhBQAAAAkAAAAAAAAAEAAAAABAgAAAAAABSAAAAAgAgAAAQUAAAAAAAUVAAAA0WAZMdMX2mCCrfUY' +
+    'AQIAAAIAYAAEAAAAABAYAP8BHwABAgAAAAAABSAAAAAgAgAAABAUAP8BHwABAQAAAAAABRIAAAAAEBgA' +
+    'qQASAAECAAAAAAAFIAAAACECAAAAEBQAvwETAAEBAAAAAAAFCwAAAA==',
+    'AQAEhBQAAAAwAAAAAAAAAEwAAAABBQAAAAAABRUAAACrWLmSPIyOxBiy0bzpAwAAAQUAAAAAAAUVAAA' +
+    'Aq1i5kjyMjsQYstG8AQIAAAIAYAAEAAAAABAYAP8BHwABAgAAAAAABSAAAAAgAgAAABAUAP8BHwABAQ' +
+    'AAAAAABRIAAAAAEBgAqQASAAECAAAAAAAFIAAAACECAAAAEBQAvwETAAEBAAAAAAAFCwAAAA==');
+  SD_TXT: array[0..high(SD_B64)] of RawUtf8 = (
+    'O:AOG:SYD:(A;;KA;;;SY)(A;;KA;;;AO)(OA;;CCDC;bf967aba-0de6-11d0-a285-00aa003049e2' +
+    ';;AO)(OA;;CCDC;bf967a9c-0de6-11d0-a285-00aa003049e2;;AO)(OA;;CCDC;6da8a4ff-0e52-' +
+    '11d0-a286-00aa003049e2;;AO)(OA;;CCDC;bf967aa8-0de6-11d0-a285-00aa003049e2;;PO)(A' +
+    ';;LCRPRC;;;AU)S:(AU;SAFA;CCDCSWWPSDWDWO;;;WD)',
+    'O:AOG:SYD:(A;;CCDCLCSWRPWPRCWDWOGA;;;S-1-0-0)',
+    'D:(A;;GA;;;AN)',
+    'O:S-1-5-21-823746769-1624905683-418753922-513' +
+    'G:S-1-5-21-823746769-1624905683-418753922-512' +
+    'D:(A;;FA;;;S-1-5-21-823746769-1624905683-418753922-512)',
+    'O:S-1-5-21-682003330-1677128483-1060284298-1003' +
+    'G:S-1-5-21-682003330-1677128483-1060284298-513' +
+    'D:(A;;FA;;;BA)(A;;FA;;;SY)' +
+      '(A;;FA;;;S-1-5-21-682003330-1677128483-1060284298-1003)(A;;0x1200a9;;;BU)',
+    'O:BA' +
+    'G:S-1-5-21-823746769-1624905683-418753922-513' +
+    'D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)',
+    'O:S-1-5-21-2461620395-3297676348-3167859224-1001' +
+    'G:S-1-5-21-2461620395-3297676348-3167859224-513' +
+    'D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)');
+  DOM_TXT: array[3..high(SD_B64)] of RawUtf8 = (
+    'S-1-5-21-823746769-1624905683-418753922',
+    'S-1-5-21-682003330-1677128483-1060284298',
+    'S-1-5-21-823746769-1624905683-418753922',
+    'S-1-5-21-2461620395-3297676348-3167859224');
+  RID_TXT: array[3..high(SD_B64)] of RawUtf8 = (
+    'O:DUG:DAD:(A;;FA;;;DA)',
+    'O:S-1-5-21-682003330-1677128483-1060284298-1003G:DUD:(A;;FA;;;BA)(A;;FA;;;SY)' +
+    '(A;;FA;;;S-1-5-21-682003330-1677128483-1060284298-1003)(A;;0x1200a9;;;BU)',
+    'O:BAG:DUD:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)',
+    'O:S-1-5-21-2461620395-3297676348-3167859224-1001G:DUD:AI(A;ID;FA;;;BA)' +
+    '(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)');
+  COND_TXT: array[0..2] of RawUtf8 = (
+    'D:(XA;;FX;;;WD;(@User.Title=="PM" && (@User.Division=="Finance" || ' +
+      '@User.Division ==" Sales")))',
+    'D:(XA;;FX;;;WD;(@User.Project Any_of @Resource.Project))(A;ID;FA;;;SY)',
+    'D:(XA;;FR;;;WD;(Member_of {SID(Smartcard_SID), SID(BO)} ' +
+      '&& @Device.Bitlocker))(A;ID;FA;;;SY)');
+
+procedure TTestCoreBase._SDDL;
+var
+  i: PtrInt;
+  c: TSecControls;
+  bin, saved: RawSecurityDescriptor;
+  u, dom: RawUtf8;
+  domsid: RawSid;
+  sd, sd2: TSecDesc;
+  p: PUtf8Char;
+begin
+  // validate internal structures and types
+  Check(KnownSidToSddl(wksNull) = '');
+  Check(KnownSidToSddl(wksWorld) = 'WD');
+  Check(KnownSidToSddl(wksLocal) = '');
+  Check(KnownSidToSddl(wksNetwork) = 'NU');
+  Check(KnownSidToSddl(wksSelf) = 'PS');
+  Check(KnownSidToSddl(wksLocalSystem) = 'SY');
+  Check(KnownSidToSddl(wksBuiltinAdministrators) = 'BA');
+  Check(KnownSidToSddl(wksBuiltinNetworkConfigurationOperators) = 'NO');
+  Check(KnownSidToSddl(wksBuiltinPerfLoggingUsers) = 'LU');
+  Check(KnownSidToSddl(wksBuiltinEventLogReadersGroup) = 'ER');
+  Check(KnownSidToSddl(wksBuiltinAccessControlAssistanceOperators) = 'AA');
+  Check(KnownSidToSddl(wksBuiltinWriteRestrictedCode) = 'WR');
+  Check(KnownSidToSddl(wksCapabilityInternetClient) = '');
+  Check(KnownSidToSddl(high(TWellKnownSid)) = '');
+  CheckEqual(ord(scDaclAutoInheritReq), 8);
+  CheckEqual(ord(scSelfRelative), 15);
+  c := [scSelfRelative];
+  CheckEqual(PWord(@c)^, $8000);
+  CheckEqual(ord(samGenericRead), 31, 'sam');
+  dom := 'S-1-5-21-823746769-1624905683-418753922';
+  CheckEqual(KnownSidToText(wkrUserAdmin, dom), dom + '-500');
+  CheckEqual(KnownSidToText(wkrSecurityMandatorySystem, dom), dom + '-16384');
+  // validate against some reference binary material
+  for i := 0 to high(SD_B64) do
+  begin
+    bin := Base64ToBin(SD_B64[i]);
+    Check(bin <> '', 'b64');
+    Check(IsValidSecurityDescriptor(pointer(bin), length(bin)), 'bin');
+    sd.Clear;
+    CheckEqual(sd.ToText, '', 'clear');
+    Check(sd.FromBinary(bin));
+    Check(sd.Dacl <> nil, 'dacl');
+    Check((sd.Sacl = nil) = (i <> 0), 'sacl');
+    CheckEqual(sd.ToText, SD_TXT[i], 'ToText');
+    SecurityDescriptorToText(pointer(bin), length(bin), u); // OS API on Windows
+    CheckEqual(u, SD_TXT[i], 'winapi1');
+    saved := sd.ToBinary;
+    Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'saved');
+    SecurityDescriptorToText(pointer(saved), length(saved), u); // OS API on Windows
+    CheckEqual(u, SD_TXT[i], 'winapi2');
+    if i >= 3 then // serialization offsets seem not consistent
+      Check(saved = bin, 'ToBinary');
+    Check(not sd2.FromText(''));
+    CheckEqual(sd2.ToText, '', 'fromnil');
+    Check(not sd.IsEqual(sd2));
+    Check(sd2.FromText(u), 'fromu');
+    CheckEqual(sd2.ToText, u, 'fromutou');
+    Check(sd.IsEqual(sd2));
+    Check(sd2.IsEqual(sd));
+    bin := sd2.ToBinary;
+    Check(bin = saved, 'saved2');
+  end;
+  // validate parsing RID in text (e.g. DU,DA)
+  Check(not sd.FromText(RID_TXT[3]), 'dom0');
+  Check(not sd.IsEqual(sd2));
+  Check(sd.FromText(' O: DU G: DA D: ( A ; ; FA ; ; ; DA ) ', dom), 'dom1');
+  Check(not sd.IsEqual(sd2));
+  u := sd.ToText;
+  CheckEqual(u, FormatUtf8('O:%-513G:%-512D:(A;;FA;;;%-512)', [dom, dom, dom]));
+  CheckEqual(u, SD_TXT[3], 'domasref');
+  u := sd.ToText(dom);
+  CheckEqual(u, RID_TXT[3], 'rid');
+  saved := sd.ToBinary;
+  CheckHash(saved, $3B028A48, 'dombin');
+  Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'saveddom');
+  Check(TryDomainTextToSid(dom, domsid));
+  u := 'rid';
+  sd.AppendAsText(u, pointer(domsid));
+  CheckEqual(u, 'ridO:DUG:DAD:(A;;FA;;;DA)');
+  for i := low(DOM_TXT) to high(DOM_TXT) do
+  begin
+    Check(TryDomainTextToSid(DOM_TXT[i], domsid));
+    Check(sd.FromText(SD_TXT[i]));
+    u := '';
+    sd.AppendAsText(u, pointer(domsid));
+    CheckEqual(u, RID_TXT[i]);
+    p := pointer(u);
+    Check(sd2.FromText(p, pointer(domsid)));
+    Check(sd.IsEqual(sd2));
+  end;
+  // validate conditional ACEs
+  for i := 0 to high(COND_TXT) do
+  begin
+    Check(sd.FromText(COND_TXT[i]));
+    Check(length(sd.Dacl) in [1, 2]);
+    CheckEqual(length(sd.Sacl), 0);
+    Check(sd.Dacl[0].AceType = satCallbackAccessAllowed);
+    if not CheckFailed(sd.Dacl[0].Opaque <> '') then
+      Check(sd.Dacl[0].Opaque[1] = '(');
+    CheckEqual(sd.ToText, COND_TXT[i]);
+    saved := sd.ToBinary;
+    Check(saved <> '');
+    Check(sd2.FromBinary(saved));
+    Check(sd.IsEqual(sd2));
+    CheckEqual(sd2.ToText, COND_TXT[i]);
+  end;
 end;
 
 function IPNUSL(const s1, s2: RawUtf8; len: integer): boolean;

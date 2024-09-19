@@ -3424,8 +3424,11 @@ end;
 function CurrentUserHasGroup(const sid: RawUtf8; wtt: TWinTokenType): boolean;
 var
   s: TSid;
+  p: PUtf8Char;
 begin
-  result := TextToSid(pointer(sid), s) and
+  p := pointer(sid);
+  result := TextToSid(p, s) and
+            (p^ = #0) and
             CurrentUserHasGroup(@s, wtt);
 end;
 
@@ -3492,8 +3495,11 @@ function LookupSid(const sid: RawUtf8; out name, domain: RawUtf8;
   const server: RawUtf8): TSidType;
 var
   s: TSid;
+  p: PUtf8Char;
 begin
-  if TextToSid(pointer(sid), s) then
+  p := pointer(sid);
+  if TextToSid(p, s) and
+     (p^ = #0) then
     result := LookupSid(@s, name, domain, server)
   else
     result := stUndefined;

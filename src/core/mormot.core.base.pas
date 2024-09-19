@@ -880,25 +880,36 @@ procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 /// simple concatenation of a 64-bit integer as text into a shorstring
 procedure AppendShortInt64(value: Int64; var dest: ShortString);
 
-/// simple concatenation of a character into a shorstring
-procedure AppendShortChar(chr: AnsiChar; var dest: ShortString);
-  {$ifdef FPC} inline; {$endif}
+/// simple concatenation of a character into a @shorstring
+// - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
+procedure AppendShortChar(chr: AnsiChar; dest: PAnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
 
-/// simple concatenation of a byte as hexadecimal into a shorstring
+/// simple concatenation of two characters into a @shorstring
+// - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
+procedure AppendShortTwoChars(twochars, dest: PAnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// simple concatenation of a #0 ending text into a @shorstring
+// - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
+procedure AppendShortBuffer(buf: PAnsiChar; len: PtrInt; dest: PAnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// simple concatenation of hexadecimal binary buffer into a shorstring
+procedure AppendShortHex(value: PByte; len: PtrInt; var dest: ShortString);
+
+/// simple concatenation of an integer as lowercase hexadecimal into a shorstring
+procedure AppendShortIntHex(value: PtrUInt; var dest: ShortString);
+
+/// simple concatenation of a byte as uppercase hexadecimal into a shorstring
 procedure AppendShortByteHex(value: byte; var dest: ShortString);
 
 /// simple concatenation of a ShortString text into a shorstring
 procedure AppendShort(const src: ShortString; var dest: ShortString);
-  {$ifdef FPC} inline; {$endif}
-
-/// simple concatenation of a #0 ending text into a shorstring
-// - if Len is < 0, will use StrLen(buf)
-procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: ShortString);
 
 /// simple concatenation of an ANSI-7 AnsiString into a shorstring
 // - if Len is < 0, will use StrLen(buf)
 procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
-  {$ifdef FPC}inline;{$endif}
 
 /// just a wrapper around vmtClassName to avoid a string conversion
 function ClassNameShort(C: TClass): PShortString; overload;
@@ -4806,24 +4817,44 @@ begin
   SetString(result, PAnsiChar(pointer(source)), length(source));
 end;
 
-procedure AppendShort(const src: ShortString; var dest: ShortString);
-var
-  len: PtrInt;
-begin
-  len := ord(src[0]);
-  if (len = 0) or
-     (len + ord(dest[0]) > 255) then
-    exit;
-  MoveFast(src[1], dest[ord(dest[0]) + 1], len);
-  inc(dest[0], len);
-end;
-
-procedure AppendShortChar(chr: AnsiChar; var dest: ShortString);
+procedure AppendShortChar(chr: AnsiChar; dest: PAnsiChar);
 begin
   if dest[0] = #255 then
     exit;
   inc(dest[0]);
   dest[ord(dest[0])] := chr;
+end;
+
+procedure AppendShortTwoChars(twochars, dest: PAnsiChar);
+begin
+  if dest[0] >= #254 then
+    exit;
+  PWord(dest + ord(dest[0]) + 1)^ := PWord(twochars)^;
+  inc(dest[0], 2);
+end;
+
+procedure AppendShortBuffer(buf: PAnsiChar; len: PtrInt; dest: PAnsiChar);
+begin
+  if len + ord(dest[0]) > 255 then
+    exit;
+  MoveFast(buf^, dest[ord(dest[0]) + 1], len);
+  inc(dest[0], len);
+end;
+
+procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
+begin
+  if buf <> '' then
+    AppendShortBuffer(pointer(buf), PStrLen(PtrUInt(buf) - _STRLEN)^, @dest);
+end;
+
+procedure AppendShort(const src: ShortString; var dest: ShortString);
+begin
+  AppendShortBuffer(@src[1], ord(src[0]), @dest);
+end;
+
+procedure AppendShortTemp(value, temp: PAnsiChar; dest: PAnsiChar);
+begin
+  AppendShortBuffer(value, temp - value, dest);
 end;
 
 const
@@ -4844,49 +4875,55 @@ begin
   dest[0] := AnsiChar(len);
 end;
 
-procedure AppendShortTemp24(value, temp: PAnsiChar; dest: PAnsiChar);
-  {$ifdef HASINLINE} inline; {$endif}
+procedure AppendShortHex(value: PByte; len: PtrInt; var dest: ShortString);
 var
-  valuelen, destlen, newlen: PtrInt;
+  dlen, v: PtrInt;
 begin
-  valuelen := temp - value;
-  destlen := ord(dest[0]);
-  newlen := valuelen + destlen;
-  if newlen > 255 then
-    exit;
-  dest[0] := AnsiChar(newlen);
-  MoveFast(value^, dest[destlen + 1], valuelen);
+  dlen := ord(dest[0]);
+  if (len > 0) and
+     (dlen + len * 2 < 254) then
+    repeat
+      v := value^;
+      inc(value);
+      dest[dlen + 1] := HexCharsLower[v shr 4];
+      inc(dlen, 2);
+      v := v and $0f;
+      dest[dlen] := HexCharsLower[v];
+      dec(len);
+    until len = 0;
+  dest[0] := AnsiChar(dlen);
+end;
+
+procedure AppendShortIntHex(value: PtrUInt; var dest: ShortString);
+var
+  tmp: array[0..23] of AnsiChar;
+  i: PtrInt;
+begin
+  i := POINTERBYTES * 2;
+  repeat
+    tmp[i - 1] := HexCharsLower[value and 15];
+    value := value shr 4;
+    tmp[i - 2] := HexCharsLower[value and 15];
+    dec(i, 2);
+    if i = 0 then
+      break;
+    value := value shr 4;
+  until value = 0;
+  AppendShortTemp(@tmp[i], @tmp[POINTERBYTES * 2], @dest);
 end;
 
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
-  AppendShortTemp24(StrUInt32(@tmp[23], value), @tmp[23], @dest);
+  AppendShortTemp(StrUInt32(@tmp[23], value), @tmp[23], @dest);
 end;
 
 procedure AppendShortInt64(value: Int64; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
-  AppendShortTemp24(StrInt64(@tmp[23], value), @tmp[23], @dest);
-end;
-
-procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: ShortString);
-begin
-  if len < 0 then
-    len := StrLen(buf);
-  if (len = 0) or
-     (len + ord(dest[0]) > 255) then
-    exit;
-  MoveFast(buf^, dest[ord(dest[0]) + 1], len);
-  inc(dest[0], len);
-end;
-
-procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
-begin
-  if buf <> '' then
-    AppendShortBuffer(pointer(buf), PStrLen(PtrUInt(buf) - _STRLEN)^, dest);
+  AppendShortTemp(StrInt64(@tmp[23], value), @tmp[23], @dest);
 end;
 
 function ClassNameShort(C: TClass): PShortString;
