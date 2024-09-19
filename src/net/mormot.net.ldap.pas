@@ -30,6 +30,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.buffers,
   mormot.core.text,
   mormot.core.unicode,
@@ -3143,8 +3144,8 @@ begin
         exit;
       end;
     atsSecurityDescriptor:
-      if SecurityDescriptorToText(pointer(s), length(s), s) then
-        exit; // use WinAPI or hexa representation
+      if SecurityDescriptorToText(s, s) then // use our TSecDesc wrapper
+        exit;
     atsFileTime: // 64-bit FileTime
       begin
         ft := GetQWord(pointer(s), err);

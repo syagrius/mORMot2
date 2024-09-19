@@ -12,6 +12,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.text,
   mormot.core.buffers,
   mormot.core.unicode,
@@ -6466,20 +6467,20 @@ var
   p: PUtf8Char;
 begin
   // validate internal structures and types
-  Check(KnownSidToSddl(wksNull) = '');
-  Check(KnownSidToSddl(wksWorld) = 'WD');
-  Check(KnownSidToSddl(wksLocal) = '');
-  Check(KnownSidToSddl(wksNetwork) = 'NU');
-  Check(KnownSidToSddl(wksSelf) = 'PS');
-  Check(KnownSidToSddl(wksLocalSystem) = 'SY');
-  Check(KnownSidToSddl(wksBuiltinAdministrators) = 'BA');
-  Check(KnownSidToSddl(wksBuiltinNetworkConfigurationOperators) = 'NO');
-  Check(KnownSidToSddl(wksBuiltinPerfLoggingUsers) = 'LU');
-  Check(KnownSidToSddl(wksBuiltinEventLogReadersGroup) = 'ER');
-  Check(KnownSidToSddl(wksBuiltinAccessControlAssistanceOperators) = 'AA');
-  Check(KnownSidToSddl(wksBuiltinWriteRestrictedCode) = 'WR');
-  Check(KnownSidToSddl(wksCapabilityInternetClient) = '');
-  Check(KnownSidToSddl(high(TWellKnownSid)) = '');
+  CheckEqual(KnownSidToSddl(wksNull), '');
+  CheckEqual(KnownSidToSddl(wksWorld), 'WD');
+  CheckEqual(KnownSidToSddl(wksLocal), '');
+  CheckEqual(KnownSidToSddl(wksNetwork), 'NU');
+  CheckEqual(KnownSidToSddl(wksSelf), 'PS');
+  CheckEqual(KnownSidToSddl(wksLocalSystem), 'SY');
+  CheckEqual(KnownSidToSddl(wksBuiltinAdministrators), 'BA');
+  CheckEqual(KnownSidToSddl(wksBuiltinNetworkConfigurationOperators), 'NO');
+  CheckEqual(KnownSidToSddl(wksBuiltinPerfLoggingUsers), 'LU');
+  CheckEqual(KnownSidToSddl(wksBuiltinEventLogReadersGroup), 'ER');
+  CheckEqual(KnownSidToSddl(wksBuiltinAccessControlAssistanceOperators), 'AA');
+  CheckEqual(KnownSidToSddl(wksBuiltinWriteRestrictedCode), 'WR');
+  CheckEqual(KnownSidToSddl(wksCapabilityInternetClient), '');
+  CheckEqual(KnownSidToSddl(high(TWellKnownSid)), '');
   CheckEqual(ord(scDaclAutoInheritReq), 8);
   CheckEqual(ord(scSelfRelative), 15);
   c := [scSelfRelative];
@@ -6494,18 +6495,26 @@ begin
     bin := Base64ToBin(SD_B64[i]);
     Check(bin <> '', 'b64');
     Check(IsValidSecurityDescriptor(pointer(bin), length(bin)), 'bin');
+    Check(SecurityDescriptorToText(bin, u), 'sdtt1');
+    CheckEqual(u, SD_TXT[i]);
+    {$ifdef OSWINDOWS} // validate against the OS API
+    Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
+    CheckEqual(u, SD_TXT[i], 'winapi2');
+    {$endif OSWINDOWS}
     sd.Clear;
     CheckEqual(sd.ToText, '', 'clear');
     Check(sd.FromBinary(bin));
     Check(sd.Dacl <> nil, 'dacl');
     Check((sd.Sacl = nil) = (i <> 0), 'sacl');
     CheckEqual(sd.ToText, SD_TXT[i], 'ToText');
-    SecurityDescriptorToText(pointer(bin), length(bin), u); // OS API on Windows
-    CheckEqual(u, SD_TXT[i], 'winapi1');
     saved := sd.ToBinary;
     Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'saved');
-    SecurityDescriptorToText(pointer(saved), length(saved), u); // OS API on Windows
-    CheckEqual(u, SD_TXT[i], 'winapi2');
+    Check(SecurityDescriptorToText(saved, u), 'sdtt2');
+    CheckEqual(u, SD_TXT[i]);
+    {$ifdef OSWINDOWS}
+    Check(CryptoApi.SecurityDescriptorToText(pointer(saved), u), 'winapi3');
+    CheckEqual(u, SD_TXT[i], 'winapi4');
+    {$endif OSWINDOWS}
     if i >= 3 then // serialization offsets seem not consistent
       Check(saved = bin, 'ToBinary');
     Check(not sd2.FromText(''));
@@ -6558,6 +6567,7 @@ begin
     CheckEqual(sd.ToText, COND_TXT[i]);
     saved := sd.ToBinary;
     Check(saved <> '');
+    Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'savcond');
     Check(sd2.FromBinary(saved));
     Check(sd.IsEqual(sd2));
     CheckEqual(sd2.ToText, COND_TXT[i]);

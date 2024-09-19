@@ -39,7 +39,6 @@ Cross-platform functions shared by all framework units
 - Gather Operating System Information
 - Operating System Specific Types (e.g. `TWinRegistry`)
 - Unicode, Time, File, Console, Library process
-- Cross-Platform Charset and CodePage Support
 - Per Class Properties O(1) Lookup via `vmtAutoTable` Slot (e.g. for RTTI cache)
 - `TSynLocker`/`TSynLocked` and Low-Level Threading Features
 - Unix Daemon and Windows Service Support
@@ -48,6 +47,8 @@ Aim of this unit is to centralize most used OS-specific API calls, like a `SysUt
 
 In practice, no "Windows", nor "Linux/Unix" reference should be needed in regular units, once `mormot.core.os` is included. :)
 
+See `mormot.core.os.mac.pas` and `mormot.core.os.security.pas` units for completion.
+
 ### mormot.core.os.mac
 
 MacOS API calls for FPC, as injected to `mormot.core.os.pas`
@@ -55,10 +56,23 @@ MacOS API calls for FPC, as injected to `mormot.core.os.pas`
 
 This unit uses MacOSAll and link several toolkits, so was not included in `mormot.core.os.pas` to reduce executable size, but inject this methods at runtime: just include "`uses mormot.core.os.mac`" in programs needing it.
 
+### mormot.core.os.security
+
+Cross-Platform Operating System Security Definitions
+- Security IDentifier (SID) Definitions
+- Security Descriptor Definition Language (SDDL) Definitions
+- Discretionary Access Control List (DACL) Definitions
+- Windows API Specific Security Types and Functions
+
+Even if most of those security definitions comes from the Windows/AD world, our framework (re)implemented them in a cross-platform way.
+
+This low-level unit only refers to `mormot.core.base.pas` and `mormot.core.os.pas`.
+
 ### mormot.core.unicode
 
 Efficient Unicode Conversion Classes shared by all framework units
 - UTF-8 Efficient Encoding / Decoding
+- Cross-Platform Charset and CodePage Support
 - UTF-8 / UTF-16 / Ansi Conversion Classes
 - Text File Loading with BOM/Unicode Support
 - Low-Level String Conversion Functions
