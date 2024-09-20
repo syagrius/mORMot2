@@ -690,6 +690,12 @@ const
 procedure DynArrayFakeLength(arr: pointer; len: TDALen);
   {$ifdef HASINLINE} inline; {$endif}
 
+/// low-level deletion of one dynmaic array item
+// - Last=high(Values) should be > 0 - caller should set Values := nil for Last<=0
+// - caller should have made Finalize(Values[Index]) before calling
+// - used e.g. by TSecurityDescriptor.Delete()
+procedure DynArrayFakeDelete(var Values; Index, Last, ValueSize: PtrUInt);
+
 {$ifndef CPUARM}
 type
   /// used as ToByte() to properly truncate any integer into 8-bit
@@ -845,6 +851,11 @@ procedure FastAssignUtf8(var dest: RawUtf8; var src: RawByteString);
 function GetCodePage(const s: RawByteString): cardinal; inline;
 {$endif HASCODEPAGE}
 
+/// retrieve the code page of a string
+// - StringRefCount() is not available on oldest Delphi
+function GetRefCount(const s: RawByteString): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// initialize a RawByteString, ensuring returned "aligned" pointer
 // is 16-bytes aligned
 // - to be used e.g. for proper SIMD process
@@ -911,6 +922,9 @@ procedure AppendShort(const src: ShortString; var dest: ShortString);
 // - if Len is < 0, will use StrLen(buf)
 procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
 
+/// simple concatenation of a ShortString text into a RawUtf8
+procedure AppendShortToUtf8(const src: ShortString; var dest: RawUtf8);
+
 /// just a wrapper around vmtClassName to avoid a string conversion
 function ClassNameShort(C: TClass): PShortString; overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -925,7 +939,6 @@ procedure ClassToText(C: TClass; var result: RawUtf8);
 /// just a wrapper around ClassToText() to avoid a string conversion
 function ToText(C: TClass): RawUtf8; overload;
   {$ifdef HASSAFEINLINE}inline;{$endif}
-
 
 var
   /// retrieve the unit name where a given class is implemented
@@ -1001,12 +1014,9 @@ procedure ToHumanHexReverse(var result: RawUtf8; bin: PByteArray; len: PtrInt);
 
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
-
 type
   TSqlRawBlob = RawBlob;
-
 {$endif PUREMORMOT2}
-
 
 
 { ************ Numbers (floats and integers) Low-level Definitions }
@@ -4640,6 +4650,13 @@ begin
 end;
 {$endif HASCODEPAGE}
 
+function GetRefCount(const s: RawByteString): PtrInt;
+begin
+  result := PtrUInt(pointer(s));
+  if result <> 0 then
+    result := PStrCnt(PtrUInt(result) - _STRCNT)^;
+end;
+
 procedure FakeLength(var s: RawUtf8; len: PtrInt);
 var
   p: PAnsiChar; // faster with a temp variable
@@ -4925,6 +4942,17 @@ var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrInt64(@tmp[23], value), @tmp[23], @dest);
+end;
+
+procedure AppendShortToUtf8(const src: ShortString; var dest: RawUtf8);
+var
+  n: PtrInt;
+begin
+  if src[0] = #0 then
+    exit;
+  n := length(dest);
+  SetLength(dest, n + ord(src[0]));
+  MoveFast(src[1], PByteArray(dest)[n], ord(src[0]));
 end;
 
 function ClassNameShort(C: TClass): PShortString;
@@ -6467,6 +6495,18 @@ end;
 procedure DynArrayFakeLength(arr: pointer; len: TDALen);
 begin
   PDALen(PAnsiChar(arr) - _DALEN)^ := len - _DAOFF;
+end;
+
+procedure DynArrayFakeDelete(var Values; Index, Last, ValueSize: PtrUInt);
+var
+  p: PAnsiChar;
+begin // ensured (Last > 0) and (Index <= Last) and made Finalize(Values[Index])
+  DynArrayFakeLength(pointer(Values), Last); // dec(length) in header no realloc
+  dec(Last, Index);
+  if Last = 0 then
+    exit; // nothing to move
+  p := PAnsiChar(Values) + Index * ValueSize;
+  MoveFast(p[ValueSize], p[0], Last * ValueSize);
 end;
 
 {$ifdef FPC} // some FPC-specific low-level code due to diverse compiler or RTL
@@ -9333,14 +9373,16 @@ end;
 procedure MultiEventRemove(var EventList; Index: PtrInt);
 var
   events: TMethodDynArray absolute EventList;
-  max: PtrInt;
+  max: PtrUInt;
 begin
   max := length(events);
-  if PtrUInt(Index) >= PtrUInt(max) then
+  if PtrUInt(Index) < max then
     exit;
   dec(max);
-  MoveFast(events[Index + 1], events[Index], (max - Index) * SizeOf(TMethod));
-  SetLength(events, max);
+  if max = 0 then
+    events := nil
+  else
+    DynArrayFakeDelete(events, Index, max, SizeOf(TMethod));
 end;
 
 procedure MultiEventMerge(var DestList; const ToBeAddedList);

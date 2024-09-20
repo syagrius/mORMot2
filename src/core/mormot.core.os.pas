@@ -1567,6 +1567,14 @@ function GetSystemStoreAsPem(
 function GetOneSystemStoreAsPem(CertStore: TSystemCertificateStore;
   FlushCache: boolean = false; now: cardinal = 0): RawUtf8;
 
+var
+  /// low-level function used by StuffExeCertificate() in mormot.misc.pecoff.pas
+  // - properly implemented by mormot.crypt.openssl.pas, but mormot.misc.pecoff
+  // has its own stand-alone version using a pre-generated fixed certificate
+  // - warning: the Marker should have no 0 byte within
+  CreateDummyCertificate: function(const Stuff, CertName: RawUtf8;
+    Marker: cardinal): RawByteString;
+
 type
   /// the raw SMBIOS information as filled by GetRawSmbios
   // - first 4 bytes are $010003ff on POSIX if read from /var/tmp/.synopse.smb
@@ -1812,7 +1820,7 @@ type
   /// define which WinAPI token is to be retrieved
   // - define the execution context, i.e. if the token is used for the current
   // process or the current thread
-  // - used e.g. by TSynWindowsPrivileges or CurrentSid()
+  // - used e.g. by TSynWindowsPrivileges or mormot.core.os.security
   TWinTokenType = (
     wttProcess,
     wttThread);
@@ -4390,9 +4398,9 @@ type
     // - defined in protected section for better inlining and to fix a Delphi
     // compiler bug about warning a missing Windows unit in the uses classes
     procedure RWLock(context: TRWLockContext);
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     procedure RWUnLock(context: TRWLockContext);
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
   public
     /// internal padding data, also used to store up to 7 variant values
     // - this memory buffer will ensure no CPU cache line mixup occurs
@@ -5849,7 +5857,7 @@ begin
 end;
 {$endif ISDELPHI}
 
-function UuidToText(const u: TGuid): RawUtf8; // seldom used in this unit
+procedure UuidToText(const u: TGuid; var result: RawUtf8); // seldom used in this unit
 begin
   result := RawUtf8(LowerCase(copy(GUIDToString(u), 2, 36)));
 end;
@@ -8849,7 +8857,7 @@ begin
       exit;
   end;
   GetComputerUuid(u, disable);
-  result := UuidToText(u);
+  UuidToText(u, result);
   if disable <> [] then
     exit; // cache fully-qualified UUID only
   GlobalLock;
@@ -8883,7 +8891,7 @@ begin
     uid.D2 := swap(uid.D2);
     uid.D3 := swap(uid.D3);
   end;
-  dest := UuidToText(uid);
+  UuidToText(uid, dest);
 end;
 
 function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;

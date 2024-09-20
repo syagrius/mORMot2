@@ -4667,13 +4667,15 @@ begin
     exit;
   end;
   c := aText[aTextLen];
-  aText[aTextLen] := #0; // input buffer may not be #0 terminated
+  if c <> #0 then // write only if needed - avoid GPF from constant string
+    aText[aTextLen] := #0; // input buffer may not be #0 terminated
   i := fHash.Values.Hasher.FindOrNewComp(aTextHash, @aText, @SortDynArrayPUtf8Char);
   if i >= 0 then
   begin
     aResult := fHash.Value[i]; // return the interned value
     fSafe.ReadUnLock;
-    aText[aTextLen] := c;
+    if c <> #0 then
+      aText[aTextLen] := c;
     exit;
   end;
   fSafe.ReadUnLock;
@@ -4686,7 +4688,8 @@ begin
     FastSetString(fHash.Value[i], aText, aTextLen); // new value to the pool
   aResult := fHash.Value[i]; // return the interned value
   fSafe.WriteUnLock;
-  aText[aTextLen] := c;
+  if c <> #0 then
+    aText[aTextLen] := c;
 end;
 
 procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
@@ -7407,7 +7410,7 @@ end;
 function TDynArray.Delete(aIndex: PtrInt): boolean;
 var
   n: PtrInt;
-  s, len: PtrUInt;
+  siz, tomove: PtrUInt;
   P: PAnsiChar;
   wassorted: boolean;
 begin
@@ -7420,19 +7423,19 @@ begin
   if PDACnt(PAnsiChar(fValue^) - _DACNT)^ > 1 then
     InternalSetLength(n, n); // unique
   dec(n);
-  s := fInfo.Cache.ItemSize;
-  P := PAnsiChar(fValue^) + PtrUInt(aIndex) * s;
+  siz := fInfo.Cache.ItemSize;
+  P := PAnsiChar(fValue^) + PtrUInt(aIndex) * siz;
   if (fInfo.ArrayRtti <> nil) and
      not fNoFinalize then
     fInfo.ArrayRtti.ValueFinalize(P); // also for T*ObjArray
-  len := n - aIndex;
-  if len <> 0 then
+  tomove := n - aIndex;
+  if tomove <> 0 then
   begin
-    len := len * s;
-    MoveFast(P[s], P[0], len);
-    inc(P, len);
+    tomove := tomove * siz;
+    MoveFast(P[siz], P[0], tomove);
+    inc(P, tomove);
   end;
-  FillCharFast(P^, s, 0);
+  FillCharFast(P^, siz, 0);
   wassorted := fSorted;
   SetCount(n); // won't reallocate
   fSorted := wassorted; // deletion won't change the order

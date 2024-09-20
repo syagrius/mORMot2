@@ -8,8 +8,8 @@ unit mormot.core.os.security;
 
   Cross-Platform Operating System Security Definitions
   - Security IDentifier (SID) Definitions
-  - Security Descriptor Definition Language (SDDL) Definitions
-  - Discretionary Access Control List (DACL) Definitions
+  - Access Control List (DACL/SACL) Definitions
+  - Security Descriptor Definition Language (SDDL)
   - Windows API Specific Security Types and Functions
 
   Even if most of those security definitions comes from the Windows/AD world,
@@ -17,6 +17,9 @@ unit mormot.core.os.security;
   This low-level unit only refers to mormot.core.base and mormot.core.os.
 
   *****************************************************************************
+
+    TODO: proper ACE conditional expression binary + SDDL support: 2.4.4.17.1
+    at https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp
 }
 
 interface
@@ -33,6 +36,15 @@ uses
 { ****************** Security IDentifier (SID) Definitions }
 
 type
+  /// custom binary buffer type used as convenient Windows SID storage
+  // - mormot.crypt.secure will recognize this type and serialize its standard
+  // text as a JSON string
+  RawSid = type RawByteString;
+  PRawSid = ^RawSid;
+
+  /// a dynamic array of binary SID storage buffers
+  RawSidDynArray = array of RawSid;
+
   /// Security IDentifier (SID) Authority, encoded as 48-bit binary
   TSidAuth = array[0..5] of byte;
   PSidAuth = ^TSidAuth;
@@ -49,6 +61,75 @@ type
   PSid = ^TSid;
   PSids = array of PSid;
 
+
+/// a wrapper around MemCmp() on two Security IDentifier binary buffers
+// - will first compare by length, then by content
+function SidCompare(a, b: PSid): integer;
+
+/// compute the actual binary length of a Security IDentifier buffer, in bytes
+function SidLength(sid: PSid): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// allocate a RawSid instance from a PSid raw handler
+procedure ToRawSid(sid: PSid; out result: RawSid);
+
+/// check if a RawSid binary buffer has the expected length of a valid SID
+function IsValidRawSid(const sid: RawSid): boolean;
+
+/// search within SID dynamic array for a given SID
+function HasSid(const sids: PSids; sid: PSid): boolean;
+
+/// search within SID dynamic array for a given dynamic array of SID buffers
+function HasAnySid(const sids: PSids; const sid: RawSidDynArray): boolean;
+
+/// append a SID buffer pointer to a dynamic array of SID buffers
+procedure AddRawSid(var sids: RawSidDynArray; sid: PSid);
+
+/// convert a Security IDentifier as text, following the standard representation
+procedure SidToTextShort(sid: PSid; var result: ShortString);
+
+/// convert a Security IDentifier as text, following the standard representation
+function SidToText(sid: PSid): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert a Security IDentifier as text, following the standard representation
+// - this function is able to convert into itself, i.e. allows sid=pointer(text)
+procedure SidToText(sid: PSid; var text: RawUtf8); overload;
+
+/// convert several Security IDentifier as text dynamic array
+function SidsToText(sids: PSids): TRawUtf8DynArray;
+
+/// convert a Security IDentifier as text, following the standard representation
+function RawSidToText(const sid: RawSid): RawUtf8;
+
+/// parse a Security IDentifier text, following the standard representation
+// - won't support hexadecimal 48-bit IdentifierAuthority, i.e. S-1-0x######-..
+// - will parse the input text buffer in-place, and return the next position
+function TextToSid(var P: PUtf8Char; out sid: TSid): boolean;
+
+/// parse a Security IDentifier text, following the standard representation
+function TextToRawSid(const text: RawUtf8): RawSid; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// parse a Security IDentifier text, following the standard representation
+function TextToRawSid(const text: RawUtf8; out sid: RawSid): boolean; overload;
+
+/// decode a domain SID text into a generic binary RID value
+// - returns true if Domain is '', or is in its 'S-1-5-21-xx-xx-xx' domain form
+// - will also accepts any 'S-1-5-21-xx-xx-xx-yyy' form, e.g. the current user SID
+// - if a domain SID, Dom binary buffer will contain a S-1-5-21-xx-xx-xx-0 value,
+// ready to be used with KnownRidSid(), SidSameDomain(), SddlAppendSid(),
+// SddlNextSid() or TSecurityDescriptor.AppendAsText functions
+function TryDomainTextToSid(const Domain: RawUtf8; out Dom: RawSid): boolean;
+
+/// quickly check if two binary SID buffers domain do overlap
+// - one of the values should be a domain SID in S-1-5-21-xx-xx-xx-RID layout,
+// typically from TryDomainTextToSid() output
+function SidSameDomain(a, b: PSid): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+
+type
   /// define a list of well-known Security IDentifier (SID) groups
   // - for instance, wksBuiltinAdministrators is set for local administrators
   // - warning: does not exactly match winnt.h WELL_KNOWN_SID_TYPE enumeration
@@ -183,65 +264,6 @@ type
   /// define a set of well-known RID
   TWellKnownRids = set of TWellKnownRid;
 
-  /// custom binary buffer type used as convenient Windows SID storage
-  RawSid = type RawByteString;
-
-  /// a dynamic array of binary SID storage buffers
-  RawSidDynArray = array of RawSid;
-
-
-/// a wrapper around MemCmp() on two Security IDentifier binary buffers
-// - will first compare by length, then by content
-function SidCompare(a, b: PSid): integer;
-
-/// compute the actual binary length of a Security IDentifier buffer, in bytes
-function SidLength(sid: PSid): PtrInt;
-  {$ifdef HASINLINE} inline; {$endif}
-
-/// allocate a RawSid instance from a PSid raw handler
-procedure ToRawSid(sid: PSid; out result: RawSid);
-
-/// check if a RawSid binary buffer has the expected length of a valid SID
-function IsValidRawSid(const sid: RawSid): boolean;
-
-/// search within SID dynamic array for a given SID
-function HasSid(const sids: PSids; sid: PSid): boolean;
-
-/// search within SID dynamic array for a given dynamic array of SID buffers
-function HasAnySid(const sids: PSids; const sid: RawSidDynArray): boolean;
-
-/// append a SID buffer pointer to a dynamic array of SID buffers
-procedure AddRawSid(var sids: RawSidDynArray; sid: PSid);
-
-/// convert a Security IDentifier as text, following the standard representation
-procedure SidToTextShort(sid: PSid; var result: shortstring);
-
-/// convert a Security IDentifier as text, following the standard representation
-function SidToText(sid: PSid): RawUtf8; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert a Security IDentifier as text, following the standard representation
-// - this function is able to convert into itself, i.e. allows sid=pointer(text)
-procedure SidToText(sid: PSid; var text: RawUtf8); overload;
-
-/// convert several Security IDentifier as text dynamic array
-function SidsToText(sids: PSids): TRawUtf8DynArray;
-
-/// convert a Security IDentifier as text, following the standard representation
-function RawSidToText(const sid: RawSid): RawUtf8;
-
-/// parse a Security IDentifier text, following the standard representation
-// - won't support hexadecimal 48-bit IdentifierAuthority, i.e. S-1-0x######-..
-// - will parse the input text buffer in-place, and return the next position
-function TextToSid(var P: PUtf8Char; out sid: TSid): boolean;
-
-/// parse a Security IDentifier text, following the standard representation
-function TextToRawSid(const text: RawUtf8): RawSid; overload;
-  {$ifdef HASINLINE} inline; {$endif}
-
-/// parse a Security IDentifier text, following the standard representation
-function TextToRawSid(const text: RawUtf8; out sid: RawSid): boolean; overload;
-
 /// returns a Security IDentifier of a well-known SID as binary
 // - is using an internal cache for the returned RawSid instances
 function KnownRawSid(wks: TWellKnownSid): RawSid; overload;
@@ -274,45 +296,20 @@ function KnownRawSid(wkr: TWellKnownRid; const Domain: RawUtf8): RawSid; overloa
 // - e.g. wkrUserAdmin as 'S-1-5-21-xxxxxx-xxxxxxx-xxxxxx-500'
 function KnownSidToText(wkr: TWellKnownRid; const Domain: RawUtf8): RawUtf8; overload;
 
-/// decode a domain SID text into a generic binary RID value
-// - returns true if Domain is '', or is in its 'S-1-5-21-xx-xx-xx' domain form
-// - will also accepts any 'S-1-5-21-xx-xx-xx-yyy' form, e.g. the current user SID
-// - if a domain SID, Dom binary buffer will contain a S-1-5-21-xx-xx-xx-0 value,
-// ready to be used with KnownRidSid(), SameDomain(), SddlAppendSid(),
-// SddlNextSid() or TSecDesc.AppendAsText functions
-function TryDomainTextToSid(const Domain: RawUtf8; out Dom: RawSid): boolean;
-
 /// compute a binary SID from a decoded binary Domain and a well-known RID
 // - more efficient than KnownRawSid() overload and KnownSidToText()
 procedure KnownRidSid(wkr: TWellKnownRid; dom: PSid; var result: RawSid);
 
-/// quickly check if two binary SID buffers domain do overlap
-// - one the values should be a domain SID in S-1-5-21-xx-xx-xx-RID layout
-function SameDomain(a, b: PSid): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
 
-
-{ ****************** Security Descriptor Definition Language (SDDL) Definitions }
-
-/// append a binary SID in its SDDL text form
-// - recognize TWellKnownSid into SDDL text, e.g. S-1-1-0 (wksWorld) into 'WD'
-// - with optional TWellKnownRid recognition if dom binary is supplied, e.g.
-// S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
-procedure SddlAppendSid(var s: shortstring; sid, dom: PSid);
-
-/// parse a SID from its SDDL text form into its binary buffer
-// - recognize TWellKnownSid SDDL identifiers, e.g. 'WD' into S-1-1-0 (wksWorld)
-// - with optional TWellKnownRid recognition if dom binary is supplied, e.g.
-// 'DA' identifier into S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins)
-function SddlNextSid(var p: PUtf8Char; var sid: RawSid; dom: PSid): boolean;
-
-function KnownSidToSddl(wks: TWellKnownSid): RawUtf8; // for unit tests only
-
-
-
-{ ****************** Discretionary Access Control List (DACL) Definitions }
+{ ****************** Access Control List (DACL/SACL) Definitions }
 
 type
+  /// custom binary buffer type used as Windows self-relative Security Descriptor
+  // - mormot.crypt.secure will recognize this type and serialize its SDDL
+  // text as a JSON string
+  RawSecurityDescriptor = type RawByteString;
+  PRawSecurityDescriptor = ^RawSecurityDescriptor;
+
   /// standard and generic access rights in TSecAce.Mask
   TSecAccess = (
     samCreateChild,          // CC
@@ -324,25 +321,44 @@ type
     samDeleteTree,           // DT
     samListObject,           // LO
     samControlAccess,        // CR
-    sam9, sam10, sam11, sam12, sam13, sam14, sam15,
+    sam9,
+    sam10,
+    sam11,
+    sam12,
+    sam13,
+    sam14,
+    sam15,
     samDelete,               // SD
     samReadControl,          // RC
     samWriteDac,             // WD
     samWriteOwner,           // WO
     samSynchronize,
-    sam21, sam22, sam23,
+    sam21,
+    sam22,
+    sam23,
     samAccessSystemSecurity,
     samMaximumAllowed,
-    sam26, sam27,
+    sam26,
+    sam27,
     samGenericAll,           // GA
     samGenericExecute,       // GX
     samGenericWrite,         // GW
     samGenericRead);         // GR
+
   /// 32-bit standard and generic access rights in TSecAce.Mask
   TSecAccessMask = set of TSecAccess;
+  PSecAccessMask = ^TSecAccessMask;
 
-  /// custom binary buffer type used as Windows self-relative Security Descriptor
-  RawSecurityDescriptor = type RawByteString;
+  /// TSecAce.Mask constant values with their own SDDL identifier
+  TSecAccessRight = (
+    sarFileAll,
+    sarFileRead,
+    sarFileWrite,
+    sarFileExecute,
+    sarKeyAll,
+    sarKeyRead,
+    sarKeyWrite,
+    sarKeyExecute);
 
   TSecControl = (
     scOwnerDefaulted,
@@ -351,7 +367,8 @@ type
     scDaclDefaulted,
     scSaclPresent,
     scSaclDefaulted,
-    sc6, sc7,
+    sc6,
+    sc7,
     scDaclAutoInheritReq,
     scSaclAutoInheritReq,
     scDaclAutoInherit,
@@ -364,6 +381,7 @@ type
 
   /// high-level supported ACE kinds in TSecAce.AceType
   TSecAceType = (
+    satUnknown,
     satAccessAllowed,                 // A  0  ACCESS_ALLOWED_ACE_TYPE
     satAccessDenied,                  // D  1  ACCESS_DENIED_ACE_TYPE
     satAudit,                         // AU 2  SYSTEM_AUDIT_ACE_TYPE
@@ -385,8 +403,7 @@ type
     satResourceAttribute,             // RA 18 SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE
     satScoppedPolicy,                 // SP 19 SYSTEM_SCOPED_POLICY_ID_ACE_TYPE
     satProcessTrustLabel,             // TL 20 SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE
-    satAccessFilter,                  // FL 21 SYSTEM_ACCESS_FILTER_ACE_TYPE
-    satUnknown);                      //    22 unknown = for internal use
+    satAccessFilter);                  // FL 21 SYSTEM_ACCESS_FILTER_ACE_TYPE
 
   /// high-level supported ACE flags in TSecAce.Flags
   TSecAceFlag = (
@@ -402,19 +419,31 @@ type
   /// high-level supported ACE flags in TSecAce.Flags
   TSecAceFlags = set of TSecAceFlag;
 
-  /// define one discretionary/system access control, as stored in TSecDesc.Dacl[]
-  TSecAce = packed record
+  /// define one TSecurityDescriptor Dacl[] or Sacl[] access control list (ACL)
+  TSecAceScope = (
+    sasDacl,
+    sasSacl);
+
+  {$A-} // both TSecAce and TSecurityDescriptor should be packed for JSON serialization
+
+  /// define one discretionary/system access entry (ACE)
+  {$ifdef USERECORDWITHMETHODS}
+  TSecAce = record
+  {$else}
+  TSecAce = object
+  {$endif USERECORDWITHMETHODS}
+  public
     /// high-level supported ACE kinds
     AceType: TSecAceType;
     // the ACE flags
     Flags: TSecAceFlags;
-    /// the raw ACE identifier - typically = ord(AceType)
+    /// the raw ACE identifier - typically = ord(AceType) - 1
     // - if you force this type, ensure you set AceType=satUnknown before saving
     // - defined as word for proper alignment
     RawType: word;
     /// contains the associated 32-bit access mask
     Mask: TSecAccessMask;
-    /// contains an associated SID
+    /// contains an associated SID, in its raw binary content
     Sid: RawSid;
     /// some optional opaque callback/resource data, stored after the Sid
     // - e.g. is a conditional expression string for satConditional ACEs like
@@ -424,32 +453,79 @@ type
     ObjectType: TGuid;
     /// the inherited Object Type GUID  (satObject only)
     InheritedObjectType: TGuid;
+    /// remove any previous content
+    procedure Clear;
+    /// compare the fields of this instance with another
+    function IsEqual(const ace: TSecAce): boolean;
+    /// append this entry as SDDL text into an existing buffer
+    // - could also generate SDDL RID placeholders, if dom binary is supplied,
+    // e.g. S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
+    procedure AppendAsText(var s: ShortString; dom: PSid);
+    /// decode a SDDL ACE textual representation into this (cleared) entry
+    function FromText(var p: PUtf8Char; dom: PSid): boolean;
+    /// encode this entry into a self-relative binary buffer
+    // - returns the output length in bytes
+    // - if dest is nil, will compute the length but won't write anything
+    function ToBinary(dest: PAnsiChar): PtrInt;
+    /// decode a self-relative binary buffer into this (cleared) entry
+    function FromBinary(p, max: PByte): boolean;
+    /// user-friendly set the properties of this ACE
+    // - SID and Mask are supplied in their regular / SDDL text form
+    // - returns true on success - i.e. if all input params were correct
+    function Fill(sat: TSecAceType; const sidSddl, maskSddl: RawUtf8;
+      dom: PSid = nil; const condExp: RawUtf8 = ''; saf: TSecAceFlags = []): boolean;
+    /// get the associated SID, in its SDDL text, optionally with a RID domain
+    function SidText(dom: PSid = nil): RawUtf8; overload;
+    /// set the associated SID, in its SDDL text, optionally with a RID domain
+    function SidText(const sidSddl: RawUtf8; dom: PSid = nil): boolean; overload;
+    /// get the associated access mask, in its SDDL text format
+    function MaskText: RawUtf8; overload;
+    /// set the associated access mask, in its SDDL text format
+    function MaskText(const maskSddl: RawUtf8): boolean; overload;
+    /// get the ACE conditional expression, as stored in Opaque binary
+    function ConditionalExpression: RawUtf8; overload;
+    /// parse a ACE conditional expression, and assign it to Opaque binary
+    function ConditionalExpression(const condExp: RawUtf8): boolean; overload;
   end;
-  /// define a discretionary access control list (DACL)
-  TSecAces = array of TSecAce;
 
-  /// high-level cross-platform support of Windows Security Descriptors
-  // - can load and export Windows SD as self-relative binary or SDDL text
+  /// pointer to one ACE of the TSecurityDescriptor ACL
+  PSecAce = ^TSecAce;
+
+  /// define a discretionary/system access control list (DACL)
+  // - as stored in TSecurityDescriptor Dacl[] Sacl[] access control lists (ACL)
+  TSecAcl = array of TSecAce;
+  PSecAcl = ^TSecAcl;
+
+  /// high-level cross-platform support of one Windows Security Descriptor
+  // - can be loaded and exported as self-relative binary or SDDL text
+  // - JSON is supported via SecurityDescriptorToJson() and
+  // SecurityDescriptorFromJson() from mormot.crypt.secure
   {$ifdef USERECORDWITHMETHODS}
-  TSecDesc = record
+  TSecurityDescriptor = record
   {$else}
-  TSecDesc = object
+  TSecurityDescriptor = object
   {$endif USERECORDWITHMETHODS}
+  private
+    function NextAclFromText(var p: PUtf8Char; dom: PSid; scope: TSecAceScope): boolean;
+    procedure AclToText(var sddl: RawUtf8; dom: PSid; scope: TSecAceScope);
+    function InternalAdd(scope: TSecAceScope; out acl: PSecAcl): PSecAce;
+    function InternalAdded(scope: TSecAceScope; ace: PSecAce; acl: PSecAcl;
+      success: boolean): PSecAce;
   public
     /// the owner security identifier (SID)
     Owner: RawSid;
     /// the primary group SID
     Group: RawSid;
     /// discretionary access control list
-    Dacl: TSecAces;
+    Dacl: TSecAcl;
     /// system access control list
-    Sacl: TSecAces;
+    Sacl: TSecAcl;
     /// control flags of this Security Descriptor
     Flags: TSecControls;
     /// remove any previous content
     procedure Clear;
     /// compare the fields of this instance with another
-    function IsEqual(const sd: TSecDesc): boolean;
+    function IsEqual(const sd: TSecurityDescriptor): boolean;
     /// decode a self-relative binary Security Descriptor buffer
     function FromBinary(p: PByteArray; len: cardinal): boolean; overload;
     /// decode a self-relative binary Security Descriptor buffer
@@ -472,37 +548,245 @@ type
     // - could also generate SDDL RID placeholders, if dom binary is supplied,
     // e.g. S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
     procedure AppendAsText(var result: RawUtf8; dom: PSid = nil);
+    /// add one new ACE to the DACL (or SACL)
+    // - SID and Mask are supplied in their regular / SDDL text form, with
+    // dom optionally able to recognize SDDL RID placeholders
+    // - add to Dacl[] unless scope is sasSacl so it is added to Sacl[]
+    // - return nil on sidText/maskSddl parsing error, or the newly added entry
+    function Add(sat: TSecAceType; const sidText, maskSddl: RawUtf8;
+      dom: PSid = nil; const condExp: RawUtf8 = ''; scope: TSecAceScope = sasDacl;
+      saf: TSecAceFlags = []): PSecAce; overload;
+    /// add one new ACE to the DACL (or SACL) from SDDL text
+    // - dom <> nil would enable SDDL RID placeholders recognition
+    // - add to Dacl[] unless scope is sasSacl so it is added to Sacl[]
+    // - return nil on sddl input text parsing error, or the newly added entry
+    function Add(const sddl: RawUtf8; dom: PSid = nil;
+      scope: TSecAceScope = sasDacl): PSecAce; overload;
+    /// delete one ACE from the DACL (or SACL)
+    procedure Delete(index: PtrUInt; scope: TSecAceScope = sasDacl);
   end;
 
+  {$A+}
+
 const
-  satCommon = [satAccessAllowed, satAccessDenied, satAudit,  satAlarm,
-               satCallbackAccessAllowed, satCallbackAccessDenied,
-               satCallbackAudit,  satCallbackAlarm,
-               satMandatoryLabel, satResourceAttribute,
-               satScoppedPolicy,  satAccessFilter];
-  satObject = [satObjectAccessAllowed, satObjectAccessDenied,
-               satObjectAudit, satObjectAlarm,
-               satCallbackObjectAccessAllowed, satCallbackObjectAccessDenied,
-               satCallbackObjectAudit, satCallbackObjectAlarm];
-  satConditional = [satCallbackAccessAllowed, satCallbackAccessDenied,
-               satCallbackObjectAccessAllowed, satCallbackObjectAccessDenied];
-  safInheritanceFlags = [safObjectInherit, safContainerInherit,
-                         safNoPropagateInherit, safInheritOnly];
-  safAuditFlags = [safSuccessfulAccess, safFailedAccess];
+  /// the ACE which have just a Mask and SID in their definition
+  satCommon = [
+    satAccessAllowed,
+    satAccessDenied,
+    satAudit,
+    satAlarm,
+    satCallbackAccessAllowed,
+    satCallbackAccessDenied,
+    satCallbackAudit,
+    satCallbackAlarm,
+    satMandatoryLabel,
+    satResourceAttribute,
+    satScoppedPolicy,
+    satAccessFilter];
+
+  /// the ACE which have a Mask, SID and Object UUIDs in their definition
+  satObject = [
+    satObjectAccessAllowed,
+    satObjectAccessDenied,
+    satObjectAudit,
+    satObjectAlarm,
+    satCallbackObjectAccessAllowed,
+    satCallbackObjectAccessDenied,
+    satCallbackObjectAudit,
+    satCallbackObjectAlarm];
+
+  /// the ACE which have a conditional expression as TSecAce.Opaque member
+  // - see MS-DTYP OpenSpecs 2.4.4.17
+  satConditional = [
+    satCallbackAccessAllowed,
+    satCallbackAccessDenied,
+    satCallbackAudit,
+    satCallbackObjectAccessAllowed,
+    satCallbackObjectAccessDenied,
+    satCallbackObjectAudit];
+
+  /// defined in TSecAce.Flags for an ACE which has inheritance
+  safInheritanceFlags = [
+    safObjectInherit,
+    safContainerInherit,
+    safNoPropagateInherit,
+    safInheritOnly];
+
+  /// defined in TSecAce.Flags for an ACE which refers to audit
+  safAuditFlags = [
+    safSuccessfulAccess,
+    safFailedAccess];
+
+  {  cross-platform definitions of TSecAccessRight 32-bit Windows access rights }
+
+  SAR_FILE_ALL_ACCESS      = $001f01ff;
+  SAR_FILE_GENERIC_READ    = $00120089;
+  SAR_FILE_GENERIC_WRITE   = $00120116;
+  SAR_FILE_GENERIC_EXECUTE = $001200a0;
+
+  SAR_KEY_ALL_ACCESS       = $000f003f;
+  SAR_KEY_READ             = $00020019;
+  SAR_KEY_WRITE            = $00020006;
+  SAR_KEY_EXECUTE          = $00020019; // note that KEY_EXECUTE = KEY_READ
+
+  /// match the TSecAce.Mask constant values with their own SDDL identifier
+  SAR_MASK: array[TSecAccessRight] of cardinal = (
+    SAR_FILE_ALL_ACCESS,       // sarFileAll
+    SAR_FILE_GENERIC_READ,     // sarFileRead
+    SAR_FILE_GENERIC_WRITE,    // sarFileWrite
+    SAR_FILE_GENERIC_EXECUTE,  // sarFileExecute
+    SAR_KEY_ALL_ACCESS,        // sarKeyAll
+    SAR_KEY_READ,              // sarKeyRead
+    SAR_KEY_WRITE,             // sarKeyWrite
+    SAR_KEY_EXECUTE);          // sarKeyExecute
+
 
 /// check the conformity of a self-relative binary Security Descriptor buffer
-// - only check the TSecDesc main fields consistency
+// - only check the TSecurityDescriptor main fields consistency
 function IsValidSecurityDescriptor(p: PByteArray; len: cardinal): boolean;
 
 /// convert a self-relative Security Descriptor buffer as text (SDDL or hexa)
-// - will wrap our TSecDesc binary decoder / SDDL encoder on all platforms
+// - will wrap our TSecurityDescriptor binary decoder / SDDL encoder on all platforms
 // - returns true if the conversion succeeded
-// - function is able to convert itself, i.e. allows pointer(sd)=pointer(text)
+// - returns false, and don't change the text value on rendering error
+// - function is able to convert the value itself, i.e. allows @sd = @text
 // - could also generate SDDL RID placeholders, if dom binary is supplied,
 // e.g. S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
 // - on Windows, you can call native CryptoApi.SecurityDescriptorToText()
 function SecurityDescriptorToText(const sd: RawSecurityDescriptor;
   var text: RawUtf8; dom: PSid = nil): boolean;
+
+
+{ ****************** Security Descriptor Definition Language (SDDL) }
+
+/// parse a SID from its SDDL text form into its binary buffer
+// - recognize TWellKnownSid SDDL identifiers, e.g. 'WD' into S-1-1-0 (wksWorld)
+// - with optional TWellKnownRid recognition if dom binary is supplied, e.g.
+// 'DA' identifier into S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins)
+function SddlNextSid(var p: PUtf8Char; var sid: RawSid; dom: PSid): boolean;
+
+/// append a binary SID in its SDDL text form
+// - recognize TWellKnownSid into SDDL text, e.g. S-1-1-0 (wksWorld) into 'WD'
+// - with optional TWellKnownRid recognition if dom binary is supplied, e.g.
+// S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
+procedure SddlAppendSid(var s: ShortString; sid, dom: PSid);
+
+/// parse a TSecAce.Mask 32-bit value from its SDDL text
+function SddlNextMask(var p: PUtf8Char; var mask: TSecAccessMask): boolean;
+
+/// append a TSecAce.Mask 32-bit value in its SDDL text form
+procedure SddlAppendMask(var s: ShortString; mask: TSecAccessMask);
+
+/// parse a TSecAce.Opaque value from its SDDL text
+function SddlNextOpaque(var p: PUtf8Char; var ace: TSecAce): boolean;
+
+/// append a TSecAce.Opaque value in its SDDL text form
+procedure SddlAppendOpaque(var s: ShortString; const ace: TSecAce);
+
+// defined for unit tests only
+function KnownSidToSddl(wks: TWellKnownSid): RawUtf8;
+
+
+const
+  /// the last TWellKnownSid item which has a SDDL identifier
+  wksLastSddl = wksBuiltinWriteRestrictedCode;
+
+  { SDDL standard identifiers using string[3] for efficient 32-bit alignment }
+
+  /// define how ACE kinds in TSecAce.AceType are stored as SDDL
+  SAT_SDDL: array[TSecAceType] of string[3] = (
+    '',    // satUnknown
+    'A',   // satAccessAllowed
+    'D',   // satAccessDenied
+    'AU',  // satAudit
+    'AL',  // satAlarm
+    '',    // satCompoundAllowed
+    'OA',  // satObjectAccessAllowed
+    'OD',  // satObjectAccessDenied
+    'OU',  // satObjectAudit
+    'OL',  // satObjectAlarm
+    'XA',  // satCallbackAccessAllowed
+    'XD',  // satCallbackAccessDenied
+    'ZA',  // satCallbackObjectAccessAllowed
+    '',    // satCallbackObjectAccessDenied
+    'XU',  // satCallbackAudit
+    '',    // satCallbackAlarm
+    '',    // satCallbackObjectAudit
+    '',    // satCallbackObjectAlarm
+    'ML',  // satMandatoryLabel
+    'RA',  // satResourceAttribute
+    'SP',  // satScoppedPolicy
+    'TL',  // satProcessTrustLabel
+    'FL'); // satAccessFilter
+
+  /// define how ACE flags in TSecAce.Flags are stored as SDDL
+  SAF_SDDL: array[TSecAceFlag] of string[3] = (
+    'OI',  // safObjectInherit
+    'CI',  // safContainerInherit
+    'NP',  // safNoPropagateInherit
+    'IO',  // safInheritOnly
+    'ID',  // safInherited
+    '',    // saf5
+    'SA',  // safSuccessfulAccess
+    'FA'); // safFailedAccess
+
+  /// define how ACE access rights bits in TSecAce.Mask are stored as SDDL
+  SAM_SDDL: array[TSecAccess] of string[3] = (
+    'CC',  // samCreateChild
+    'DC',  // samDeleteChild
+    'LC',  // samListChildren
+    'SW',  // samSelfWrite
+    'RP',  // samReadProp
+    'WP',  // samWriteProp
+    'DT',  // samDeleteTree
+    'LO',  // samListObject
+    'CR',  // samControlAccess
+    '',    // sam9
+    '',    // sam10
+    '',    // sam11
+    '',    // sam12
+    '',    // sam13
+    '',    // sam14
+    '',    // sam15
+    'SD',  // samDelete
+    'RC',  // samReadControl
+    'WD',  // samWriteDac
+    'WO',  // samWriteOwner
+    '',    // samSynchronize
+    '',    // sam21
+    '',    // sam22
+    '',    // sam23
+    '',    // samAccessSystemSecurity
+    '',    // samMaximumAllowed
+    '',    // sam26
+    '',    // sam27
+    'GA',  // samGenericAll
+    'GX',  // samGenericExecute
+    'GW',  // samGenericWrite
+    'GR'); // samGenericRead
+
+  /// define how full 32-bit ACE access rights in TSecAce.Mask are stored as SDDL
+  SAR_SDDL: array[TSecAccessRight] of string[3] = (
+    'FA',  //  sarFileAll
+    'FR',  //  sarFileRead
+    'FW',  //  sarFileWrite
+    'FX',  //  sarFileExecute
+    'KA',  //  sarKeyAll
+    'KR',  //  sarKeyRead
+    'KW',  //  sarKeyWrite
+    'KX'); //  sarKeyExecute
+
+var
+  { sets filled during unit initialization from actual code constants }
+
+  /// allow to quickly check if a TWellKnownSid has a SDDL identifier
+  wksWithSddl: TWellKnownSids;
+
+  /// allow to quickly check if a TWellKnownRid has a SDDL identifier
+  wkrWithSddl: TWellKnownRids;
+
+  /// allow to quickly check if a TSecAccess has a SDDL identifier
+  samWithSddl: TSecAccessMask;
 
 
 { ****************** Windows API Specific Security Types and Functions }
@@ -548,11 +832,11 @@ function TokenHasAnyGroup(tok: THandle; const sid: RawSidDynArray): boolean;
 // - e.g. 'S-1-5-21-823746769-1624905683-418753922-1000'
 // - optionally returning the name and domain via LookupSid()
 function CurrentSid(wtt: TWinTokenType = wttProcess;
-  name: PRawUtf8 = nil; domain: PRawUtf8 = nil): RawUtf8; overload;
+  name: PRawUtf8 = nil; domain: PRawUtf8 = nil): RawUtf8;
 
 /// return the SID of the current user, from process or thread, as raw binary
 procedure CurrentRawSid(out sid: RawSid; wtt: TWinTokenType = wttProcess;
-  name: PRawUtf8 = nil; domain: PRawUtf8 = nil); overload;
+  name: PRawUtf8 = nil; domain: PRawUtf8 = nil);
 
 /// return the SID of the current user groups, from process or thread, as text
 function CurrentGroupsSid(wtt: TWinTokenType = wttProcess): TRawUtf8DynArray;
@@ -618,7 +902,7 @@ uses
 {$endif OSWINDOWS}
 
 
-{ some general wrapper functions, to avoid dependencies to mormot.core.text }
+{ some shared functions to avoid dependencies to mormot.core.text }
 
 function GetNextUInt32(var P: PUtf8Char): cardinal;
 var
@@ -651,12 +935,12 @@ begin
 end;
 {$endif ISDELPHI}
 
-function TextToUuid(const text: shortstring; out uuid: TGuid): boolean;
+function TextToUuid(const text: ShortString; out uuid: TGuid): boolean;
 begin // sub-function to avoid temp string on the stack
   result := TryStringToGUID('{' + string(text) + '}', uuid); // RTL fast enough
 end;
 
-procedure AppendShortUuid(const u: TGuid; var s: shortstring);
+procedure AppendShortUuid(const u: TGuid; var s: ShortString);
 begin // sub-function to avoid temp string on the stack
   AppendShortAnsi7String(AnsiString(LowerCase(copy(GUIDToString(u), 2, 36))), s);
 end;
@@ -692,7 +976,7 @@ begin
     FastSetRawByteString(RawByteString(result), sid, SidLength(sid));
 end;
 
-procedure SidToTextShort(sid: PSid; var result: shortstring);
+procedure SidToTextShort(sid: PSid; var result: ShortString);
 var
   a: PSidAuth;
   i: PtrInt;
@@ -730,7 +1014,7 @@ end;
 
 procedure SidToText(sid: PSid; var text: RawUtf8);
 var
-  tmp: shortstring;
+  tmp: ShortString;
 begin
   SidToTextShort(sid, tmp);
   FastSetString(text, @tmp[1], ord(tmp[0]));
@@ -833,6 +1117,37 @@ begin
   if result then
     ToRawSid(@tmp, sid);
 end;
+
+function TryDomainTextToSid(const Domain: RawUtf8; out Dom: RawSid): boolean;
+var
+  tmp: TSid;
+  p: PUtf8Char;
+begin
+  result := true;
+  if Domain = '' then
+    exit; // no Domain involved: continue
+  p := pointer(Domain);
+  result := TextToSid(p, tmp) and // expects S-1-5-21-xx-xx-xx[-rid]
+            (p^ = #0) and
+            (tmp.SubAuthorityCount in [4, 5]) and // allow domain or rid
+            (tmp.SubAuthority[0] = 21) and
+            (PWord(@tmp.IdentifierAuthority)^ = 0) and
+            (PCardinal(@tmp.IdentifierAuthority[2])^ = $05000000);
+  if not result then
+    exit; // this Domain text is no valid domain SID
+  tmp.SubAuthorityCount := 5; // reserve place for WKR_RID[wkr] trailer
+  tmp.SubAuthority[4] := 0;
+  ToRawSid(@tmp, Dom);        // output Dom as S-1-5-21-xx-xx-xx-RID
+end;
+
+function SidSameDomain(a, b: PSid): boolean;
+begin // both values are expected to be in a S-1-5-21-xx-xx-xx-RID layout
+  result := (PInt64Array(a)[0] = PInt64Array(b)[0]) and // rev+count+auth
+            (PInt64Array(a)[1] = PInt64Array(b)[1]) and // auth[0..1]
+            (PInt64Array(a)[2] = PInt64Array(b)[2]);    // auth[2..3]
+            // so auth[4] will contain any RID
+end;
+
 
 var
   KNOWN_SID_SAFE: TLightLock; // lighter than GlobalLock/GlobalUnLock
@@ -1075,32 +1390,32 @@ begin
   end;
 end;
 
-function TryDomainTextToSid(const Domain: RawUtf8; out Dom: RawSid): boolean;
-var
-  tmp: TSid;
-  p: PUtf8Char;
-begin
-  result := true;
-  if Domain = '' then
-    exit; // no Domain involved: continue
-  p := pointer(Domain);
-  result := TextToSid(p, tmp) and // expects S-1-5-21-xx-xx-xx[-rid]
-            (p^ = #0) and
-            (tmp.SubAuthorityCount in [4, 5]) and // allow domain or rid
-            (tmp.SubAuthority[0] = 21) and
-            (PWord(@tmp.IdentifierAuthority)^ = 0) and
-            (PCardinal(@tmp.IdentifierAuthority[2])^ = $05000000);
-  if not result then
-    exit; // this Domain text is no valid domain SID
-  tmp.SubAuthorityCount := 5; // reserve place for WKR_RID[wkr] trailer
-  tmp.SubAuthority[4] := 0;
-  ToRawSid(@tmp, Dom);        // output Dom as S-1-5-21-xx-xx-xx-RID
-end;
-
 const
+  // the S-1-5-21-xx-xx-xx-RID trailer value of each known RID
   WKR_RID: array[TWellKnownRid] of word = (
-    $1f2, $1f4, $1f5, $1f6, $200, $201, $202, $203, $204, $205, $206, $207,
-    $208, $209, $20a, $20d, $20e, $20f, $1000, $2000, $2100, $3000, $4000);
+    $1f2,    // wkrGroupReadOnly
+    $1f4,    // wkrUserAdmin
+    $1f5,    // wkrUserGuest
+    $1f6,    // wkrServiceKrbtgt
+    $200,    // wkrGroupAdmins
+    $201,    // wkrGroupUsers
+    $202,    // wkrGroupGuests
+    $203,    // wkrGroupComputers
+    $204,    // wkrGroupControllers
+    $205,    // wkrGroupCertAdmins
+    $206,    // wkrGroupSchemaAdmins
+    $207,    // wkrGroupEntrepriseAdmins
+    $208,    // wkrGroupPolicyAdmins
+    $209,    // wkrGroupReadOnlyControllers
+    $20a,    // wkrGroupCloneableControllers
+    $20d,    // wkrGroupProtectedUsers
+    $20e,    // wkrGroupKeyAdmins
+    $20f,    // wkrGroupEntrepriseKeyAdmins
+    $1000,   // wkrSecurityMandatoryLow
+    $2000,   // wkrSecurityMandatoryMedium
+    $2100,   // wkrSecurityMandatoryMediumPlus
+    $3000,   // wkrSecurityMandatoryHigh
+    $4000);  // wkrSecurityMandatorySystem
 
 function KnownSidToText(wkr: TWellKnownRid; const Domain: RawUtf8): RawUtf8;
 begin
@@ -1119,24 +1434,20 @@ begin
   PSid(result)^.SubAuthority[4] := WKR_RID[wkr];
 end;
 
-function SameDomain(a, b: PSid): boolean;
-begin // both values are exepceted to be in a S-1-5-21-xx-xx-xx-RID layout
-  result := (PInt64Array(a)[0] = PInt64Array(b)[0]) and // rev+count+auth
-            (PInt64Array(a)[1] = PInt64Array(b)[1]) and // auth[0..1]
-            (PInt64Array(a)[2] = PInt64Array(b)[2]);    // auth[2..3]
-end;
 
-
-{ ****************** Security Descriptor Definition Language (SDDL) Definitions }
+{ ****************** Security Descriptor Definition Language (SDDL) }
 
 const
-  wksLastSddl = wksBuiltinWriteRestrictedCode;
-  wksWithSddl = [wksWorld .. wksLastSddl];
-  SID_SDDL: array[1 .. (ord(wksLastSddl) + ord(high(TWellKnownRid)) + 2) * 2] of AnsiChar =
+  // defined as a packed array of chars for fast SSE2 brute force search
+  SID_SDDL: array[0 .. (ord(wksLastSddl) + ord(high(TWellKnownRid)) + 2) * 2 - 1] of AnsiChar =
+    // TWellKnownSid
     '  WD    COCG                                    NU  ' +
     'IUSUAN    PSAURC        SY          BABUBGPUAOSOPOBORERSRURDNO  MULU' +
-    '      ISCY      ERCDRAES  HAAA        WR' +      // TWellKnownSid
-    'ROLALG  DADUDGDCDDCASAEAPA  CNAPKAEKLWMEMPHISI'; // TWellKnownRid
+    '      ISCY      ERCDRAES  HAAA        WR' +  // WR = wksLastSddl
+    // TWellKnownRid
+    'ROLALG  DADUDGDCDDCASAEAPA  CNAPKAEKLWMEMPHISI';
+var
+  SID_SDDLW: packed array[byte] of word absolute SID_SDDL;
 
 function SddlNextSid(var p: PUtf8Char; var sid: RawSid; dom: PSid): boolean;
 var
@@ -1172,46 +1483,37 @@ begin
   result := true;
 end;
 
-function KnownSidToSddl(wks: TWellKnownSid): RawUtf8;
-begin
-  FastAssignNew(result); // no need to optimize: only used for regression tests
-  if (wks in wksWithSddl) and
-     (PWordArray(@SID_SDDL)^[ord(wks)] <> $2020) then
-    FastSetString(result, @PWordArray(@SID_SDDL)^[ord(wks)], 2);
-end;
-
-procedure SddlAppendSid(var s: shortstring; sid, dom: PSid);
+procedure SddlAppendSid(var s: ShortString; sid, dom: PSid);
 var
   k: TWellKnownSid;
-  c: cardinal;
-  i: PtrInt;
-  tmp: shortstring;
+  r: TWellKnownRid;
+  tmp: ShortString;
 begin
   if sid = nil then
     exit;
   k := SidToKnown(sid);
-  c := $2020;
   if k in wksWithSddl then
-    c := PWordArray(@SID_SDDL)^[ord(k)]
+  begin
+    AppendShortTwoChars(@SID_SDDLW[ord(k)], @s);
+    exit;
+  end
   else if (k = wksNull) and
           (dom <> nil) and
-          SameDomain(sid, dom) and
-          (sid^.SubAuthority[4] <= $4000{WKR_RID[high(WKR_RID)]}) then
+          SidSameDomain(sid, dom) and
+          (sid^.SubAuthority[4] <= $4000) then
   begin
-    i := WordScanIndex(@WKR_RID, length(WKR_RID), sid^.SubAuthority[4]);
-    if i >= 0 then // found a TWellKnownRid
-      c := PWordArray(@SID_SDDL)^[i + (ord(wksLastSddl) + 1)];
+    r := TWellKnownRid(WordScanIndex(@WKR_RID, length(WKR_RID), sid^.SubAuthority[4]));
+    if r in wkrWithSddl then
+    begin
+      AppendShortTwoChars(@SID_SDDLW[(ord(wksLastSddl) + 1) + ord(r)], @s);
+      exit;
+    end
   end;
-  if c <> $2020 then
-    AppendShortTwoChars(@c, @s)
-  else
-  begin
-    SidToTextShort(sid, tmp);
-    AppendShort(tmp, s);
-  end;
+  SidToTextShort(sid, tmp);
+  AppendShort(tmp, s);
 end;
 
-function SddlNextPart(var p: PUtf8Char; out u: shortstring): boolean;
+function SddlNextPart(var p: PUtf8Char; out u: ShortString): boolean;
 var
   s: PUtf8Char;
 begin
@@ -1228,7 +1530,7 @@ begin
   p := s;
 end;
 
-function SddlNextTwo(var p: PUtf8Char; out u: shortstring): boolean;
+function SddlNextTwo(var p: PUtf8Char; out u: ShortString): boolean;
 var
   s: PUtf8Char;
 begin
@@ -1250,7 +1552,7 @@ end;
 
 function SddlNextGuid(var p: PUtf8Char; out uuid: TGuid): boolean;
 var
-  u: shortstring;
+  u: ShortString;
 begin
   result := SddlNextPart(p, u) and
             ((u[0] = #0) or
@@ -1262,143 +1564,98 @@ end;
 
 function SddlNextInteger(var p: PUtf8Char; out c: integer): boolean;
 var
-  u: shortstring;
+  u: ShortString;
   err: integer;
+  s: PUtf8Char;
 begin
-  result := false;
-  if not SddlNextPart(p, u) then
-    exit;
+  s := p; // p^ is '0x####'
+  repeat
+    inc(s);
+  until s^ in [#0, ';'];
+  SetString(u, PAnsiChar(p), s - p);
   val({$ifdef UNICODE}string{$endif}(u), c, err); // RTL handles 0x###
   result := err = 0;
+  p := s;
 end;
 
-type
-  TSecAccessRight = (
-    sarFileAll, sarFileRead, sarFileWrite, sarFileExecute,
-    sarKeyAll,  sarKeyRead,  sarKeyWrite,  sarKeyExecute);
-
-const
-  // SDDL standard identifiers - use string[3] for 32-bit efficient alignment
-  SAT_SDDL: array[TSecAceType] of string[3] = (
-    'A', 'D', 'AU', 'AL', '', 'OA', 'OD', 'OU', 'OL', 'XA', 'XD', 'ZA', '',
-    'XU', '', '', '', 'ML', 'RA', 'SP', 'TL', 'FL', '');
-  SAF_SDDL: array[TSecAceFlag] of string[3] = (
-    'OI', 'CI', 'NP', 'IO', 'ID', '', 'SA', 'FA');
-  samWithSddl = [samCreateChild .. samControlAccess,
-                 samDelete .. samWriteOwner, samGenericAll .. samGenericRead];
-  SAM_SDDL: array[TSecAccess] of string[3] = (
-    'CC', 'DC', 'LC', 'SW', 'RP', 'WP', 'DT', 'LO', 'CR', '', '', '', '', '', '', '',
-    'SD', 'RC', 'WD', 'WO', '', '', '', '', '', '', '', '', 'GA', 'GX', 'GW', 'GR');
-  SAR_SDDL: array[TSecAccessRight] of string[3] = (
-    'FA', 'FR', 'FW', 'FX', 'KA', 'KR', 'KW', 'KX');
-
-  // some cross-platform definitions of main 32-bit Windows access rights
-  FILE_ALL_ACCESS      = $001f01ff;
-  FILE_GENERIC_READ    = $00120089;
-  FILE_GENERIC_WRITE   = $00120116;
-  FILE_GENERIC_EXECUTE = $001200a0;
-  KEY_ALL_ACCESS       = $000f003f;
-  KEY_READ             = $00020019;
-  KEY_WRITE            = $00020006;
-  KEY_EXECUTE          = $00020019; // note that KEY_EXECUTE = KEY_READ
-  SAR_MASK: array[TSecAccessRight] of cardinal = (
-    FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE,
-    KEY_ALL_ACCESS, KEY_READ, KEY_WRITE, KEY_EXECUTE);
-
-function SddlNextAce(var p: PUtf8Char; var ace: TSecAce; dom: PSid): boolean;
+function SddlNextMask(var p: PUtf8Char; var mask: TSecAccessMask): boolean;
 var
-  u: shortstring;
-  t: TSecAceType;
-  f: TSecAceFlag;
-  a: TSecAccess;
   r: TSecAccessRight;
-  s: PUtf8Char;
-  mask, parent: integer;
+  a: TSecAccess;
+  m: integer absolute mask;
+  one: integer;
+  u: string[2];
 begin
   result := false;
-  ace.AceType := satUnknown;
+  m := 0;
+  if p = nil then
+    exit;
   while p^ = ' ' do
     inc(p);
-  if PWord(p)^ = ord('0') + ord('x') shl 8 then // our own fallback format
-    if SddlNextInteger(p, mask) then
-      ace.RawType := mask
-    else
-      exit
-  else
-  begin
-    if not SddlNextPart(p, u) or
-       not (u[0] in [#1, #2]) then
-      exit;
-    for t := low(t) to high(t) do
-      if SAT_SDDL[t] = u then
-      begin
-        ace.AceType := t;
-        break;
-      end;
-    if ace.AceType = satUnknown then
-      exit;
-    ace.RawType := ord(ace.AceType);
-  end;
-  if p^ <> ';' then
-    exit;
-  repeat
-    inc(p);
-  until p^ <> ' ';
-  while p^ <> ';' do
-  begin
-    if not SddlNextTwo(p, u) then
-      exit;
-    for f := low(f) to high(f) do
-      if SAF_SDDL[f] = u then
-      begin
-        include(ace.Flags, f);
-        break;
-      end;
-  end;
-  repeat
-    inc(p);
-  until p^ <> ' ';
-  while p^ <> ';' do
+  while not (p^ in [#0, ';']) do
   begin
     if PWord(p)^ = ord('0') + ord('x') shl 8 then
-      if SddlNextInteger(p, PInteger(@ace.Mask)^) then
+      if SddlNextInteger(p, m) then
         break // we got the mask as a 32-bit hexadecimal value
       else
         exit;
     if not SddlNextTwo(p, u) then
       exit;
-    mask := 0;
+    one := 0;
     for r := low(r) to high(r) do
       if SAR_SDDL[r] = u then
       begin
-        mask := SAR_MASK[r];
+        one := SAR_MASK[r];
         break;
       end;
-    if mask = 0 then
+    if one = 0 then
       for a := low(a) to high(a) do
         if SAM_SDDL[a] = u then
         begin
-          mask := 1 shl ord(a);
+          one := 1 shl ord(a);
           break;
         end;
-    if mask = 0 then
+    if one = 0 then
       exit; // unrecognized
-    PInteger(@ace.Mask)^ := PInteger(@ace.Mask)^ or mask;
+    m := m or one;
   end;
-  repeat
-    inc(p);
-  until p^ <> ' ';
-  if not SddlNextGuid(p, ace.ObjectType) or
-     not SddlNextGuid(p, ace.InheritedObjectType) or // satObject or nothing
-     not SddlNextSid(p, ace.Sid, dom) then // entries always end with a SID/RID
+  result := m <> 0;
+end;
+
+procedure SddlAppendMask(var s: ShortString; mask: TSecAccessMask);
+var
+  a: TSecAccess;
+  i: PtrInt;
+begin
+  if cardinal(mask) = 0 then
     exit;
-  if p^ = ';' then // optional additional/opaque parameter
+  i := IntegerScanIndex(@SAR_MASK, length(SAR_MASK), cardinal(mask));
+  if i >= 0 then
+    AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
+  else if mask - samWithSddl <> [] then
   begin
-    repeat
+    AppendShortTwoChars('0x', @s);        // we don't have all tokens it needs
+    AppendShortIntHex(cardinal(mask), s); // store as @x##### hexadecimal
+  end
+  else
+    for a := low(a) to high(a) do
+      if a in mask then
+        AppendShortTwoChars(@SAM_SDDL[a][1], @s); // store as SDDL pairs
+end;
+
+function SddlNextOpaque(var p: PUtf8Char; var ace: TSecAce): boolean;
+var
+  s: PUtf8Char;
+  parent: integer;
+begin
+  result := false;
+  if p <> nil then
+    while p^ = ' ' do
       inc(p);
-    until p^ <> ' ';
+  s := p;
+  if s <> nil then
+  begin
     parent := 0;
-    s := p;
     if (ace.AceType in satConditional) and
        (s^ = '(') then // conditional ACE expression
       repeat
@@ -1418,71 +1675,31 @@ begin
     else
       while not (s^ in [#0, ')']) do // retrieve everthing until ending ')'
         inc(s);
-    FastSetString(RawUtf8(ace.Opaque), p, s - p);
-    p := s;
   end;
-  result := p^ = ')'; // ACE should end with a parenthesis
+  FastSetString(RawUtf8(ace.Opaque), p, s - p);
+  p := s;
+  result := true;
 end;
 
-procedure SddlAppendAce(var s: shortstring; const ace: TSecAce; dom: PSid);
-var
-  f: TSecAceFlag;
-  a: TSecAccess;
-  c: cardinal;
-  i: PtrInt;
+procedure SddlAppendOpaque(var s: ShortString; const ace: TSecAce);
 begin
-  if SAT_SDDL[ace.AceType][0] <> #0 then
-    AppendShort(SAT_SDDL[ace.AceType], s)
-  else
-  begin
-    AppendShortTwoChars('0x', @s);
-    AppendShortIntHex(ace.RawType, s); // fallback to lower hex - paranoid
-  end;
-  AppendShortChar(';', @s);
-  for f := low(f) to high(f) do
-    if f in ace.Flags then
-      AppendShort(SAF_SDDL[f], s);
-  AppendShortChar(';', @s);
-  c := cardinal(ace.Mask);
-  if c <> 0 then
-  begin
-    i := IntegerScanIndex(@SAR_MASK, length(SAR_MASK), c);
-    if i >= 0 then
-      AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
-    else if ace.Mask - samWithSddl <> [] then
-    begin
-      AppendShortTwoChars('0x', @s); // we don't have the tokens it needs
-      AppendShortIntHex(c, s);       // store as @x##### hexadecimal
-    end
-    else
-      for a := low(a) to high(a) do
-        if a in ace.Mask then
-          AppendShortTwoChars(@SAM_SDDL[a][1], @s)
-  end;
-  if ace.AceType in satObject then
-  begin
-    AppendShortChar(';', @s);
-    if not IsNullGuid(ace.ObjectType) then
-      AppendShortUuid(ace.ObjectType, s);
-    AppendShortChar(';', @s);
-    if not IsNullGuid(ace.InheritedObjectType) then
-      AppendShortUuid(ace.InheritedObjectType, s);
-    AppendShortChar(';', @s);
-  end
-  else
-    AppendShort(';;;', s);
-  SddlAppendSid(s, pointer(ace.Sid), dom);
   if ace.Opaque = '' then
     exit;
-  AppendShortChar(';', @s);
   if StrLen(pointer(ace.Opaque)) = length(ace.Opaque) then // true text
     AppendShortAnsi7String(ace.Opaque, s) // e.g. conditional ACE expression
   else
     AppendShortHex(pointer(ace.Opaque), length(ace.Opaque), s); // paranoid
 end;
 
+function KnownSidToSddl(wks: TWellKnownSid): RawUtf8;
+begin
+  FastAssignNew(result); // no need to optimize: only used for regression tests
+  if wks in wksWithSddl then
+    FastSetString(result, @SID_SDDLW[ord(wks)], 2);
+end;
 
-{ ****************** Discretionary Access Control List (DACL) Definitions }
+
+{ ****************** Access Control List (DACL/SACL) Definitions }
 
 { low-level self-relative Security Descriptor buffer data structures }
 
@@ -1498,6 +1715,7 @@ type
     Dacl: cardinal;
   end;
   PSD = ^TSD;
+
   // map the Access Control List header
   TACL = packed record
     AclRevision: byte;
@@ -1507,6 +1725,7 @@ type
     Sbz2: word;
   end;
   PACL = ^TACL;
+
   // map one Access Control Entry
   TACE = packed record
     // ACE header
@@ -1550,7 +1769,7 @@ end;
 function SecurityDescriptorToText(const sd: RawSecurityDescriptor;
   var text: RawUtf8; dom: PSid): boolean;
 var
-  tmp: TSecDesc;
+  tmp: TSecurityDescriptor;
 begin
   result := tmp.FromBinary(sd);
   if not result then
@@ -1560,16 +1779,304 @@ begin
 end;
 
 
-{ TSecAces }
+{ TSecAce }
 
-function BinToAcl(p: PByteArray; offset: cardinal; var res: TSecAces): boolean;
+procedure TSecAce.Clear;
+begin
+  Finalize(self);
+  FillCharFast(self, SizeOf(self), 0);
+end;
+
+function TSecAce.IsEqual(const ace: TSecAce): boolean;
+begin
+  result := (AceType = ace.AceType) and
+            (RawType = ace.RawType) and
+            (Flags = ace.Flags) and
+            (Mask = ace.Mask) and
+            (Sid = ace.Sid) and
+            (Opaque = ace.Opaque) and
+            IsEqualGuid(ObjectType, ace.ObjectType) and
+            IsEqualGuid(InheritedObjectType, ace.InheritedObjectType);
+end;
+
+function TSecAce.SidText(dom: PSid): RawUtf8;
+var
+  s: ShortString;
+begin
+  s[0] := #0;
+  SddlAppendSid(s, pointer(sid), dom);
+  ShortStringToAnsi7String(s, result);
+end;
+
+function TSecAce.SidText(const sidSddl: RawUtf8; dom: PSid): boolean;
+var
+  p: PUtf8Char;
+begin
+  p := pointer(sidSddl);
+  result := SddlNextSid(p, Sid, dom);
+end;
+
+function TSecAce.MaskText: RawUtf8;
+var
+  s: ShortString;
+begin
+  s[0] := #0;
+  SddlAppendMask(s, Mask);
+  ShortStringToAnsi7String(s, result);
+end;
+
+function TSecAce.MaskText(const maskSddl: RawUtf8): boolean;
+var
+  p: PUtf8Char;
+begin
+  p := pointer(maskSddl);
+  result := SddlNextMask(p, Mask);
+end;
+
+function TSecAce.ConditionalExpression: RawUtf8;
+var
+  s: ShortString;
+begin
+  s[0] := #0;
+  SddlAppendOpaque(s, self);
+  ShortStringToAnsi7String(s, result);
+end;
+
+function TSecAce.ConditionalExpression(const condExp: RawUtf8): boolean;
+var
+  p: PUtf8Char;
+begin
+  p := pointer(condExp);
+  result := SddlNextOpaque(p, self);
+end;
+
+function TSecAce.Fill(sat: TSecAceType; const sidSddl, maskSddl: RawUtf8;
+  dom: PSid; const condExp: RawUtf8; saf: TSecAceFlags): boolean;
+begin
+  Clear;
+  result := false;
+  if (sat = satUnknown) or
+     not SidText(sidSddl, dom) or
+     not MaskText(maskSddl) or
+     not ConditionalExpression(condExp) then
+    exit;
+  AceType := sat;
+  RawType := ord(sat) + 1;
+  Flags := saf;
+  result := true;
+end;
+
+procedure TSecAce.AppendAsText(var s: ShortString; dom: PSid);
+var
+  f: TSecAceFlag;
+begin
+  AppendShortChar('(', @s);
+  if SAT_SDDL[AceType][0] <> #0 then
+    AppendShort(SAT_SDDL[AceType], s)
+  else
+  begin
+    AppendShortTwoChars('0x', @s);
+    AppendShortIntHex(RawType, s); // fallback to lower hex - paranoid
+  end;
+  AppendShortChar(';', @s);
+  for f := low(f) to high(f) do
+    if f in Flags then
+      AppendShort(SAF_SDDL[f], s);
+  AppendShortChar(';', @s);
+  SddlAppendMask(s, Mask);
+  if AceType in satObject then
+  begin
+    AppendShortChar(';', @s);
+    if not IsNullGuid(ObjectType) then
+      AppendShortUuid(ObjectType, s);
+    AppendShortChar(';', @s);
+    if not IsNullGuid(InheritedObjectType) then
+      AppendShortUuid(InheritedObjectType, s);
+    AppendShortChar(';', @s);
+  end
+  else
+    AppendShort(';;;', s);
+  SddlAppendSid(s, pointer(Sid), dom);
+  if Opaque <> '' then
+  begin
+    AppendShortChar(';', @s);
+    SddlAppendOpaque(s, self);
+  end;
+  AppendShortChar(')', @s);
+end;
+
+function TSecAce.FromText(var p: PUtf8Char; dom: PSid): boolean;
+var
+  u: ShortString;
+  t: TSecAceType;
+  f: TSecAceFlag;
+  i: integer;
+begin
+  result := false;
+  while p^ = ' ' do
+    inc(p);
+  if PWord(p)^ = ord('0') + ord('x') shl 8 then // our own fallback format
+    if SddlNextInteger(p, i) then
+      RawType := i
+    else
+      exit
+  else
+  begin
+    if not SddlNextPart(p, u) or
+       not (u[0] in [#1, #2]) then
+      exit;
+    for t := succ(low(t)) to high(t) do
+      if SAT_SDDL[t] = u then
+      begin
+        AceType := t;
+        break;
+      end;
+    if AceType = satUnknown then
+      exit;
+    RawType := ord(AceType) - 1;
+  end;
+  if p^ <> ';' then
+    exit;
+  repeat
+    inc(p);
+  until p^ <> ' ';
+  while p^ <> ';' do
+  begin
+    if not SddlNextTwo(p, u) then
+      exit;
+    for f := low(f) to high(f) do
+      if SAF_SDDL[f] = u then
+      begin
+        include(Flags, f);
+        break;
+      end;
+  end;
+  inc(p);
+  if not SddlNextMask(p, Mask) or
+     (p^ <> ';') then
+    exit;
+  repeat
+    inc(p);
+  until p^ <> ' ';
+  if not SddlNextGuid(p, ObjectType) or
+     not SddlNextGuid(p, InheritedObjectType) or // satObject or nothing
+     not SddlNextSid(p, Sid, dom) then // entries always end with a SID/RID
+    exit;
+  if p^ = ';' then // optional additional/opaque parameter
+  begin
+    inc(p);
+    if not SddlNextOpaque(p, self) then
+      exit;
+  end;
+  result := p^ = ')'; // ACE should end with a parenthesis
+end;
+
+function TSecAce.ToBinary(dest: PAnsiChar): PtrInt;
+var
+  hdr: PACE; // ACE binary header
+  f: cardinal;
+  pf: PCardinal;
+begin
+  hdr := pointer(dest);
+  inc(dest, 8); // ACE header + Mask
+  if AceType in satObject then
+  begin
+    pf := pointer(dest);
+    inc(PCardinal(dest));
+    f := 0;
+    if not IsNullGuid(ObjectType) then
+    begin
+      f := ACE_OBJECT_TYPE_PRESENT;
+      if hdr <> nil then
+        PGuid(dest)^ := ObjectType;
+      inc(PGuid(dest));
+    end;
+    if not IsNullGuid(InheritedObjectType) then
+    begin
+      f := f or ACE_INHERITED_OBJECT_TYPE_PRESENT;
+      if hdr <> nil then
+        PGuid(dest)^ := InheritedObjectType;
+      inc(PGuid(dest));
+    end;
+    if hdr <> nil then
+      pf^ := f;
+  end;
+  if hdr <> nil then
+    MoveFast(pointer(Sid)^, dest^, length(Sid));
+  inc(dest, length(Sid));
+  if hdr <> nil then
+    MoveFast(pointer(Opaque)^, dest^, length(Opaque));
+  inc(dest, length(Opaque));
+  result := dest - pointer(hdr);
+  if hdr = nil then
+    exit; // nothing to write
+  if AceType <> satUnknown then
+    hdr^.AceType := ord(AceType) - 1
+  else
+    hdr^.AceType := RawType;
+  hdr^.AceFlags := Flags;
+  hdr^.AceSize := dest - pointer(hdr);
+  hdr^.Mask := Mask;
+end;
+
+function TSecAce.FromBinary(p, max: PByte): boolean;
+var
+  ace: PACE;
+  opaquelen, sidlen: integer;
+  psid: pointer;
+begin
+  result := false;
+  ace := pointer(p);
+  if (max <> nil) and
+     (PtrUInt(ace) + ace^.AceSize > PtrUInt(max)) then
+    exit; // avoid buffer overflow
+  RawType := ace^.AceType;
+  AceType := TSecAceType(ace^.AceType + 1); // range is checked below
+  Flags := ace^.AceFlags;
+  Mask := ace^.Mask;
+  psid := nil;
+  if AceType in satCommon then
+    psid := @ace^.CommonSid
+  else if AceType in satObject then
+  begin
+    psid := @ace^.ObjectStart;
+    if ace^.ObjectFlags and ACE_OBJECT_TYPE_PRESENT <> 0 then
+    begin
+      ObjectType := PGuid(psid)^;
+      inc(PGuid(psid));
+    end;
+    if ace^.ObjectFlags and ACE_INHERITED_OBJECT_TYPE_PRESENT <> 0 then
+    begin
+      InheritedObjectType := PGuid(psid)^;
+      inc(PGuid(psid));
+    end;
+  end
+  else if AceType > high(TSecAceType) then
+    AceType := satUnknown; // unsupported or out of range RawType
+  if psid = nil then
+    exit;
+  sidlen := SidLength(psid) + (PAnsiChar(psid) - pointer(ace));
+  opaquelen := integer(ace^.AceSize) - sidlen;
+  if opaquelen < 0 then
+    exit; // invalid SidLength()
+  ToRawSid(psid, Sid);
+  result := true;
+  if opaquelen = 0 then
+    exit;
+  inc(PByte(psid), sidlen - 8);
+  FastSetRawByteString(Opaque, psid, opaquelen);
+end;
+
+
+{ TSecAcl }
+
+function BinToSecAcl(p: PByteArray; offset: cardinal; var res: TSecAcl): boolean;
 var
   hdr: PACL;
   ace: PACE;
-  i, opaquelen, sidlen: integer;
-  max: PtrUInt;
-  sid: pointer;
+  max: pointer;
   a: ^TSecAce;
+  i: integer;
 begin
   result := offset = 0;
   if result then
@@ -1580,51 +2087,14 @@ begin
     exit;
   if hdr^.AceCount <> 0 then
   begin
-    max := PtrUInt(@p[offset + hdr^.AclSize]);
+    max := @p[offset + hdr^.AclSize];
     SetLength(res, hdr^.AceCount);
     a := pointer(res);
     ace := @p[offset + SizeOf(hdr^)];
     for i := 1 to hdr^.AceCount do
     begin
-      // unserialize each entry
-      if PtrUInt(ace) + ace^.AceSize > max then
-        exit; // avoid buffer overflow
-      a^.RawType := ace^.AceType;
-      a^.AceType := TSecAceType(ace^.AceType);
-      a^.Flags := ace^.AceFlags;
-      a^.Mask := ace^.Mask;
-      sid := nil;
-      if a^.AceType in satCommon then
-        sid := @ace^.CommonSid
-      else if a^.AceType in satObject then
-      begin
-        sid := @ace^.ObjectStart;
-        if ace^.ObjectFlags and ACE_OBJECT_TYPE_PRESENT <> 0 then
-        begin
-          a^.ObjectType := PGuid(sid)^;
-          inc(PGuid(sid));
-        end;
-        if ace^.ObjectFlags and ACE_INHERITED_OBJECT_TYPE_PRESENT <> 0 then
-        begin
-          a^.InheritedObjectType := PGuid(sid)^;
-          inc(PGuid(sid));
-        end;
-      end
-      else if a^.AceType >= satUnknown then
-        a^.AceType := satUnknown; // unsupported
-      if sid <> nil then
-      begin
-        sidlen := SidLength(sid) + (PAnsiChar(sid) - pointer(ace));
-        opaquelen := integer(ace^.AceSize) - sidlen;
-        if opaquelen < 0 then
-          exit;
-        ToRawSid(sid, a^.Sid);
-        if opaquelen <> 0 then
-        begin
-          inc(PByte(sid), sidlen - 8);
-          FastSetRawByteString(a^.Opaque, sid, opaquelen);
-        end;
-      end;
+      if not a^.FromBinary(pointer(ace), max) then
+        exit;
       inc(PByte(ace), ace^.AceSize);
       inc(a);
     end;
@@ -1632,101 +2102,47 @@ begin
   result := true;
 end;
 
-function AclToBin(p: PAnsiChar; const ace: TSecAces): PtrInt;
+function SecAclToBin(p: PAnsiChar; const ace: TSecAcl): PtrInt;
 var
   hdr: PACL;
-  e: PACE;
   a: ^TSecAce;
-  f: cardinal;
-  pf: PCardinal;
-  i: PtrInt;
+  i, len: PtrInt;
 begin
-  hdr := pointer(p); // hdr=nil below if we just want the length
-  if ace <> nil then
+  result := 0;
+  if ace = nil then
+    exit;
+  hdr := pointer(p);
+  result := SizeOf(hdr^);
+  if hdr <> nil then // need to write ACL header
+    inc(p, result);
+  a := pointer(ace);
+  for i := 0 to length(ace) - 1 do
   begin
-    inc(PACL(p));
-    a := pointer(ace);
-    for i := 0 to length(ace) - 1 do
-    begin
-      e := pointer(p);
-      inc(p, 8); // ACE header + Mask
-      if a^.AceType in satObject then
-      begin
-        pf := pointer(p);
-        inc(PCardinal(p));
-        f := 0;
-        if not IsNullGuid(a^.ObjectType) then
-        begin
-          f := ACE_OBJECT_TYPE_PRESENT;
-          if hdr <> nil then
-            PGuid(p)^ := a^.ObjectType;
-          inc(PGuid(p));
-        end;
-        if not IsNullGuid(a^.InheritedObjectType) then
-        begin
-          f := f or ACE_INHERITED_OBJECT_TYPE_PRESENT;
-          if hdr <> nil then
-            PGuid(p)^ := a^.InheritedObjectType;
-          inc(PGuid(p));
-        end;
-        if hdr <> nil then
-          pf^ := f;
-      end;
-      if hdr <> nil then
-        MoveFast(pointer(a^.Sid)^, p^, length(a^.Sid));
-      inc(p, length(a^.Sid));
-      if hdr <> nil then
-        MoveFast(pointer(a^.Opaque)^, p^, length(a^.Opaque));
-      inc(p, length(a^.Opaque));
-      if hdr <> nil then
-      begin
-        if a^.AceType < satUnknown then
-          e^.AceType := ord(a^.AceType)
-        else
-          e^.AceType := a^.RawType;
-        e^.AceFlags := a^.Flags;
-        e^.AceSize := p - pointer(e);
-        e^.Mask := a^.Mask;
-      end;
-      inc(a);
-    end;
+    len := a^.ToBinary(p);
+    inc(result, len);
     if hdr <> nil then
-    begin
-      hdr^.AclRevision := 2;
-      hdr^.Sbz1 := 0;
-      hdr^.AceCount := length(ace);
-      hdr^.Sbz2 := 0;
-      hdr^.AclSize := p - pointer(hdr);
-    end;
+      inc(p, len);
+    inc(a);
   end;
-  result := p - pointer(hdr);
+  if hdr = nil then
+    exit;
+  hdr^.AclRevision := 2;
+  hdr^.Sbz1 := 0;
+  hdr^.AceCount := length(ace);
+  hdr^.Sbz2 := 0;
+  hdr^.AclSize := result;
 end;
 
 
-{ TSecAce }
+{ TSecurityDescriptor }
 
-function AceCompare(const a, b: TSecAce): boolean;
-begin
-  result := (a.AceType = b.AceType) and
-            (a.RawType = b.RawType) and
-            (a.Flags = b.Flags) and
-            (a.Mask = b.Mask) and
-            (a.Sid = b.Sid) and
-            (a.Opaque = b.Opaque) and
-            IsEqualGuid(a.ObjectType, b.ObjectType) and
-            IsEqualGuid(a.InheritedObjectType, b.InheritedObjectType);
-end;
-
-
-{ TSecDesc }
-
-procedure TSecDesc.Clear;
+procedure TSecurityDescriptor.Clear;
 begin
   Finalize(self);
   Flags := [scSelfRelative];
 end;
 
-function TSecDesc.IsEqual(const sd: TSecDesc): boolean;
+function TSecurityDescriptor.IsEqual(const sd: TSecurityDescriptor): boolean;
 var
   i: PtrInt;
 begin
@@ -1738,20 +2154,20 @@ begin
      (length(Sacl) <> length(sd.Sacl)) then
     exit;
   for i := 0 to high(Dacl) do
-    if not AceCompare(Dacl[i], sd.Dacl[i]) then
+    if not Dacl[i].IsEqual(sd.Dacl[i]) then
       exit;
   for i := 0 to high(Sacl) do
-    if not AceCompare(Sacl[i], sd.Sacl[i]) then
+    if not Sacl[i].IsEqual(sd.Sacl[i]) then
       exit;
   result := true;
 end;
 
-function TSecDesc.FromBinary(const Bin: RawSecurityDescriptor): boolean;
+function TSecurityDescriptor.FromBinary(const Bin: RawSecurityDescriptor): boolean;
 begin
   result := FromBinary(pointer(Bin), length(Bin));
 end;
 
-function TSecDesc.FromBinary(p: PByteArray; len: cardinal): boolean;
+function TSecurityDescriptor.FromBinary(p: PByteArray; len: cardinal): boolean;
 begin
   Clear;
   result := false;
@@ -1762,18 +2178,18 @@ begin
   if PSD(p)^.Group <> 0 then
     ToRawSid(@p[PSD(p)^.Group], Group);
   Flags := PSD(p)^.Control;
-  result := BinToAcl(p, PSD(p)^.Dacl, Dacl) and
-            BinToAcl(p, PSD(p)^.Sacl, Sacl);
+  result := BinToSecAcl(p, PSD(p)^.Dacl, Dacl) and
+            BinToSecAcl(p, PSD(p)^.Sacl, Sacl);
 end;
 
-function TSecDesc.ToBinary: RawSecurityDescriptor;
+function TSecurityDescriptor.ToBinary: RawSecurityDescriptor;
 var
   p: PAnsiChar;
   hdr: PSD;
 begin
   FastSetRawByteString(RawByteString(result), nil,
     SizeOf(hdr^) + length(Owner) + length(Group) +
-    AclToBin(nil, Sacl) + AclToBin(nil, Dacl));
+    SecAclToBin(nil, Sacl) + SecAclToBin(nil, Dacl));
   p := pointer(result);
   hdr := pointer(p);
   FillCharFast(hdr^, SizeOf(hdr^), 0);
@@ -1796,58 +2212,96 @@ begin
   begin
     include(hdr^.Control, scSaclPresent);
     hdr^.Sacl := p - pointer(result);
-    inc(p, AclToBin(p, Sacl));
+    inc(p, SecAclToBin(p, Sacl));
   end;
   if Dacl <> nil then
   begin
     include(hdr^.Control, scDaclPresent);
     hdr^.Dacl := p - pointer(result);
-    inc(p, AclToBin(p, Dacl));
+    inc(p, SecAclToBin(p, Dacl));
   end;
   if p - pointer(result) <> length(result) then
-    raise EOSException.Create('TSecDesc.ToBinary'); // paranoid
+    raise EOSException.Create('TSecurityDescriptor.ToBinary'); // paranoid
 end;
 
-function TSecDesc.FromText(var p: PUtf8Char; dom: PSid; endchar: AnsiChar): boolean;
+const
+  SCOPE_SDDL: array[TSecAceScope] of string[3] = (
+    'D:', 'S:');
+  SCOPE_P: array[TSecAceScope] of TSecControl = (
+    scDaclProtected, scSaclProtected);
+  SCOPE_AR: array[TSecAceScope] of TSecControl = (
+    scDaclAutoInheritReq, scSaclAutoInheritReq);
+  SCOPE_AI: array[TSecAceScope] of TSecControl = (
+    scDaclAutoInherit, scSaclAutoInherit);
+  SCOPE_FLAG: array[TSecAceScope] of TSecControl = (
+    scDaclPresent, scSaclPresent);
 
-  function NextAces(var aces: TSecAces; pr, ar, ai: TSecControl): boolean;
+function TSecurityDescriptor.NextAclFromText(var p: PUtf8Char; dom: PSid;
+  scope: TSecAceScope): boolean;
+var
+  acl: PSecAcl;
+begin
+  result := false;
+  while p^ = ' ' do
+    inc(p);
+  if p^ = 'P' then
   begin
-    result := false;
-    while p^ = ' ' do
-      inc(p);
-    if p^ = 'P' then
-    begin
-      include(Flags, pr);
-      inc(p);
-    end;
-    while p^ = ' ' do
-      inc(p);
-    if PWord(p)^ = ord('A') + ord('R') shl 8 then
-    begin
-      include(Flags, ar);
-      inc(p, 2);
-    end;
-    while p^ = ' ' do
-      inc(p);
-    if PWord(p)^ = ord('A') + ord('I') shl 8 then
-    begin
-      include(Flags, ai);
-      inc(p, 2);
-    end;
-    while p^ = ' ' do
-      inc(p);
-    if p^ <> '(' then
-      exit;
-    repeat
-      inc(p);
-      SetLength(aces, length(aces) + 1);
-      if not SddlNextAce(p, aces[high(aces)], dom) then
-        exit;
-      inc(p); // p^ = ')'
-    until p^ <> '(';
-    result := true;
+    include(Flags, SCOPE_P[scope]);
+    inc(p);
   end;
+  while p^ = ' ' do
+    inc(p);
+  if PWord(p)^ = ord('A') + ord('R') shl 8 then
+  begin
+    include(Flags, SCOPE_AR[scope]);
+    inc(p, 2);
+  end;
+  while p^ = ' ' do
+    inc(p);
+  if PWord(p)^ = ord('A') + ord('I') shl 8 then
+  begin
+    include(Flags, SCOPE_AI[scope]);
+    inc(p, 2);
+  end;
+  while p^ = ' ' do
+    inc(p);
+  if p^ <> '(' then
+    exit;
+  repeat
+    inc(p);
+    if not InternalAdd(scope, acl).FromText(p, dom) then
+      exit;
+    inc(p); // p^ = ')'
+  until p^ <> '(';
+  result := true;
+end;
 
+procedure TSecurityDescriptor.AclToText(var sddl: RawUtf8;
+  dom: PSid; scope: TSecAceScope);
+var
+  tmp: ShortString;
+  acl: PSecAcl;
+  i: Ptrint;
+begin
+  PCardinal(@tmp)^ := PCardinal(@SCOPE_SDDL[scope])^;
+  if SCOPE_P[scope] in Flags then
+    AppendShortChar('P', @tmp);
+  if SCOPE_AR[scope] in Flags then
+    AppendShortTwoChars('AR', @tmp);
+  if SCOPE_AI[scope] in Flags then
+    AppendShortTwoChars('AI', @tmp);
+  acl := @Dacl;
+  if scope = sasSacl then
+    acl := @Sacl;
+  for i := 0 to length(acl^) - 1 do
+  begin
+    acl^[i].AppendAsText(tmp, dom);
+    AppendShortToUtf8(tmp, sddl);
+    tmp[0] := #0;
+  end;
+end;
+
+function TSecurityDescriptor.FromText(var p: PUtf8Char; dom: PSid; endchar: AnsiChar): boolean;
 begin
   Clear;
   result := false;
@@ -1867,12 +2321,10 @@ begin
         if not SddlNextSid(p, Group, dom) then
           exit;
       'D':
-        if not NextAces(Dacl,
-                scDaclProtected, scDaclAutoInheritReq, scDaclAutoInherit) then
+        if not NextAclFromText(p, dom, sasDacl) then
           exit;
       'S':
-        if not NextAces(Sacl,
-                 scSaclProtected, scSaclAutoInheritReq, scSaclAutoInherit) then
+        if not NextAclFromText(p, dom, sasSacl) then
           exit;
     else
       exit;
@@ -1887,7 +2339,7 @@ begin
   result := true;
 end;
 
-function TSecDesc.FromText(const SddlText, RidDomain: RawUtf8): boolean;
+function TSecurityDescriptor.FromText(const SddlText, RidDomain: RawUtf8): boolean;
 var
   p: PUtf8Char;
   dom: RawSid;
@@ -1897,7 +2349,7 @@ begin
             FromText(p, pointer(dom));
 end;
 
-function TSecDesc.ToText(const RidDomain: RawUtf8): RawUtf8;
+function TSecurityDescriptor.ToText(const RidDomain: RawUtf8): RawUtf8;
 var
   dom: RawSid;
 begin
@@ -1906,42 +2358,11 @@ begin
     AppendAsText(result, pointer(dom));
 end;
 
-procedure TSecDesc.AppendAsText(var result: RawUtf8; dom: PSid);
+procedure TSecurityDescriptor.AppendAsText(var result: RawUtf8; dom: PSid);
 var
-  tmp: shortstring;
-
-  procedure AppendTmp;
-  var
-    n: PtrInt;
-  begin
-    n := length(result);
-    SetLength(result, n + ord(tmp[0]));
-    MoveFast(tmp[1], PByteArray(result)[n], ord(tmp[0]));
-  end;
-
-  procedure AppendAces(const aces: TSecAces; p, ar, ai: TSecControl);
-  var
-    i: Ptrint;
-  begin
-    if aces = nil then
-      exit;
-    if p in Flags then
-      AppendShortChar('P', @tmp);
-    if ar in Flags then
-      AppendShortTwoChars('AR', @tmp);
-    if ai in Flags then
-      AppendShortTwoChars('AI', @tmp);
-    for i := 0 to length(aces) - 1 do
-    begin
-      AppendShortChar('(', @tmp);
-      SddlAppendAce(tmp, aces[i], dom);
-      AppendShortChar(')', @tmp);
-      AppendTmp;
-      tmp[0] := #0;
-    end;
-  end;
-
+  tmp: ShortString;
 begin
+  tmp[0] := #0;
   if Owner <> '' then
   begin
     tmp := 'O:';
@@ -1951,12 +2372,89 @@ begin
   begin
     AppendShortTwoChars('G:', @tmp);
     SddlAppendSid(tmp, pointer(Group), dom);
-    AppendTmp;
   end;
-  tmp := 'D:';
-  AppendAces(Dacl, scDaclProtected, scDaclAutoInheritReq, scDaclAutoInherit);
-  tmp := 'S:';
-  AppendAces(Sacl, scSaclProtected, scSaclAutoInheritReq, scSaclAutoInherit);
+  AppendShortToUtf8(tmp, result);
+  AclToText(result, dom, sasDacl);
+  AclToText(result, dom, sasSacl);
+end;
+
+function TSecurityDescriptor.InternalAdd(scope: TSecAceScope;
+  out acl: PSecAcl): PSecAce;
+var
+  n: PtrInt;
+begin
+  acl := @Dacl;
+  if scope = sasSacl then
+    acl := @Sacl;
+  n := length(acl^);
+  SetLength(acl^, n + 1); // append
+  result := @acl^[n];
+end;
+
+function TSecurityDescriptor.InternalAdded(scope: TSecAceScope; ace: PSecAce;
+  acl: PSecAcl; success: boolean): PSecAce;
+begin
+  if success then
+  begin
+    include(Flags, SCOPE_FLAG[scope]);
+    result := ace;
+  end
+  else
+  begin
+    SetLength(acl^, length(acl^) - 1); // abort
+    if acl^ = nil then
+      exclude(Flags, SCOPE_FLAG[scope]);
+    result := nil;
+  end;
+end;
+
+function TSecurityDescriptor.Add(sat: TSecAceType;
+  const sidText, maskSddl: RawUtf8; dom: PSid; const condExp: RawUtf8;
+  scope: TSecAceScope; saf: TSecAceFlags): PSecAce;
+var
+  acl: PSecAcl;
+begin
+  result := InternalAdd(scope, acl);
+  result := InternalAdded(scope, result, acl,
+    result^.Fill(sat, sidText, maskSddl, dom, condExp, saf));
+end;
+
+function TSecurityDescriptor.Add(const sddl: RawUtf8; dom: PSid;
+  scope: TSecAceScope): PSecAce;
+var
+  p: PUtf8Char;
+  acl: PSecAcl;
+begin
+  result := nil;
+  p := pointer(sddl);
+  if (p = nil) or
+     (p^ <> '(') then
+    exit;
+  inc(p);
+  result := InternalAdd(scope, acl);
+  result := InternalAdded(scope, result, acl, result^.FromText(p, dom));
+end;
+
+procedure TSecurityDescriptor.Delete(index: PtrUInt; scope: TSecAceScope);
+var
+  dest: PSecAcl;
+  n: PtrUInt;
+begin
+  dest := @Dacl;
+  if scope = sasSacl then
+    dest := @Sacl;
+  n := length(dest^);
+  if index >= n then
+    exit;
+  Finalize(dest^[index]);
+  dec(n);
+  if n = 0 then
+  begin
+    dest^ := nil;
+    exclude(Flags, SCOPE_FLAG[scope]);
+  end
+  else
+    DynArrayFakeDelete(dest^, index, n, SizeOf(dest^[0]));
 end;
 
 
@@ -2215,6 +2713,34 @@ end;
 
 {$endif OSWINDOWS}
 
+
+procedure InitializeUnit;
+var
+  wks: TWellKnownSid;
+  wkr: TWellKnownRid;
+  sam: TSecAccess;
+  w: PWord;
+begin
+  w := @SID_SDDLW;
+  for wks := low(wks) to wksLastSddl do
+  begin
+    if w^ <> $2020 then
+      include(wksWithSddl, wks);
+    inc(w);
+  end;
+  for wkr := low(wkr) to high(wkr) do
+  begin
+    if w^ <> $2020 then
+      include(wkrWithSddl, wkr);
+    inc(w);
+  end;
+  for sam := low(sam) to high(sam) do
+    if SAM_SDDL[sam][0] <> #0  then
+      include(samWithSddl, sam);
+end;
+
+initialization
+  InitializeUnit;
 
 end.
 

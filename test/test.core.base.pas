@@ -3308,45 +3308,63 @@ var
   tmp: RawUtf8;
   vs: TRawUtf8DynArray;
   timer: TPrecisionTimer;
+
+  procedure DoOne(const u: RawUtf8);
+  var
+    local: RawUtf8; // will force dec(RefCnt) when leaving DoOne()
+  begin
+    local := int.Unique(u);
+    CheckEqual(local, u);
+  end;
+
 const
   MAX = 500000;
   ONESIZE = 32; // assume each SmallUInt32Utf8[] uses 32 heap bytes
   DIRSIZE = ONESIZE * (MAX + 1);
   INTSIZE = ONESIZE * 512;
 begin
-  {$ifndef HASINLINE} // inlining induces optimizations which trigger Clean
   int := TRawUtf8Interning.Create(1);
   try
-    check(int.Count = 0);
-    check(int.Unique('test') = 'test');
-    check(int.Count = 1);
-    check(int.Unique('test') = 'test');
-    check(int.Count = 1);
-    check(int.Clean = 0);
-    check(int.Unique('single') = 'single');
-    check(int.Count = 2);
-    check(int.Clean = 1);
-    check(int.Count = 1);
-    check(int.Clean = 0);
-    check(int.Count = 1);
-    check(int.Unique('single1') = 'single1');
-    check(int.Count = 2);
-    check(int.Unique('test2') = 'test2');
-    check(int.Count = 3);
-    check(int.Unique('test2') = 'test2');
-    check(int.Count = 3);
-    check(int.Unique('single2') = 'single2');
-    check(int.Count = 4);
-    check(int.Clean = 2);
-    check(int.Count = 2);
+    CheckEqual(int.Count, 0);
+    DoOne('test');
+    CheckEqual(int.Count, 1);
+    DoOne('test');
+    CheckEqual(int.Count, 1);
+    CheckEqual(int.Clean, 1);
+    DoOne('single');
+    CheckEqual(int.Count, 1);
+    CheckEqual(int.Clean, 1);
+    CheckEqual(int.Count, 0);
+    CheckEqual(int.Clean, 0);
+    CheckEqual(int.Count, 0);
+    DoOne('single1');
+    CheckEqual(int.Count, 1);
+    DoOne('single1');
+    CheckEqual(int.Count, 1);
+    DoOne('test2');
+    CheckEqual(int.Count, 2);
+    DoOne('test2');
+    CheckEqual(int.Count, 2);
+    DoOne('single2');
+    CheckEqual(int.Count, 3);
+    CheckEqual(int.Clean, 3);
+    CheckEqual(int.Count, 0);
+    int.Unique(tmp, 'kept', 4);
+    CheckEqual(tmp, 'kept');
+    CheckEqual(GetRefCount(tmp), 2);
+    CheckEqual(int.Count, 1);
+    CheckEqual(int.Clean, 0);
+    CheckEqual(int.Count, 1);
+    tmp := '';
+    CheckEqual(int.Clean, 1);
+    CheckEqual(int.Count, 0);
     int.Clear;
-    check(int.Count = 0);
-    check(int.Clean = 0);
-    check(int.Count = 0);
+    CheckEqual(int.Count, 0);
+    CheckEqual(int.Clean, 0);
+    CheckEqual(int.Count, 0);
   finally
     int.Free;
   end;
-  {$endif HASINLINE}
   int := TRawUtf8Interning.Create(16);
   try
     for i := 0 to MAX do
@@ -6458,12 +6476,12 @@ const
 
 procedure TTestCoreBase._SDDL;
 var
-  i: PtrInt;
+  i, j: PtrInt;
   c: TSecControls;
   bin, saved: RawSecurityDescriptor;
-  u, dom: RawUtf8;
+  u, dom, json: RawUtf8;
   domsid: RawSid;
-  sd, sd2: TSecDesc;
+  sd, sd2: TSecurityDescriptor;
   p: PUtf8Char;
 begin
   // validate internal structures and types
@@ -6492,6 +6510,7 @@ begin
   // validate against some reference binary material
   for i := 0 to high(SD_B64) do
   begin
+    // high-level IsValidSecurityDescriptor() and SecurityDescriptorToText()
     bin := Base64ToBin(SD_B64[i]);
     Check(bin <> '', 'b64');
     Check(IsValidSecurityDescriptor(pointer(bin), length(bin)), 'bin');
@@ -6501,12 +6520,17 @@ begin
     Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
     CheckEqual(u, SD_TXT[i], 'winapi2');
     {$endif OSWINDOWS}
+    // TSecurityDescriptor binary load and export as SDDL or binary
     sd.Clear;
     CheckEqual(sd.ToText, '', 'clear');
+    Check(sd.Flags = [scSelfRelative]);
     Check(sd.FromBinary(bin));
     Check(sd.Dacl <> nil, 'dacl');
+    Check(scSelfRelative in sd.Flags);
     Check((sd.Sacl = nil) = (i <> 0), 'sacl');
     CheckEqual(sd.ToText, SD_TXT[i], 'ToText');
+    Check(sd.Dacl[0].Opaque = '');
+    Check(sd.Dacl[0].ConditionalExpression = '');
     saved := sd.ToBinary;
     Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'saved');
     Check(SecurityDescriptorToText(saved, u), 'sdtt2');
@@ -6517,6 +6541,7 @@ begin
     {$endif OSWINDOWS}
     if i >= 3 then // serialization offsets seem not consistent
       Check(saved = bin, 'ToBinary');
+    // TSecurityDescriptor load from SDDL into another instance
     Check(not sd2.FromText(''));
     CheckEqual(sd2.ToText, '', 'fromnil');
     Check(not sd.IsEqual(sd2));
@@ -6526,6 +6551,48 @@ begin
     Check(sd2.IsEqual(sd));
     bin := sd2.ToBinary;
     Check(bin = saved, 'saved2');
+    // TSecurityDescriptor JSON
+    json := SecurityDescriptorToJson(sd);
+    Check(IsValidJson(json), 'savejson');
+    sd2.Clear;
+    Check(SecurityDescriptorFromJson(json, sd2), 'loadjson');
+    Check(sd.IsEqual(sd2));
+    Check(scSelfRelative in sd2.Flags);
+    // TSecurityDescriptor.Add and Delete high-level methods
+    Check(scDaclPresent in sd.Flags);
+    if sd.Sacl <> nil then
+    begin
+      Check(scSaclPresent in sd.Flags);
+      continue;
+    end;
+    Check(not (scSaclPresent in sd.Flags));
+    Check(sd.Add('') = nil);
+    Check(sd.IsEqual(sd2));
+    Check(sd.Add('(toto;;;;)') = nil);
+    Check(sd.Add('(D;;;;;SY)') = nil);
+    Check(sd.Add('(A;;;;;SY)') = nil);
+    Check(sd.IsEqual(sd2));
+    Check(sd.Add('(A;;KA;;;SY)') <> nil);
+    Check(not sd.IsEqual(sd2));
+    CheckEqual(sd.ToText, u + '(A;;KA;;;SY)');
+    Check(sd.Add(satCallbackAudit, 'AU', 'KR') <> nil);
+    CheckEqual(sd.ToText, u + '(A;;KA;;;SY)(XU;;KR;;;AU)');
+    sd.Delete(100);
+    sd.Delete(length(sd.Dacl) - 2);
+    CheckEqual(sd.ToText, u + '(XU;;KR;;;AU)');
+    Check(not sd.IsEqual(sd2));
+    sd.Delete(length(sd.Dacl) - 1);
+    CheckEqual(sd.ToText, u);
+    Check(sd.IsEqual(sd2));
+    Check(sd.ToBinary = saved);
+    Check(scDaclPresent in sd.Flags);
+    for j := 1 to length(sd.Dacl) do
+      sd.Delete(0);
+    Check(sd.Dacl = nil);
+    Check(not (scDaclPresent in sd.Flags));
+    Check(sd.Add('(A;;KA;;;SY)') <> nil);
+    Check(PosEx('(A;;KA;;;SY)', sd.ToText) <> 0);
+    Check(scDaclPresent in sd.Flags);
   end;
   // validate parsing RID in text (e.g. DU,DA)
   Check(not sd.FromText(RID_TXT[3]), 'dom0');
@@ -6544,6 +6611,13 @@ begin
   u := 'rid';
   sd.AppendAsText(u, pointer(domsid));
   CheckEqual(u, 'ridO:DUG:DAD:(A;;FA;;;DA)');
+  CheckEqual(sd.Dacl[0].SidText, dom + '-512');
+  CheckEqual(sd.Dacl[0].SidText(pointer(domsid)), 'DA');
+  CheckEqual(sd.Dacl[0].MaskText, 'FA');
+  Check(sd.Dacl[0].SidText('DU', pointer(domsid)));
+  CheckEqual(sd.Dacl[0].SidText, dom + '-513');
+  CheckEqual(sd.Dacl[0].SidText(pointer(domsid)), 'DU');
+  // RID reference material with several domains
   for i := low(DOM_TXT) to high(DOM_TXT) do
   begin
     Check(TryDomainTextToSid(DOM_TXT[i], domsid));
@@ -6563,7 +6637,12 @@ begin
     CheckEqual(length(sd.Sacl), 0);
     Check(sd.Dacl[0].AceType = satCallbackAccessAllowed);
     if not CheckFailed(sd.Dacl[0].Opaque <> '') then
-      Check(sd.Dacl[0].Opaque[1] = '(');
+    begin
+      u := sd.Dacl[0].ConditionalExpression;
+      Check(u <> '');
+      Check(u[1] = '(');
+      Check(u[length(u)] = ')');
+    end;
     CheckEqual(sd.ToText, COND_TXT[i]);
     saved := sd.ToBinary;
     Check(saved <> '');
