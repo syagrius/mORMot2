@@ -2929,8 +2929,9 @@ function Unicode_WideToAnsi(
 
 /// conversion of some UTF-16 buffer into a temporary Ansi ShortString
 // - used when mormot.core.unicode is an overkill, e.g. TCrtSocket.SockSend()
-procedure Unicode_WideToShort(
-  W: PWideChar; LW, CodePage: PtrInt; var res: ShortString);
+// - calls IsAnsiCompatibleW() first to quickly handle any ASCII-7 output
+procedure Unicode_WideToShort(W: PWideChar; LW, CodePage: PtrInt;
+  var res: ShortString);
 
 /// compatibility function, wrapping Win32 API CharUpperBuffW()
 // - on POSIX, use the ICU library, or fallback to 'a'..'z' conversion only
@@ -2943,6 +2944,12 @@ function Unicode_InPlaceUpper(W: PWideChar; WLen: integer): integer;
 // - raw function called by LowerCaseUnicode() from mormot.core.unicode unit
 function Unicode_InPlaceLower(W: PWideChar; WLen: integer): integer;
   {$ifdef OSWINDOWS} stdcall; {$endif}
+
+/// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+// - returns dest.buf as PWideChar result, and dest.len as length in WideChars
+// - caller should always call Dest.Done to release any (unlikely) allocated memory
+function Unicode_ToUtf8(Text: PUtf8Char; TextLen: PtrInt;
+  var Dest: TSynTempBuffer): PWideChar;
 
 /// returns a system-wide current monotonic timestamp as milliseconds
 // - will use the corresponding native API function under Vista+, or will be
@@ -3890,10 +3897,9 @@ procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt;
 procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8); overload;
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
-// - returns dest.buf as PWideChar result, and dest.len as length
-// - caller should always call dest.Done to release (unlikely) temporary memory
-function Utf8ToWin32PWideChar(const Text: RawUtf8;
-  var dest: TSynTempBuffer): PWideChar;
+// - just a wrapper around Unicode_ToUtf8() over a temporary buffer
+// - caller should always call d.Done to release any (unlikely) allocated memory
+function Utf8ToWin32PWideChar(const u: RawUtf8; var d: TSynTempBuffer): PWideChar;
 
 /// ask the Operating System to convert a file URL to a local file path
 // - only Windows has a such a PathCreateFromUrlW() API
@@ -3902,12 +3908,6 @@ function Utf8ToWin32PWideChar(const Text: RawUtf8;
 function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 
 {$else}
-
-/// internal function to avoid linking mormot.core.buffers.pas
-function PosixParseHex32(p: PAnsiChar): integer;
-
-/// internal function to avoid linking mormot.core.buffers.pas
-procedure ParseHex(p: PAnsiChar; b: PByte; n: integer);
 
 /// internal function just wrapping fppoll(POLLIN or POLLPRI)
 function WaitReadPending(fd, timeout: integer): boolean;
@@ -3936,6 +3936,15 @@ function PosixFileNames(const Folder: TFileName; Recursive: boolean;
 /// internal function to avoid linking mormot.core.buffers.pas
 // - will output the value as one number with one decimal and KB/MB/GB/TB suffix
 function _oskb(Size: QWord): shortstring;
+
+var
+  /// decode a '3F2504E0-4F89-11D3-9A0C-0305E82C3301' text into a TGuid
+  // - this unit defaults to the RTL, but mormot.core.text.pas will override it
+  ShortToUuid: function(const text: ShortString; out uuid: TGuid): boolean;
+
+  /// append a TGuid into lower-cased '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
+  // - this unit defaults to the RTL, but mormot.core.text.pas will override it
+  AppendShortUuid: procedure(const u: TGuid; var s: ShortString);
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
 // - under Windows, will use the CP_OEM encoding
@@ -5857,9 +5866,36 @@ begin
 end;
 {$endif ISDELPHI}
 
-procedure UuidToText(const u: TGuid; var result: RawUtf8); // seldom used in this unit
+function _ShortToUuid(const text: ShortString; out uuid: TGuid): boolean;
 begin
-  result := RawUtf8(LowerCase(copy(GUIDToString(u), 2, 36)));
+  result := (text[0] = #36) and
+            TryStringToGUID('{' + string(text) + '}', uuid); // RTL
+end;
+
+procedure _AppendShortUuid(const u: TGuid; var s: ShortString);
+begin
+  AppendShortAnsi7String(AnsiString(LowerCase(copy(GUIDToString(u), 2, 36))), s);
+end;
+
+function TextToUuid(const text: RawUtf8; out uuid: TGuid): boolean;
+var
+  tmp: string[36];
+begin
+  result := false;
+  if length(text) <> 36 then
+    exit;
+  tmp[0] := #36;
+  MoveFast(pointer(text)^, tmp[1], 36);
+  result := ShortToUuid(tmp, uuid); // may call mormot.core.text
+end;
+
+procedure UuidToText(const u: TGuid; var result: RawUtf8); // seldom used
+var
+  tmp: ShortString;
+begin
+  tmp[0] := #0;
+  AppendShortUuid(u, tmp); // may call mormot.core.text
+  FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
 
@@ -6159,10 +6195,11 @@ var
 begin
   if LW <= 0 then
     res[0] := #0
-  else if (LW <= 255) and
-          IsAnsiCompatibleW(W, LW) then
+  else if IsAnsiCompatibleW(W, LW) then
   begin
-    // fast handling of pure English content
+    // fast handling of pure ASCII-7 content (very common case)
+    if LW > 255 then
+      LW := 255;
     res[0] := AnsiChar(LW);
     i := 1;
     repeat
@@ -6177,6 +6214,38 @@ begin
     // use WinAPI, ICU or cwstring/RTL for accurate conversion
     res[0] := AnsiChar(
       Unicode_WideToAnsi(W, PAnsiChar(@res[1]), LW, 255, CodePage));
+end;
+
+function Unicode_ToUtf8(Text: PUtf8Char; TextLen: PtrInt;
+  var Dest: TSynTempBuffer): PWideChar;
+var
+  i: PtrInt;
+begin
+  result := nil;
+  if Text = nil then
+    TextLen := 0;
+  Dest.Init(TextLen * 2); // maximum absolute UTF-16 size in bytes (pure ASCII)
+  if Dest.len = 0 then
+    exit;
+  result := Dest.buf;
+  if IsAnsiCompatible(pointer(Text), TextLen) then // fastest optimistic way
+  begin
+    Dest.len := TextLen;
+    for i := 0 to TextLen - 1 do
+      PWordArray(result)[i] := PByteArray(Text)[i];
+    result[Dest.len] := #0; // Text[TextLen] may not be #0
+  end
+  else // use the RTL to perform the UTF-8 to UTF-16 conversion
+  begin
+    Dest.len := Utf8ToUnicode(result, Dest.Len + 16, pointer(Text), TextLen);
+    if Dest.len <= 0 then
+      Dest.len := 0
+    else
+    begin
+      dec(Dest.len); // Utf8ToUnicode() returned length includes trailing #0
+      result[Dest.len] := #0; // missing on FPC
+    end;
+  end;
 end;
 
 function NowUtc: TDateTime;
@@ -8787,7 +8856,7 @@ begin
     ComputeGetSmbios; // maybe from local SMB_CACHE file for non-root
   if not (gcuSmbios in disable) and
      (_Smbios[sbiUuid] <> '') and
-     TryStringToGUID(format('{%s}', [_Smbios[sbiUuid]]), uuid) then // use RTL
+     TextToUuid(_Smbios[sbiUuid], uuid) then
     exit;
   // did we already compute (and persist) this UUID?
   if disable = [] then // we persist a fully-qualified UUID only
@@ -10424,6 +10493,8 @@ begin
   // minimal stubs which will be properly implemented in mormot.core.log.pas
   GetExecutableLocation := _GetExecutableLocation;
   SetThreadName := _SetThreadName;
+  ShortToUuid := _ShortToUuid;
+  AppendShortUuid := _AppendShortUuid;
 end;
 
 procedure FinalizeUnit;

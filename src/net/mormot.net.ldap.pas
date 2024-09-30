@@ -1034,7 +1034,7 @@ type
     /// access any attribute value from its known type
     // - calls GetReadable(0) to read, or Add(aoReplaceValue) to write
     // - returns empty string if not found
-    // - is defined as the default property for conveniency
+    // - is defined as the default property for convenience
     property Attr[AttributeType: TLdapAttributeType]: RawUtf8
       read Get write SetAttr; default;
     /// access to the internal list of TLdapAttribute objects
@@ -1144,7 +1144,7 @@ type
     /// access any attribute value from its known type
     // - calls GetReadable(0) on the found attribute
     // - returns empty string if not found
-    // - is defined as the default property for conveniency
+    // - is defined as the default property for convenience
     property Attr[AttributeType: TLdapAttributeType]: RawUtf8
       read GetAttr; default;
     /// copy the 'objectSid' attribute if present
@@ -1482,6 +1482,7 @@ type
     procedure GetByAccountType(AT: TSamAccountType; Uac, unUac: integer;
       const BaseDN, CustomFilter, Match: RawUtf8; Attribute: TLdapAttributeType;
       out Res: TRawUtf8DynArray; ObjectNames: PRawUtf8DynArray);
+    procedure RetrieveRootInfo;
   public
     /// initialize this LDAP client instance
     constructor Create; overload; override;
@@ -1887,6 +1888,7 @@ type
       read fSearchCookie write fSearchCookie;
     /// the optional security flags to include in the response
     // - default [] means no atNTSecurityDescriptor
+    // - you can set e.g. lsfMain to retrieve main Security Descriptor fields
     // - if not [], append a LDAP_SERVER_SD_FLAGS_OID control to each Search(),
     // so that atNTSecurityDescriptor will contain the specified flags
     property SearchSDFlags: TLdapSearchSDFlags
@@ -1994,6 +1996,14 @@ type
     property CacheTimeoutSeconds: integer
       read fCacheTimeoutSeconds write fCacheTimeoutSeconds;
   end;
+
+const
+  /// common possible value for TLdapClient.SearchSDFlags
+  // - lsfSaclSecurityInformation is not included because it is likely to be not
+  // available for the client, and would void the atNTSecurityDescriptor field
+  lsfMain = [lsfOwnerSecurityInformation,
+             lsfGroupSecurityInformation,
+             lsfDaclSecurityInformation];
 
 
 { **************** HTTP BASIC Authentication via LDAP or Kerberos }
@@ -4759,11 +4769,33 @@ begin
   result := fNetbiosDN;
 end;
 
+procedure TLdapClient.RetrieveRootInfo;
+var
+  root: TLdapResult;
+begin
+  if not fSock.SockConnected then
+    exit;
+  root := SearchObject('', '*', [
+    'rootDomainNamingContext',
+    'defaultNamingContext',
+    'configurationNamingContext',
+    'supportedSASLMechanisms',
+    'supportedControl',
+    'supportedExtension']);
+  fRootDN := root.Attributes.GetByName('rootDomainNamingContext');
+  fDefaultDN := root.Attributes.GetByName('defaultNamingContext');
+  fConfigDN := root.Attributes.GetByName('configurationNamingContext');
+  fMechanisms := root.Attributes.Find('supportedSASLMechanisms').GetAllReadable;
+  fControls := root.Attributes.Find('supportedControl').GetAllReadable;
+  DeduplicateRawUtf8(fControls);
+  fExtensions := root.Attributes.Find('supportedExtension').GetAllReadable;
+  DeduplicateRawUtf8(fExtensions);
+end;
+
 function TLdapClient.RootDN: RawUtf8;
 begin
-  if (fRootDN = '') and
-     fSock.SockConnected then
-    fRootDN := SearchObject('', '*', 'rootDomainNamingContext').GetReadable;
+  if fRootDN = '' then
+    RetrieveRootInfo;
   result := fRootDN;
 end;
 
@@ -4773,48 +4805,37 @@ begin
     result := BaseDN
   else
   begin
-    if (fDefaultDN = '') and
-       fSock.SockConnected then
-      fDefaultDN := SearchObject('', '*', 'defaultNamingContext').GetReadable;
+    if fRootDN = '' then
+      RetrieveRootInfo;
     result := fDefaultDN;
   end;
 end;
 
 function TLdapClient.ConfigDN: RawUtf8;
 begin
-  if (fConfigDN = '') and
-     fSock.SockConnected then
-    fConfigDN := SearchObject('', '*', 'configurationNamingContext').GetReadable;
+  if fRootDN = '' then
+    RetrieveRootInfo;
   result := fConfigDN;
 end;
 
 function TLdapClient.Mechanisms: TRawUtf8DynArray;
 begin
-  if (fMechanisms = nil) and
-     fSock.SockConnected then
-    fMechanisms := SearchObject('', '*', 'supportedSASLMechanisms').GetAllReadable;
+  if fRootDN = '' then
+    RetrieveRootInfo;
   result := fMechanisms;
 end;
 
 function TLdapClient.Controls: TRawUtf8DynArray;
 begin
-  if (fControls = nil) and
-     fSock.SockConnected then
-  begin
-    fControls := SearchObject('', '*', 'supportedControl').GetAllReadable;
-    DeduplicateRawUtf8(fControls);
-  end;
+  if fRootDN = '' then
+    RetrieveRootInfo;
   result := fControls;
 end;
 
 function TLdapClient.Extensions: TRawUtf8DynArray;
 begin
-  if (fExtensions = nil) and
-     fSock.SockConnected then
-  begin
-    fExtensions := SearchObject('', '*', 'supportedExtension').GetAllReadable;
-    DeduplicateRawUtf8(fExtensions);
-  end;
+  if fRootDN = '' then
+    RetrieveRootInfo;
   result := fExtensions;
 end;
 

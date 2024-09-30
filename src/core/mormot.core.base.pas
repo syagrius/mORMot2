@@ -888,8 +888,11 @@ procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortStrin
 /// simple concatenation of a 32-bit unsigned integer as text into a shorstring
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 
-/// simple concatenation of a 64-bit integer as text into a shorstring
+/// simple concatenation of a signed 64-bit integer as text into a shorstring
 procedure AppendShortInt64(value: Int64; var dest: ShortString);
+
+/// simple concatenation of an unsigned 64-bit integer as text into a shorstring
+procedure AppendShortQWord(value: QWord; var dest: ShortString);
 
 /// simple concatenation of a character into a @shorstring
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
@@ -907,10 +910,10 @@ procedure AppendShortBuffer(buf: PAnsiChar; len: PtrInt; dest: PAnsiChar);
   {$ifdef HASINLINE} inline; {$endif}
 
 /// simple concatenation of hexadecimal binary buffer into a shorstring
-procedure AppendShortHex(value: PByte; len: PtrInt; var dest: ShortString);
+procedure AppendShortHex(value: PByte; len: PtrUInt; var dest: ShortString);
 
 /// simple concatenation of an integer as lowercase hexadecimal into a shorstring
-procedure AppendShortIntHex(value: PtrUInt; var dest: ShortString);
+procedure AppendShortIntHex(value: Int64; var dest: ShortString);
 
 /// simple concatenation of a byte as uppercase hexadecimal into a shorstring
 procedure AppendShortByteHex(value: byte; var dest: ShortString);
@@ -919,7 +922,6 @@ procedure AppendShortByteHex(value: byte; var dest: ShortString);
 procedure AppendShort(const src: ShortString; var dest: ShortString);
 
 /// simple concatenation of an ANSI-7 AnsiString into a shorstring
-// - if Len is < 0, will use StrLen(buf)
 procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
 
 /// simple concatenation of a ShortString text into a RawUtf8
@@ -952,22 +954,30 @@ var
 function GetClassParent(C: TClass): TClass;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// case-insensitive comparison of two shortstrings only containing ASCII 7-bit
+/// case-insensitive comparison of two text buffers only containing ASCII 7-bit
+// - this is the actual comparison function called by its overloads
 // - use e.g. with RTTI property names values only including A..Z,0..9,_ chars
 // - will make the "XOR AND $DF" trick to quickly test A-Z / a-z characters
 // - behavior is undefined with UTF-8 encoding (some false positive may occur)
-// - see IdemPropName/IdemPropNameU functions in mormot.core.text for a similar
-// comparison with other kind of input variables
-function PropNameEquals(P1, P2: PShortString): boolean; overload;
+// - see IdemPropName/IdemPropNameU functions in mormot.core.unicode for similar
+// comparison functions with other kind of input variables
+function PropNameEquals(P1, P2: PAnsiChar; P1Len, P2Len: PtrInt): boolean; overload;
   {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 
+/// case-insensitive comparison of two shortstrings only containing ASCII 7-bit
+function PropNameEquals(P1, P2: PShortString): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// case-insensitive comparison of two text buffers only containing ASCII 7-bit
+function PropNameEquals(P1: PShortString; P2: PAnsiChar; P2Len: PtrInt): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// case-insensitive comparison of two RawUtf8 only containing ASCII 7-bit
-// - use e.g. with RTTI property names values only including A..Z,0..9,_ chars
-// - will make the "XOR AND $DF" trick to quickly test A-Z / a-z characters
-// - behavior is undefined with UTF-8 encoding (some false positive may occur)
-// - see IdemPropName/IdemPropNameU functions in mormot.core.text for a similar
-// comparison with other kind of input variables
 function PropNameEquals(const P1, P2: RawUtf8): boolean; overload;
+
+/// case-insensitive comparison of a RawUtf8 only containing ASCII 7-bit
+function PropNameEquals(const P1: RawUtf8; P2: PAnsiChar; P2Len: PtrInt): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// raw internal method as published by FindNonVoid[false]
 function FindNonVoidRawUtf8(n: PPointerArray; name: pointer; len: TStrLen;
@@ -1004,13 +1014,23 @@ function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integ
 // - slow function, here to avoid linking mormot.core.datetime
 function DateTimeToIsoString(dt: TDateTime): string;
 
+/// parse a '0x#####' buffer context into a 32-bit binary
+// - jump trailing '0x', then ends at first non hexadecimal character
+// - internal function to avoid linking mormot.core.buffers.pas
+function ParseHex0x(p: PAnsiChar): cardinal;
+
+/// parse an hexadecimal buffer into its raw binary
+// - parse up to n chars from p^, ending in case of not hexadecimal char
+// - any '#' char in the input buffer will be handled as '0'
+// - caller should ensure p<>nil and b<>nil and n>0
+// - internal function to avoid linking mormot.core.buffers.pas
+function ParseHex(p: PAnsiChar; b: PByte; n: integer): PAnsiChar;
+
 /// convert a binary into its human-friendly per-byte hexadecimal lowercase text
 // - returns e.g. '12:50:b6:1e:c6:aa', i.e. the DN/MAC format
 // - used e.g. in mormot.lib.openssl11 and mormot.net.sock
-procedure ToHumanHex(var result: RawUtf8; bin: PByteArray; len: PtrInt);
-
-/// convert a binary into its human-friendly hexadecimal in reverse order
-procedure ToHumanHexReverse(var result: RawUtf8; bin: PByteArray; len: PtrInt);
+procedure ToHumanHex(var result: RawUtf8; bin: PByte; len: integer;
+  reverse: boolean = false);
 
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
@@ -4893,31 +4913,35 @@ begin
   dest[0] := AnsiChar(len);
 end;
 
-procedure AppendShortHex(value: PByte; len: PtrInt; var dest: ShortString);
+procedure AppendShortHex(value: PByte; len: PtrUInt; var dest: ShortString);
 var
-  dlen, v: PtrInt;
+  dlen, v: PtrUInt;
+  tab: PAnsiChar;
 begin
   dlen := ord(dest[0]);
   if (len > 0) and
      (dlen + len * 2 < 254) then
+  begin
+    tab := @HexCharsLower;
     repeat
       v := value^;
       inc(value);
-      dest[dlen + 1] := HexCharsLower[v shr 4];
+      dest[dlen + 1] := tab[v shr 4];
       inc(dlen, 2);
       v := v and $0f;
-      dest[dlen] := HexCharsLower[v];
+      dest[dlen] := tab[v];
       dec(len);
     until len = 0;
+  end;
   dest[0] := AnsiChar(dlen);
 end;
 
-procedure AppendShortIntHex(value: PtrUInt; var dest: ShortString);
+procedure AppendShortIntHex(value: Int64; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
   i: PtrInt;
 begin
-  i := POINTERBYTES * 2;
+  i := SizeOf(value) * 2;
   repeat
     tmp[i - 1] := HexCharsLower[value and 15];
     value := value shr 4;
@@ -4927,7 +4951,7 @@ begin
       break;
     value := value shr 4;
   until value = 0;
-  AppendShortTemp(@tmp[i], @tmp[POINTERBYTES * 2], @dest);
+  AppendShortTemp(@tmp[i], @tmp[SizeOf(value) * 2], @dest);
 end;
 
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
@@ -4942,6 +4966,13 @@ var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrInt64(@tmp[23], value), @tmp[23], @dest);
+end;
+
+procedure AppendShortQWord(value: QWord; var dest: ShortString);
+var
+  tmp: array[0..23] of AnsiChar;
+begin
+  AppendShortTemp(StrUInt64(@tmp[23], value), @tmp[23], @dest);
 end;
 
 procedure AppendShortToUtf8(const src: ShortString; var dest: RawUtf8);
@@ -4997,70 +5028,52 @@ begin
   {$endif HASDIRECTTYPEINFO}
 end;
 
-function PropNameEquals(P1, P2: PShortString): boolean;
-var
-  l: PtrInt;
+function PropNameEquals(P1, P2: PAnsiChar; P1Len, P2Len: PtrInt): boolean;
 label
   zero;
 begin
-  l := ord(P1^[0]);
-  if l <> ord(P2^[0]) then
+  if P1Len <> P2Len then
     goto zero;
-  inc(PByte(P1));
-  inc(PByte(P2));
-  l := PtrInt(@PByteArray(P1)[l - SizeOf(cardinal)]); // 32-bit end
-  if l >= PtrInt(PtrUInt(P1)) then
+  P2Len := PtrInt(@PByteArray(P1)[P2Len - SizeOf(cardinal)]); // 32-bit end
+  if P2Len >= PtrInt(PtrUInt(P1)) then
     repeat // case-insensitive compare 4 bytes per loop
       if (PCardinal(P1)^ xor PCardinal(P2)^) and $dfdfdfdf <> 0 then
         goto zero;
       inc(PCardinal(P1));
       inc(PCardinal(P2));
-    until l < PtrInt(PtrUInt(P1));
-  inc(PCardinal(l));
+    until P2Len < PtrInt(PtrUInt(P1));
+  inc(PCardinal(P2Len));
   dec(PtrUInt(P2), PtrUInt(P1));
-  if PtrInt(PtrUInt(P1)) < l then
+  if PtrInt(PtrUInt(P1)) < P2Len then
     repeat
       if (PByte(P1)^ xor PByteArray(P2)[PtrUInt(P1)]) and $df <> 0 then
         goto zero;
       inc(PByte(P1));
-    until PtrInt(PtrUInt(P1)) >= l;
+    until PtrInt(PtrUInt(P1)) >= P2Len;
   result := true;
   exit;
 zero:
   result := false;
 end;
 
-function PropNameEquals(const P1, P2: RawUtf8): boolean;
-var
-  l, _1, _2: PtrInt;
-label
-  zero;
+function PropNameEquals(P1, P2: PShortString): boolean;
 begin
-  l := length(P1);
-  if l <> length(P2) then
-    goto zero;
-  _1 := PtrUInt(P1);
-  _2 := PtrUInt(P2);
-  l := PtrInt(@PByteArray(_1)[l - SizeOf(cardinal)]); // 32-bit end
-  if l >= _1 then
-    repeat // case-insensitive compare 4 bytes per loop
-      if (PCardinal(_1)^ xor PCardinal(_2)^) and $dfdfdfdf <> 0 then
-        goto zero;
-      inc(PCardinal(_1));
-      inc(PCardinal(_2));
-    until l < _1;
-  inc(PCardinal(l));
-  dec(_2, _1);
-  if _1 < l then
-    repeat
-      if (PByte(_1)^ xor PByteArray(_2)[PtrUInt(_1)]) and $df <> 0 then
-        goto zero;
-      inc(PByte(_1));
-    until _1 >= l;
-  result := true;
-  exit;
-zero:
-  result := false;
+  result := PropNameEquals(@P1^[1], @P2^[1], ord(P1^[0]), ord(P2^[0]));
+end;
+
+function PropNameEquals(P1: PShortString; P2: PAnsiChar; P2Len: PtrInt): boolean;
+begin
+  result := PropNameEquals(@P1^[1], P2, ord(P1^[0]), P2Len);
+end;
+
+function PropNameEquals(const P1, P2: RawUtf8): boolean;
+begin
+  result := PropNameEquals(pointer(P1), pointer(P2), length(P1), length(P2));
+end;
+
+function PropNameEquals(const P1: RawUtf8; P2: PAnsiChar; P2Len: PtrInt): boolean;
+begin
+  result := PropNameEquals(pointer(P1), P2, length(P1), P2Len);
 end;
 
 {$ifdef HASINLINE} // defined here for proper inlining
@@ -5182,39 +5195,75 @@ begin
   DateTimeToString(result, 'yyyy-mm-dd hh:nn:ss', dt);
 end;
 
-procedure ToHumanHex(var result: RawUtf8; bin: PByteArray; len: PtrInt);
-var
-  p: PAnsiChar;
-  i, c: PtrInt;
-  tab: PAnsichar;
+function Hex2Dec(c: AnsiChar): ShortInt; {$ifdef HASINLINE} inline; {$endif}
 begin
-  if len <= 0 then
-  begin
-    result := '';
-    exit;
+  result := ord(c);
+  case c of
+    '#':
+      result := 0; // handle # as 0 char within an hexadecimal buffer
+    '0'..'9':
+      dec(result, ord('0'));
+    'A'..'Z':
+      dec(result, ord('A') - 10);
+    'a'..'z':
+      dec(result, ord('a') - 10);
+  else
+    result := -1;
   end;
-  FastSetString(result, (len * 3) - 1);
-  dec(len);
-  tab := @HexCharsLower;
-  p := pointer(result);
-  i := 0;
+end;
+
+function ParseHex0x(p: PAnsiChar): cardinal;
+var
+  v0, v1: integer;
+begin
+  result := 0;
+  if p = nil then
+    exit;
+  while p^ <> 'x' do
+    if p^ = #0 then
+      exit
+    else
+      inc(p);
   repeat
-    c := bin[i];
-    p[0] := tab[c shr 4];
-    c := c and 15;
-    p[1] := tab[c];
-    if i = len then
+    inc(p); // points to trailing 'x' at start
+    v0 := Hex2Dec(p^);
+    if v0 < 0 then
+      break; // not in '0'..'9','a'..'f'
+    inc(p);
+    v1 := Hex2Dec(p^);
+    if v1 < 0 then
+    begin
+      result := (result shl 4) or cardinal(v0); // only one char left
       break;
-    p[2] := ':'; // to please (most) human limited hexadecimal capabilities
-    inc(p, 3);
-    inc(i);
+    end;
+    result := (result shl 8) or (cardinal(v0) shl 4) or cardinal(v1);
   until false;
 end;
 
-procedure ToHumanHexReverse(var result: RawUtf8; bin: PByteArray; len: PtrInt);
+function ParseHex(p: PAnsiChar; b: PByte; n: integer): PAnsiChar;
+var
+  v0, v1: integer;
+begin
+  repeat
+    v0 := Hex2Dec(p^);
+    if v0 < 0 then
+      break; // not in '0'..'9','a'..'f'
+    inc(p);
+    v1 := Hex2Dec(p^);
+    if v1 < 0 then
+      break;
+    inc(p);
+    b^ := (v0 shl 4) or v1;
+    inc(b);
+    dec(n);
+  until n = 0;
+  result := p;
+end;
+
+procedure ToHumanHex(var result: RawUtf8; bin: PByte; len: integer; reverse: boolean);
 var
   p: PAnsiChar;
-  i, c: PtrInt;
+  c: PtrInt;
   tab: PAnsichar;
 begin
   if len <= 0 then
@@ -5225,19 +5274,25 @@ begin
   FastSetString(result, (len * 3) - 1);
   tab := @HexCharsLower;
   p := pointer(result);
-  i := len;
+  if reverse then
+    inc(bin, len - 1);
   repeat
-    dec(i);
-    c := bin[i];
+    c := bin^;
     p[0] := tab[c shr 4];
     c := c and 15;
     p[1] := tab[c];
-    if i = 0 then
+    dec(len);
+    if len = 0 then
       break;
-    p[2] := ':';
+    p[2] := ':'; // to please (most) human limited hexadecimal capabilities
     inc(p, 3);
+    if reverse then
+      dec(bin)
+    else
+      inc(bin);
   until false;
 end;
+
 
 { TObjectWithProps}
 

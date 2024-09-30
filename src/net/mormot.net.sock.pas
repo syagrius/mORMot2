@@ -1939,7 +1939,8 @@ type
 // - useful to easily catch any exception, and provide a custom TNetTlsContext
 // - aTunnel could be populated from mormot.net.client GetSystemProxyUri()
 function SocketOpen(const aServer, aPort: RawUtf8; aTLS: boolean = false;
-  aTLSContext: PNetTlsContext = nil; aTunnel: PUri = nil): TCrtSocket;
+  aTLSContext: PNetTlsContext = nil; aTunnel: PUri = nil;
+  aTLSIgnoreCertError: boolean = false): TCrtSocket;
 
 
 { ********* NTP / SNTP Protocol Client }
@@ -3444,7 +3445,7 @@ end;
 
 function MacToText(mac: PByteArray): RawUtf8;
 begin
-  ToHumanHex(result, mac, 6);
+  ToHumanHex(result, pointer(mac), 6);
 end;
 
 function MacTextFromHex(const Hex: RawUtf8): RawUtf8;
@@ -5150,7 +5151,7 @@ begin
   fSocketLayer := aLayer;
   fSocketFamily := nfUnknown;
   fWasBind := doBind;
-  if {%H-}PtrInt(aSock)<=0 then
+  if {%H-}PtrInt(aSock) <= 0 then
   begin
     // OPEN or BIND mode -> create the socket
     fServer := aServer;
@@ -6106,8 +6107,19 @@ end;
 
 
 function SocketOpen(const aServer, aPort: RawUtf8; aTLS: boolean;
-  aTLSContext: PNetTlsContext; aTunnel: PUri): TCrtSocket;
+  aTLSContext: PNetTlsContext; aTunnel: PUri;
+  aTLSIgnoreCertError: boolean): TCrtSocket;
+var
+  c: TNetTlsContext;
 begin
+  if aTls and
+     (aTLSContext = nil) and
+     aTLSIgnoreCertError then
+  begin
+    InitNetTlsContext(c);
+    c.IgnoreCertificateErrors := true;
+    aTLSContext := @c;
+  end;
   try
     result := TCrtSocket.Open(
       aServer, aPort, nlTcp, 10000, aTLS, aTLSContext, aTunnel);
