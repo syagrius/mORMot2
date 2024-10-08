@@ -547,7 +547,7 @@ type
     /// the element type
     Kind: TBsonElementType;
     /// number of bytes in the BSON element
-    // - will include the trailing #0 for string element
+    // - will include the #0 terminator for string element
     ElementBytes: integer;
     /// pointer to the BSON element value
     // - is the raw value, without any parsing, e.g. points to a double value or
@@ -579,7 +579,7 @@ type
           (
           /// points to the #0 ending string
           Text: PUtf8Char;
-          /// number of bytes in Text (excluding trailing #0)
+          /// number of bytes in Text (excluding #0 terminator)
           TextLen: integer;);
         betDoc,
         betArray:
@@ -1960,7 +1960,9 @@ procedure InitBsonObjectIDComputeNew;
 begin
   with GlobalBsonObjectID.DefaultValues do
   begin
-    Counter := Random32 and COUNTER_MASK;
+    repeat
+      Counter := Random32 and COUNTER_MASK;
+    until Counter <> 0;
     with Executable do
       PCardinal(@MachineID)^ := crc32c(crc32c(
         0, pointer(Host), length(Host)), pointer(User), length(User));
@@ -3356,7 +3358,7 @@ end;
 procedure TBsonWriter.BsonWrite(const name: RawUtf8; elemtype: TBsonElementType);
 begin
   if name = '' then
-    Write2(ord(elemtype)) // write with trailing #0 for void name
+    Write2(ord(elemtype)) // write with #0 terminator for void name
   else
   begin
     Write1(ord(elemtype));
@@ -3471,7 +3473,7 @@ begin
     valueLen := StrLen(value);
   Write4(valueLen + 1);
   Write(value, valueLen);
-  Write1(0); // value may be a PUtf8Char with no trailing #0
+  Write1(0); // value may be a PUtf8Char with no #0 terminator
 end;
 
 procedure TBsonWriter.BsonWriteDateTime(const name: RawUtf8; const value: TDateTime);

@@ -569,7 +569,7 @@ type
     procedure(Protocol: TWebSocketProtocol) of object;
 
   /// used to maintain a list of websocket protocols (for the server side)
-  TWebSocketProtocolList = class(TSynPersistentRWLightLock)
+  TWebSocketProtocolList = class(TObjectRWLightLock)
   protected
     fProtocols: array of TWebSocketProtocol;
     fOnUpgraded: TOnWebSocketProtocolUpgraded;
@@ -1231,9 +1231,7 @@ begin
   begin
     // https://tools.ietf.org/html/rfc6455#section-10.3
     // client-to-server masking is mandatory (but not from server to client)
-    repeat
-      hdr.mask := Random32;
-    until hdr.mask <> 0;
+    hdr.mask := Random32Not0;
     inc(hdrlen, 4);
   end
   else
@@ -3434,12 +3432,12 @@ begin
     if r[length(r)] <> '/' then
       Append(r, '/');
   end;
-  // EIO        4          Mandatory, the version of the protocol.
-  // transport  websocket  Mandatory, the name of the transport.
-  // sid        <sid>      None here - direct websockets, not from HTTP polling.
-  // t          <random>   Ensure that the request is not cached by the browser.
+  // EIO        4          Mandatory, the version of the protocol
+  // transport  websocket  Mandatory, the name of the transport
+  // sid        <sid>      None here - direct websockets, not from HTTP polling
+  // t          <random>   Ensure that the request is not cached by the browser
   FormatUtf8('%?EIO=4&transport=websocket&t=%',
-    [r, CardinalToHexShort(Random32)], result);
+    [r, CardinalToHexShort(Random32Not0)], result);
   if PollingUpgradeSid <> '' then
     Append(result, '&sid=', PollingUpgradeSid);
 end;

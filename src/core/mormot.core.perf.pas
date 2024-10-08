@@ -373,7 +373,7 @@ type
   // process is to be monitored
   // - this class is thread-safe for its methods, but you should call explicitly
   // non-rentrant Lock/UnLock to access its individual properties
-  TSynMonitor = class(TSynPersistent)
+  TSynMonitor = class(TObjectWithRttiMethods)
   protected
     fSafe: TOSLightLock;
     fName: RawUtf8;
@@ -747,7 +747,7 @@ type
   // - you should inherit from this class to implement proper data persistence,
   // e.g. using TSynMonitorUsageRest for ORM-based storage
   // - SaveDB may take some time, so a TSynLocker OS lock is used, not TRWLock
-  TSynMonitorUsage = class(TSynPersistentLock)
+  TSynMonitorUsage = class(TSynLocked)
   protected
     fLog: TSynLogFamily;
     fTracked: array of TSynMonitorUsageTrack;
@@ -858,7 +858,7 @@ type
   // to gather low-level CPU and RAM information for the given set of processes
   // - is able to keep an history of latest sample values
   // - use Current class function to access a process-wide instance
-  TSystemUse = class(TSynPersistentRWLightLock)
+  TSystemUse = class(TObjectRWLightLock)
   protected
     fProcess: TSystemUseProcessDynArray;
     fProcesses: TDynArray;

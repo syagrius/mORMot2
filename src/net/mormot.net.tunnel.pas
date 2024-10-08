@@ -166,7 +166,7 @@ type
   // - is properly implemented by TTunnelLocalServer/TTunnelLocalClient classes
   // - published ITunnelTransmit so that could be used as receival callback
   // - if you release this instance, the tunnel will end
-  TTunnelLocal = class(TInterfacedObjectWithCustomCreate,
+  TTunnelLocal = class(TInterfacedPersistent,
     ITunnelLocal, ITunnelTransmit)
   protected
     fOptions: TTunnelOptions;
@@ -750,7 +750,7 @@ var
 begin
   if (Sender <> nil) and
      (Sender.Protocol <> nil) and
-     (Sender.Protocol.ClassType = TTunnelRelayServerProtocol) then
+     (PClass(Sender.Protocol)^ = TTunnelRelayServerProtocol) then
   case request.opcode of
     // focBinary or focContinuation/focConnectionClose
     focBinary:

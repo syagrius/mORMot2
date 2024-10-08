@@ -1457,7 +1457,7 @@ type
   // - inherited class should override the NewStore virtual method, e.g.
   // TRestStorageMultiDB as defined in mormot.orm.sqlite3.pas for SQlite3 storage
   // - your custom class should override NewModel to provide the proper data model
-  TRestStorageMulti = class(TSynPersistentRWLightLock)
+  TRestStorageMulti = class(TObjectRWLightLock)
   protected
     fDatabaseIDBits: byte;
     fDatabaseIDMax: TRestStorageMultiDatabaseID;
@@ -5364,7 +5364,7 @@ begin
       if fShardBatch[i] <> nil then
         if fShards[i].BatchSend(fShardBatch[i]) <> HTTP_SUCCESS then
           InternalLog('InternalBatchStop(%): %.BatchSend failed for shard #%',
-            [fStoredClass, fShards[i].ClassType, i], sllWarning);
+            [fStoredClass, PClass(fShards[i])^, i], sllWarning);
   finally
     ObjArrayClear(fShardBatch);
     StorageUnLock;

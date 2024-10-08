@@ -1540,25 +1540,14 @@ function CompressShaAes(var Data: RawByteString; Compress: boolean): RawUtf8;
 { ************* AES-256 Cryptographic Pseudorandom Number Generator (CSPRNG) }
 
 type
-  {$M+}
   /// thread-safe class containing a TAes encryption/decryption engine
-  TAesLocked = class
+  TAesLocked = class(TObjectOSLightLock)
   protected
-    fSafe: TOSLightLock; // TAes is enough for cache line padding of this lock
-    fAes: TAes;
+    fAes: TAes; // TAes is enough for cache line padding of this lock
   public
-    /// initialize the instance
-    constructor Create; virtual;
-    /// finalize all used memory and resources
+    /// finalize all used memory and the TAes instance
     destructor Destroy; override;
-    /// enter the associated non-reentrant TOSLightLock
-    procedure Lock;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// leave the associated non-reentrant TOSLightLock
-    procedure UnLock;
-      {$ifdef HASINLINE} inline; {$endif}
   end;
-  {$M-}
 
   /// abstract parent for TAesPrng* classes
   // - you should never use this class, but TAesPrng, TSystemPrng or
@@ -6810,7 +6799,7 @@ begin
         if (HRESULT(GetLastError) <> NTE_BAD_KEYSET) or
            not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
              PROV_RSA_AES, CRYPT_NEWKEYSET) then
-          raise ESynCrypto.CreateLastOSError('in AcquireContext', []);
+          ESynCrypto.RaiseLastOSError('in AcquireContext', []);
     end;
   end;
 end;
@@ -6858,11 +6847,11 @@ begin
   end;
   if not CryptoApi.ImportKey(CryptoApiAesProvider, @fKeyHeader,
      SizeOf(fKeyHeader) + fKeySizeBytes, nil, 0, fKeyCryptoApi) then
-    raise ESynCrypto.CreateLastOSError('in CryptImportKey for %', [self]);
+    ESynCrypto.RaiseLastOSError('in CryptImportKey for %', [self]);
   if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_IV, @fIV, 0) then
-    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_IV) for %', [self]);
+    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_IV) for %', [self]);
   if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_MODE, @fInternalMode, 0) then
-    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',
+    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',
        [fInternalMode, self]);
   if BufOut <> BufIn then
     MoveFast(BufIn^, BufOut^, Count);
@@ -6870,10 +6859,10 @@ begin
   if DoEncrypt then
   begin
     if not CryptoApi.Encrypt(fKeyCryptoApi, nil, false, 0, BufOut, n, Count) then
-      raise ESynCrypto.CreateLastOSError('in Encrypt() for %', [self]);
+      ESynCrypto.RaiseLastOSError('in Encrypt() for %', [self]);
   end
   else if not CryptoApi.Decrypt(fKeyCryptoApi, nil, false, 0, BufOut, n) then
-    raise ESynCrypto.CreateLastOSError('in Decrypt() for %', [self]);
+    ESynCrypto.RaiseLastOSError('in Decrypt() for %', [self]);
   dec(Count, n);
   if Count > 0 then // remaining bytes will be XORed with the supplied IV
     XorMemory(@PByteArray(BufOut)[n], @PByteArray(BufIn)[n], @fIV, Count);
@@ -7432,26 +7421,10 @@ end;
 
 { TAesLocked }
 
-constructor TAesLocked.Create;
-begin
-  fSafe.Init; // mandatory for TOSLightLock
-end;
-
 destructor TAesLocked.Destroy;
 begin
   inherited Destroy;
   fAes.Done; // fill AES buffer with 0 for safety
-  fSafe.Done;
-end;
-
-procedure TAesLocked.Lock;
-begin
-  fSafe.Lock;
-end;
-
-procedure TAesLocked.UnLock;
-begin
-  fSafe.UnLock;
 end;
 
 
@@ -11354,7 +11327,7 @@ begin
           SetOutLen(inLen + SizeOf(TAesBlock))
         else
           SetOutLen((nBlock + 2) shl AesBlockShift);
-        Head.SomeSalt := Random32;
+        Head.SomeSalt := Random32Not0;
         Head.HeaderCheck := Head.Calc(Key, KeySize);
         Crypt.Encrypt(TAesBlock(Head));
         Write(@Head, SizeOf(Head));

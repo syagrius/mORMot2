@@ -8,20 +8,6 @@
 
 { ****************** Unicode, Time, File process }
 
-const
-  /// Windows file APIs have hardcoded MAX_PATH = 260 :(
-  // - but more than 260 chars are possible with the \\?\..... prefix
-  // or by disabling the limitation in registry since Windows 10, version 1607
-  // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-  // - extended-length path allows up to 32,767 widechars
-  // - but 2047 chars seems big enough in practice e.g. with NTFS - POSIX uses 4096
-  W32_MAX = 2047;
-
-type
-  /// 4KB stack buffer for no heap allocation during UTF-16 encoding or
-  // switch to extended-length path
-  TW32Temp = array[0..W32_MAX] of WideChar;
-
 // W32() gets a PWideChar buffer from a TFileName using TW32Temp static buffer
 // W32Copy() forces a temporary copy - as used by GetFileVersionInfo()
 
@@ -97,7 +83,7 @@ begin
     if (len < MAX_PATH) and
        IsAnsiCompatible(pointer(FileName), len) then
       // most common cases do not need any Unicode conversion
-      for i := 0 to len do // include trailing #0
+      for i := 0 to len do // include #0 terminator
         PWordArray(@Temp)[i] := PByteArray(FileName)[i]
     else
       // use a temporary SynUnicode variable for complex UTF-16 conversion
@@ -130,7 +116,7 @@ var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // use RTL if complex
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len); // use RTL if complex
   if Len > 0 then
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
@@ -617,10 +603,10 @@ begin
   end;
   // first try if there is an English message version of this error code
   len := FormatMessageW(flags, src, Code, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
-  if len = 0 then
+  if len <= 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
     len := FormatMessageW(flags, src, Code, 0, @tmp, SizeOf(tmp), nil);
-  if (len = 0) and
+  if (len <= 0) and
      (src <> nil) then
   begin
     // fallback to the system error message if this module as no such code
@@ -3057,7 +3043,7 @@ end;
 
 const
   _WSP: array[TWinSystemPrivilege] of string[32] = (
-    // note: string[32] to ensure there is a trailing #0 for all items
+    // note: string[32] to ensure there is a #0 terminator for all items
     'SeCreateTokenPrivilege',          // wspCreateToken
     'SeAssignPrimaryTokenPrivilege',   // wspAssignPrimaryToken
     'SeLockMemoryPrivilege',           // wspLockMemory
@@ -3272,6 +3258,17 @@ begin
     exit;
   Include(fEnabled, aPrivilege);
   result := true;
+end;
+
+function TSynWindowsPrivileges.Enable(aPrivilege: TWinSystemPrivileges): boolean;
+var
+  p: TWinSystemPrivilege;
+begin
+  result := true;
+  for p := low(p) to high(p) do
+    if p in aPrivilege then
+      if not Enable(p) then
+        result := false; // notify an error at some point
 end;
 
 function TSynWindowsPrivileges.Disable(

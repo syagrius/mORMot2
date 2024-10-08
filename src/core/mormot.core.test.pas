@@ -25,6 +25,8 @@ uses
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers,
+  mormot.core.datetime,
+  mormot.core.rtti,
   mormot.core.perf,
   mormot.core.log;
 
@@ -529,10 +531,6 @@ var
 
 
 implementation
-
-uses
-  mormot.core.rtti,
-  mormot.core.datetime;
 
 
 { ************ Unit-Testing classes and functions }

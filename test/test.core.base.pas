@@ -50,7 +50,7 @@ const
 
 type
   /// a test class, used by TTestServiceOrientedArchitecture
-  // - to test TPersistent objects used as parameters for remote service calls
+  // - also validates TPersistent objects as parameters for remote service calls
   TComplexNumber = class(TPersistent)
   private
     fReal: Double;
@@ -60,9 +60,11 @@ type
     constructor Create(aReal, aImaginary: double); reintroduce;
   published
     /// the real part of this complex number
-    property Real: Double read fReal write fReal;
+    property Real: Double
+      read fReal write fReal;
     /// the imaginary part of this complex number
-    property Imaginary: Double read fImaginary write fImaginary;
+    property Imaginary: Double
+      read fImaginary write fImaginary;
   end;
 
   TComplexNumberObjArray = array of TComplexNumber;
@@ -216,8 +218,8 @@ type
     procedure _IdemPropName;
     /// test our internal fast TGUID process functions
     procedure _GUID;
-    /// test ParseCommandArguments() function
-    procedure _ParseCommandArguments;
+    /// test ParseCommandArgs() functions
+    procedure _ParseCommandArgs;
     /// test TExecutableCommandLine class
     procedure _TExecutableCommandLine;
     /// test IsMatch() function
@@ -2467,8 +2469,8 @@ begin
   Check(r.Enum = e4);
   // TPeople2 <--> TPeopleR class/record custom fields mapping with TRttiMap
   m.Init(TPeople2, TypeInfo(TPeopleR)).Map([
-    'firstName', 'lastname',   // inverted
-    'lastname', 'firstName',
+    'firstName',   'lastname', // inverted
+    'lastname',    'firstName',
     'YearOfBirth', 'Unused']); // moved
   RecordZero(@r, TypeInfo(TPeopleR));
   CheckEqual(r.FirstName, '');
@@ -2482,7 +2484,7 @@ begin
   CheckEqual(r.Unused, o2.YearOfBirth);
   Check(r.Enum = e0);
   // TOrmPeople <--> TRecordPeople class/record fields mapping with TRttiMap
-  m.Init(TypeInfo(TOrmPeople), TypeInfo(TRecordPeople)).AutoMap;
+  m.Init(TOrmPeople, TypeInfo(TRecordPeople)).AutoMap;
   CheckEqual(p.FirstName, 'toto');
   CheckEqual(p.LastName, 'titi');
   CheckEqual(p.YearOfBirth, o1.YearOfBirth);
@@ -2676,31 +2678,37 @@ begin
   end;
 end;
 
-procedure TTestCoreBase._ParseCommandArguments;
+procedure TTestCoreBase._ParseCommandArgs;
 
   procedure Test(const cmd: RawUtf8; const expected: array of RawUtf8;
      const flags: TParseCommands = []; posix: boolean = true);
   var
     tmp: RawUtf8;
-    n, i: integer;
+    n, i: integer; // integer, not PtrInt
     a: TParseCommandsArgs;
+    p: TRawUtf8DynArray;
   begin
-    if checkfailed(ParseCommandArgs(cmd, nil, nil, nil, posix) = flags) then
+    if CheckFailed(ParseCommandArgs(cmd, nil, nil, nil, posix) = flags) then
       exit;
-    FillcharFast(a, SizeOf(a), 255);
-    check(ParseCommandArgs(cmd, @a, @n, @tmp, posix) = flags);
-    if (flags = []) and
-       not CheckFailed(n = length(expected)) then
-    begin
-      for i := 0 to high(expected) do
-        check(StrComp(pointer(a[i]), pointer(expected[i])) = 0);
-      check(a[n] = nil);
-    end;
+    FillcharFast(a, SizeOf(a), 255); // ensure a[n]<>nil
+    Check(ParseCommandArgs(cmd, @a, @n, @tmp, posix) = flags);
+    if (flags <> []) or
+       CheckFailed(n = length(expected)) then
+      exit;
+    for i := 0 to n - 1 do
+      Check(StrComp(pointer(a[i]), pointer(expected[i])) = 0);
+    Check(a[n] = nil, 'last param should be nil');
+    Check(ExtractCommandArgs(cmd, p, posix) = flags);
+    if not CheckFailed(n = length(p)) then
+      for i := 0 to n - 1 do
+        CheckEqual(p[i], expected[i]);
   end;
 
 begin
   Test('', [], [pcInvalidCommand]);
   Test('one', ['one']);
+  Test('o', ['o']);
+  Test(' o', ['o']);
   Test('one two', ['one', 'two']);
   Test('    one     two    ', ['one', 'two']);
   Test('"one" two', ['one', 'two']);
@@ -6495,10 +6503,10 @@ const
   RID_TXT: array[4..high(SD_B64)] of RawUtf8 = (
     'O:DUG:DAD:(A;;FA;;;DA)',
     'O:S-1-5-21-682003330-1677128483-1060284298-1003G:DUD:(A;;FA;;;BA)(A;;FA;;;SY)' +
-    '(A;;FA;;;S-1-5-21-682003330-1677128483-1060284298-1003)(A;;0x1200a9;;;BU)',
+      '(A;;FA;;;S-1-5-21-682003330-1677128483-1060284298-1003)(A;;0x1200a9;;;BU)',
     'O:BAG:DUD:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)',
     'O:S-1-5-21-2461620395-3297676348-3167859224-1001G:DUD:AI(A;ID;FA;;;BA)' +
-    '(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)');
+      '(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)');
   // [MS-DTYP] 2.4.4.17.9 Examples: Conditional Expression Binary Representation
   ARTX_HEX: array[0..2] of RawUtf8 = (
     '61727478f80a0000005400690074006c00650010040000005600500080000000',
@@ -6518,33 +6526,40 @@ const
     'D:(XA;;FX;;;WD;(@User.Title=="PM" && (@User.Division=="Finance" || ' +
       '@User.Division ==" Sales")))',
     'D:(XA;;FX;;;WD;(@User.Project Any_of @Resource.Project))(A;ID;FA;;;SY)',
-    'D:(XA;;FR;;;WD;(Member_of{SID(S-1-3-4),SID(BO)} && @Device.Bitlocker))(A;ID;FA;;;SY)');
+    'D:(XA;;FR;;;WD;(Member_of{SID(S-1-5-21-111-222-333-500),SID(BO)} && ' +
+      '@Device.Bitlocker))(A;ID;FA;;;SY)');
   // our SDDL output always add parenthesis on binary expressions
   COND_EXP: array[0..2] of RawUtf8 = (
     'D:(XA;;FX;;;WD;((@User.Title=="PM") && ((@User.Division=="Finance") || ' +
       '(@User.Division==" Sales"))))',
     'D:(XA;;FX;;;WD;(@User.Project Any_of @Resource.Project))(A;ID;FA;;;SY)',
-    'D:(XA;;FR;;;WD;((Member_of{SID(S-1-3-4),SID(BO)}) && @Device.Bitlocker))(A;ID;FA;;;SY)');
+    'D:(XA;;FR;;;WD;((Member_of{SID(S-1-5-21-111-222-333-500),SID(BO)}) && '+
+      '@Device.Bitlocker))(A;ID;FA;;;SY)');
 
 procedure TTestCoreBase._SDDL;
 var
   i, j: PtrInt;
   c: TSecControls;
-  k: TWellKnownSid;
-  r: TWellKnownRid;
+  k, k2: TWellKnownSid;
+  r, r2: TWellKnownRid;
   bin, saved: RawSecurityDescriptor;
-  u, dom, json: RawUtf8;
+  u, u2, dom, dom2, json: RawUtf8;
+  all: TRawUtf8DynArray;
+  n: integer;
   domsid: RawSid;
   sd, sd2: TSecurityDescriptor;
   bintree: TAceBinaryTree;
   sddltree: TAceTextTree;
   atp: TAceTextParse;
+  a: TAdsKnownAttribute;
   p: PUtf8Char;
 begin
   // validate internal structures and types
   CheckEqual(KnownSidToSddl(wksNull), '');
   CheckEqual(KnownSidToSddl(wksWorld), 'WD');
   CheckEqual(KnownSidToSddl(wksLocal), '');
+  CheckEqual(KnownSidToSddl(wksCreatorOwnerRights), 'OW');
+  CheckEqual(KnownSidToSddl(wksDialup), '');
   CheckEqual(KnownSidToSddl(wksNetwork), 'NU');
   CheckEqual(KnownSidToSddl(wksSelf), 'PS');
   CheckEqual(KnownSidToSddl(wksLocalSystem), 'SY');
@@ -6554,12 +6569,43 @@ begin
   CheckEqual(KnownSidToSddl(wksBuiltinEventLogReadersGroup), 'ER');
   CheckEqual(KnownSidToSddl(wksBuiltinAccessControlAssistanceOperators), 'AA');
   CheckEqual(KnownSidToSddl(wksBuiltinWriteRestrictedCode), 'WR');
+  CheckEqual(KnownSidToSddl(wksBuiltinUserModeDriver), 'UD');
+  CheckEqual(KnownSidToSddl(wksBuiltinAnyPackage), 'AC');
+  CheckEqual(KnownSidToSddl(wksAuthenticationServiceAsserted), 'SS');
   CheckEqual(KnownSidToSddl(wksCapabilityInternetClient), '');
   CheckEqual(KnownSidToSddl(high(TWellKnownSid)), '');
+  CheckEqual(KnownRidToSddl(wrkUserModeHwOperator), 'HO');
+  n := 0;
   for k := low(k) to high(k) do
-    Check((KnownSidToSddl(k) <> '') = (k in wksWithSddl));
+  begin
+    u := KnownSidToSddl(k);
+    Check((u <> '') = (k in wksWithSddl));
+    Check(SddlToKnownSid(u, k2) = (u <> ''));
+    if u = '' then
+      continue;
+    CheckUtf8(k2 = k, u);
+    CheckUtf8(not SddlToKnownRid(u, r2), u);
+    AddRawUtf8(all, n, FormatUtf8('% = %', [u, ToText(k)^]));
+  end;
   for r := low(r) to high(r) do
-    Check((KnownRidToSddl(r) <> '') = (r in wkrWithSddl));
+  begin
+    u := KnownRidToSddl(r);
+    Check((u <> '') = (r in wkrWithSddl));
+    Check(SddlToKnownRid(u, r2) = (u <> ''));
+    if u = '' then
+      continue;
+    CheckUtf8(r2 = r, u);
+    CheckUtf8(not SddlToKnownSid(u, k2), u);
+    AddRawUtf8(all, n, FormatUtf8('% = %', [u, ToText(r)^]));
+  end;
+  DynArrayFakeLength(all, n);
+  QuickSortRawUtf8(all, n);
+  u := RawUtf8ArrayToCsv(all, #10); //ConsoleWrite(u);
+  CheckHash(u, $30EF8B6D, 'sid sddl list');
+  CheckEqual(SizeOf(TSid)    and 3, 0, 'TSid    DWORD-aligned');
+  CheckEqual(SizeOf(TRawSD)  and 3, 0, 'TRawSD  DWORD-aligned');
+  CheckEqual(SizeOf(TRawAcl) and 3, 0, 'TRawAcl DWORD-aligned');
+  CheckEqual(SizeOf(TRawAce) and 3, 0, 'TRawAce DWORD-aligned');
   CheckEqual(ord(scDaclAutoInheritReq), 8);
   CheckEqual(ord(scSelfRelative), 15);
   c := [scSelfRelative];
@@ -6567,7 +6613,7 @@ begin
   CheckEqual(ord(samGenericRead), 31, 'sam');
   dom := 'S-1-5-21-823746769-1624905683-418753922';
   CheckEqual(KnownSidToText(wkrUserAdmin, dom), dom + '-500');
-  CheckEqual(KnownSidToText(wkrSecurityMandatorySystem, dom), dom + '-16384');
+  CheckEqual(KnownSidToText(wrkGroupRasServers, dom), dom + '-553');
   // validate against some reference binary material
   for i := 0 to high(SD_B64) do
   begin
@@ -6616,6 +6662,7 @@ begin
     json := SecurityDescriptorToJson(sd);
     Check(IsValidJson(json), 'savejson');
     sd2.Clear;
+    Check(not sd.IsEqual(sd2));
     Check(SecurityDescriptorFromJson(json, sd2), 'loadjson');
     Check(sd.IsEqual(sd2));
     Check(scSelfRelative in sd2.Flags);
@@ -6671,29 +6718,92 @@ begin
   CheckHash(saved, $3B028A48, 'dombin');
   Check(IsValidSecurityDescriptor(pointer(saved), length(saved)), 'saveddom');
   Check(TryDomainTextToSid(dom, domsid));
-  u := 'rid';
-  sd.AppendAsText(u, pointer(domsid));
-  CheckEqual(u, 'ridO:DUG:DAD:(A;;FA;;;DA)');
   CheckEqual(sd.Dacl[0].SidText, dom + '-512');
   CheckEqual(sd.Dacl[0].SidText(pointer(domsid)), 'DA');
   CheckEqual(sd.Dacl[0].MaskText, 'FA');
   Check(sd.Dacl[0].SidText('DU', pointer(domsid)));
   CheckEqual(sd.Dacl[0].SidText, dom + '-513');
   CheckEqual(sd.Dacl[0].SidText(pointer(domsid)), 'DU');
+  dom2 := 'S-1-5-21-237846769-6124905683-148753929';
+  Check(sd.FromBinary(saved));
+  Check(sd2.FromBinary(saved));
+  Check(sd.IsEqual(sd2));
+  u := sd.ToText(dom);
+  CheckEqual(u, RID_TXT[4], 'domsaved');
+  Check(sd.Modified = []);
+  CheckEqual(sd.ReplaceDomain(dom, dom2), 3);
+  Check(sd.Modified = [sdiOwner, sdiGroup, sdiDacl]);
+  sd.Modified := [];
+  Check(not sd.IsEqual(sd2));
+  u := sd.ToText;
+  CheckNotEqual(u, SD_TXT[4], 'dom2a');
+  u2 := sd.ToText(dom);
+  CheckEqual(u, u2, 'dom2b');
+  u := sd.ToText(dom2);
+  CheckEqual(u, RID_TXT[4], 'dom2c');
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceDomain(dom, dom2), 0);
+  Check(sd.Modified = []);
+  u := sd.ToText(dom);
+  CheckEqual(u, u2, 'dom2d');
+  u := sd.ToText(dom2);
+  CheckEqual(u, RID_TXT[4], 'dom2e');
+  Check(not sd.IsEqual(sd2));
+  CheckEqual(sd.ReplaceDomain(dom2, dom), 3);
+  Check(sd.Modified = [sdiOwner, sdiGroup, sdiDacl]);
+  u := sd.ToText(dom);
+  CheckNotEqual(u, SD_TXT[4], 'dom2f');
+  CheckEqual(u, RID_TXT[4], 'dom2g');
+  Check(sd.IsEqual(sd2), 'dom2h');
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceDomain(dom2, dom), 0);
+  Check(sd.Modified = []);
+  Check(sd.IsEqual(sd2), 'dom2i');
+  CheckEqual(sd.ReplaceSid(dom + '-512', dom + '-500'), 2, 'dom3a');
+  Check(sd.Modified = [sdiGroup, sdiDacl]);
+  u := sd.ToText(dom);
+  CheckEqual(u, 'O:DUG:LAD:(A;;FA;;;LA)');
+  Check(not sd.IsEqual(sd2), 'dom3c');
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceSid(dom + '-501', dom + '-512'), 0, 'dom3d1');
+  Check(sd.Modified = []);
+  CheckEqual(sd.ReplaceSid(dom + '-500', dom + '-512'), 2, 'dom3d2');
+  Check(sd.Modified = [sdiGroup, sdiDacl]);
+  u := sd.ToText(dom);
+  CheckEqual(u, RID_TXT[4]);
+  Check(sd.IsEqual(sd2), 'dom3f');
   // RID reference material with several domains
   for i := low(DOM_TXT) to high(DOM_TXT) do
   begin
-    Check(TryDomainTextToSid(DOM_TXT[i], domsid));
     atp := sd.FromText(SD_TXT[i]);
     Check(atp = atpSuccess);
-    u := '';
-    sd.AppendAsText(u, pointer(domsid));
+    u := sd.ToText(DOM_TXT[i]);
     CheckEqual(u, RID_TXT[i]);
+    Check(TryDomainTextToSid(DOM_TXT[i], domsid));
     p := pointer(u);
     atp := sd2.FromText(p, pointer(domsid));
     Check(atp = atpSuccess);
     Check(sd.IsEqual(sd2));
   end;
+  // custom UUID values in SDDL text
+  for a := low(a) to high(a) do
+  begin
+    Check(UuidToKnownAttribute(ATTR_UUID[a]) = a); // O(log(n)) binary search
+    u := ATTR_TXT[a];
+    CheckUtf8(TextToKnownAttribute(pointer(u), length(u)) = a, u);
+  end;
+  Check(sd.FromText(SD_TXT[1]) = atpSuccess, 'uuid');
+  u := sd.ToText;
+  CheckEqual(u, SD_TXT[1]);
+  u := sd.ToText('', AppendShortKnownUuid);
+  CheckEqual(u, 'O:AOG:SYD:(A;;KA;;;SY)(A;;KA;;;AO)(OA;;CCDC;User;;AO)' +
+    '(OA;;CCDC;Group;;AO)(OA;;CCDC;6da8a4ff-0e52-11d0-a286-00aa003049e2;;AO)' +
+    '(OA;;CCDC;Print-Queue;;PO)(A;;LCRPRC;;;AU)S:(AU;SAFA;CCDCSWWPSDWDWO;;;WD)');
+  atp := sd2.FromText(u);
+  Check(atp = atpInvalidUuid, 'uuid1');
+  Check(not sd.IsEqual(sd2), 'uuid2');
+  Check(sd2.FromText(u, '', @ShortToKnownUuid) = atpSuccess, 'uuid3');
+  Check(sd.IsEqual(sd2), 'uuid4');
   // validate conditional ACEs reference binary
   for i := 0 to high(ARTX_HEX) do
   begin
@@ -6737,6 +6847,31 @@ begin
     Check(sd.IsEqual(sd2));
     CheckEqual(sd2.ToText, u);
   end;
+  dom := 'S-1-5-21-111-222-333';
+  u := sd.ToText(dom);
+  CheckEqual(u, 'D:(XA;;FR;;;WD;((Member_of{SID(LA),SID(BO)}) && ' +
+    '@Device.Bitlocker))(A;ID;FA;;;SY)');
+  dom2 := 'S-1-5-21-1111-2222-3333';
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceDomain(dom, dom2), 1);
+  Check(sd.Modified = [sdiDacl]);
+  u2 := sd.ToText;
+  CheckEqual(u2,
+    'D:(XA;;FR;;;WD;((Member_of{SID(S-1-5-21-1111-2222-3333-500),SID(BO)}) && '+
+    '@Device.Bitlocker))(A;ID;FA;;;SY)');
+  u2 := sd.ToText(dom2);
+  CheckEqual(u, u2);
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceSid('S-1-5-21-1111-2222-3333-500',
+    'S-1-5-21-111-222-333-512'), 1);
+  Check(sd.Modified = [sdiDacl]);
+  u := sd.ToText(dom);
+  CheckEqual(u, 'D:(XA;;FR;;;WD;((Member_of{SID(DA),SID(BO)}) && ' +
+    '@Device.Bitlocker))(A;ID;FA;;;SY)');
+  sd.Modified := [];
+  CheckEqual(sd.ReplaceSid('S-1-5-21-1111-2222-3333-500',
+    'S-1-5-21-111-222-333-512'), 0);
+  Check(sd.Modified = []);
 end;
 
 function IPNUSL(const s1, s2: RawUtf8; len: integer): boolean;

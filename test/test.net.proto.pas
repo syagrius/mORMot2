@@ -135,7 +135,7 @@ begin
         url := 'https://raw.githubusercontent.com/OAI/' +
                  'OpenAPI-Specification/main/examples/' + url;
        JsonBufferReformat(pointer(
-        HttpGet(url, nil, false, nil, 0, {forcesock:}true, {igncerterr:}true)),
+        HttpGet(url, nil, false, nil, 0, {forcesock:}false, {igncerterr:}true)),
         pets[i]);
       if pets[i] <> '' then
         FileFromString(pets[i], fn);
@@ -669,13 +669,14 @@ end;
 procedure TNetworkProtocols.DNSAndLDAP;
 var
   ip, u, v, sid: RawUtf8;
+  o: TAsnObject;
   c: cardinal;
   withntp: boolean;
   guid: TGuid;
   i, j, k: PtrInt;
   dns, clients, a: TRawUtf8DynArray;
   le: TLdapError;
-  rl: TLdapResultList;
+  rl, rl2: TLdapResultList;
   r: TLdapResult;
   at: TLdapAttributeType;
   ats: TLdapAttributeTypes;
@@ -691,6 +692,7 @@ var
   res: TLdapResult;
   utc1, utc2: TDateTime;
   ntp, usr, pwd, ku, main, txt: RawUtf8;
+  dn: TNameValueDNs;
   hasinternet: boolean;
 begin
   // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
@@ -758,8 +760,30 @@ begin
     'OU=d..zaf(fds )da\,z \"\"((''\\/ df\3D\3Dez,OU=test_wapt,OU=computers,' +
     'OU=tranquilit,DC=ad,DC=tranquil,DC=it'),
     'ad.tranquil.it/tranquilit/computers/test_wapt/d\.\.zaf(fds )da,z ""((''\\\/ df==ez');
+  CheckEqual(DNToCN('dc=ad,dc=company,dc=it'), 'ad.company.it');
   CheckEqual(DNToCN('cn=foo, ou=bar'), '/bar/foo');
   CheckEqual(NormalizeDN('cn=foo, ou = bar'), 'CN=foo,OU=bar');
+  Check(ParseDn('dc=ad, dc=company, dc = it', dn));
+  CheckEqual(length(dn), 3);
+  CheckEqual(dn[0].Name, 'dc');
+  CheckEqual(dn[0].Value, 'ad');
+  CheckEqual(dn[1].Name, 'dc');
+  CheckEqual(dn[1].Value, 'company');
+  CheckEqual(dn[2].Name, 'dc');
+  CheckEqual(dn[2].Value, 'it');
+  Check(ParseDn('uid=33\,test\=dans le nom,ou=Users,ou=montaigu,dc=sermo,dc=fr', dn));
+  CheckEqual(length(dn), 5);
+  CheckEqual(dn[0].Name, 'uid');
+  CheckEqual(dn[0].Value, '33\,test\=dans le nom');
+  CheckEqual(dn[1].Name, 'ou');
+  CheckEqual(dn[1].Value, 'Users');
+  CheckEqual(dn[2].Name, 'ou');
+  CheckEqual(dn[2].Value, 'montaigu');
+  CheckEqual(dn[3].Name, 'dc');
+  CheckEqual(dn[3].Value, 'sermo');
+  CheckEqual(dn[4].Name, 'dc');
+  CheckEqual(dn[4].Value, 'fr');
+  Check(not ParseDn('dc=ad, dc=company, dc', dn, {noraise=}true));
   // validate LDAP error recognition
   Check(RawLdapError(-1) = leUnknown);
   Check(RawLdapError(LDAP_RES_TOO_LATE) = leUnknown);
@@ -798,6 +822,64 @@ begin
   Check(not LdapSafe('abc)'));
   Check(not LdapSafe('*'));
   Check(not LdapSafe('()'));
+  // validate LDAP filter text parsing
+  // against https://ldap.com/ldapv3-wire-protocol-reference-search reference
+  CheckEqual(RawLdapTranslateFilter('', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('', {noraise=}false), '');
+  o := RawLdapTranslateFilter('(attr=toto)');
+  CheckHash(o, $E2C7F47C);
+  o := RawLdapTranslateFilter('&(attr=toto)');
+  CheckHash(o, $7B08F48C);
+  o := RawLdapTranslateFilter('(&(attr1=a)(attr2=b)(attr3=c)(attr4=d))');
+  CheckHash(o, $1AAB9884);
+  o := RawLdapTranslateFilter('&(attr1=a)(attr2=b)(attr3=c)(attr4=d)');
+  CheckHash(o, $1AAB9884);
+  o := RawLdapTranslateFilter('(& ( attr1=a) (attr2=b) (attr3=c) (attr4=d))');
+  CheckHash(o, $1AAB9884);
+  o := RawLdapTranslateFilter('( & (attr1=a)(attr2=b)(attr3=c)(attr4=d) )');
+  CheckHash(o, $1AAB9884);
+  o := RawLdapTranslateFilter('(&(attr1=a)(&(attr2=b)(&(attr3=c)(attr4=d))))');
+  CheckHash(o, $B1BB5EE1);
+  o := RawLdapTranslateFilter('(&(givenName=John)(sn=Doe))');
+  CheckHash(o, $372C9EF2);
+  o := RawLdapTranslateFilter('(&)');
+  CheckHash(o, $00A000A0);
+  o := RawLdapTranslateFilter('(|(givenName=John)(givenName=Jonathan))');
+  CheckHash(o, $A9670687);
+  o := RawLdapTranslateFilter('(!(givenName=John))');
+  CheckHash(o, $231C39EF);
+  o := RawLdapTranslateFilter('(|)');
+  CheckHash(o, $00A100A1);
+  o := RawLdapTranslateFilter('*');
+  CheckHash(o, $01AD0187);
+  o := RawLdapTranslateFilter('(*)');
+  CheckHash(o, $01AD0187);
+  o := RawLdapTranslateFilter('(uid:=jdoe)');
+  CheckHash(o, $C93ADF87);
+  o := RawLdapTranslateFilter('(:caseIgnoreMatch:=foo)');
+  CheckHash(o, $4F000E3E);
+  o := RawLdapTranslateFilter('(uid:dn:caseIgnoreMatch:=jdoe)');
+  CheckHash(o, $921D9031);
+  o := RawLdapTranslateFilter('(cn=abc*)');
+  CheckHash(o, $E8897DEA);
+  o := RawLdapTranslateFilter('(cn=*lmn*)');
+  CheckHash(o, $F5897DF6);
+  o := RawLdapTranslateFilter('(cn=*xyz)');
+  CheckHash(o, $019B7E03);
+  o := RawLdapTranslateFilter('(cn=abc*def*lmn*uvw*xyz)');
+  CheckHash(o, $9BA95FBA);
+  //writeln(AsnDump(o));
+  CheckEqual(RawLdapTranslateFilter('(givenName=John', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('(!(givenName=John)', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('!', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('&', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('|', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('! ', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('& ', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('| ', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('!( )', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('&()', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('| ( )', {noraise=}true), '');
   // validate LDAP attributes definitions
   for at := low(at) to high(at) do
   begin
@@ -864,9 +946,15 @@ begin
     Check(SystemFlagsFromInteger(SystemFlagsValue(sfs)) = sfs);
   end;
   // validate LDAP resultset and LDIF content
+  rl2 := nil;
   rl := TLdapResultList.Create;
   try
-    CheckEqual(rl.Dump({noTime=}true), 'results: 0'#13#10);
+    u := rl.Dump({noTime=}true);
+    CheckEqual(u, 'results: 0'#13#10);
+    rl2 := CopyObject(rl);
+    Check(rl2 <> nil);
+    Check(rl2.ClassType = TLdapResultList);
+    CheckEqual(rl2.Dump({noTime=}true), u);
     CheckEqual(rl.ExportToLdifContent,
       'version: 1'#$0A'# total number of entries: 0'#$0A);
     CheckEqual(rl.Count, 0);
@@ -895,6 +983,9 @@ begin
     CheckHash(rl.GetJson([roNoObjectName, roWithCanonicalName]), $0BCFC3BC);
     CheckHash(rl.Dump({noTime=}true), $DF59A0A9, 'hashDump');
     CheckHash(rl.ExportToLdifContent, $4A97B4B2, 'hashLdif');
+    CopyObject(rl, rl2);
+    CheckHash(rl2.Dump({noTime=}true), $DF59A0A9, 'hashDump2');
+    CheckHash(rl2.ExportToLdifContent, $4A97B4B2, 'hashLdif2');
     r.Attributes.Delete(atCommonName);
     CheckEqual(r.Attributes.Count, 2);
     v := rl.GetJson([roNoObjectName]);
@@ -908,6 +999,7 @@ begin
     CheckHash(rl.ExportToLdifContent, $31A4283C, 'hashLdif');
   finally
     rl.Free;
+    rl2.Free;
   end;
   // validate LDAP settings
   l := TLdapClientSettings.Create;

@@ -168,7 +168,7 @@ function FromVarString(var Source: PByte; SourceMax: PByte;
 
 /// retrieve a variable-length UTF-8 encoded text buffer in a temporary buffer
 // - caller should call Value.Done after use of the Value.buf memory
-// - this overloaded function would include a trailing #0, so Value.buf could
+// - this overloaded function would include a #0 terminator, so Value.buf could
 // be parsed as a valid PUtf8Char buffer (e.g. containing JSON)
 procedure FromVarString(var Source: PByte; var Value: TSynTempBuffer); overload;
 
@@ -1856,6 +1856,9 @@ function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
 function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// recognize e.g. 'application/json' or 'application/vnd.api+json'
+function IsContentTypeJson(ContentType: PUtf8Char): boolean;
+
 /// fast guess of the size, in pixels, of a JPEG memory buffer
 // - will only scan for basic JPEG structure, up to the StartOfFrame (SOF) chunk
 // - returns TRUE if the buffer is likely to be a JPEG picture, and set the
@@ -1873,7 +1876,7 @@ type
   // - much faster than TStringList.LoadFromFile()
   // - will ignore any trailing UTF-8 BOM in the file content, but will not
   // expect one either
-  TMemoryMapText = class(TObjectWithProps)
+  TMemoryMapText = class(TSynPersistent)
   protected
     fLines: PPointerArray;
     fLinesMax: integer;
@@ -1999,7 +2002,7 @@ function AppendUInt32ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
 
 /// fast add text conversion of 0-999 integer value into a given buffer
 // - warning: it won't check that Value is in 0-999 range
-// - up to 4 bytes may be written to the buffer (including trailing #0)
+// - up to 4 bytes may be written to the buffer (including #0 terminator)
 function Append999ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -2205,6 +2208,7 @@ type
     function GetProgress: RawUtf8;
     procedure DoReport(ReComputeElapsed: boolean);
     procedure DoHash(data: pointer; len: integer); virtual; // do nothing
+    procedure ResetHash; virtual; // called e.g. from Seek(0, soBeginning)
     procedure SetExpectedSize(Value: Int64);
     procedure ReadWriteHash(const Buffer; Count: integer); virtual;
     procedure ReadWriteReport(const Caller: ShortString); virtual;
@@ -2233,6 +2237,9 @@ type
     // - also trigger OnProgress at least every second
     // - will raise an error if Read() has been called before
     function Write(const Buffer; Count: Longint): Longint; override;
+    /// overriden to support Seek(0, soBeginning) and reset the Redirected stream
+    // - mandatory for proper THttpClientSocket.SockSendStream rewind
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
     /// update the hash of the existing Redirected stream content
     // - ready to Write() some new data after the existing
     procedure Append;
@@ -2318,15 +2325,16 @@ type
   TStreamRedirectClass = class of TStreamRedirect;
 
   /// TStreamRedirect with 32-bit THasher checksum
-  TStreamRedirectHasher = class(TStreamRedirect)
+  TStreamRedirectHash32 = class(TStreamRedirect)
   protected
     fHash: cardinal;
+    procedure ResetHash; override;
   public
     function GetHash: RawUtf8; override;
   end;
 
   /// TStreamRedirect with crc32c 32-bit checksum
-  TStreamRedirectCrc32c = class(TStreamRedirectHasher)
+  TStreamRedirectCrc32c = class(TStreamRedirectHash32)
   protected
     procedure DoHash(data: pointer; len: integer); override;
   public
@@ -3441,7 +3449,7 @@ var
 begin
   len := FromVarUInt32(Source);
   Value.Init(Source, len);
-  PByteArray(Value.buf)[len] := 0; // include trailing #0
+  PByteArray(Value.buf)[len] := 0; // include #0 terminator
   inc(Source, len);
 end;
 
@@ -3463,7 +3471,7 @@ begin
     end;
   end;
   Value.Init(Source, len);
-  PByteArray(Value.buf)[len] := 0; // include trailing #0
+  PByteArray(Value.buf)[len] := 0; // include #0 terminator
   inc(Source, len);
   result := true;
 end;
@@ -4488,7 +4496,7 @@ procedure TBufferWriter.CancelAll;
 begin
   fTotalFlushed := 0;
   fPos := 0;
-  if fStream.ClassType = TRawByteStringStream then
+  if PClass(fStream)^ = TRawByteStringStream then
     TRawByteStringStream(fStream).Size := 0
   else
     fStream.Seek(0, soBeginning);
@@ -9029,9 +9037,9 @@ const
     nil);
   _CONTENT_APP: array[0..4] of PUtf8Char = (
     'JSON',
-    'XML',
     'JAVASCRIPT',
     'VND.API+JSON',
+    'XML',
     nil);
 
 function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
@@ -9051,6 +9059,12 @@ end;
 function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
 begin
   result := IsContentTypeCompressible(pointer(ContentType));
+end;
+
+function IsContentTypeJson(ContentType: PUtf8Char): boolean;
+begin
+  result := IdemPChar(ContentType, pointer(_CONTENT[2])) and
+            (PtrUInt(IdemPPChar(ContentType + 12, @_CONTENT_APP)) <= 2);
 end;
 
 function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
@@ -9832,6 +9846,10 @@ procedure TStreamRedirect.DoHash(data: pointer; len: integer);
 begin // no associated hasher on this parent class
 end;
 
+procedure TStreamRedirect.ResetHash;
+begin // no associated hasher on this parent class
+end;
+
 procedure TStreamRedirect.SetExpectedSize(Value: Int64);
 begin
   fInfo.SetExpectedSize(Value, fPosition);
@@ -10015,10 +10033,27 @@ begin
   ReadWriteReport('Write');
 end;
 
+function TStreamRedirect.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+var
+  prev: Int64;
+begin
+  prev := fPosition;
+  result := inherited Seek(Offset, Origin);
+  if result = prev then
+    exit; // nothing changed
+  ResetHash;
+  fRedirected.Seek(result, soBeginning);
+end;
 
-{ TStreamRedirectHasher }
 
-function TStreamRedirectHasher.GetHash: RawUtf8;
+{ TStreamRedirectHash32 }
+
+procedure TStreamRedirectHash32.ResetHash;
+begin
+  fHash := 0;
+end;
+
+function TStreamRedirectHash32.GetHash: RawUtf8;
 begin
   result := CardinalToHexLower(fHash);
 end;
@@ -10237,11 +10272,10 @@ var
 begin
   prev := fPosition;
   result := inherited Seek(Offset, Origin);
-  if prev <> result then
-  begin
-    fSource.Seek(result, soBeginning);
-    fBufferLeft := 0; // deprecate buffer content
-  end;
+  if result = prev then
+    exit; // nothing changed
+  fSource.Seek(result, soBeginning);
+  fBufferLeft := 0; // deprecate buffer content
 end;
 
 function TBufferedStreamReader.Read(var Buffer; Count: Longint): Longint;

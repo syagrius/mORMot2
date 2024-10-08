@@ -1476,6 +1476,16 @@ type
 
   IJsonClient = interface;
 
+  /// customize how IJsonClient handle its process, e.g. its parsing
+  TJsonClientOptions = set of (
+    jcoLogFullRequest,
+    jcoResultNoClear,
+    jcoHttpExceptionIntercept,
+    jcoHttpErrorRaise,
+    jcoParseTolerant,
+    jcoParseErrorClear,
+    jcoParseErrorRaise);
+
   /// event signature for error callbacks during IJsonClient.Request()
   TOnJsonClientError = procedure(const Sender: IJsonClient;
     const Response: TJsonResponse; const ErrorMsg: shortstring) of object;
@@ -1505,6 +1515,8 @@ type
     procedure SetOnBefore(const Event: TOnJsonClientBefore);
     function GetOnAfter: TOnJsonClientAfter;
     procedure SetOnAfter(const Event: TOnJsonClientAfter);
+    function GetOptions: TJsonClientOptions;
+    procedure SetOptions(Value: TJsonClientOptions);
     function GetUrlEncoder: TUrlEncoder;
     procedure SetUrlEncoder(Value: TUrlEncoder);
     function GetCookies: RawUtf8;
@@ -1574,21 +1586,15 @@ type
     // - if no event is set, TJsonResponse.RaiseForStatus will be called
     property OnError: TOnJsonClientError
       read GetOnError write SetOnError;
+    /// allow to customize the process
+    // - by default, contains [jcoParseTolerant, jcoHttpErrorRaise]
+    property Options: TJsonClientOptions
+      read GetOptions write SetOptions;
     /// allow to customize the URL encoding of parameters
     // - by default, contains [ueEncodeNames, ueSkipVoidString]
     property UrlEncoder: TUrlEncoder
       read GetUrlEncoder write SetUrlEncoder;
   end;
-
-  /// customize how TJsonClientAbstract handle its process, e.g. its parsing
-  TJsonClientOptions = set of (
-    jcoLogFullRequest,
-    jcoResultNoClear,
-    jcoHttpExceptionIntercept,
-    jcoHttpErrorRaise,
-    jcoParseTolerant,
-    jcoParseErrorClear,
-    jcoParseErrorRaise);
 
   /// abstract thread-safe generic JSON client class
   // - will implement all JSON and RTTI featured methods, without any actual
@@ -1611,6 +1617,8 @@ type
     procedure SetOnBefore(const Event: TOnJsonClientBefore); virtual;
     function GetOnAfter: TOnJsonClientAfter;
     procedure SetOnAfter(const Event: TOnJsonClientAfter); virtual;
+    function GetOptions: TJsonClientOptions;
+    procedure SetOptions(Value: TJsonClientOptions);
     function GetUrlEncoder: TUrlEncoder;
     procedure SetUrlEncoder(Value: TUrlEncoder);
     function GetCookies: RawUtf8; virtual; abstract;
@@ -1651,13 +1659,14 @@ type
     // - if no event is set, TJsonResponse.RaiseForStatus will be called
     property OnError: TOnJsonClientError
       read GetOnError write SetOnError;
+    /// allow to customize the process
+    // - by default, contains [jcoParseTolerant, jcoHttpErrorRaise]
+    property Options: TJsonClientOptions
+      read GetOptions write SetOptions;
     /// allow to customize the URL encoding of parameters
     // - by default, contains [ueEncodeNames, ueSkipVoidString]
     property UrlEncoder: TUrlEncoder
       read GetUrlEncoder write SetUrlEncoder;
-    /// allow to customize the process
-    property Options: TJsonClientOptions
-      read fOptions write fOptions;
     /// optional log of the client side process
     // - could be assigned to the TSynLog.DoLog class method
     property OnLog: TSynLogProc
@@ -2274,7 +2283,7 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
         OpenBind(fServer, fPort, {bind=}false, TLS.Enabled);
         HttpStateReset;
         include(ctxt.Retry, rMain);
-        RequestInternal(ctxt);
+        RequestInternal(ctxt); // retry once
       except
         on Exception do
           ctxt.Status := FatalError;
@@ -4651,6 +4660,16 @@ begin
   fOnAfter := Event;
 end;
 
+function TJsonClientAbstract.GetOptions: TJsonClientOptions;
+begin
+  result := fOptions;
+end;
+
+procedure TJsonClientAbstract.SetOptions(Value: TJsonClientOptions);
+begin
+  fOptions := Value;
+end;
+
 function TJsonClientAbstract.GetUrlEncoder: TUrlEncoder;
 begin
   result := fUrlEncoder;
@@ -4719,7 +4738,7 @@ begin
   if jcoParseErrorClear in fOptions then
     j.ValueFinalizeAndClear(Res);
   if jcoParseErrorRaise in fOptions then
-    raise EJsonClient.CreateUtf8('%.%', [self, err]);
+    EJsonClient.RaiseUtf8('%.%', [self, err]);
 end;
 
 procedure TJsonClientAbstract.Request(const Method, Action: RawUtf8;
@@ -4742,35 +4761,28 @@ var
   a: PtrInt;
   name, value: RawUtf8;
   p: PVarRec;
-  w: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TSynTempBuffer;
 begin
-  w := nil;
-  try
-    p := @NameValuePairs[0];
-    for a := 0 to high(NameValuePairs) shr 1 do
-    begin
-      VarRecToUtf8(p^, name);
-      inc(p);
-      VarRecToUtf8(p^, value);
-      if (name = '') or
-         (value = '') then
-        continue;
-      // append name='X-MyHeader'/value='5' as 'X-MyHeader: 5'#13#10
-      if w = nil then
-        w := DefaultJsonWriter.CreateOwnedStream(tmp);
-      w.AddString(name);
-      if PosExChar(':', name) = 0 then // if name is e.g. 'Cookie: id='
-        w.AddDirect(':', ' ');
-      w.AddString(value); // OpenAPI "simple" style is just a CSV
-      w.AddCR; // CR+LF
-      inc(p);
-    end;
-    if w <> nil then
-      w.SetText(OutHeaders);
-  finally
-    w.Free;
+  {%H-}tmp.InitOnStack;
+  p := @NameValuePairs[0];
+  for a := 0 to high(NameValuePairs) shr 1 do
+  begin
+    VarRecToUtf8(p^, name);
+    inc(p);
+    VarRecToUtf8(p^, value);
+    if (name = '') or
+       (value = '') then
+      continue;
+    // append name='X-MyHeader'/value='5' as 'X-MyHeader: 5'#13#10
+    tmp.Add(name);
+    if PosExChar(':', name) = 0 then // if name is e.g. 'Cookie: id='
+      tmp.AddDirect(':', ' ');
+    tmp.Add(value); // OpenAPI "simple" style is just a CSV
+    tmp.AddDirect(#13, #10); // use CR+LF in HTTP headers
+    inc(p);
   end;
+  if tmp.added <> 0 then
+    tmp.Done(OutHeaders, CP_UTF8);
 end;
 
 function HeadersEncode(const NameValuePairs: array of const): RawUtf8;
@@ -4825,8 +4837,8 @@ begin
   fKeepAlive := aKeepAlive;
   fHttp := TSimpleHttpClient.Create;
   fDefaultHeaders := 'Accept: ' + JSON_CONTENT_TYPE;
+  fOptions := [jcoParseTolerant, jcoHttpErrorRaise];
   fUrlEncoder := [ueEncodeNames, ueSkipVoidString];
-  fOptions := [jcoParseTolerant];
 end;
 
 destructor TJsonClient.Destroy;

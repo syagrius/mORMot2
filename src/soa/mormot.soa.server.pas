@@ -151,7 +151,7 @@ type
     fStats: TSynMonitorInputOutputObjArray;
     fImplementationClass: TInterfacedClass;
     fImplementationClassKind: (
-      ickBlank, ickWithCustomCreate, ickInjectable, ickInjectableRest,
+      ickBlank, ickPersistent, ickInjectable, ickInjectableRest,
       ickFromInjectedResolver, ickFake);
     fImplementationClassInterfaceEntry: PInterfaceEntry;
     fSharedInterface: IInterface;
@@ -178,13 +178,13 @@ type
     /// this method will create an implementation instance
     // - reference count will be set to one, in order to allow safe passing
     // of the instance into an interface, if AndIncreaseRefCount is TRUE
-    // - will handle TInterfacedObjectWithCustomCreate and TInjectableObject
+    // - will handle TInterfacedPersistent and TInjectableObject
     // as expected, if necessary
     function CreateInstance(AndIncreaseRefCount: boolean): TInterfacedObject;
   public
     /// initialize the service provider on the server side
     // - expect an direct server-side implementation class, which may inherit
-    // from plain TInterfacedClass, TInterfacedObjectWithCustomCreate if you
+    // from plain TInterfacedClass, TInterfacedPersistent if you
     // need an overridden constructor, or TInjectableObject to support DI/IoC
     // - for sicClientDriven, sicPerSession, sicPerUser or sicPerGroup modes,
     // a time out (in seconds) can be defined (default is 30 minutes) - if the
@@ -620,8 +620,8 @@ begin
       fImplementationClassKind := ickInjectableRest
     else if fImplementationClass.InheritsFrom(TInjectableObject) then
       fImplementationClassKind := ickInjectable
-    else if fImplementationClass.InheritsFrom(TInterfacedObjectWithCustomCreate) then
-      fImplementationClassKind := ickWithCustomCreate;
+    else if fImplementationClass.InheritsFrom(TInterfacedPersistent) then
+      fImplementationClassKind := ickPersistent;
     fImplementationClassInterfaceEntry := fImplementationClass.
       GetInterfaceEntry(fInterface.InterfaceIID);
     if fImplementationClassInterfaceEntry = nil then
@@ -865,7 +865,7 @@ begin
   except
     on E: Exception do
       fRestServer.Internallog('%.InstanceFree: ignored % exception ' +
-        'during I%._Release', [ClassType, E.ClassType, InterfaceUri], sllDebug);
+        'during I%._Release', [PClass(self)^, PClass(E)^, InterfaceUri], sllDebug);
   end;
 end;
 
@@ -1178,9 +1178,8 @@ var
   dummyObj: pointer;
 begin
   case fImplementationClassKind of
-    ickWithCustomCreate:
-      result := TInterfacedObjectWithCustomCreateClass(
-        fImplementationClass).Create;
+    ickPersistent:
+      result := TInterfacedPersistentClass(fImplementationClass).Create;
     ickInjectable:
       result := TInjectableObjectClass(
         fImplementationClass).CreateWithResolver(fResolver, true);
@@ -1296,7 +1295,7 @@ begin
       smsError:
         begin
           W.AddShort('},Output:{');
-          W.AddClassName(Sender.LastException.ClassType);
+          W.AddClassName(PClass(Sender.LastException)^);
           W.AddDirect(':', '"');
           W.AddJsonEscapeString(Sender.LastException.Message);
           W.AddDirect('"');
@@ -1763,7 +1762,7 @@ begin
      (high(aInterfaces) < 0) then
     exit;
   if aSharedImplementation <> nil then
-    if (aSharedImplementation.ClassType <> aImplementationClass) or
+    if (PClass(aSharedImplementation)^ <> aImplementationClass) or
        (aInstanceCreation <> sicShared) then
       EServiceException.RaiseUtf8('%.AddImplementation: invalid % class',
         [self, aSharedImplementation]);
@@ -2076,7 +2075,7 @@ begin
     InterfaceArrayAdd(fRecordVersionCallback[TableIndex], SlaveCallback);
     instance := ObjectFromInterface(SlaveCallback);
     if (instance <> nil) and
-       (instance.ClassType = TInterfacedObjectFakeServer) then
+       (PClass(instance)^ = TInterfacedObjectFakeServer) then
       TInterfacedObjectFakeServer(instance).fRaiseExceptionOnInvokeError := True;
   finally
     fRestServer.AcquireExecution[execOrmWrite].Safe.UnLock;
@@ -2122,7 +2121,7 @@ begin
   begin
     if callbacktext <> nil then
       AppendWithSpace(callbacktext^, ClassNameShort(instance)^);
-    result := (instance.ClassType = TInterfacedObjectFakeServer) and
+    result := (PClass(instance)^ = TInterfacedObjectFakeServer) and
               TInterfacedObjectFakeServer(instance).fReleasedOnClientSide;
   end;
 end;
@@ -2134,7 +2133,7 @@ var
 begin
   instance := ObjectFromInterface(callback);
   if (instance <> nil) and
-     (instance.ClassType = TInterfacedObjectFakeServer) then
+     (PClass(instance)^ = TInterfacedObjectFakeServer) then
     TInterfacedObjectFakeServer(instance).fOpaque := Opaque;
 end;
 
@@ -2145,7 +2144,7 @@ var
 begin
   instance := ObjectFromInterface(callback);
   if (instance <> nil) and
-     (instance.ClassType = TInterfacedObjectFakeServer) then
+     (PClass(instance)^ = TInterfacedObjectFakeServer) then
     result := TInterfacedObjectFakeServer(instance).fOpaque
   else
     result := nil;

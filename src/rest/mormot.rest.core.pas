@@ -79,7 +79,7 @@ type
     amMainThread);
 
   /// used to store the execution parameters for a TRest instance
-  TRestAcquireExecution = class(TSynPersistentLock)
+  TRestAcquireExecution = class(TSynLocked)
   public
     /// how read or write operations will be executed
     Mode: TRestServerAcquireMode;
@@ -116,12 +116,7 @@ const
 { ************ TRestBackgroundTimer for Multi-Thread Process }
 
 type
-  {$M+}
-  { we expect RTTI information for the published properties of these
-    forward definitions - due to internal coupling, those classes are
-    to be defined in a single "type" statement }
   TRest = class;
-  {$M-}
 
   /// optionally called after TRest.AsyncRedirect background execution
   // - to retrieve any output result value, as JSON-encoded content
@@ -284,7 +279,7 @@ type
 { ************ TRestRunThreads Multi-Threading Process of a REST instance }
 
   /// access to the Multi-Threading process of a TRest instance
-  TRestRunThreads = class(TSynPersistentLock)
+  TRestRunThreads = class(TSynLocked)
   protected
     fOwner: TRest;
     fBackgroundTimer: TRestBackgroundTimer;
@@ -1790,8 +1785,8 @@ type
   TInterfacedObjectMulti = class;
 
   /// thread-safe implementation of IMultiCallbackRedirect
-  TInterfacedObjectMultiList = class(
-    TInterfacedObjectWithCustomCreate, IMultiCallbackRedirect)
+  TInterfacedObjectMultiList = class(TInterfacedPersistent,
+    IMultiCallbackRedirect)
   protected
     fDest: TInterfacedObjectMultiDestDynArray;
     fDests: TDynArrayLocked;
@@ -1933,7 +1928,7 @@ begin
   if fCallBackUnRegisterNeeded then
   begin
     fLogClass.Add.Log(sllDebug, '%.Destroy -> Services.CallbackUnRegister(%)',
-      [fList.ClassType, fFactory.InterfaceName], self);
+      [PClass(fList)^, fFactory.InterfaceName], self);
     fRest.Services.CallBackUnRegister(IInvokable(pointer(@fVTable)));
   end;
 end;
@@ -3179,7 +3174,7 @@ begin
         except
           on E: Exception do
             fRest.InternalLog('% during AsyncBatchExecute %',
-              [E.ClassType, table], sllWarning);
+              [PClass(E)^, table], sllWarning);
         end;
     end;
   finally

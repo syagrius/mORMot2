@@ -7,7 +7,7 @@ unit mormot.crypt.secure;
   *****************************************************************************
 
    Authentication and Security types shared by all framework units
-    - TSyn***Password and TSynConnectionDefinition Classes
+    - Password-Safe and TSynConnectionDefinition Classes
     - Reusable Authentication Classes
     - High-Level TSynSigner/TSynHasher Multi-Algorithm Wrappers
     - Client and Server HTTP Access Authentication
@@ -47,10 +47,10 @@ uses
   mormot.crypt.core;
 
 
-{ ***************** TSyn***Password and TSynConnectionDefinition Classes }
+{ ***************** Password-Safe and TSynConnectionDefinition Classes }
 
 type
-  /// abstract TSynPersistent class allowing safe storage of a password
+  /// abstract class allowing safe storage of a password in a published property
   // - the associated Password, e.g. for storage or transmission encryption
   // will be persisted encrypted with a private key (which can be customized)
   // - if default simple symmetric encryption is not enough, it will also
@@ -59,7 +59,7 @@ type
   // - a published property should be defined as such in inherited class:
   // ! property PasswordPropertyName: RawUtf8 read fPassword write fPassword;
   // - use the PassWordPlain property to access to its uncyphered value
-  TSynPersistentWithPassword = class(TSynPersistent)
+  TObjectWithPassword = class(TSynPersistent)
   protected
     fPassWord: SpiUtf8;
     fKey: cardinal;
@@ -99,10 +99,14 @@ type
       read GetPassWordPlain write SetPassWordPlain;
   end;
 
+  {$ifndef PUREMORMOT2}
+  TSynPersistentWithPassword = TObjectWithPassword;
+  {$endif PUREMORMOT2}
+
 type
   /// could be used to store a credential pair, as user name and password
-  // - password will be stored with TSynPersistentWithPassword encryption
-  TSynUserPassword = class(TSynPersistentWithPassword)
+  // - password will be stored with TObjectWithPassword encryption
+  TSynUserPassword = class(TObjectWithPassword)
   protected
     fUserName: RawUtf8;
   published
@@ -119,7 +123,7 @@ type
   // - would be used by mormot.db to serialize TSqlDBConnectionProperties, or
   // by mormot.rest.core.pas to serialize TRest instances
   // - the password will be stored as Base64, after a simple encryption as
-  // defined by TSynPersistentWithPassword
+  // defined by TObjectWithPassword
   // - typical content could be:
   // $ {
   // $	"Kind": "TSqlDBSQLite3ConnectionProperties",
@@ -131,7 +135,7 @@ type
   // - the "Kind" value will be used to let the corresponding TRest or
   // TSqlDBConnectionProperties NewInstance*() class methods create the
   // actual instance, from its class name
-  TSynConnectionDefinition = class(TSynPersistentWithPassword)
+  TSynConnectionDefinition = class(TObjectWithPassword)
   protected
     fKind: string;
     fServerName: RawUtf8;
@@ -168,7 +172,7 @@ type
 
 
 /// simple symmetric obfuscation scheme using a 32-bit key
-// - used e.g. by TSynPersistentWithPassword and mormot.db.proxy to obfuscate
+// - used e.g. by TObjectWithPassword and mormot.db.proxy to obfuscate
 // password or content - so it is not a real encryption
 // - fast, but not cryptographically secure, since naively xor data bytes with
 // crc32ctab[]: consider using mormot.crypt.core proven algorithms instead
@@ -268,7 +272,7 @@ type
   // - with optional binary persistence
   // - as used by TRestServer.BanIP/JwtForUnauthenticatedRequestWhiteIP
   // - see also more efficient and lower level THttpAcceptBan in mormot.net.http
-  TIPBan = class(TSynPersistentStore)
+  TIPBan = class(TObjectStore)
   protected
     fIP4: TIntegerDynArray;
     fCount: integer;
@@ -676,6 +680,7 @@ type
   protected
     fHash: TSynHasher;
     procedure DoHash(data: pointer; len: integer); override;
+    procedure ResetHash; override;
   public
     constructor Create(aDestination: TStream; aRead: boolean = false); override;
     function GetHash: RawUtf8; override;
@@ -1025,7 +1030,7 @@ type
   /// abstract BASIC access authentication on server side
   // - don't use this class but e.g. TDigestAuthServerMem or TDigestAuthServerFile
   // - will implement the IBasicAuthServer process in an abstract way
-  TBasicAuthServer = class(TInterfacedObjectWithCustomCreate, IBasicAuthServer)
+  TBasicAuthServer = class(TInterfacedPersistent, IBasicAuthServer)
   protected
     fRealm, fQuotedRealm, fBasicInit: RawUtf8;
     fOnBeforeAuth, fOnAfterAuth: TOnAuthServer;
@@ -1756,7 +1761,7 @@ type
   end;
 
   /// abstract parent class to TCryptPublicKey and TCryptPrivateKey
-  TCryptAbstractKey = class(TInterfacedObjectWithCustomCreate)
+  TCryptAbstractKey = class(TInterfacedPersistent)
   protected
     fKeyAlgo: TCryptKeyAlgo;
   public
@@ -3794,6 +3799,11 @@ begin
   fHash.Update(data, len);
 end;
 
+procedure TStreamRedirectSynHasher.ResetHash;
+begin
+  fHash.Init(GetAlgo); // called e.g. from Seek(0, soBeginning)
+end;
+
 function TStreamRedirectSynHasher.GetHash: RawUtf8;
 begin
   fHash.Final(result);
@@ -5073,7 +5083,7 @@ begin
 end;
 
 
-{ ***************** TSyn***Password and TSynConnectionDefinition Classes }
+{ ***************** Password-Safe and TSynConnectionDefinition Classes }
 
 procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
 var
@@ -5101,20 +5111,20 @@ begin
 end;
 
 
-{ TSynPersistentWithPassword }
+{ TObjectWithPassword }
 
-destructor TSynPersistentWithPassword.Destroy;
+destructor TObjectWithPassword.Destroy;
 begin
   FillZero(fPassword);
   inherited Destroy;
 end;
 
-class function TSynPersistentWithPassword.ComputePassword(
+class function TObjectWithPassword.ComputePassword(
   const PlainPassword: SpiUtf8; CustomKey: cardinal): SpiUtf8;
 var
-  instance: TSynPersistentWithPassword;
+  instance: TObjectWithPassword;
 begin
-  instance := TSynPersistentWithPassword.Create;
+  instance := TObjectWithPassword.Create;
   try
     instance.Key := CustomKey;
     instance.SetPassWordPlain(PlainPassword);
@@ -5124,20 +5134,20 @@ begin
   end;
 end;
 
-class function TSynPersistentWithPassword.ComputePassword(PlainPassword: pointer;
+class function TObjectWithPassword.ComputePassword(PlainPassword: pointer;
   PlainPasswordLen: integer; CustomKey: cardinal): SpiUtf8;
 begin
   result := ComputePassword(
     BinToBase64uri(PlainPassword, PlainPasswordLen), CustomKey);
 end;
 
-class function TSynPersistentWithPassword.ComputePlainPassword(
+class function TObjectWithPassword.ComputePlainPassword(
   const CypheredPassword: SpiUtf8; CustomKey: cardinal;
   const AppSecret: RawUtf8): SpiUtf8;
 var
-  instance: TSynPersistentWithPassword;
+  instance: TObjectWithPassword;
 begin
-  instance := TSynPersistentWithPassword.Create;
+  instance := TObjectWithPassword.Create;
   try
     instance.Key := CustomKey;
     instance.fPassWord := CypheredPassword;
@@ -5147,7 +5157,7 @@ begin
   end;
 end;
 
-function TSynPersistentWithPassword.GetKey: cardinal;
+function TObjectWithPassword.GetKey: cardinal;
 begin
   if self = nil then
     result := 0
@@ -5155,7 +5165,7 @@ begin
     result := fKey xor $A5abba5A;
 end;
 
-function TSynPersistentWithPassword.GetPassWordPlain: SpiUtf8;
+function TObjectWithPassword.GetPassWordPlain: SpiUtf8;
 begin
   if (self = nil) or
      (fPassWord = '') then
@@ -5164,7 +5174,7 @@ begin
     result := GetPassWordPlainInternal('');
 end;
 
-function TSynPersistentWithPassword.GetPassWordPlainInternal(
+function TObjectWithPassword.GetPassWordPlainInternal(
   AppSecret: RawUtf8): SpiUtf8;
 var
   value, pass: RawByteString;
@@ -5208,7 +5218,7 @@ begin
   end;
 end;
 
-procedure TSynPersistentWithPassword.SetPassWordPlain(const Value: SpiUtf8);
+procedure TObjectWithPassword.SetPassWordPlain(const Value: SpiUtf8);
 var
   tmp: RawByteString;
 begin
@@ -5268,9 +5278,9 @@ end;
 constructor TSynAuthenticationAbstract.Create;
 begin
   fSafe.Init;
-  fTokenSeed := Random32;
+  fTokenSeed := Random32Not0;
   fSessionGenerator := abs(fTokenSeed * PPtrInt(self)^);
-  fTokenSeed := abs(fTokenSeed * Random32);
+  fTokenSeed := fTokenSeed * Random31Not0;
 end;
 
 destructor TSynAuthenticationAbstract.Destroy;
@@ -5934,12 +5944,14 @@ procedure TBinaryCookieGenerator.Init(const Name: RawUtf8;
 begin
   CookieName := Name;
   // initial random session ID, small enough to remain 31-bit > 0
-  SessionSequence := Random32 and $07ffffff;
+  repeat
+    SessionSequence := Random32 shr 9;
+  until SessionSequence <> 0;
   SessionSequenceStart := SessionSequence;
   // temporary secret for checksum  (Lecuyer is good enough for 32-bit)
-  Secret := Random32;
+  Secret := Random32Not0;
   // temporary secret for encryption
-  CryptNonce := Random32;
+  CryptNonce := Random32Not0;
   // custom expiration
   DefaultTimeOutMinutes := DefaultSessionTimeOutMinutes;
   // default algorithm is caCrc32c
@@ -5983,7 +5995,7 @@ begin
         // all cookies storage should be < 4K so a single 2K cookie seems huge
         raise ECrypt.Create('TBinaryCookieGenerator: Too Big Too Fat');
     end;
-    cc.head.cryptnonce := Random32;
+    cc.head.cryptnonce := Random32Not0;
     cc.head.session    := result;
     cc.head.issued     := UnixTimeMinimalUtc;
     if TimeOutMinutes = 0 then
@@ -9844,7 +9856,7 @@ begin
           w.Add('''');
         end;
       end;
-      w.AddCR;
+      w.AddShorter(CRLF); // adapted to the current console output
     end;
     w.SetText(result);
   finally
@@ -9877,7 +9889,8 @@ begin
   Data := PPointer(Data)^;
   if Data <> nil then
   begin
-    SidToTextShort(Data, tmp); // fast enough
+    tmp[0] := #0;
+    SidAppendShort(Data, tmp); // fast enough
     Ctxt.W.AddShort(tmp);
   end;
   Ctxt.W.AddDirect('"');
@@ -9946,13 +9959,15 @@ const
   _TSynSignerParams = 'algo:TSignAlgo secret,salt:RawUtf8 rounds:integer';
   _TSecAce = 'type:TSecAceType flags:TSecAceFlags raw:word mask:TSecAccessMask ' +
     'sid:RawSid opaque:RawUtf8 obj,inh:TGuid';
-  _TSecurityDescriptor = 'owner,group:RawSid dacl,sacl:TSecAcl flags:TSecControls';
+  _TSecurityDescriptor = 'owner,group:RawSid dacl,sacl:TSecAcl ' +
+    'flags:TSecControls modified:TSecurityDescriptorInfos';
 
 procedure InitializeUnit;
 begin
   // register proper JSON serialization of security related types
   Rtti.RegisterTypes([TypeInfo(TSignAlgo), TypeInfo(TSecAceType),
-    TypeInfo(TSecAceFlags), TypeInfo(TSecAccessMask), TypeInfo(TSecControls)]);
+    TypeInfo(TSecAceFlags), TypeInfo(TSecAccessMask), TypeInfo(TSecControls),
+    TypeInfo(TSecurityDescriptorInfos)]);
   Rtti.RegisterFromText(TypeInfo(TSynSignerParams), _TSynSignerParams);
   TRttiJson.RegisterCustomSerializers([
     TypeInfo(RawSid),                @_JL_RawSid, @_JS_RawSid,

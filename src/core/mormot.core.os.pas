@@ -1066,7 +1066,7 @@ type
   // - for the main executable, do not create once instance of this class, but
   // call GetExecutableVersion / SetExecutableVersion and access the Executable
   // global variable
-  TFileVersion = class(TObjectWithProps)
+  TFileVersion = class(TSynPersistent)
   protected
     fDetailed: string;
     fFileName: TFileName;
@@ -1853,7 +1853,11 @@ type
     /// enable privilege
     // - if aPrivilege is already enabled return true, if operation is not
     // possible (required privilege doesn't exist or API error) return false
-    function Enable(aPrivilege: TWinSystemPrivilege): boolean;
+    function Enable(aPrivilege: TWinSystemPrivilege): boolean; overload;
+    /// enable one or several privilege(s) from a set
+    // - if aPrivilege is already enabled return true, if operation is not
+    // possible (required privilege doesn't exist or API error) return false
+    function Enable(aPrivilege: TWinSystemPrivileges): boolean; overload;
     /// disable privilege
     // - if aPrivilege is already disabled return true, if operation is not
     // possible (required privilege doesn't exist or API error) return false
@@ -1990,6 +1994,27 @@ function GetTimeZoneInformation(var info: TTimeZoneInformation): DWORD;
 // - will select the proper API before and after Vista, if needed
 // - raise EOSException on failure
 procedure SetSystemTimeZone(const info: TDynamicTimeZoneInformation);
+
+const
+  /// Windows file APIs have hardcoded MAX_PATH = 260 :(
+  // - but more than 260 chars are possible with the \\?\..... prefix
+  // or by disabling the limitation in registry since Windows 10, version 1607
+  // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+  // - extended-length path allows up to 32,767 widechars
+  // - but 2047 chars seems big enough in practice e.g. with NTFS - POSIX uses 4096
+  W32_MAX = 2047;
+
+type
+  /// 4KB stack buffer for no heap allocation during UTF-16 encoding or
+  // switch to extended-length path
+  TW32Temp = array[0..W32_MAX] of WideChar;
+
+/// efficiently return a PWideChar from a TFileName on all compilers
+// - without any memory allocation, and with proper Unicode support
+// - is also able to handle FileName with length > MAX_PATH, up to 2048 chars
+// - all the low-level file functions of this unit (e.g. FileCreate or FileOpen)
+// will use this function to support file names longer than MAX_PATH
+function W32(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
 
 type
   HCRYPTPROV = pointer;
@@ -3485,6 +3510,7 @@ function NormalizeDirectoryExists(const Directory: TFileName;
 // is processed by this function (for safety)
 // - if DeleteOnlyFilesNotDirectory is TRUE, it won't remove the folder itself,
 // but just the files found in it
+// - warning: DeletedCount^ should be a 32-bit "integer" variable, not a PtrInt
 function DirectoryDelete(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; DeleteOnlyFilesNotDirectory: boolean = false;
   DeletedCount: PInteger = nil): boolean;
@@ -3937,14 +3963,20 @@ function PosixFileNames(const Folder: TFileName; Recursive: boolean;
 // - will output the value as one number with one decimal and KB/MB/GB/TB suffix
 function _oskb(Size: QWord): shortstring;
 
+type
+  /// function prototype for AppendShortUuid()
+  TAppendShortUuid = procedure(const u: TGuid; var s: ShortString);
+  /// function prototype for ShortToUuid()
+  TShortToUuid = function(const text: ShortString; out uuid: TGuid): boolean;
+
 var
   /// decode a '3F2504E0-4F89-11D3-9A0C-0305E82C3301' text into a TGuid
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
-  ShortToUuid: function(const text: ShortString; out uuid: TGuid): boolean;
+  ShortToUuid: TShortToUuid;
 
   /// append a TGuid into lower-cased '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
-  AppendShortUuid: procedure(const u: TGuid; var s: ShortString);
+  AppendShortUuid: TAppendShortUuid;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
 // - under Windows, will use the CP_OEM encoding
@@ -4371,11 +4403,11 @@ type
   // @http://www.delphitools.info/2011/11/30/fixing-tcriticalsection
   // - internal padding is used to safely store up to 7 values protected
   // from concurrent access with a mutex, so that SizeOf(TSynLocker)>128
-  // - for object-level locking, see TSynPersistentLock which owns one such
+  // - for object-level locking, see TSynLocked which owns one such
   // instance, or call low-level fSafe := NewSynLocker in your constructor,
   // then fSafe^.DoneAndFreemem in your destructor
   // - RWUse property could replace the TRTLCriticalSection by a lighter TRWLock
-  // - see also TRWLock and TSynPersistentRWLock if the multiple read / exclusive
+  // - see also TRWLock and TObjectRWLock if the multiple read / exclusive
   // write lock is better (only if the locked process does not take too much time)
   {$ifdef USERECORDWITHMETHODS}
   TSynLocker = record
@@ -4615,7 +4647,7 @@ type
   // - only limitation is that we don't know if WaitFor is signaled or timeout,
   // but this is not a real problem in practice since most code don't need this
   // information or has already its own flag in its implementation logic
-  TSynEvent = class(TObjectWithProps)
+  TSynEvent = class(TSynPersistent)
   protected
     fHandle: pointer; // Windows THandle or FPC PRTLEvent
     fFD: integer;     // for eventfd()
@@ -4645,31 +4677,81 @@ type
       {$ifdef HASINLINE} inline; {$endif}
   end;
 
-
-/// initialize a TSynLocker instance from heap
-// - call DoneandFreeMem to release the associated memory and OS mutex
-// - is used e.g. in TSynPersistentLock to reduce class instance size
-function NewSynLocker: PSynLocker;
-
-type
-  /// a persistent-agnostic alternative to TSynPersistentLock
-  // - can be used as base class when custom JSON persistence is not needed
-  // - consider a TRWLock field as a lighter multi read / exclusive write option
-  TSynLocked = class(TObjectWithProps)
+  /// a thread-safe class with a virtual constructor and properties persistence
+  // - publishes a TSynLocker instance, and its managed critical section
+  // - consider a TLightLock field as lighter options, or a R/W lock with
+  // TObjectRWLock and TObjectRWLightLock classes, or even a TObjectOSLightLock
+  // - TSynLockedWithRttiMethods would add paranoid JSON persistence lock
+  TSynLocked = class(TSynPersistent)
   protected
     fSafe: PSynLocker; // TSynLocker would increase inherited fields offset
   public
     /// initialize the instance, and its associated lock
-    // - is defined as virtual, just like TObjectWithCustomCreate/TSynPersistent
     constructor Create; override;
     /// finalize the instance, and its associated lock
     destructor Destroy; override;
     /// access to the associated instance critical section
-    // - call Safe.Lock/UnLock to protect multi-thread access on this storage
     property Safe: PSynLocker
+      read fSafe;
+    /// could be used as a short-cut to Safe^.Lock
+    procedure Lock;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// could be used as a short-cut to Safe^.UnLock
+    procedure Unlock;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
+
+  /// a thread-safe class with a virtual constructor and properties persistence
+  // - publishes the fastest available non-reentrant Operating System lock
+  TObjectOSLightLock = class(TSynPersistent)
+  protected
+    fSafe: TOSLightLock;
+  public
+    /// initialize the instance, and its associated OS lock
+    constructor Create; override;
+    /// finalize the instance, and its associated OS lock
+    destructor Destroy; override;
+    /// access to the associated non-reentrant Operating System lock instance
+    property Safe: TOSLightLock
+      read fSafe;
+    /// could be used as a short-cut to Safe^.Lock
+    procedure Lock;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// could be used as a short-cut to Safe^.UnLock
+    procedure Unlock;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
+
+  /// a thread-safe class with a virtual constructor and properties persistence
+  // - publishes a non-upgradable multiple Read / exclusive Write TRWLightLock
+  TObjectRWLightLock = class(TSynPersistent)
+  protected
+    fSafe: TRWLightLock;
+  public
+    /// access to the associated non-upgradable TRWLightLock instance
+    // - call Safe methods to protect multi-thread access on this storage
+    property Safe: TRWLightLock
       read fSafe;
   end;
 
+  /// a thread-safe class with a virtual constructor and properties persistence
+  // - publishes an upgradable multiple Read / exclusive Write TRWLock
+  TObjectRWLock = class(TSynPersistent)
+  protected
+    fSafe: TRWLock;
+  public
+    /// access to the associated upgradable TRWLock instance
+    // - call Safe methods to protect multi-thread access on this storage
+    property Safe: TRWLock
+      read fSafe;
+  end;
+
+/// initialize a TSynLocker instance from heap
+// - call DoneandFreeMem to release the associated memory and OS mutex
+// - as used e.g. by TSynLocked/TSynLockedWithRttiMethods to reduce class instance size
+function NewSynLocker: PSynLocker;
+
+type
   /// a thread-safe Pierre L'Ecuyer software random generator
   // - just wrap TLecuyer with a TLighLock
   // - should not be used, unless may be slightly faster than a threadvar
@@ -4751,10 +4833,12 @@ procedure SwitchToThread;
 procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
 
 /// wrapper to implement a thread-safe T*ObjArray dynamic array storage
+// - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
 function ObjArrayAdd(var aObjArray; aItem: TObject;
   var aSafe: TLightLock; aCount: PInteger = nil): PtrInt; overload;
 
 /// wrapper to implement a thread-safe pointer dynamic array storage
+// - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
 function PtrArrayDelete(var aPtrArray; aItem: pointer; var aSafe: TLightLock;
   aCount: PInteger = nil): PtrInt; overload;
 
@@ -5045,6 +5129,13 @@ function OpenServiceManager(const TargetComputer, DatabaseName: RawUtf8;
 function OpenServiceInstance(hSCManager: SC_HANDLE; const ServiceName: RawUtf8;
   dwDesiredAccess: cardinal): SC_HANDLE;
 
+function GetNamedSecurityInfoW(pObjectName: PWideChar; ObjectType,
+  SecurityInfo: cardinal; ppsidOwner, ppsidGroup, ppDacl, ppSacl: pointer;
+  var ppSecurityDescriptor: PSECURITY_DESCRIPTOR): DWORD; stdcall; external advapi32;
+function SetNamedSecurityInfoW(pObjectName: PWideChar; ObjectType,
+  SecurityInfo: cardinal; psidOwner, psidGroup: pointer;
+  pDacl, pSacl: pointer): DWORD; stdcall; external advapi32;
+
 
 { *** high level classes to define and manage Windows Services }
 
@@ -5204,7 +5295,7 @@ type
 
   /// abstract class to let an executable implement a Windows Service
   // - do not use this class directly, but TServiceSingle
-  TService = class(TObjectWithProps)
+  TService = class(TSynPersistent)
   protected
     fServiceName: RawUtf8;
     fDisplayName: RawUtf8;
@@ -5491,25 +5582,37 @@ const
   PARSECOMMAND_ERROR =
     [pcUnbalancedSingleQuote .. pcHasEndingBackSlash];
 
+  /// let ParseCommandArgs/ExtractExecutableName/ExtractCommandArgs follow the
+  // current running OS command-line expectations by default
   PARSCOMMAND_POSIX = {$ifdef OSWINDOWS} false {$else} true {$endif};
 
 /// low-level parsing of a RunCommand() execution command
-// - parse and fill argv^[0..argc^-1] with corresponding arguments, after
-// un-escaping and un-quoting if applicable, using temp^ to store the content
+// - parse and fill argv^[0 .. argc^ - 1] with corresponding arguments, after
+// un-escaping and un-quoting if applicable, using temp^ to store the content,
+// and argv^[argc^] = nil, as expected by low-level OS exec() syscall parameters
 // - if argv=nil, do only the parsing, not the argument extraction - could be
 // used for fast validation of the command line syntax
 // - you can force arguments OS flavor using the posix parameter - note that
 // Windows parsing is not consistent by itself (e.g. double quoting or
 // escaping depends on the actual executable called) so returned flags
 // should be considered as indicative only with posix=false
+// - you can check for errors with result * PARSECOMMAND_ERROR <> []
+// - warning: argc^ should be a 32-bit "integer" variable, not a PtrInt
 function ParseCommandArgs(const cmd: RawUtf8; argv: PParseCommandsArgs = nil;
   argc: PInteger = nil; temp: PRawUtf8 = nil;
   posix: boolean = PARSCOMMAND_POSIX): TParseCommands;
 
-/// low-level extration of the executable of a RunCommand() execution command
+/// high-level extraction of the executable of a RunCommand() execution command
 // - returns the first parameter returned by ParseCommandArgs()
 function ExtractExecutableName(const cmd: RawUtf8;
   posix: boolean = PARSCOMMAND_POSIX): RawUtf8;
+
+/// high-level extraction of all parts of a RunCommand() execution command
+// - output param[0] is the executable name, and other param[] are the
+// actual command line arguments, just like the ParamStr() RTL function
+// - param is left nil on error, with result * PARSECOMMAND_ERROR <> []
+function ExtractCommandArgs(const cmd: RawUtf8; out param: TRawUtf8DynArray;
+  posix: boolean = PARSCOMMAND_POSIX): TParseCommands;
 
 type
   /// callback used by RunRedirect() to notify of console output at runtime
@@ -5574,6 +5677,7 @@ function RunCommand(const cmd: TFileName; waitfor: boolean;
 // - optional env is Windows only, (FPC popen does not support it), and should
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
+// - warning: exitcode^ should be a 32-bit "integer" variable, not a PtrInt
 function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
   const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
   setresult: boolean = true; const env: TFileName = '';
@@ -6242,7 +6346,7 @@ begin
       Dest.len := 0
     else
     begin
-      dec(Dest.len); // Utf8ToUnicode() returned length includes trailing #0
+      dec(Dest.len); // Utf8ToUnicode() returned length includes #0 terminator
       result[Dest.len] := #0; // missing on FPC
     end;
   end;
@@ -6808,7 +6912,7 @@ begin
   // fast cross-platform implementation
   folder := GetSystemPath(spTemp);
   if _TmpCounter = 0 then
-    _TmpCounter := Random31; // avoid paranoid overflow
+    _TmpCounter := Random31Not0; // avoid paranoid overflow
   retry := 10;
   repeat
     // thread-safe unique file name generation
@@ -9930,7 +10034,6 @@ begin
 end;
 
 
-
 { TSynLocked }
 
 constructor TSynLocked.Create;
@@ -9942,6 +10045,43 @@ destructor TSynLocked.Destroy;
 begin
   inherited Destroy;
   fSafe^.DoneAndFreeMem;
+end;
+
+procedure TSynLocked.Lock;
+begin
+  if self <> nil then
+    fSafe^.Lock;
+end;
+
+procedure TSynLocked.Unlock;
+begin
+  if self <> nil then
+    fSafe^.UnLock;
+end;
+
+
+{ TObjectOSLightLock }
+
+constructor TObjectOSLightLock.Create;
+begin
+  fSafe.Init;
+end;
+
+destructor TObjectOSLightLock.Destroy;
+begin
+  fSafe.Done;
+end;
+
+procedure TObjectOSLightLock.Lock;
+begin
+  if self <> nil then
+    fSafe.Lock;
+end;
+
+procedure TObjectOSLightLock.Unlock;
+begin
+  if self <> nil then
+    fSafe.UnLock;
 end;
 
 
@@ -10245,6 +10385,22 @@ begin
     FastSetString(result, argv[0], StrLen(argv[0]));
 end;
 
+function ExtractCommandArgs(const cmd: RawUtf8; out param: TRawUtf8DynArray;
+  posix: boolean): TParseCommands;
+var
+  temp: RawUtf8;
+  argv: TParseCommandsArgs;
+  argc: integer;
+  i: PtrInt;
+begin
+  result := ParseCommandArgs(cmd, @argv, @argc, @temp, posix);
+  if result * PARSECOMMAND_ERROR <> [] then
+    exit; // failed
+  SetLength(param, argc);
+  for i := 0 to argc - 1 do
+    FastSetString(param[i], argv[i], StrLen(argv[i]));
+end;
+
 function ParseCommandArgs(const cmd: RawUtf8; argv: PParseCommandsArgs;
   argc: PInteger; temp: PRawUtf8; posix: boolean): TParseCommands;
 var
@@ -10272,7 +10428,7 @@ begin
   state := [];
   n := 0;
   p := pointer(cmd);
-  repeat
+  repeat // parse the command line text, using a state machine in the loop
     c := p^;
     if d <> nil then
       d^ := c;
@@ -10286,7 +10442,7 @@ begin
             include(result, pcUnbalancedDoubleQuote);
           exclude(result, pcInvalidCommand);
           if argv <> nil then
-            argv[n] := nil;
+            argv^[n] := nil; // always end with a last argv^[] = nil
           if argc <> nil then
             argc^ := n;
           exit;
@@ -10360,12 +10516,10 @@ begin
           else if state = [] then
           begin
             if argv <> nil then
-            begin
-              argv[n] := d;
-              inc(n);
-              if n = high(argv^) then
-                exit;
-            end;
+              argv^[n] := d;
+            inc(n);
+            if n = high(argv^) then
+              exit;
             state := [sInSQ, sInArg];
             continue;
           end
@@ -10384,12 +10538,10 @@ begin
           else if state = [] then
           begin
             if argv <> nil then
-            begin
-              argv[n] := d;
-              inc(n);
-              if n = high(argv^) then
-                exit;
-            end;
+              argv^[n] := d;
+            inc(n);
+            if n = high(argv^) then
+              exit;
             state := [sInDQ, sInArg];
             continue;
           end
@@ -10437,12 +10589,10 @@ begin
     if state = [] then
     begin
       if argv <> nil then
-      begin
-        argv[n] := d;
-        inc(n);
-        if n = high(argv^) then
-          exit;
-      end;
+        argv^[n] := d;
+      inc(n);
+      if n = high(argv^) then
+        exit;
       state := [sInArg];
     end;
     if d <> nil then

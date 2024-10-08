@@ -8113,7 +8113,7 @@ begin
   Rtti.JsonReader := TMethod(read);
   write := RttiJsonWrite;
   Rtti.JsonWriter := TMethod(write);
-  Rtti.CopyObject := OrmCopyObject;
+  Rtti.CopyObject := @OrmCopyObject;
 end;
 
 function TOrm.IsPropClassInstance(Prop: PRttiCustomProp): boolean;
@@ -8599,7 +8599,7 @@ begin
                 if result = '' then
                    // no custom message -> show a default message
                   result := format(sValidationFailed,
-                    [GetCaptionFromClass(Validate.ClassType)]);
+                    [GetCaptionFromClass(PClass(Validate)^)]);
                 exit;
               end;
             end;

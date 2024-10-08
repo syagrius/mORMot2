@@ -79,7 +79,7 @@ type
   // you would better use an external .dbg file then convert it into a .mab
   // - on FPC, you don't need to specifly the -gl compiler switch
   // - location of a source code information from its address is below 10us
-  TDebugFile = class(TObjectWithProps)
+  TDebugFile = class(TSynPersistent)
   protected
     fDebugFile: TFileName;
     fSymbol: TDebugSymbolDynArray;
@@ -6176,10 +6176,8 @@ fin:  log.fWriterEcho.AddEndOfLine(log.fCurrentLevel);
       // any nested exception should never be propagated to the OS caller
     end;
   finally
-    {$ifndef NOEXCEPTIONINTERCEPT}
     if log <> nil then
       log.fExceptionIgnoreThreadVar^ := log.fExceptionIgnoredBackup;
-    {$endif NOEXCEPTIONINTERCEPT}
     mormot.core.os.LeaveCriticalSection(GlobalThreadLock);
   end;
 end;

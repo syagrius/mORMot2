@@ -2140,7 +2140,7 @@ type
   // you should call sqlite3.open() instead of sqlite3_open() for instance
   // - if your project refers to mormot.db.raw.sqlite3.static unit, it will
   // initialize a TSqlite3LibrayStatic instance
-  TSqlite3Library = class(TObjectWithProps)
+  TSqlite3Library = class(TSynPersistent)
   protected
     fUseInternalMM: boolean;
     fVersionNumber: cardinal;
@@ -4907,7 +4907,7 @@ type
   // TSqlite3Library.AfterInitialization did set SQLITE_CONFIG_MULTITHREAD flag
   // - can cache last results for SELECT statements, if property UseCache is true:
   //  this can speed up most read queries, for web server or client UI e.g.
-  TSqlDataBase = class(TSynPersistentLock)
+  TSqlDataBase = class(TSynLocked)
   protected
     fDB: TSqlite3DB;
     fFileName: TFileName;
@@ -5549,6 +5549,7 @@ var
 /// check from the file beginning if sounds like a valid SQLite3 file
 // - returns true if a database file is encrypted or not
 // - optional retrieve the file page size from header
+// - warning: PageSize^ should be a 32-bit "integer" variable, not a PtrInt
 function IsSQLite3File(const FileName: TFileName;
   PageSize: PInteger = nil): boolean;
 

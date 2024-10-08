@@ -63,6 +63,7 @@ Cross-Platform Operating System Security Definitions
 - Security Descriptor Self-Relative Binary Structures
 - Access Control List (DACL/SACL) Definitions
 - Conditional ACE Expressions SDDL and Binary Support
+- Active Directory Definitions
 - Security Descriptor Definition Language (SDDL)
 - `TSecurityDescriptor` Wrapper Object
 - Windows API Specific Security Types and Functions
@@ -116,7 +117,8 @@ Cross-Compiler RTTI Definitions shared by all framework units
 - Managed Types Finalization, Random or Copy
 - RTTI Value Types used for JSON Parsing
 - RTTI-based Registration for Custom JSON Parsing
-- High Level `TObjectWithID` and `TObjectWithCustomCreate` Class Types
+- `TRttiMap` Field Mapping (e.g. DTO/Domain Objects)
+- `TObjectWithRttiMethods` `TObjectWithID` `TClonable` Classes
 - Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly
 
 Purpose of this unit is to avoid any direct use of `TypInfo.pas` RTL unit, which is not exactly compatible between compilers, and lacks of direct RTTI access with no memory allocation. We define pointers to RTTI record/object to access `TypeInfo()` via a set of explicit methods. Here fake record/objects are just wrappers around pointers defined in Delphi/FPC RTL's `TypInfo.pas` with the magic of inlining. We redefined all RTTI definitions as `TRtti*` types to avoid confusion with type names as published by the `TypInfo` unit.
@@ -140,9 +142,10 @@ Low-Level Memory Buffers Processing Functions shared by all framework units
 ### mormot.core.data
 
 Low-Level Data Processing Functions shared by all framework units
-- RTL `TPersistent` / `TInterfacedObject` with Custom Constructor
-- `TSynPersistent*` / `TSyn*List` `TSynLocker` classes
-- `TSynPersistentStore` with proper Binary Serialization
+- RTL `TPersistent` or Root Classes with Custom Constructor
+- `IAutoFree` and `IAutoLocker` Reference-Counted Process
+- `TSynList` `TSynObjectList` `TSynLocker` classes
+- `TObjectStore` with proper Binary Serialization
 - INI Files and In-memory Access
 - Efficient RTTI Values Binary Serialization and Comparison
 - `TDynArray` and `TDynArrayHashed` Wrappers
@@ -155,7 +158,7 @@ Low-Level Data Processing Functions shared by all framework units
 JSON functions shared by all framework units
 - Low-Level JSON Processing Functions
 - `TTextWriter` class with proper JSON escaping and `WriteObject()` support
-- JSON-aware `TSynNameValue` `TSynPersistentStoreJson`
+- JSON-aware `TSynNameValue` `TObjectStoreJson`
 - JSON-aware `TSynDictionary` Storage
 - JSON Unserialization for any kind of Values
 - JSON Serialization Wrapper Functions

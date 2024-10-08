@@ -15,7 +15,8 @@ unit mormot.core.rtti;
     - Managed Types Finalization, Random or Copy
     - RTTI Value Types used for JSON Parsing
     - RTTI-based Registration for Custom JSON Parsing
-    - High Level TObjectWithID and TObjectWithCustomCreate Class Types
+    - TRttiMap Field Mapping (e.g. for DTO/Domain Objects)
+    - TObjectWithRttiMethods TObjectWithID TClonable Classes
     - Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly
 
      Purpose of this unit is to avoid any direct use of TypInfo.pas RTL unit,
@@ -368,6 +369,14 @@ const
     8,                                             // rfComp
     8 );                                           // rfCurr
 
+  /// the maximum supported byte size of sets - 8 bytes for ENUM_MAX = 64 items
+  // - mormot.core.rtti/json has such a limit when calling getter/setter methods
+  // via Int64/variants - even if the compiler itself is limited to 256 items
+  // - see also TRttiEnumType.SizeInStorageAsSet
+  ENUM_MAX_SIZE = SizeOf(Int64);
+  /// the maximum supported items count of sets - 64 items for ENUM_MAX_SIZE
+  ENUM_MAX = ENUM_MAX_SIZE shl 3;
+
 
 type
   PRttiKind = ^TRttiKind;
@@ -581,7 +590,7 @@ type
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the enumeration names corresponding to a set value as CSV
     function GetSetName(const value; trimmed: boolean = false;
-      const sep: RawUtf8 = ','): RawUtf8;
+      sep: AnsiChar = ','): RawUtf8;
     /// get the enumeration names corresponding to a set value as a RawUtf8 rray
     procedure GetSetNameArray(const value; var res: TRawUtf8DynArray;
       trimmed: boolean = false);
@@ -604,7 +613,9 @@ type
     function SizeInStorageAsEnum: integer;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute how many bytes (1, 2, 4, 8) this type will use to be stored as a set
-    // - if ISFPC32 conditional is defined, will execute in O(1)
+    // - mormot.core.rtti/json only supports sets up to ENUM_MAX = 64 items, to
+    // fit the 64-bit maximum size of our virtual getter/setter methods via
+    // Int64/variants - even if the compiler itself is limited to 256 items
     function SizeInStorageAsSet: integer;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// store an enumeration value from its ordinal representation
@@ -689,6 +700,22 @@ type
   /// as returned by TRttiInfo.RecordAllFields
   TRttiRecordAllFields = array of TRttiRecordAllField;
 
+  /// some basic classes as recognized in TRttiCustom.ValueRtlClass
+  TRttiValueClass = (
+    vcNone,
+    vcPersistent,
+    vcStrings,
+    vcList,
+    vcObjectList,
+    vcException,
+    vcCollection,
+    vcESynException,
+    vcSynList,
+    vcSynObjectList,
+    vcRawUtf8List,
+    vcObjectWithID,
+    vcClonable);
+
   /// quick identification of some RTTI value types
   TRttiCacheFlag = (
     rcfQWord,
@@ -748,14 +775,19 @@ type
       rkDynArray,
       rkArray: (
         ItemInfoManaged: PRttiInfo; // = nil for unmanaged types
-        ItemInfoRaw: PRttiInfo;   // from RTTI, likely <> nil for unmanaged types
+        ItemInfoRaw: PRttiInfo; // from RTTI, may be <> nil for unmanaged types
         ItemSize: integer;
-        ItemCount: integer;    // rkArray only
+        ItemCount: integer;     // rkArray only
+        ObjArrayClass: TClass;  // rkDynArray only
       );
       rkClass: (
+        NewInstance: pointer; // TRttiCustomNewInstance - set by mormot.core.json
+        ValueClass: TClass; // = Info.RttiClass.RttiClass
+        ValueRtlClass: TRttiValueClass;
         SerializableInterface: pointer; // = TRttiCustom of the rkInterface
       );
       rkInterface: (
+        NewInterface: pointer; // same offset than rkClass NewInstance
         InterfaceGuid: PGuid;
         SerializableClass: TClass; // = TInterfacedSerializable
         SerializableInterfaceEntryOffset: integer; // resolve once
@@ -1461,7 +1493,20 @@ procedure CopyObject(aFrom, aTo: TObject); overload;
 // CopyObject() procedure to copy its values
 // - caller should use "CopyObject(...) as TDestClass" for safety
 // - see also TRttiMap for custom mapping between classes
-function CopyObject(aFrom: TObject): TObject; overload;
+function CopyObject(aFrom: TObject): pointer; overload;
+
+/// allocate and fill DestObjArray[] from SourceObjArray[] copies
+// - i.e. new TObject instances will be allocated and copied via CopyObject(),
+// whereas DestObjArray := copy(SourceObjArray) would only copy the pointers
+// - supports optional external integer counts, to use length() as capacity
+// - warning: SourceCount/DestCount should be 32-bit "integer" variable, not PtrInt
+procedure ObjArrayCopy(const SourceObjArray; var DestObjArray;
+  SourceCount: PInteger = nil; DestCount: PInteger = nil); overload;
+
+/// allocate and fill a T*ObjArray from SourceObjArray[] copies
+// - warning: SourceCount should be a 32-bit "integer" variable, not a PtrInt
+function ObjArrayCopy(const SourceObjArray;
+  SourceCount: PInteger = nil): TPointerDynArray; overload;
 
 /// copy record properties into an object instance
 // - handle properties of the same exact type, searched by name
@@ -1477,17 +1522,13 @@ procedure RecordToObject(const aFrom; aTo: TObject; aFromType: PRttiInfo);
 // - see also TRttiMap for custom mapping between class and record
 procedure ObjectToRecord(aFrom: TObject; var aTo; aToType: PRttiInfo);
 
-/// copy two TStrings instances
-// - will just call Dest.Assign(Source) in practice
-procedure CopyStrings(Source, Dest: TStrings);
-
 /// copy two TCollection instances
 // - will call CopyObject() in loop to repopulate the Dest collection,
 // which will work even if Assign() method was not overriden
 procedure CopyCollection(Source, Dest: TCollection);
 
 /// set any default integer or enumerates (including boolean) published
-// properties values for a TPersistent/TSynPersistent
+// properties values for a TPersistent/TClonable
 // - set only the values set as "property ... default ..." at class type level
 // - will also reset the published properties of the nested classes
 procedure SetDefaultValuesObject(Instance: TObject);
@@ -1605,7 +1646,13 @@ function GetSetNameArray(aTypeInfo: PRttiInfo; const value;
 // - expects CustomText in the TRttiJson.RegisterCustomEnumValues() format, e.g.
 // ! const MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('one', 'and 2');
 function GetSetNameCustom(aTypeInfo: PRttiInfo; const value;
-  CustomText: PRawUtf8Array; const SepChar: RawUtf8 = ','): RawUtf8;
+  customText: PRawUtf8Array; sepChar: AnsiChar = ','): RawUtf8;
+
+/// helper to retrieve the CSV text of all enumerates defined in a dynamic array
+// - expects CustomText in the TRttiJson.RegisterCustomEnumValues() format, e.g.
+// ! const MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('one', 'and 2');
+function GetEnumArrayNameCustom(const value; valueLength: PtrInt;
+  customText: PRawUtf8Array; sepChar: AnsiChar = ','): RawUtf8;
 
 /// helper to retrieve the CSV text of all enumerate items defined in a set
 procedure GetSetNameShort(aTypeInfo: PRttiInfo; const value;
@@ -1647,6 +1694,7 @@ function ToText(cmd: TParseCommands): ShortString; overload;
 { defined here to avoid circular dependency in mormot.core.os.security.pas }
 function ToText(w: TWellKnownSid): PShortString; overload;
 function ToText(w: TWellKnownRid): PShortString; overload;
+function ToText(a: TAdsKnownAttribute): PShortString; overload;
 
 
 { ***************** IInvokable Interface RTTI }
@@ -2195,8 +2243,8 @@ type
   // - rcfSpi identifies types containing Sensitive Personal Information
   // (e.g. a bank card number or a plain password) which should be hidden
   // - rcfHookWrite, rcfHookWriteProperty, rcfHookRead, rcfHookReadProperty for
-  // TObjectWithCustomCreate kind of class, to customize JSON serialization
-  // calling the set of TObjectWithCustomCreate protected virtual methods -
+  // TObjectWithRttiMethods kind of class, to customize JSON serialization
+  // calling the set of TObjectWithRttiMethods protected virtual methods -
   // disabled by default not to slow down the serialization process
   // - rcfHasNestedProperties is set e.g. for rkClass or rcfWithoutRtti records,
   // rcfHasNestedManagedProperties if any of the property/field is rcfIsManaged
@@ -2305,8 +2353,13 @@ type
       CaseInsensitive: boolean): integer;
       {$ifdef HASINLINE}inline;{$endif}
     /// low-level copy of two properties values
+    // - managed or simple (e.g. integer) properties call Value.ValueCopy()
+    // - if the property is a class, will copy the properties or call Assign()
+    // as expected on an existing Dest instance
     procedure CopyValue(Dest, Source: PAnsiChar; DestRtti: PRttiCustomProp);
     /// low-level initialization of one property value
+    // - if the property is a class, all nested properties will be cleared,
+    // optionally calling Free on all instances
     procedure ClearValue(Data: pointer; FreeAndNilNestedObjects: boolean);
     /// append the field value as JSON with proper getter method call
     // - wrap GetRttiVarData() + AddVariant() over a temp TRttiVarData
@@ -2439,20 +2492,6 @@ type
     eeCurly,
     eeEndKeyWord);
 
-  /// the recognized raw RTL classes as identified in TRttiCustom.ValueRtlClass
-  TRttiValueClass = (
-    vcNone,
-    vcCollection,
-    vcStrings,
-    vcObjectList,
-    vcList,
-    vcSynList,
-    vcRawUtf8List,
-    vcESynException,
-    vcException,
-    vcObjectWithID);
-
-
   /// allow to customize the process of a given TypeInfo/PRttiInfo
   // - a global list of TRttiCustom instances mapping TypeInfo() is maintained
   // in Rtti: TRttiCustomList
@@ -2462,7 +2501,6 @@ type
     fCache: TRttiCache;
     fParser: TRttiParserType;                 // 8-bit
     fParserComplex: TRttiParserComplexType;   // 8-bit
-    fValueRtlClass: TRttiValueClass;          // 8-bit
     fFlags: TRttiCustomFlags;                 // 32-bit
     fPrivateSlot: pointer;
     fArrayRtti: TRttiCustom;
@@ -2478,7 +2516,6 @@ type
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
     fJsonSave: pointer; // contains a TRttiJsonSave - used if fJsonWriter=nil
     fJsonReader, fJsonWriter: TMethod; // TOnRttiJsonRead/TOnRttiJsonWrite
-    fNewInstance: TRttiCustomNewInstance; // mormot.core.json implemented
     fAutoCreateInstances, // some lists made by RegisterAutoCreateFieldsClass
     fAutoDestroyClasses,
     fAutoCreateObjArrays,
@@ -2486,12 +2523,11 @@ type
     fPrivateSlots: TObjectDynArray;
     fNoRttiInfo: TByteDynArray; // used by NoRttiSetAndRegister()
     // used to customize the class process
-    fValueClass: TClass;
-    fObjArrayClass: TClass;
     fCollectionItem: TCollectionItemClass;
     fCollectionItemRtti: TRttiCustom;
     fCopyObject: TRttiClassCopier;
-    procedure SetValueClass(aClass: TClass; aInfo: PRttiInfo); virtual;
+    procedure RaiseMissingRtti;
+    procedure SetValueClass(aClass: TClass; aInfo: PRttiInfo);
     // for TRttiCustomList.RegisterObjArray/RegisterBinaryType/RegisterFromText
     function SetObjArray(Item: TClass): TRttiCustom;
     function SetBinaryType(BinSize: integer): TRttiCustom;
@@ -2529,7 +2565,9 @@ type
     procedure ValueFinalizeAndClear(Data: pointer);
       {$ifdef HASINLINE}inline;{$endif}
     /// efficiently copy of a stored value of this type
-    // - same behavior as Dest := Source for all types
+    // - same behavior as Dest := Source for all types, i.e. managed types will
+    // be handled as expected, but rkClass will be copied by reference, just
+    // like e.g. any ordinal value
     procedure ValueCopy(Dest, Source: pointer);
       {$ifdef HASINLINE}inline;{$endif}
     /// return TRUE if the Value is 0 / nil / '' / null
@@ -2583,15 +2621,18 @@ type
     // - implemented in TRttiJson for proper knowledge of complex types
     // - warning: supplied W instance should be a TJsonWriter
     procedure ValueWriteText(Data: pointer; W: TTextWriter; HtmlEscape: boolean); virtual;
-    /// create a new TObject instance of this rkClass
-    // - not implemented here (raise an ERttiException) but in TRttiJson,
-    // so that mormot.core.rtti has no dependency to TSynPersistent and such
+    /// create a new TObject instance of this rkClass or rkInterface
+    // - mormot.core.json will ensure the proper (virtual) constructor is called
+    // - may return nil if self is nil or this type is not a rkClass or rkInterface
     function ClassNewInstance: pointer;
       {$ifdef HASINLINE}inline;{$endif}
-    /// allow low-level customization of the fNewInstance pointer
+    /// allow low-level customization of the Cache.NewInstance pointer for rkClass/rkInterface
     procedure SetClassNewInstance(FactoryMethod: TRttiCustomNewInstance);
-    /// check if this type has ClassNewInstance information
+    /// check if this type has ClassNewInstance information for rkClass
     function HasClassNewInstance: boolean;
+    /// copy one rkClass instance into another - as used by CopyObject()
+    // - return the destination object, optionally creating it if aTo = nil
+    function ClassCopyInstance(aFrom, aTo: TObject): pointer;
     /// reset all stored Props[] and associated flags
     procedure PropsClear;
     /// recursively search for 'one.two.three' nested properties
@@ -2661,17 +2702,17 @@ type
       read fCache.BinarySize;
     /// store the class of this type, i.e. contains Cache.Info.RttiClass.RttiClass
     property ValueClass: TClass
-      read fValueClass;
+      read fCache.ValueClass;
     /// identify most common RTL inherited classes for special handling
     // - recognize TCollection TStrings TObjectList TList parents
     // - TRttiValueClass enumerate is faster than InheritsFrom() call
     property ValueRtlClass: TRttiValueClass
-      read fValueRtlClass;
+      read fCache.ValueRtlClass;
     /// store the class of a T*ObjArray dynamic array
     // - shortcut to ArrayRtti.Info.RttiClass.RttiClass
     // - used when rcfObjArray is defined in Flags
     property ObjArrayClass: TClass
-      read fObjArrayClass;
+      read fCache.ObjArrayClass;
     /// store the Item class for a given TCollection
     // - as previously registered by Rtti.RegisterCollection()
     property CollectionItem: TCollectionItemClass
@@ -2683,12 +2724,17 @@ type
     // - assignment is usually protected by the Rtti.RegisterSafe
     property PrivateSlot: pointer
       read fPrivateSlot write fPrivateSlot;
-    /// redirect to the low-level value copy - use rather ValueCopy()
+    /// redirect to the low-level value copy - used to bypass ValueCopy()
+    // - if nil, you should use MoveFast(), as ValueCopy() does
+    // - is set for managed types (e.g. strings), or most simple types stored as
+    // 2, 4, 8, 16, 32 or 64 bytes - rkClass will be copied by reference, just
+    // like e.g. any ordinal value
     property Copy: TRttiCopier
       read fCopy;
     /// redirect to the low-level class instance copy
     // - nil by default, to use Props.CopyProperties()
-    // - is overwritten e.g. by TOrm.RttiCustomSetParser
+    // - is overwritten e.g. to call TPersistent/TClonable.Assign when no
+    // published property is defined, or by TOrm.RttiCustomSetParser
     property CopyObject: TRttiClassCopier
       read fCopyObject write fCopyObject;
     /// opaque TRttiJsonLoad callback used by mormot.core.json.pas
@@ -2985,14 +3031,21 @@ var
   /// direct lookup to the TRttiCustom of TRttiParserComplexType values
   PTC_RTTI: array[TRttiParserComplexType] of TRttiCustom;
 
+
+
+{ ************************ TRttiMap Field Mapping (e.g. DTO/Domain Objects) }
+
 type
   /// pointer to a TRttiMap reference, for fluid-interface initialization
   PRttiMap = ^TRttiMap;
+
   /// customizable field mapping between classes and records
   // - Init/Map overloaded methods return self to allow proper fluid-calling
   // - records should have field-level extended RTTI (since Delphi 2010), or have
   // been properly defined with Rtti.RegisterFromText() on FPC or oldest Delphi
   // - allow RTTI or custom mapping, e.g. with Data Transfer Objects (DTO)
+  // - ToA() / ToB() methods are thread-safe by design: once Init() and Map()
+  // have been made, you can safely share a single TRttiMap between threads
   {$ifdef USERECORDWITHMETHODS}
   TRttiMap = record
   {$else}
@@ -3005,47 +3058,96 @@ type
     function _Map(A, B: PtrInt): PRttiMap;
   public
     /// initialize fields mapping between two class instances
+    // - for instance:
+    // !  map.Init(TMyClassA, TMyClassB);
     function Init(A, B: TClass): PRttiMap; overload;
     /// initialize fields mapping between a class instance and a record
+    // - for instance:
+    // !  map.Init(TMyClassA, TypeInfo(TMyRecordB));
     function Init(A: TClass; B: PRttiInfo): PRttiMap; overload;
     /// initialize fields mapping between two record instances
+    // - for instance:
+    // !  map.Init(TypeInfo(TMyRecordA), TypeInfo(TMyRecordB));
     function Init(A, B: PRttiInfo): PRttiMap; overload;
     /// use RTTI field names to map the content
+    // - returns self to continue manual calls to Map() in a fluid interface,
+    // e.g. to tune the default mapping made by this method
     function AutoMap: PRttiMap;
     /// map two fields by name
     // - if any field A or B name is '', this field will be ignored
+    // - returns self to continue manual calls to Map() in a fluid interface
     function Map(const A, B: RawUtf8): PRttiMap; overload;
     /// map fields by A,B pairs of names
+    // - returns self to continue manual calls to Map() in a fluid interface
     function Map(const ABPairs: array of RawUtf8): PRttiMap; overload;
-    /// copy B fields values into A
-    // - A and B are either a TObject instance or a @record pointer, depending on Init()
+    /// thread-safe copy B fields values into A
+    // - A and B are either a TObject instance or a @record pointer, depending
+    // on Init() supplied types, for instance:
+    // !var c: TMyClass;
+    // !    r: TMyRecord;
+    // !begin
+    // !  map.Init(TMyClass, TypeInfo(TMyRecord)).AutoMap;
+    // !  map.ToA(c, @r); // from TMyRecord to TMyClass
+    // !  map.ToB(c, @r); // from TMyClass to TMyRecord
     procedure ToA(A, B: pointer); overload;
-    /// copy A fields values into B
-    // - A and B are either a TObject instance or a @record pointer, depending on Init()
+    /// thread-safe copy A fields values into B
+    // - A/B are either TObject instance or @record pointer, depending on Init()
     procedure ToB(A, B: pointer); overload;
-    /// create a new A class instance, copying field values from B
-    // - returned A is a newly allocated instance of the TClass specified to Init()
+    /// thread-safe create a new A, copying field values from B
+    // - if Init(A) was a class, returned pointer is a new class instance,
+    // which should be released via Free
+    // - if Init(A) was a record, returned pointer if a heap-allocated record,
+    // which should be released via a proper Dispose()
     // - B is either a TObject instance or a @record pointer, depending on Init()
+    // - usage may be:
+    // !var c, c2: TMyClass;
+    // !    r: ^TMyRecord;
+    // !begin
+    // !  map.Init(TypeInfo(TMyRecord), TMyClass).AutoMap;
+    // !  c := TMyClass.Create;
+    // !  try
+    // !    Fill(c);
+    // !    r := map.ToA(c); // from TMyClass to heap-allocated TMyRecord
+    // !    try
+    // !      WorkOn(r^);
+    // !      c2 := map.ToB(r); // from TMyRecord to a new TMyClass instance
+    // !      try
+    // !        Use(c2);
+    // !      finally
+    // !        c2.Free;
+    // !      end;
+    // !    finally
+    // !      Dispose(r);
+    // !    end;
+    // !  finally
+    // !    c.Free;
+    // !  end;
+    // !end;
     function ToA(B: pointer): pointer; overload;
-    /// create a new B class instance, copying field values from A
-    // - A is either a TObject instance or a @record pointer, depending on Init()
+    /// thread-safe create a new B, copying field values from A
+    // - if Init(B) was a class, returned pointer is a new class instance,
+    // which should be released via Free
+    // - if Init(B) was a record, returned pointer if a heap-allocated record,
+    // which should be released via a proper Dispose()
     // - returned B is a newly allocated instance of the TClass specified to Init()
     function ToB(A: pointer): pointer; overload;
   end;
 
 
-{ *********** High Level TObjectWithID and TObjectWithCustomCreate Class Types }
+{ *********** TObjectWithRttiMethods TObjectWithID TClonable Classes }
 
 type
   /// abstract parent class with published properties and a virtual constructor
-  // - is the parent of both TSynPersistent and TOrm classes
+  // - for instance, is the parent of TObjectWithID, TOrm or TSynMonitor classes
   // - will ensure the class type is registered to the Rtti global list
   // - also features some protected virtual methods for custom RTTI/JSON process
-  TObjectWithCustomCreate = class(TObjectWithProps)
+  // - for best performance, any type inheriting from this class will bypass
+  // some regular steps: do not implement interfaces or use TMonitor with them!
+  TObjectWithRttiMethods = class(TSynPersistent)
   protected
     /// called by TRttiJson.SetParserType when this class is registered
     // - used e.g. to register TOrm.ID field which is not published as RTTI
-    // - in TSynPersistent descendants, can change the Rtti.JsonSave callback
+    // - in TClonable descendants, can change the Rtti.JsonSave callback
     // if needed, or e.g. set rcfHookWrite flag to call RttiBeforeWriteObject
     // and RttiAfterWriteObject, rcfHookWriteProperty for RttiWritePropertyValue
     // and/or rcfHookRead for RttiBeforeReadObject or RttiAfterReadObject methods
@@ -3092,8 +3194,8 @@ type
     // - somewhat faster than the regular RTL implementation
     // - warning: this optimized version won't initialize the vmtIntfTable
     // for this class hierarchy: as a result, you would NOT be able to
-    // implement an interface with a TSynPersistent descendent (but you should
-    // not need to, but inherit from TInterfacedObject)
+    // implement an interface with a TObjectWithRttiMethods descendent (but
+    // you should not need to, but inherit from TInterfacedObject)
     // - warning: under FPC, it won't initialize fields management operators
     class function NewInstance: TObject; override;
     /// very efficiently retrieve the TRttiCustom associated with this class
@@ -3103,15 +3205,44 @@ type
   end;
   {$M-}
 
-  /// used to determine the exact class type of a TObjectWithCustomCreate
-  TObjectWithCustomCreateClass = class of TObjectWithCustomCreate;
+  /// used to determine the exact class type of a TObjectWithRttiMethods
+  TObjectWithRttiMethodsClass = class of TObjectWithRttiMethods;
+
+  /// add locking methods to TObjectWithRttiMethods, with woRttiMethodsLock support
+  // - if you don't need TObjectWithRttiMethods overhead, nor lock/unlock during
+  // JSON process, consider plain the TSynLocked class or just a TLightLock field
+  TSynLockedWithRttiMethods = class(TObjectWithRttiMethods)
+  protected
+    fSafe: PSynLocker;
+    // will lock/unlock the instance during JSON serialization of its properties
+    function RttiBeforeWriteObject(W: TTextWriter;
+      var Options: TTextWriterWriteObjectOptions): boolean; override;
+    procedure RttiAfterWriteObject(W: TTextWriter;
+      Options: TTextWriterWriteObjectOptions); override;
+    // set rcfHookWrite flag to call RttiBeforeWriteObject/RttiAfterWriteObject
+    class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
+  public
+    /// initialize the instance, and its associated lock
+    constructor Create; override;
+    /// finalize the instance, and its associated lock
+    destructor Destroy; override;
+    /// access to the associated instance critical section
+    property Safe: PSynLocker
+      read fSafe;
+    /// could be used as a short-cut to Safe^.Lock
+    procedure Lock;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// could be used as a short-cut to Safe^.UnLock
+    procedure Unlock;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
 
   /// root class of an object with a 64-bit ID primary key
   // - is the parent of mormot.orm.core's TOrm, but you could use it e.g. on
   // client side to avoid a dependency to all ORM process, but still have the
   // proper published fields and use it in SOA - with a single conditional over
   // your class definition to inherit either from TOrm or from TObjectWithID
-  TObjectWithID = class(TObjectWithCustomCreate)
+  TObjectWithID = class(TObjectWithRttiMethods)
   protected
     fID: TID;
     /// will register the "ID":... field value for proper JSON serialization
@@ -3128,10 +3259,35 @@ type
   /// used to determine the exact class type of a TObjectWithID
   TObjectWithIDClass = class of TObjectWithID;
 
-/// internal wrapper to protected TObjectWithCustomCreate.RttiCustomSetParser()
-// - a local TCCHook was reported to have issues on FPC with class methods
-procedure TObjectWithCustomCreateRttiCustomSetParser(
-  O: TObjectWithCustomCreateClass; Rtti: TRttiCustom);
+  /// our own empowered TPersistent-like parent class with assignment
+  // - inherited class should override AssignTo() protected abstract method
+  // - if you just need to use published properties and RTTI, don't inherit
+  // from this class, but from the lighter TSynPersistent
+  // - the Clone and CloneObjArray() methods allow fast copy of such instances
+  TClonable = class(TSynPersistent)
+  protected
+    procedure AssignTo(Dest: TClonable); virtual; abstract; // to be overriden
+  public
+    /// allows to implement a TPersistent-like assignement mechanism
+    // - could be used instead of CopyObject() which copy published properties
+    // - will first check than Dest is (or inherits from) this class
+    procedure Assign(Source: TClonable);
+    /// create a copy of this TClonable instance using Assign()
+    // - slightly faster than CopyObject(self)
+    function Clone: pointer;
+    /// create a copy of a T*ObjArray of this TClonable using Clone()
+    // - will be allocated and filled by DestObjArray[] := SourceObjArray[].Clone
+    class procedure CloneObjArray(const SourceObjArray; var DestObjArray;
+      SourceCount: PInteger = nil; DestCount: PInteger = nil);
+  end;
+
+  /// used to determine the exact class type of a TClonable
+  TClonableClass = class of TClonable;
+
+  /// used for backward compatibility only with existing code
+  TSynPersistentLock = class(TSynLocked);
+  TSynPersistentLocked = class(TSynLocked);
+  TObjectWithProps = class(TSynPersistent);
 
 /// TDynArraySortCompare compatible function, sorting by TObjectWithID/TOrm.ID
 function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
@@ -3139,6 +3295,28 @@ function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
 /// TDynArrayHashOne compatible function, hashing TObjectWithID/TOrm.ID
 function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
 
+// internal wrappers to publish protected methods to mormot.core.json
+procedure CopyClonable(Dest, Source: TObject);
+procedure RttiSetParserTObjectWithRttiMethods(
+  O: TObjectWithRttiMethodsClass; Rtti: TRttiCustom);
+
+var
+  /// let TRttiCustom recognize the actual TClass of each TRttiValueClass
+  // - mormot.core.data list classses are set by mormot.core.json
+  CLASS_RTTI: array[TRttiValueClass] of TClass = (
+    nil,                      // vcNone
+    TPersistent,              // vcPersistent
+    TStrings,                 // vcStrings
+    TList,                    // vcList
+    TObjectList,              // vcObjectList
+    Exception,                // vcException
+    TCollection,              // vcCollection
+    ESynException,            // vcESynException
+    nil,                      // vcSynList
+    nil,                      // vcSynObjectList
+    nil,                      // vcRawUtf8List
+    TObjectWithID,            // vcObjectWithID
+    TClonable);          // vcClonable
 
 
 implementation
@@ -3298,7 +3476,7 @@ begin
     else if result < 64 then
       result := SizeOf(QWord)
     else
-      result := 0;
+      result := 0; // see ENUM_MAX/ENUM_MAX_SIZE hardcore limit
   end
   else
     result := 0;
@@ -3491,32 +3669,39 @@ begin
 end;
 
 function TRttiEnumType.GetSetName(const value; trimmed: boolean;
-  const sep: RawUtf8): RawUtf8;
+  sep: AnsiChar): RawUtf8;
 var
   j: PtrInt;
   PS, v: PShortString;
-  tmp: shortstring;
+  tmp: TSynTempBuffer; // no temp allocation up to 4KB of output text
+  tmp2: shortstring;
 begin
   result := '';
   if (@self = nil) or
      (@value = nil) then
     exit;
+  tmp.InitOnStack;
   PS := NameList;
   for j := MinValue to MaxValue do
   begin
     if GetBitPtr(@value, j) then
     begin
-      v := @tmp;
       if trimmed then
-        TrimLeftLowerCaseToShort(PS, tmp)
+      begin
+        TrimLeftLowerCaseToShort(PS, tmp2);
+        v := @tmp2;
+      end
       else
         v := PS;
-      Append(result, [v^, sep]);
+      tmp.AddShort(v^);
+      tmp.AddDirect(sep);
     end;
     inc(PByte(PS), PByte(PS)^ + 1); // next
   end;
-  if result <> '' then
-    FakeLength(result, length(result) - length(sep)); // trim last separator
+  if tmp.added = 0 then
+    exit;
+  dec(tmp.added); // cancel last comma
+  tmp.Done(result, CP_UTF8);
 end;
 
 procedure TRttiEnumType.GetSetNameArray(const value; var res: TRawUtf8DynArray;
@@ -3726,7 +3911,7 @@ begin
     rkWChar:
       result := ORDTYPE_SIZE[TRttiOrd(GetTypeData(@self)^.OrdType)];
     rkSet:
-      result := SetEnumSize;
+      result := SetEnumSize; // equals 0 if items count is > ENUM_MAX = 64
     rkFloat:
       result := FLOATTYPE_SIZE[TRttiFloat(GetTypeData(@self)^.FloatType)];
     rkLString,
@@ -3746,11 +3931,13 @@ begin
     rkInterface,
     rkDynArray:
       result := SizeOf(pointer);
+    rkMethod:
+      result := SizeOf(pointer) * 2;
     {$ifdef FPC}
     rkQWord,
     {$endif FPC}
     rkInt64:
-      result := 8;
+      result := SizeOf(Int64);
     rkVariant:
       result := SizeOf(variant);
     rkArray:
@@ -3814,6 +4001,18 @@ begin
   end;
 end;
 
+function {%H-}_New_NotImplemented(Rtti: TRttiCustom): pointer;
+begin
+  if Rtti = nil then
+    raise ERttiException.Create('Unexpected ClassNewInstance(nil)')
+  else if Rtti.Kind <> rkClass then
+     raise ERttiException.CreateUtf8('%.ClassNewInstance(%) not available for %',
+       [Rtti, Rtti.Name, ToText(Rtti.Kind)^])
+  else
+    raise ERttiException.CreateUtf8('%.ClassNewInstance(%) not implemented -> ' +
+      'please include mormot.core.json unit to register TRttiJson',
+      [Rtti, Rtti.Name]);
+end;
 
 var
   /// conversion table from TRttiKind to TRttiVarData.VType
@@ -3921,8 +4120,16 @@ begin
         Cache.CodePage := AnsiStringCodePage; // use TypeInfo() on old Delphi
         Cache.Engine := TSynAnsiConvert.Engine(Cache.CodePage);
       end;
+    rkClass:
+      begin
+        Cache.NewInstance := @_New_NotImplemented; // raise ERttiException
+        Cache.ValueClass := RttiClass^.RttiClass;
+      end;
     rkInterface:
-      Cache.InterfaceGuid := InterfaceGuid;
+      begin
+        Cache.NewInterface := @_New_NotImplemented; // at NewInstance offset
+        Cache.InterfaceGuid := InterfaceGuid;
+      end;
   end;
 end;
 
@@ -4296,7 +4503,7 @@ begin
     call.Code := PPointer({%H-}call.Data)^
   else if TypeInfo^.Kind in [rkDynArray, rkInterface] then
     ERttiException.RaiseUtf8('TRttiProp.GetOrdProp(%) has no getter for %',
-      [Instance.ClassType, ToText(TypeInfo^.Kind)^])
+      [Instance, ToText(TypeInfo^.Kind)^])
   else if rpc = rpcMethod then
     call.Code := TGetProc(call)
   else if rpc = rpcIndexed then
@@ -5050,8 +5257,49 @@ begin
   result := GetEnumName(TypeInfo(TWellKnownRid), ord(w));
 end;
 
+function ToText(a: TAdsKnownAttribute): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TAdsKnownAttribute), ord(a));
+end;
+
 
 { **************** Published Class Properties and Methods RTTI }
+
+// some TRttiCustomList methods defined here for proper inlining in code below
+
+function TRttiCustomList.RegisterType(Info: PRttiInfo): TRttiCustom;
+begin
+  if Info <> nil then
+  begin
+    result := FindType(Info);
+    if result = nil then
+      result := DoRegister(Info);
+  end
+  else
+    result := nil;
+end;
+
+function TRttiCustomList.RegisterClass(ObjectClass: TClass): TRttiCustom;
+begin
+  {$ifdef NOPATCHVMT}
+  result := FindType(PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^);
+  {$else}
+  result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
+  if result = nil then
+    result := DoRegister(ObjectClass);
+end;
+
+function TRttiCustomList.RegisterClass(aObject: TObject): TRttiCustom;
+begin
+  {$ifdef NOPATCHVMT}
+  result := FindType(PPointer(PPAnsiChar(aObject)^ + vmtTypeInfo)^);
+  {$else}
+  result := PPointer(PPAnsiChar(aObject)^ + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
+  if result = nil then
+    result := DoRegister(PClass(aObject)^);
+end;
 
 function GetRttiClass(RttiClass: TClass): PRttiClass;
 begin
@@ -5381,14 +5629,13 @@ begin
   end;
 end;
 
-
 procedure CopyCollection(Source, Dest: TCollection);
 var
   i: integer; // Items[] uses an integer
 begin
   if (Source = nil) or
      (Dest = nil) or
-     (Source.ClassType <> Dest.ClassType) then
+     (PClass(Source)^ <> PClass(Dest)^) then
     exit;
   Dest.BeginUpdate;
   try
@@ -5400,14 +5647,39 @@ begin
   end;
 end;
 
-procedure CopyStrings(Source, Dest: TStrings);
+procedure CopyObject(aFrom, aTo: TObject);
 begin
-  if (Source <> nil) and
-     (Dest <> nil) then
-    Dest.Assign(Source); // will do the copy RTL-style
+  if (aFrom <> nil) and
+     (aTo <> nil) then
+    Rtti.RegisterClass(PClass(aFrom)^).ClassCopyInstance(aFrom, aTo);
 end;
 
-procedure CopyInternal(f, t: pointer; rf, rt: PRttiCustomProps);
+function CopyObject(aFrom: TObject): pointer;
+begin
+  if aFrom = nil then
+    result := nil
+  else
+    result := Rtti.RegisterClass(aFrom).ClassCopyInstance(aFrom, nil);
+end;
+
+procedure ObjArrayCopy(const SourceObjArray; var DestObjArray;
+  SourceCount, DestCount: PInteger);
+var
+  s: TObjectDynArray absolute SourceObjArray;
+  d: TObjectDynArray absolute DestObjArray;
+  i: PtrInt;
+begin
+  for i := 0 to ObjArrayPrepareCopy(s, d, SourceCount, DestCount) - 1 do
+    d[i] := Rtti.RegisterClass(PClass(s[i])^).ClassCopyInstance(s[i], nil);
+end;
+
+function ObjArrayCopy(const SourceObjArray; SourceCount: PInteger): TPointerDynArray;
+begin
+  result := nil;
+  ObjArrayCopy(SourceObjArray, result, SourceCount);
+end;
+
+procedure CopyPropsInternal(f, t: pointer; rf, rt: PRttiCustomProps);
 var
   pf, pt: PRttiCustomProp;
   n: integer;
@@ -5425,52 +5697,13 @@ begin
   until n = 0;
 end;
 
-procedure CopyObject(aFrom, aTo: TObject);
-var
-  cf: TRttiCustom;
-begin
-  if (aFrom = nil) or
-     (aTo = nil) then
-    exit;
-  cf := Rtti.RegisterClass(PClass(aFrom)^);
-  if (cf.ValueRtlClass = vcCollection) and
-     (PClass(aFrom)^ = PClass(aTo)^)  then
-    // specific process of TCollection items
-    CopyCollection(TCollection(aFrom), TCollection(aTo))
-  else if (cf.ValueRtlClass = vcStrings) and
-          PClass(aTo)^.InheritsFrom(TStrings) then
-    // specific process of TStrings items using RTL-style copy
-    TStrings(aTo).Assign(TStrings(aFrom))
-  else if PClass(aTo)^.InheritsFrom(PClass(aFrom)^) then
-    // fast copy from RTTI properties of the common (or same) hierarchy
-    if Assigned(cf.CopyObject) then
-      cf.CopyObject(aTo, aFrom) // overriden e.g. for TOrm
-    else
-      cf.Props.CopyProperties(pointer(aTo), pointer(aFrom))
-  else
-    // no common inheritance -> lookup by property name (slower)
-    CopyInternal(pointer(aFrom), pointer(aTo),
-      @cf.Props, @Rtti.RegisterClass(PClass(aTo)^).Props);
-end;
-
-function CopyObject(aFrom: TObject): TObject;
-begin
-  if aFrom = nil then
-    result := nil
-  else
-  begin
-    result := Rtti.RegisterClass(aFrom).ClassNewInstance;
-    CopyObject(aFrom, result);
-  end;
-end;
-
 procedure RecordToObject(const aFrom; aTo: TObject; aFromType: PRttiInfo);
 begin
   if (@aFrom <> nil) and
      (aFromType <> nil) and
      (aFromType^.Kind in rkRecordTypes) and
      (aTo <> nil) then
-    CopyInternal(@aFrom, aTo, @Rtti.RegisterType(aFromType).Props,
+    CopyPropsInternal(@aFrom, aTo, @Rtti.RegisterType(aFromType).Props,
       @Rtti.RegisterClass(PClass(aTo)^).Props);
 end;
 
@@ -5480,7 +5713,7 @@ begin
      (@aTo <> nil) and
      (aToType <> nil) and
      (aToType^.Kind in rkRecordTypes) then
-    CopyInternal(aFrom, @aTo, @Rtti.RegisterClass(PClass(aFrom)^).Props,
+    CopyPropsInternal(aFrom, @aTo, @Rtti.RegisterClass(PClass(aFrom)^).Props,
       @Rtti.RegisterType(aToType).Props);
 end;
 
@@ -5783,22 +6016,67 @@ begin
 end;
 
 function GetSetNameCustom(aTypeInfo: PRttiInfo; const value;
-  CustomText: PRawUtf8Array; const SepChar: RawUtf8): RawUtf8;
+  customText: PRawUtf8Array; sepChar: AnsiChar): RawUtf8;
 var
   info: PRttiEnumType;
+  tmp: TSynTempBuffer; // no temp allocation up to 4KB of output text
   i: PtrInt;
 begin
   result := '';
   info := aTypeInfo^.SetEnumType;
   if (info = nil) or
      (@value = nil) or
-     (CustomText = nil) then
+     (customText = nil) then
     exit;
+  tmp.InitOnStack;
   for i := info^.MinValue to info^.MaxValue do
     if GetBitPtr(@value, i) then
-      Append(result, CustomText^[i], SepChar);
-  if result <> '' then
-    FakeSetLength(result, length(result) - 1); // cancel last comma
+    begin
+      tmp.Add(customText^[i]);
+      tmp.AddDirect(sepChar);
+    end;
+  if tmp.added = 0 then
+    exit;
+  dec(tmp.added); // cancel last comma
+  tmp.Done(result, CP_UTF8);
+end;
+
+function GetEnumArrayNameCustom(const value; valueLength: PtrInt;
+  customText: PRawUtf8Array; sepChar: AnsiChar): RawUtf8;
+var
+  b: TByteDynArray absolute value;
+  w: TWordDynArray absolute value;
+  tmp: TSynTempBuffer; // no temp allocation up to 4KB of output text
+  i: PtrInt;
+begin
+  result := '';
+  if (valueLength = 0) or
+     (valueLength > 65535) or
+     (@value = nil) or
+     (b = nil) or
+     (customText = nil) then
+    exit;
+  tmp.InitOnStack;
+  if valueLength <= 256 then
+  begin
+    for i := 0 to length(b) - 1 do
+      if b[i] < valueLength then
+      begin
+        tmp.Add(customText^[b[i]]);
+        tmp.AddDirect(sepChar);
+      end;
+  end
+  else
+    for i := 0 to length(w) - 1 do
+      if w[i] < valueLength then
+      begin
+        tmp.Add(customText^[w[i]]);
+        tmp.AddDirect(sepChar);
+      end;
+  if tmp.added = 0 then
+    exit;
+  dec(tmp.added); // cancel last comma
+  tmp.Done(result, CP_UTF8);
 end;
 
 procedure GetSetNameShort(aTypeInfo: PRttiInfo; const value;
@@ -6125,19 +6403,6 @@ end;
 
 
 { ************* Efficient Dynamic Arrays and Records Process }
-
-// defined here for proper inlining in code below
-function TRttiCustomList.RegisterType(Info: PRttiInfo): TRttiCustom;
-begin
-  if Info <> nil then
-  begin
-    result := FindType(Info);
-    if result = nil then
-      result := DoRegister(Info);
-  end
-  else
-    result := nil;
-end;
 
 procedure VariantDynArrayClear(var Value: TVariantDynArray);
 begin
@@ -6832,7 +7097,7 @@ end;
 
 function _InterfaceCopy(Dest, Source: PInterface; Info: PRttiInfo): PtrInt;
 begin
-  Dest^ := Source^;
+  Dest^ := Source^; // fast by-reference assignment
   result := SizeOf(Source^);
 end;
 
@@ -6843,7 +7108,7 @@ var
   f: PRttiRecordField;
   cop: PRttiCopiers;
 begin
-  Info^.RecordManagedFields(fields);
+  Info^.RecordManagedFields(fields); // handle nested managed fields
   f := fields.Fields;
   cop := @RTTI_MANAGEDCOPY;
   offset := 0;
@@ -7011,7 +7276,9 @@ begin
   case NameLen of
     5:
       if IdemPropNameUSameLenNotNull(Name, 'array', 5) then
-        result := ptArray;
+        result := ptArray
+      else if IdemPropNameUSameLenNotNull(Name, 'TDate', 5) then
+        result := ptDateTime;
     6:
       {$ifdef FPC}
       // TypeInfo(string)=TypeInfo(AnsiString) on FPC
@@ -7082,7 +7349,6 @@ begin
     exit; // found by name
   // fallback to the closed known type, using RTTI
   case Info^.Kind of
-    // FPC and Delphi will use a fast jmp table
   {$ifdef FPC}
     rkLStringOld,
   {$endif FPC}
@@ -7131,7 +7397,7 @@ begin
     rkWChar:
       result := ptWord;
     rkMethod:
-      result := ptPtrInt;
+      result := {$ifdef CPU64} ptHash128 {$else} ptInt64 {$endif}; // 2*pointer
     rkInterface:
       result := ptInterface;
     rkInteger:
@@ -7816,7 +8082,7 @@ begin
   inc(Dest, DestRtti^.OffsetSet);
   inc(Source, OffsetGet);
   if Value.Kind = rkClass then
-    if Assigned(Value.CopyObject) then // set e.g. by TOrm.RttiCustomSetParser
+    if Assigned(Value.CopyObject) then // e.g. for TOrm, TClonable or TStrings
       Value.CopyObject(PPointer(Dest)^, PPointer(Source)^)
     else
       Value.Props.CopyProperties(PPointer(Dest)^, PPointer(Source)^)
@@ -8269,6 +8535,15 @@ end;
 
 { TRttiCustom }
 
+procedure TRttiCustom.RaiseMissingRtti;
+begin // called e.g. if fCache.Size = 0
+  if Kind = rkSet then // mormot.core.rtti/json hardcore getter/setter limit
+    ERttiException.RaiseUtf8(
+      '%: sets are limited to % items: use "array of %" instead', [self, ENUM_MAX, Name])
+  else
+    ERttiException.RaiseUtf8('%: % % has RttiSize=%', [self, ToText(Kind)^, Name, Size]);
+end;
+
 type
   EHook = class(Exception) // to access @Message private field offset
   public
@@ -8280,22 +8555,23 @@ begin
   result := PtrInt(@Message);
 end;
 
-// since "var class" are not available in Delphi 6-7, and is inherited by
+// since "var class" are not available in Delphi 6-7, and are inherited by
 // the children classes under latest Delphi versions (i.e. the "var class" is
 // shared by all inherited classes, whereas we want one var per class), we
 // reused one of the magic VMT slots, i.e. vmtAutoTable as filled for automated
 // methods, a relic from Delphi 2 that is not used  - see
 // http://hallvards.blogspot.com/2007/05/hack17-virtual-class-variables-part-ii.html
 // [you can define the NOPATCHVMT conditional to rely on our Rtti.FindType()
-//  internal hash table instead, for a slower but more conservative approach]
+// internal hash table instead, for a slower but more conservative approach]
 
 procedure TRttiCustom.SetValueClass(aClass: TClass; aInfo: PRttiInfo);
-{$ifndef NOPATCHVMT}
 var
+  i: PtrInt;
+  {$ifndef NOPATCHVMT}
   vmt: PPointer;
-{$endif NOPATCHVMT}
+  {$endif NOPATCHVMT}
 begin
-  fValueClass := aClass;
+  fCache.ValueClass := aClass;
   // we need to register this class ASAP into RTTI list to avoid infinite calls
   {$ifdef NOPATCHVMT}
   Rtti.fHashTable[RK_TOSLOT[rkClass]].LastInfo := self; // faster FindType()
@@ -8308,24 +8584,21 @@ begin
     ERttiException.RaiseUtf8(
       '%.SetValueClass(%): vmtAutoTable set to %', [self, aClass, vmt^]);
   {$endif NOPATCHVMT}
-  // identify the most known class types - see also overriden mormot.core.json
-  if aClass.InheritsFrom(TCollection) then
-    fValueRtlClass := vcCollection
-  else if aClass.InheritsFrom(TStrings) then
-    fValueRtlClass := vcStrings
-  else if aClass.InheritsFrom(TObjectList) then
-    fValueRtlClass := vcObjectList
-  else if aClass.InheritsFrom(TList) then
-    fValueRtlClass := vcList
-  else if aClass.InheritsFrom(ESynException) then
-    fValueRtlClass := vcESynException
-  else if aClass.InheritsFrom(Exception) then
-    fValueRtlClass := vcException
-  else if aClass.InheritsFrom(TObjectWithID) then
-    fValueRtlClass := vcObjectWithID;
+  // recognize the main known classes as ValueRtlClass
+  while aClass <> TObject do
+  begin
+    i := PtrUIntScanIndex(
+      @CLASS_RTTI[succ(vcNone)], length(CLASS_RTTI) - 1, PtrUInt(aClass));
+    if i >= 0 then
+    begin
+      fCache.ValueRtlClass := TRttiValueClass(i + 1);
+      break;
+    end;
+    aClass := aClass.ClassParent;
+  end;
   // register the published properties of this class using RTTI
   fProps.InternalAddFromClass(aInfo, {includeparents=}true);
-  if fValueRtlClass = vcException then
+  if fCache.ValueRtlClass = vcException then
     // manual registration of the Exception.Message property
     fProps.InternalAdd(TypeInfo(string), EHook(nil).MessageOffset, 'Message');
 end;
@@ -8349,7 +8622,7 @@ begin
     include(fFlags, rcfIsManaged);
   case fCache.Kind of
     rkClass:
-      SetValueClass(aInfo.RttiClass.RttiClass, aInfo);
+      SetValueClass(fCache.ValueClass, aInfo);
     {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       fProps.SetFromRecordExtendedRtti(aInfo); // only for Delphi 2010+
@@ -8374,7 +8647,7 @@ begin
           begin
             // no need to call RegisterObjArray() on FPC and Delphi 2010+ :)
             include(fFlags, rcfObjArray);
-            fObjArrayClass := item.RttiClass^.RttiClass;
+            fCache.ObjArrayClass := item.RttiClass^.RttiClass;
           end;
         end;
         fArrayRtti := Rtti.RegisterType(item);
@@ -8411,22 +8684,6 @@ begin
   end;
   // initialize processing callbacks
   fFinalize := RTTI_FINALIZE[fCache.Kind];
-  fCopy := RTTI_MANAGEDCOPY[fCache.Kind];
-  if not Assigned(fCopy) then
-    case fCache.Size of // direct copy of most sizes, including class/pointer
-      1:
-        fCopy := @_Per1Copy;
-      2:
-        fCopy := @_Per2Copy;
-      4:
-        fCopy := @_Per4Copy;
-      8:
-        fCopy := @_Per8Copy;
-      16:
-        fCopy := @_Per16Copy;
-      32:
-        fCopy := @_Per32Copy;
-    end; // ItemCopy() will fallback to MoveFast() otherwise
   pt := GuessTypeInfoToStandardParserType(aInfo, @pct);
   SetParserType(pt, pct);
 end;
@@ -8488,12 +8745,12 @@ begin
     SetParserType(ParserType, pctNone);
     exit;
   end;
-  // create fake RTTI which should be enough for our purpose
+  // create fake RTTI which should be enough for our registration purpose
   SetLength(fNoRttiInfo, length(TypeName) + 64); // all filled with zeros
   fCache.Info := pointer(fNoRttiInfo);
   fCache.Info.Kind := fCache.Kind;
   if TypeName = '' then // we need some name to search for
-    fCache.Info.RawName := BinToHexDisplayLowerShort(@self, SizeOf(pointer))
+    fCache.Info.RawName := PointerToHexShort(self)
   else
     fCache.Info.RawName := TypeName;
   case ParserType of
@@ -8508,25 +8765,12 @@ begin
   Rtti.AddToPairs(self, fCache.Info);
 end;
 
-function {%H-}_New_NotImplemented(Rtti: TRttiCustom): pointer;
-begin
-  if Rtti = nil then
-    raise ERttiException.Create('Unexpected ClassNewInstance(nil)')
-  else if Rtti.Kind <> rkClass then
-     raise ERttiException.CreateUtf8('%.ClassNewInstance(%) not available for %',
-       [Rtti, Rtti.Name, ToText(Rtti.Kind)^])
-  else
-    raise ERttiException.CreateUtf8('%.ClassNewInstance(%) not implemented -> ' +
-      'please include mormot.core.json unit to register TRttiJson',
-      [Rtti, Rtti.Name]);
-end;
-
 function TRttiCustom.SetParserType(aParser: TRttiParserType;
   aParserComplex: TRttiParserComplexType): TRttiCustom;
 begin
+  // setup this TRttiParserType
   fParser := aParser;
   fParserComplex := aParserComplex;
-  fSetRandom := PT_RANDOM[aParser];
   if fCache.Info <> nil then
     ShortStringToAnsi7String(fCache.Info.Name^, fName);
   fFlags := fFlags + fProps.AdjustAfterAdded;
@@ -8535,7 +8779,24 @@ begin
     include(fFlags, rcfArrayItemManaged);
   if aParser in (ptStringTypes - [ptRawJson]) then
     include(fFlags, rcfJsonString);
-  fNewInstance := @_New_NotImplemented; // raise ERttiException by default
+  // setup the processing callbacks
+  fSetRandom := PT_RANDOM[aParser];
+  fCopy := RTTI_MANAGEDCOPY[fCache.Kind];
+  if not Assigned(fCopy) then
+    case fCache.Size of // direct copy of most sizes, including class/pointer
+      1:
+        fCopy := @_Per1Copy; // e.g. byte
+      2:
+        fCopy := @_Per2Copy; // e.g. word
+      4:
+        fCopy := @_Per4Copy; // e.g. integer/single/pointer
+      8:
+        fCopy := @_Per8Copy; // e.g. Int64/double/pointer
+      16:
+        fCopy := @_Per16Copy; // e.g. THash128/TGuid
+      32:
+        fCopy := @_Per32Copy; // e.g. THash256
+    end; // ItemCopy() will fallback to MoveFast() otherwise
   result := self;
 end;
 
@@ -8683,18 +8944,42 @@ end;
 
 function TRttiCustom.ClassNewInstance: pointer;
 begin
-  result := fNewInstance(self);
+  if fCache.Kind = rkClass then
+    result := TRttiCustomNewInstance(fCache.NewInstance)(self)
+  else
+    result := nil;
 end;
 
 procedure TRttiCustom.SetClassNewInstance(FactoryMethod: TRttiCustomNewInstance);
 begin
-  fNewInstance := FactoryMethod;
+  if fCache.Kind = rkClass then
+    fCache.NewInstance := pointer(@FactoryMethod);
 end;
 
 function TRttiCustom.HasClassNewInstance: boolean;
-begin
+begin // NewInstance is at NewInterface offset: works for rkClass + rkInterface
   result := (self <> nil) and
-            (@fNewInstance <> @_New_NotImplemented);
+            (fCache.Kind in [rkClass, rkInterface]) and
+            (fCache.NewInstance <> @_New_NotImplemented);
+end;
+
+function TRttiCustom.ClassCopyInstance(aFrom, aTo: TObject): pointer;
+begin // self is Rtti.RegisterClass(PClass(aFrom)^)
+  result := aTo;
+  if (self = nil) or
+     (aFrom = nil) then
+    exit;
+  if result = nil then
+    result := TRttiCustomNewInstance(fCache.NewInstance)(self); // allocate new
+  if PClass(result)^.InheritsFrom(PClass(aFrom)^) then
+    // fast copy from RTTI properties of the common (or same) hierarchy
+    if Assigned(fCopyObject) then
+      fCopyObject(result, aFrom) // e.g. TOrm or TPersistent/TClonable/TStrings
+    else
+      fProps.CopyProperties(result, pointer(aFrom))
+  else // no common inheritance -> lookup by property name (slower)
+    CopyPropsInternal(pointer(aFrom), result,
+      @fProps, @Rtti.RegisterClass(PClass(result)^).Props);
 end;
 
 procedure TRttiCustom.PropsClear;
@@ -8754,17 +9039,17 @@ begin
      (fCache.ItemSize = SizeOf(pointer)) and
      (fCache.ItemInfoManaged = nil) then
   begin
-    fObjArrayClass := Item;
+    fCache.ObjArrayClass := Item;
     if Item = nil then
     begin
-      // unregister
+      // unregister this dynamic array type to behave as a "weak" pointer array
       exclude(fFlags, rcfObjArray);
       fArrayRtti := nil;
       fFinalize := @_DynArrayClear;
     end
     else
     begin
-      // register
+      // register this T*ObjArray type to own its class instances
       include(fFlags, rcfObjArray);
       fArrayRtti := Rtti.RegisterClass(Item); // will call _ObjClear()
       fFinalize := @_ObjArrayClear; // calls RawObjectsClear()
@@ -9075,13 +9360,15 @@ begin
 end;
 
 function TRttiCustom.ComputeFakeObjArrayRtti(aItemClass: TClass): TBytes;
+var
+  r: TRttiCustom absolute result;
 begin
   if Kind <> rkDynArray then
     ERttiException.RaiseUtf8('ComputeFakeArrayRtti %?', [Name]);
   SetLength(result, InstanceSize);
   MoveFast(pointer(self)^, pointer(result)^, InstanceSize);  // weak copy
-  TRttiCustom(pointer(result)).fObjArrayClass := aItemClass; // overwrite class
-  TRttiCustom(pointer(result)).fArrayRtti := Rtti.RegisterClass(aItemClass);
+  r.fCache.ObjArrayClass := aItemClass; // overwrite
+  r.fArrayRtti := Rtti.RegisterClass(aItemClass);
 end; // no need to set other fields like Name
 
 
@@ -9380,7 +9667,7 @@ begin
       if result <> nil then
         exit; // already registered in the background
       result := GlobalClass.Create;
-      result.FromRtti(nil);
+      result.FromRtti(nil); // just set rcfWithoutRtti flag
       result.SetValueClass(ObjectClass, nil);
       result.NoRttiSetAndRegister(ptClass, ToText(ObjectClass));
       GetTypeData(result.fCache.Info)^.ClassType := ObjectClass;
@@ -9420,7 +9707,7 @@ begin
           rkInterface:
             if (p^.OffsetGet >= 0) and
                (p^.OffsetSet >= 0) then
-              if p^.Value.HasClassNewInstance then
+              if p^.Value.HasClassNewInstance then // ISerializable
                 PtrArrayAdd(result.fAutoCreateInstances, p)
               else
                 PtrArrayAdd(result.fAutoResolveInterfaces, p);
@@ -9503,8 +9790,8 @@ begin
     RegisterType(Info[i]);
 end;
 
-function TRttiCustomList.RegisterTypeFromName(Name: PUtf8Char;
-  NameLen: PtrInt; ParserType: PRttiParserType): TRttiCustom;
+function TRttiCustomList.RegisterTypeFromName(Name: PUtf8Char; NameLen: PtrInt;
+  ParserType: PRttiParserType): TRttiCustom;
 var
   pt: TRttiParserType;
   i: PtrInt;
@@ -9544,31 +9831,9 @@ begin
   result := RegisterTypeFromName(pointer(Name), length(Name), ParserType);
 end;
 
-function TRttiCustomList.RegisterClass(ObjectClass: TClass): TRttiCustom;
-begin
-  {$ifdef NOPATCHVMT}
-  result := FindType(PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^);
-  {$else}
-  result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
-  {$endif NOPATCHVMT}
-  if result = nil then
-    result := DoRegister(ObjectClass);
-end;
-
 function TRttiCustomList.GetByClass(ObjectClass: TClass): TRttiCustom;
 begin
   result := RegisterClass(ObjectClass);
-end;
-
-function TRttiCustomList.RegisterClass(aObject: TObject): TRttiCustom;
-begin
-  {$ifdef NOPATCHVMT}
-  result := FindType(PPointer(PPAnsiChar(aObject)^ + vmtTypeInfo)^);
-  {$else}
-  result := PPointer(PPAnsiChar(aObject)^ + vmtAutoTable)^;
-  {$endif NOPATCHVMT}
-  if result = nil then
-    result := DoRegister(PClass(aObject)^);
 end;
 
 function TRttiCustomList.RegisterAutoCreateFieldsClass(ObjectClass: TClass): TRttiCustom;
@@ -9764,13 +10029,17 @@ begin
 end;
 
 
+{ ************************ TRttiMap Field Mapping (e.g. DTO/Domain Objects) }
+
 { TRttiMap }
 
 function TRttiMap._Init(A, B: TRttiCustom): PRttiMap;
 begin
-  if A.Props.Count = 0 then
+  if (A.Props.Count = 0) or
+     not (A.Kind in (rkRecordTypes + [rkClass])) then
     ERttiException.RaiseUtf8('Unexpected TRttiMap.Init(A: %)', [A.Name]);
-  if B.Props.Count = 0 then
+  if (B.Props.Count = 0) or
+     not (B.Kind in (rkRecordTypes + [rkClass])) then
     ERttiException.RaiseUtf8('Unexpected TRttiMap.Init(B: %)', [B.Name]);
   aRtti := A;
   bRtti := B;
@@ -9874,22 +10143,28 @@ end;
 
 function TRttiMap.ToA(B: pointer): pointer;
 begin
-  result := aRtti.ClassNewInstance; // raise ERttiException if not a class
+  if aRtti.Kind = rkClass then
+    result := aRtti.ClassNewInstance
+  else
+    result := AllocMem(aRtti.Size);
   ToA(result, B);
 end;
 
 function TRttiMap.ToB(A: pointer): pointer;
 begin
-  result := bRtti.ClassNewInstance;
+  if bRtti.Kind = rkClass then
+    result := bRtti.ClassNewInstance
+  else
+    result := AllocMem(bRtti.Size);
   ToB(A, result);
 end;
 
 
-{ *********** High Level TObjectWithID and TObjectWithCustomCreate Class Types }
+{ *********** TObjectWithRttiMethods TObjectWithID TClonable Classes }
 
-{ TObjectWithCustomCreate }
+{ TObjectWithRttiMethods }
 
-class function TObjectWithCustomCreate.RttiCustom: TRttiCustom;
+class function TObjectWithRttiMethods.RttiCustom: TRttiCustom;
 begin
   // inlined Rtti.Find(ClassType): we know it is the first slot
   {$ifdef NOPATCHVMT}
@@ -9900,7 +10175,7 @@ begin
   // assert(result.InheritsFrom(TRttiCustom));
 end;
 
-class function TObjectWithCustomCreate.NewInstance: TObject;
+class function TObjectWithRttiMethods.NewInstance: TObject;
 begin
   {$ifndef NOPATCHVMT}
   // register the class to the RTTI cache
@@ -9913,47 +10188,96 @@ begin
   PPointer(result)^ := pointer(self); // store VMT
 end; // no benefit of rewriting FreeInstance/CleanupInstance
 
-class procedure TObjectWithCustomCreate.RttiCustomSetParser(Rtti: TRttiCustom);
+class procedure TObjectWithRttiMethods.RttiCustomSetParser(Rtti: TRttiCustom);
 begin
   // do nothing by default
 end;
 
-function TObjectWithCustomCreate.RttiBeforeWriteObject(W: TTextWriter;
+function TObjectWithRttiMethods.RttiBeforeWriteObject(W: TTextWriter;
   var Options: TTextWriterWriteObjectOptions): boolean;
 begin
   result := false; // default JSON serialization
 end;
 
-function TObjectWithCustomCreate.RttiWritePropertyValue(W: TTextWriter;
+function TObjectWithRttiMethods.RttiWritePropertyValue(W: TTextWriter;
   Prop: PRttiCustomProp; Options: TTextWriterWriteObjectOptions): boolean;
 begin
   result := false; // default JSON serializaiton
 end;
 
-procedure TObjectWithCustomCreate.RttiAfterWriteObject(W: TTextWriter;
+procedure TObjectWithRttiMethods.RttiAfterWriteObject(W: TTextWriter;
   Options: TTextWriterWriteObjectOptions);
 begin
   // nothing to do
 end;
 
-function TObjectWithCustomCreate.RttiBeforeReadObject(Ctxt: pointer): boolean;
+function TObjectWithRttiMethods.RttiBeforeReadObject(Ctxt: pointer): boolean;
 begin
   result := false; // default JSON unserialization
 end;
 
-function TObjectWithCustomCreate.RttiBeforeReadPropertyValue(
+function TObjectWithRttiMethods.RttiBeforeReadPropertyValue(
   Ctxt: pointer; Prop: PRttiCustomProp): boolean;
 begin
   result := false; // default JSON unserialization
 end;
 
-procedure TObjectWithCustomCreate.RttiAfterReadObject;
+procedure TObjectWithRttiMethods.RttiAfterReadObject;
 begin
   // nothing to do
 end;
 
-procedure TObjectWithCustomCreateRttiCustomSetParser(
-  O: TObjectWithCustomCreateClass; Rtti: TRttiCustom);
+
+{ TSynLockedWithRttiMethods }
+
+constructor TSynLockedWithRttiMethods.Create;
+begin
+  inherited Create; // may have been overriden
+  fSafe := NewSynLocker;
+end;
+
+destructor TSynLockedWithRttiMethods.Destroy;
+begin
+  inherited Destroy;
+  fSafe^.DoneAndFreeMem;
+end;
+
+procedure TSynLockedWithRttiMethods.Lock;
+begin
+  if self <> nil then
+    fSafe^.Lock;
+end;
+
+procedure TSynLockedWithRttiMethods.Unlock;
+begin
+  if self <> nil then
+    fSafe^.UnLock;
+end;
+
+class procedure TSynLockedWithRttiMethods.RttiCustomSetParser(Rtti: TRttiCustom);
+begin
+  inherited RttiCustomSetParser(Rtti);
+  Rtti.Flags := Rtti.Flags + [rcfHookWrite]; // call our before/after methods
+end;
+
+function TSynLockedWithRttiMethods.RttiBeforeWriteObject(W: TTextWriter;
+  var Options: TTextWriterWriteObjectOptions): boolean;
+begin
+  if woRttiMethodsLock in Options then
+    fSafe^.Lock;
+  result := false; // continue with default JSON serialization
+end;
+
+procedure TSynLockedWithRttiMethods.RttiAfterWriteObject(W: TTextWriter;
+  Options: TTextWriterWriteObjectOptions);
+begin
+  if woRttiMethodsLock in Options then
+    fSafe^.UnLock;
+end;
+
+
+procedure RttiSetParserTObjectWithRttiMethods(
+  O: TObjectWithRttiMethodsClass; Rtti: TRttiCustom);
 begin
   O.RttiCustomSetParser(Rtti); // to circumvent some compiler issue
 end;
@@ -9969,6 +10293,7 @@ end;
 
 class procedure TObjectWithID.RttiCustomSetParser(Rtti: TRttiCustom);
 begin
+  inherited RttiCustomSetParser(Rtti);
   Rtti.Props.InternalAdd(
     TypeInfo(TID), PtrInt(@TObjectWithID(nil).fID), 'ID', {first=}true);
 end;
@@ -10003,6 +10328,40 @@ end;
 function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
 begin
   result := Hasher(0, pointer(@TObjectWithID(Elem).fID), SizeOf(TID));
+end;
+
+
+{ TClonable }
+
+procedure TClonable.Assign(Source: TClonable);
+begin
+  if (self = nil) or
+     (Source = nil) or
+     not InheritsFrom(PClass(Source)^) then
+    ERttiException.RaiseUtf8('Unexpected %.Assign(%)', [self, Source]);
+  Source.AssignTo(self);
+end;
+
+function TClonable.Clone: pointer;
+begin
+  result := TClonableClass(PClass(self)^).Create; // call virtual constructor
+  AssignTo(result);
+end;
+
+class procedure TClonable.CloneObjArray(
+  const SourceObjArray; var DestObjArray; SourceCount, DestCount: PInteger);
+var
+  s: TObjectDynArray absolute SourceObjArray;
+  d: TObjectDynArray absolute DestObjArray;
+  i: PtrInt;
+begin
+  for i := 0 to ObjArrayPrepareCopy(s, d, SourceCount, DestCount) - 1 do
+    d[i] := TClonable(s[i]).Clone;
+end;
+
+procedure CopyClonable(Dest, Source: TObject);
+begin
+  TClonable(Source).AssignTo(TClonable(Dest));
 end;
 
 
