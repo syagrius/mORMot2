@@ -1361,7 +1361,6 @@ class function T7zLib.FormatDetect(const FileName: TFileName;
   OnlyFileName: boolean): T7zFormatHandler;
 var
   h: THash128Rec;
-  f: THandle;
   i, l: PtrInt;
   ext: RawUtf8;
 begin
@@ -1371,12 +1370,7 @@ begin
   // first try to identify from binary header
   if not OnlyFileName then
   begin
-    f := FileOpen(FileName, fmOpenReadShared);
-    if not ValidHandle(f) then
-      exit;
-    l := FileRead(f, h, SizeOf(h));
-    FileClose(f);
-    if l <> SizeOf(h) then
+    if not BufferFromFile(FileName, @h, SizeOf(h)) then
       exit;
     case h.c[0] of
       $04034b50:
@@ -2224,7 +2218,7 @@ begin
   fExtractCallback := callback;
   try
     E7Zip.CheckOk(self, 'ExtractAll', fInArchive.Extract(
-      nil, $FFFFFFFF, ord(Assigned(callback)), self as IArchiveExtractCallback));
+      nil, $ffffffff, ord(Assigned(callback)), self as IArchiveExtractCallback));
   finally
     fExtractCallback := nil;
   end;
@@ -2237,7 +2231,7 @@ begin
   fExtractPathNoSubFolder := nosubfolder;
   try
     E7Zip.CheckOk(self, 'ExtractAll', fInArchive.Extract(
-      nil, $FFFFFFFF, 0, self as IArchiveExtractCallback));
+      nil, $ffffffff, 0, self as IArchiveExtractCallback));
   finally
     fExtractPath := '';
   end;

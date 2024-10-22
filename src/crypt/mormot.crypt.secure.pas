@@ -629,7 +629,8 @@ type
   /// convenient multi-algorithm hashing wrapper
   // - as used e.g. by HashFile/HashFull functions
   // - we defined a record instead of a class, to allow stack allocation and
-  // thread-safe reuse of one initialized instance
+  // thread-safe reuse of one initialized instance: copying the record content
+  // will copy the actual hashing state
   {$ifdef USERECORDWITHMETHODS}
   TSynHasher = record
   {$else}
@@ -678,8 +679,9 @@ type
   // - do not use this abstract class but inherited with overloaded GetAlgo
   TStreamRedirectSynHasher = class(TStreamRedirect)
   protected
-    fHash: TSynHasher;
+    fHash, fHashAppend: TSynHasher;
     procedure DoHash(data: pointer; len: integer); override;
+    procedure AfterAppend; override;
     procedure ResetHash; override;
   public
     constructor Create(aDestination: TStream; aRead: boolean = false); override;
@@ -3792,6 +3794,12 @@ constructor TStreamRedirectSynHasher.Create(aDestination: TStream; aRead: boolea
 begin
   inherited Create(aDestination, aRead);
   fHash.Init(GetAlgo);
+  fHashAppend := fHash; // save initial state for ResetHash
+end;
+
+procedure TStreamRedirectSynHasher.AfterAppend;
+begin
+  fHashAppend := fHash; // save appended state for ResetHash
 end;
 
 procedure TStreamRedirectSynHasher.DoHash(data: pointer; len: integer);
@@ -3801,7 +3809,7 @@ end;
 
 procedure TStreamRedirectSynHasher.ResetHash;
 begin
-  fHash.Init(GetAlgo); // called e.g. from Seek(0, soBeginning)
+  fHash := fHashAppend; // restore after e.g. Seek(0, soBeginning)
 end;
 
 function TStreamRedirectSynHasher.GetHash: RawUtf8;
@@ -9201,13 +9209,13 @@ var
 begin
   if Len <= $7f then
   begin
-    dest^ := Len;
+    dest^ := Len; // most simple case
     result := 1;
     exit;
   end;
   n := 0;
   repeat
-    tmp[n] := byte(Len);
+    tmp[n] := byte(Len); // prepare big endian storage
     inc(n);
     Len := Len shr 8;
   until Len = 0;
@@ -9332,7 +9340,7 @@ begin
   for i := 0 to high(Content) do
     inc(len, length(Content[i]));
   al := AsnEncLen(len, @tmp);
-  SetString(result, nil, 1 + al + len);
+  FastNewRawByteString(result, al + len + 1);
   p := pointer(result);
   p^ := AsnType;         // type
   inc(p);
@@ -9969,7 +9977,7 @@ begin
     TypeInfo(TSecAceFlags), TypeInfo(TSecAccessMask), TypeInfo(TSecControls),
     TypeInfo(TSecurityDescriptorInfos)]);
   Rtti.RegisterFromText(TypeInfo(TSynSignerParams), _TSynSignerParams);
-  TRttiJson.RegisterCustomSerializers([
+  TRttiJson.RegisterCustomSerializerFunctions([
     TypeInfo(RawSid),                @_JL_RawSid, @_JS_RawSid,
     TypeInfo(RawSecurityDescriptor), @_JL_SD,     @_JS_SD,
     TypeInfo(TSecAccessMask),        @_JL_Mask,   @_JS_Mask]);

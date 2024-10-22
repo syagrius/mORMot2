@@ -2208,6 +2208,7 @@ type
     function GetProgress: RawUtf8;
     procedure DoReport(ReComputeElapsed: boolean);
     procedure DoHash(data: pointer; len: integer); virtual; // do nothing
+    procedure AfterAppend; virtual;
     procedure ResetHash; virtual; // called e.g. from Seek(0, soBeginning)
     procedure SetExpectedSize(Value: Int64);
     procedure ReadWriteHash(const Buffer; Count: integer); virtual;
@@ -2327,7 +2328,8 @@ type
   /// TStreamRedirect with 32-bit THasher checksum
   TStreamRedirectHash32 = class(TStreamRedirect)
   protected
-    fHash: cardinal;
+    fHash, fHashAppend: cardinal;
+    procedure AfterAppend; override;
     procedure ResetHash; override;
   public
     function GetHash: RawUtf8; override;
@@ -2856,16 +2858,16 @@ begin
       goto _2
     else if Value < $80 shl 21 then
       goto _3;
-    Dest^ := (Value and $7F) or $80;
+    Dest^ := (Value and $7f) or $80;
     Value := Value shr 7;
     inc(Dest);
-_3: Dest^ := (Value and $7F) or $80;
+_3: Dest^ := (Value and $7f) or $80;
     Value := Value shr 7;
     inc(Dest);
-_2: Dest^ := (Value and $7F) or $80;
+_2: Dest^ := (Value and $7f) or $80;
     Value := Value shr 7;
     inc(Dest);
-_1: Dest^ := (Value and $7F) or $80;
+_1: Dest^ := (Value and $7f) or $80;
     Value := Value shr 7;
     inc(Dest);
   end;
@@ -2907,7 +2909,7 @@ begin
   result := Source^;
   inc(Source);
   if result > $7f then
-    result := (result and $7F) or FromVarUInt32Up128(Source);
+    result := (result and $7f) or FromVarUInt32Up128(Source);
 end;
 
 function FromVarUInt32Big(var Source: PByte): cardinal;
@@ -2923,7 +2925,7 @@ begin
     // Values between 128 and 16256
     c := p^;
     c := c shl 7;
-    result := result and $7F or c;
+    result := result and $7f or c;
     inc(p);
     if c > $7f shl 7 then
     begin
@@ -2931,21 +2933,21 @@ begin
       c := p^;
       c := c shl 14;
       inc(p);
-      result := result and $3FFF or c;
+      result := result and $3fff or c;
       if c > $7f shl 14 then
       begin
         // Values between 2080769 and 266338304
         c := p^;
         c := c shl 21;
         inc(p);
-        result := result and $1FFFFF or c;
+        result := result and $1fffff or c;
         if c > $7f shl 21 then
         begin
           // Values above 266338304
           c := p^;
           c := c shl 28;
           inc(p);
-          result := result and $FFFFFFF or c;
+          result := result and $fffffff or c;
         end;
       end;
     end;
@@ -2968,21 +2970,21 @@ begin
     c := p^;
     c := c shl 14;
     inc(p);
-    result := result and $3FFF or c;
+    result := result and $3fff or c;
     if c > $7f shl 14 then
     begin
       // Values above 2080768
       c := p^;
       c := c shl 21;
       inc(p);
-      result := result and $1FFFFF or c;
+      result := result and $1fffff or c;
       if c > $7f shl 21 then
       begin
         // Values above 266338304
         c := p^;
         c := c shl 28;
         inc(p);
-        result := result and $FFFFFFF or c;
+        result := result and $fffffff or c;
       end;
     end;
   end;
@@ -3021,7 +3023,7 @@ begin
       exit;
     c := Source^;
     c := c shl 7;
-    Value := Value and $7F or c;
+    Value := Value and $7f or c;
     inc(Source);
     if c > $7f shl 7 then
     begin
@@ -3031,7 +3033,7 @@ begin
       c := Source^;
       c := c shl 14;
       inc(Source);
-      Value := Value and $3FFF or c;
+      Value := Value and $3fff or c;
       if c > $7f shl 14 then
       begin
         // Values between 2080769 and 266338304
@@ -3040,7 +3042,7 @@ begin
         c := Source^;
         c := c shl 21;
         inc(Source);
-        Value := Value and $1FFFFF or c;
+        Value := Value and $1fffff or c;
         if c > $7f shl 21 then
         begin
           // Values above 266338304
@@ -3049,7 +3051,7 @@ begin
           c := Source^;
           c := c shl 28;
           inc(Source);
-          Value := Value and $FFFFFFF or c;
+          Value := Value and $fffffff or c;
         end;
       end;
     end;
@@ -3070,26 +3072,26 @@ begin
   begin
     c := p^;
     c := c shl 7;
-    result := result and $7F or integer(c);
+    result := result and $7f or integer(c);
     inc(p);
     if c > $7f shl 7 then
     begin
       c := p^;
       c := c shl 14;
       inc(p);
-      result := result and $3FFF or integer(c);
+      result := result and $3fff or integer(c);
       if c > $7f shl 14 then
       begin
         c := p^;
         c := c shl 21;
         inc(p);
-        result := result and $1FFFFF or integer(c);
+        result := result and $1fffff or integer(c);
         if c > $7f shl 21 then
         begin
           c := p^;
           c := c shl 28;
           inc(p);
-          result := result and $FFFFFFF or integer(c);
+          result := result and $fffffff or integer(c);
         end;
       end;
     end;
@@ -3112,22 +3114,22 @@ begin
   inc(Source);
   c := Source^ shl 7;
   inc(Source);
-  result := result and $7F or c;
+  result := result and $7f or c;
   if c <= $7f shl 7 then
     exit;
   c := Source^ shl 14;
   inc(Source);
-  result := result and $3FFF or c;
+  result := result and $3fff or c;
   if c <= $7f shl 14 then
     exit;
   c := Source^ shl 21;
   inc(Source);
-  result := result and $1FFFFF or c;
+  result := result and $1fffff or c;
   if c <= $7f shl 21 then
     exit;
   c := Source^ shl 28;
   inc(Source);
-  result := result and $FFFFFFF or c;
+  result := result and $fffffff or c;
 end;
 
 function ToVarInt64(Value: Int64; Dest: PByte): PByte;
@@ -3173,13 +3175,13 @@ begin
             goto _2
           else if c >= $80 shl 21 then
             goto _4;
-          Dest^ := (c and $7F) or $80;
+          Dest^ := (c and $7f) or $80;
           c := c shr 7;
           inc(Dest);
-_2:       Dest^ := (c and $7F) or $80;
+_2:       Dest^ := (c and $7f) or $80;
           c := c shr 7;
           inc(Dest);
-_1:       Dest^ := (c and $7F) or $80;
+_1:       Dest^ := (c and $7f) or $80;
           c := c shr 7;
           inc(Dest);
         end;
@@ -3188,8 +3190,8 @@ _1:       Dest^ := (c and $7F) or $80;
         result := Dest;
         exit;
       end;
-_4: PCardinal(Dest)^ := (c and $7F) or (((c shr 7) and $7F) shl 8) or
-      (((c shr 14) and $7F) shl 16) or (((c shr 21) and $7F) shl 24) or $80808080;
+_4: PCardinal(Dest)^ := (c and $7f) or (((c shr 7) and $7f) shl 8) or
+      (((c shr 14) and $7f) shl 16) or (((c shr 21) and $7f) shl 24) or $80808080;
     inc(Dest, 4);
     Value := Value shr 28;
   until false;
@@ -3205,11 +3207,11 @@ begin
   result := p^;
   if result > $7f then
   begin
-    result := result and $7F;
+    result := result and $7f;
   {$else}
   if p^ > $7f then
   begin
-    result := PtrUInt(p^) and $7F;
+    result := PtrUInt(p^) and $7f;
   {$endif CPU64}
     n := 0;
     inc(p);
@@ -3242,7 +3244,7 @@ begin
   inc(Source);
   if c > $7f then
   begin
-    Value := c and $7F;
+    Value := c and $7f;
     n := 7;
     repeat
       if PAnsiChar(Source) >= PAnsiChar(SourceMax) then
@@ -3285,7 +3287,7 @@ begin
   result := Source^;
   if result > $7f then
   begin
-    result := result and $7F;
+    result := result and $7f;
     n := 0;
     inc(Source);
     repeat
@@ -3308,7 +3310,7 @@ begin
   c := Source^;
   if c > $7f then
   begin
-    result := c and $7F;
+    result := c and $7f;
     n := 0;
     inc(Source);
     repeat
@@ -3350,7 +3352,7 @@ begin
   c := Source^;
   if c > $7f then
   begin
-    result := c and $7F;
+    result := c and $7f;
     n := 0;
     inc(Source);
     repeat
@@ -3707,21 +3709,21 @@ begin
     goto e;
   c := ord(P^) shl 7;
   inc(P);
-  result := result and $7F or c;
+  result := result and $7f or c;
   if c <= $7f shl 7 then
     exit; // Values between 128 and 16256
   if P >= Last then
     goto e;
   c := ord(P^) shl 14;
   inc(P);
-  result := result and $3FFF or c;
+  result := result and $3fff or c;
   if c <= $7f shl 14 then
     exit; // Values between 16257 and 2080768
   if P >= Last then
     goto e;
   c := ord(P^) shl 21;
   inc(P);
-  result := result and $1FFFFF or c;
+  result := result and $1fffff or c;
   if c <= $7f shl 21 then
     exit; // Values between 2080769 and 266338304
   if P >= Last then
@@ -3733,7 +3735,7 @@ e:begin
   end;
   c := ord(P^) shl 28;
   inc(P);
-  result := result {%H-}and $FFFFFFF or c;
+  result := result {%H-}and $fffffff or c;
 end;
 
 procedure TFastReader.VarNextInt;
@@ -3788,21 +3790,21 @@ begin
     goto e;
   c := s^ shl 7;
   inc(s);
-  result := result and $7F or c;
+  result := result and $7f or c;
   if c <= $7f shl 7 then
     goto f; // Values between 128 and 16256
   if PAnsiChar(s) >= PAnsiChar(l) then
     goto e;
   c := s^ shl 14;
   inc(s);
-  result := result and $3FFF or c;
+  result := result and $3fff or c;
   if c <= $7f shl 14 then
     goto f; // Values between 16257 and 2080768
   if PAnsiChar(s) >= PAnsiChar(l) then
     goto e;
   c := s^ shl 21;
   inc(s);
-  result := result and $1FFFFF or c;
+  result := result and $1fffff or c;
   if c <= $7f shl 21 then
     goto f; // Values between 2080769 and 266338304
   if PAnsiChar(s) >= PAnsiChar(l) then
@@ -3814,7 +3816,7 @@ e:begin
   end;
   c := s^ shl 28;
   inc(s);
-  result := result {%H-}and $FFFFFFF or c;
+  result := result {%H-}and $fffffff or c;
 f:P := pointer(s);
 end;
 
@@ -3902,7 +3904,7 @@ begin
   if v > $7f then
   begin
     n := 0;
-    v := v and $7F;
+    v := v and $7f;
     repeat
       if P >= Last then
         exit;
@@ -3931,7 +3933,7 @@ e:  ErrorOverflow;
   inc(P);
   if c > $7f then
   begin
-    result := c and $7F;
+    result := c and $7f;
     n := 0;
     repeat
       if P >= Last then
@@ -4071,7 +4073,7 @@ r:  P := s;
     P := s;
     exit;
   end;
-  len := (len and $7F) or (ord(s^) shl 7); // 2nd byte of VarUInt32 decoding
+  len := (len and $7f) or (ord(s^) shl 7); // 2nd byte of VarUInt32 decoding
   inc(s);
   if len <= 255 then
     goto r;
@@ -5870,7 +5872,7 @@ begin
     if (Magic = trailer^.Magic) and
        (trailer^.HeaderRelativeOffset < Len) and
        (PAlgoCompressHead(P + Len - trailer^.HeaderRelativeOffset)^.Magic = Magic) then
-      // trim existing content
+      // compute actual content size from first header to last trailer
       result := Len - trailer^.HeaderRelativeOffset
     else
       result := Len;
@@ -5880,18 +5882,10 @@ end;
 class function TAlgoCompress.FileIsCompressed(const Name: TFileName;
   Magic: cardinal): boolean;
 var
-  f: THandle;
-  l: integer;
   h: TAlgoCompressHead;
 begin
-  result := false;
-  f := FileOpen(Name, fmOpenReadShared);
-  if not ValidHandle(f) then
-    exit;
-  l := FileRead(f, h, SizeOf(h));
-  FileClose(f);
-  result := (l = SizeOf(h)) and
-            (h.Magic = Magic); // only check the magic of first chunk header
+  result := BufferFromFile(Name, @h, SizeOf(h)) and
+            (h{%H-}.Magic = Magic); // only check first chunk header magic
 end;
 
 function TAlgoCompress.FileCompress(const Source, Dest: TFileName; Magic: cardinal;
@@ -9846,6 +9840,10 @@ procedure TStreamRedirect.DoHash(data: pointer; len: integer);
 begin // no associated hasher on this parent class
 end;
 
+procedure TStreamRedirect.AfterAppend;
+begin // no associated hasher on this parent class
+end;
+
 procedure TStreamRedirect.ResetHash;
 begin // no associated hasher on this parent class
 end;
@@ -9930,6 +9928,7 @@ begin
            (fInfo.CurrentSize <> read) then
           DoReport(true);
     until false;
+    AfterAppend; // save current hasher state for ResetHash
   end;
 end;
 
@@ -10048,9 +10047,14 @@ end;
 
 { TStreamRedirectHash32 }
 
+procedure TStreamRedirectHash32.AfterAppend;
+begin
+  fHashAppend := fHash; // save for ResetHash
+end;
+
 procedure TStreamRedirectHash32.ResetHash;
 begin
-  fHash := 0;
+  fHash := fHashAppend; // restore after e.g. Seek(0, soBeginning)
 end;
 
 function TStreamRedirectHash32.GetHash: RawUtf8;

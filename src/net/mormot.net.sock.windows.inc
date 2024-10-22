@@ -119,9 +119,9 @@ type
 
 const
   INADDR_ANY       = $00000000;
-  INADDR_LOOPBACK  = $7F000001;
-  INADDR_BROADCAST = $FFFFFFFF;
-  INADDR_NONE      = $FFFFFFFF;
+  INADDR_LOOPBACK  = $7f000001;
+  INADDR_BROADCAST = $ffffffff;
+  INADDR_NONE      = $ffffffff;
   ADDR_ANY	   = INADDR_ANY;
   INVALID_SOCKET   = TSocket(NOT(0));
   SOCKET_ERROR	   = -1;
@@ -178,9 +178,9 @@ const
   // Other NT-specific options
   SO_OPENTYPE              = $7008;
   SO_MAXDG                 = $7009;
-  SO_MAXPATHDG             = $700A;
-  SO_UPDATE_ACCEPT_CONTEXT = $700B;
-  SO_CONNECT_TIME          = $700C;
+  SO_MAXPATHDG             = $700a;
+  SO_UPDATE_ACCEPT_CONTEXT = $700b;
+  SO_CONNECT_TIME          = $700c;
 
   SOMAXCONN       = $7fffffff;
 
@@ -1719,7 +1719,7 @@ begin
     begin
       e := GetLastError;
       fOnLog(sllDebug, 'PrepareNext(%%) error % %',
-        [IOCP_EVENT[event], pointer(o^.socket), e, WinErrorConstant(e)], self);
+        [IOCP_EVENT[event], pointer(o^.socket), e, WinErrorConstant(e)^], self);
     end;
 end;
 
@@ -1987,12 +1987,13 @@ procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean;
   dwFlags: cardinal; paServCred: PPCCERT_CONTEXT);
 begin
   FillCharFast(cred, SizeOf(cred), 0);
+  if SChannelEnableTls13 and // should be explicitly enabled
+     ((OSVersion in [wEleven, wEleven_64]) or
+      (OSVersion >= wServer2022_64)) then
   // TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
   // Enabling TLS 1.3 on earlier versions of Windows is possible through the
   // registry, but is explictly documented as unsafe by Microsoft.
   // https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
-  if (OSVersion in [wEleven, wEleven_64]) or
-     (OSVersion >= wServer2022_64) then
   begin
     // require new SCH_CREDENTIALS structure in order to enable TLS 1.3
     cred.New.dwVersion := SCH_CREDENTIALS_VERSION;
@@ -2001,7 +2002,7 @@ begin
       dwFlags := dwFlags or SCH_USE_STRONG_CRYPTO;
       cred.New.cTlsParameters := 1;
       cred.New.pTlsParameters := @cred.Tls;
-      cred.Tls.grbitDisabledProtocols := cardinal(not SP_PROT_TLS_SAFE);
+      cred.Tls.grbitDisabledProtocols := SP_PROT_TLS_UNSAFE;
     end;
     cred.New.dwFlags := dwFlags;
     if paServCred <> nil then
@@ -2036,7 +2037,7 @@ var
   nfo: TWinCertInfo;
   res, f, trial: cardinal;
 begin
-  // prepare execution context
+  // method called once to attach the socket from the client side
   fSocket := Socket;
   fServerAddressW := SynUnicode(ServerAddress);
   SetLength(fData, TLSRECMAXSIZE);
@@ -2044,6 +2045,7 @@ begin
   trial := 0;
   while true do
     try
+      // prepare execution context
       if Context.IgnoreCertificateErrors then
         f := SCH_CRED_MANUAL_CRED_VALIDATION or
              SCH_CRED_NO_DEFAULT_CREDS
@@ -2058,7 +2060,9 @@ begin
       fFlags := ISC_REQ_FLAGS;
       if Context.IgnoreCertificateErrors then
         // prevent SEC_E_UNTRUSTED_ROOT result in HandshakeLoop
-        fFlags := fFlags or ISC_REQ_MANUAL_CRED_VALIDATION;
+        fFlags := fFlags or
+          ISC_REQ_MANUAL_CRED_VALIDATION or // no WinVerifyTrust() call
+          ISC_REQ_USE_SUPPLIED_CREDS; // send no client certificate to the server
       // initiate a ClientHello TLS message and a new fCtxt
       HandshakeBufInit(buf);
       res := InitializeSecurityContextW(
@@ -2112,6 +2116,7 @@ var
   prov: HCRYPTPROV;
   freeprov: BOOL;
 begin
+  // method called once the socket has been bound on server side
   if Context.CertificateFile = '' then
     // Load certificate and private key from Windows certificate store
     fAcceptCertStore := CertOpenSystemStoreW(nil, 'MY')
@@ -2135,8 +2140,7 @@ begin
     if pass <> '' then
       FillCharFast(pointer(pass)^, length(pass) * 2, 0); // anti forensic
     if fAcceptCertStore = nil then
-      ESChannelRaiseLastError('PFXImportCertStoreSEC_E_CERT_UNKNOWN',
-        SEC_E_CERT_UNKNOWN);
+      ESChannelRaiseLastError('AfterBind: PFXImportCertStore', SEC_E_CERT_UNKNOWN);
   end;
   // find first certificate in store with private key
   fAcceptCert := nil;

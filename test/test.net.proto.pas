@@ -107,6 +107,7 @@ begin
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 2'), 2);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'one'), 1);
   CheckEqual(FindCustomEnum(MYENUM2TXT, ''), 0);
+  CheckEqual(FindCustomEnum(MYENUM2TXT, 'and'), 0);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 3'), 0);
   for i := 1 to high(RESERVED_KEYWORDS) do
     CheckUtf8(StrComp(pointer(RESERVED_KEYWORDS[i - 1]),
@@ -843,23 +844,27 @@ begin
   o := RawLdapTranslateFilter('(&(givenName=John)(sn=Doe))');
   CheckHash(o, $372C9EF2);
   o := RawLdapTranslateFilter('(&)');
-  CheckHash(o, $00A000A0);
+  CheckHash(o, $00A000A0, 'absolute true');
   o := RawLdapTranslateFilter('(|(givenName=John)(givenName=Jonathan))');
+  CheckHash(o, $A9670687);
+  o := RawLdapTranslateFilter('|(givenName=John)(givenName=Jonathan)');
   CheckHash(o, $A9670687);
   o := RawLdapTranslateFilter('(!(givenName=John))');
   CheckHash(o, $231C39EF);
   o := RawLdapTranslateFilter('(|)');
-  CheckHash(o, $00A100A1);
+  CheckHash(o, $00A100A1, 'absolute false');
   o := RawLdapTranslateFilter('*');
-  CheckHash(o, $01AD0187);
+  CheckHash(o, $01AD0187, 'present1');
   o := RawLdapTranslateFilter('(*)');
-  CheckHash(o, $01AD0187);
+  CheckHash(o, $01AD0187, 'present2');
   o := RawLdapTranslateFilter('(uid:=jdoe)');
   CheckHash(o, $C93ADF87);
   o := RawLdapTranslateFilter('(:caseIgnoreMatch:=foo)');
   CheckHash(o, $4F000E3E);
   o := RawLdapTranslateFilter('(uid:dn:caseIgnoreMatch:=jdoe)');
   CheckHash(o, $921D9031);
+  o := RawLdapTranslateFilter('(cn=*)');
+  CheckHash(o, $6B6D0287, 'present3');
   o := RawLdapTranslateFilter('(cn=abc*)');
   CheckHash(o, $E8897DEA);
   o := RawLdapTranslateFilter('(cn=*lmn*)');
@@ -868,6 +873,19 @@ begin
   CheckHash(o, $019B7E03);
   o := RawLdapTranslateFilter('(cn=abc*def*lmn*uvw*xyz)');
   CheckHash(o, $9BA95FBA);
+  o := RawLdapTranslateFilter('(createTimestamp>=20170102030405.678Z)');
+  CheckHash(o, $D4CECB30);
+  o := RawLdapTranslateFilter('(accountBalance<=1234)');
+  CheckHash(o, $075CEC71);
+  o := RawLdapTranslateFilter('accountBalance<=1234');
+  CheckHash(o, $075CEC71);
+  o := RawLdapTranslateFilter('(givenName~=John)');
+  CheckHash(o, $7C293651);
+  o := RawLdapTranslateFilter('(&(|(cn=Jon)(sn=Brion)(!(cn=Alex))))');
+  CheckHash(o, $ADF30CEA);
+  o := RawLdapTranslateFilter('&(objectCategory=person)(objectClass=user)' +
+    '(useraccountcontrol:1.2.840.113556.1.4.803:=16)');
+  CheckHash(o, $82EE2554);
   //writeln(AsnDump(o));
   CheckEqual(RawLdapTranslateFilter('(givenName=John', {noraise=}true), '');
   CheckEqual(RawLdapTranslateFilter('(!(givenName=John)', {noraise=}true), '');
@@ -880,6 +898,8 @@ begin
   CheckEqual(RawLdapTranslateFilter('!( )', {noraise=}true), '');
   CheckEqual(RawLdapTranslateFilter('&()', {noraise=}true), '');
   CheckEqual(RawLdapTranslateFilter('| ( )', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('(toto)', {noraise=}true), '');
+  CheckEqual(RawLdapTranslateFilter('x', {noraise=}true), '');
   // validate LDAP attributes definitions
   for at := low(at) to high(at) do
   begin
@@ -1362,10 +1382,12 @@ end;
 
 type
   THttpPeerCacheHook = class(THttpPeerCache); // to test protected methods
+  THttpPeerCryptHook = class(THttpPeerCrypt);
 
 procedure TNetworkProtocols._THttpPeerCache;
 var
   hpc: THttpPeerCacheHook;
+  hpc2: THttpPeerCryptHook; // another instance to validate remote decoding
   hps: THttpPeerCacheSettings;
   msg, msg2: THttpPeerCacheMessage;
   i, n, alter: integer;
@@ -1382,41 +1404,48 @@ begin
     try
       hpc := THttpPeerCacheHook.Create(hps, 'secret');
       try
-        timer.Start;
-        hpc.MessageInit(pcfBearer, 0, msg);
-        msg.Hash.Algo := hfSHA256;
-        n := 1000;
-        for i := 1 to n do
-        begin
-          msg.Size := i;
-          msg.Hash.Hash.i0 := i;
-          tmp := hpc.MessageEncode(msg);
-          Check(tmp <> '');
-          Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
-          CheckEqual(msg2.Size, i);
+        hpc2 := THttpPeerCryptHook.Create('secret');
+        try
+          hpc2.fSettings := hps;
+          hpc2.AfterSettings;
+          hpc.MessageInit(pcfBearer, 0, msg);
+          msg.Hash.Algo := hfSHA256;
+          timer.Start;
+          n := 1000;
+          for i := 1 to n do
+          begin
+            msg.Size := i;
+            msg.Hash.Hash.i0 := i;
+            tmp := hpc.MessageEncode(msg);
+            Check(tmp <> '');
+            Check(hpc2.MessageDecode(pointer(tmp), length(tmp), msg2), 'hpc2');
+            CheckEqual(msg2.Size, i);
+            Check(CompareMem(@msg, @msg2, SizeOf(msg)));
+          end;
+          NotifyTestSpeed('messages', n * 2, n * 2 * SizeOf(msg), @timer);
+          Check(ToText(msg) = ToText(msg2));
+          timer.Start;
+          n := 10000;
+          for i := 1 to n do
+          begin
+            alter := Random32(length(tmp));
+            inc(PByteArray(tmp)[alter]); // should be detected at crc level
+            Check(not hpc2.MessageDecode(pointer(tmp), length(tmp), msg2), 'alt');
+            dec(PByteArray(tmp)[alter]); // restore
+          end;
+          NotifyTestSpeed('altered', n, n * SizeOf(msg), @timer);
+          Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2), 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
+          for i := 1 to 10 do
+            Check(hpc.Ping = nil);
+        finally
+          hpc2.Free;
         end;
-        NotifyTestSpeed('messages', n * 2, n * 2 * SizeOf(msg), @timer);
-        Check(ToText(msg) = ToText(msg2));
-        timer.Start;
-        n := 10000;
-        for i := 1 to n do
-        begin
-          alter := Random32(length(tmp));
-          inc(PByteArray(tmp)[alter]); // should be detected at crc level
-          Check(not hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
-          dec(PByteArray(tmp)[alter]);
-        end;
-        NotifyTestSpeed('altered', n, n * SizeOf(msg), @timer);
-        Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
-        Check(CompareMem(@msg, @msg2, SizeOf(msg)));
-        for i := 1 to 10 do
-          Check(hpc.Ping = nil);
       finally
         hpc.Free;
       end;
     except
-      // exception here is likely to be port 8089 already used -> continue
+      // exception here is likely to be port 8099 already used -> continue
     end;
   finally
     hps.Free;

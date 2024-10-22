@@ -11,7 +11,7 @@ unit mormot.net.client;
    - THttpClientSocket Implementing HTTP client over plain sockets
    - Additional Client Protocols Support
    - THttpRequest Abstract HTTP client class
-   - TWinHttp TWinINet TWinHttpWebSocketClient TCurlHttp
+   - TWinHttp TWinINet TCurlHttp classes
    - IHttpClient / TSimpleHttpClient Wrappers
    - TJsonClient JSON requests over HTTP
    - Cached HTTP Connection to a Remote Server
@@ -42,7 +42,7 @@ uses
   mormot.net.sock,
   mormot.net.http,
   {$ifdef USEWININET}  // as set in mormot.defines.inc
-  WinINet,
+  wininet,
   mormot.lib.winhttp,
   {$ifdef FORCE_OPENSSL}
   mormot.lib.openssl11, // bypass SChannel for a given project
@@ -169,7 +169,7 @@ type
       Password: SpiUtf8;
       Token: SpiUtf8;
     end;
-    /// how many times THttpClientSocket should redirect 30x responses
+    /// how many times THttpClientSocket/TWinHttp should redirect 30x responses
     RedirectMax: integer;
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
@@ -234,14 +234,15 @@ type
   // - waoNoHeadFirst will call OnDownload() first then fallback to GET so
   // may be preferred e.g. if the main server has a huge latency
   // - waoNoMinimalSize should let OnDownload() accept even the smallest files
-  // - waoTryLastPeer/waoBroadcastNotAlone will force homonymous
-  // pcoTryLastPeer/pcoBroadcastNotAlone THttpPeerCacheOption
+  // - waoTryLastPeer/waoTryAllPeers/waoBroadcastNotAlone will force homonymous
+  // pcoTryLastPeer/pcoTryAllPeers/pcoBroadcastNotAlone THttpPeerCacheOption
   // - waoNoProgressiveDownloading will disable pcfResponsePartial requests
   TWGetAlternateOption = (
     waoPermanentCache,
     waoNoHeadFirst,
     waoNoMinimalSize,
     waoTryLastPeer,
+    waoTryAllPeers,
     waoBroadcastNotAlone,
     waoNoProgressiveDownloading);
 
@@ -265,6 +266,7 @@ type
     wgsAlternateLastPeer,
     wgsAlternateBroadcast,
     wgsAlternateGet,
+    wgsAlternateGetNext,
     wgsAlternateSuccess,
     wgsAlternateFailed,
     wgsAlternateReset,
@@ -937,6 +939,11 @@ type
     property UserAgent: RawUtf8
       read fExtendedOptions.UserAgent
       write fExtendedOptions.UserAgent;
+    /// how many 3xx status code redirections are allowed
+    // - default is 0 - i.e. no redirection
+    // - implemented for TWinHttp only
+    property RedirectMax: integer
+      read fExtendedOptions.RedirectMax write fExtendedOptions.RedirectMax;
     /// internal structure used to store extended options
     // - will be replicated by TLS.IgnoreCertificateErrors and Auth* properties
     property ExtendedOptions: THttpRequestExtendedOptions
@@ -999,7 +1006,7 @@ procedure ReplaceMainHttpClass(aClass: THttpRequestClass);
 {$endif USEHTTPREQUEST}
 
 
-{ ******************** TWinHttp TWinINet TWinHttpWebSocketClient }
+{ ******************** TWinHttp TWinINet classes }
 
 {$ifdef USEWININET}
 
@@ -1169,50 +1176,6 @@ type
   public
     /// create and raise a EWinHttp exception, with the error message as text
     class procedure RaiseFromLastError;
-  end;
-
-  /// establish a client connection to a WebSocket server using the Windows API
-  // - used by TWinWebSocketClient class
-  TWinHttpUpgradeable = class(TWinHttp)
-  private
-    fSocket: HINTERNET;
-  protected
-    function InternalRetrieveAnswer(var Header, Encoding, AcceptEncoding:
-      RawUtf8; var Data: RawByteString): integer; override;
-    procedure InternalSendRequest(const aMethod: RawUtf8;
-      const aData: RawByteString); override;
-  public
-    /// initialize the instance
-    constructor Create(const aServer, aPort: RawUtf8; aHttps: boolean;
-      const aProxyName: RawUtf8 = ''; const aProxyByPass: RawUtf8 = '';
-      ConnectionTimeOut: cardinal = 0; SendTimeout: cardinal = 0;
-      ReceiveTimeout: cardinal = 0; aLayer: TNetLayer = nlTcp;
-      const aUserAgent: RawUtf8 = ''); override;
-  end;
-
-  /// WebSocket client implementation
-  TWinHttpWebSocketClient = class
-  protected
-    fSocket: HINTERNET;
-    function CheckSocket: boolean;
-  public
-    /// initialize the instance
-    // - all parameters do match TWinHttp.Create except url: address of WebSocketServer
-    // for sending upgrade request
-    constructor Create(const aServer, aPort: RawUtf8; aHttps: boolean;
-      const url: RawUtf8; const aSubProtocol: RawUtf8 = ''; const aProxyName: RawUtf8 = '';
-      const aProxyByPass: RawUtf8 = ''; ConnectionTimeOut: cardinal = 0;
-      SendTimeout: cardinal = 0; ReceiveTimeout: cardinal = 0);
-    /// send buffer
-    function Send(aBufferType: WINHTTP_WEB_SOCKET_BUFFER_TYPE; aBuffer: pointer;
-      aBufferLength: cardinal): cardinal;
-    /// receive buffer
-    function Receive(aBuffer: pointer; aBufferLength: cardinal;
-      out aBytesRead: cardinal; out aBufferType: WINHTTP_WEB_SOCKET_BUFFER_TYPE): cardinal;
-    /// close current connection
-    function CloseConnection(const aCloseReason: RawUtf8): cardinal;
-    /// finalize the instance
-    destructor Destroy; override;
   end;
 
 var
@@ -2331,9 +2294,9 @@ begin
           not IsHead(ctxt.Method)) then
         CompressDataAndWriteHeaders(ctxt.DataMimeType, dat, ctxt.InStream);
       if ctxt.Header <> '' then
-        SockSend(ctxt.Header);
+        SockSendHeaders(pointer(ctxt.Header)); // normalizing CRLF
       if Http.CompressAcceptEncoding <> '' then
-        SockSend(Http.CompressAcceptEncoding);
+        SockSendHeaders(pointer(Http.CompressAcceptEncoding));
       SockSendCRLF;
       // flush headers and Data/InStream body
       SockSendFlush(dat);
@@ -2341,7 +2304,15 @@ begin
       begin
         // InStream may be a THttpMultiPartStream -> Seek(0) calls Flush
         ctxt.InStream.Seek(0, soBeginning);
-        SockSendStream(ctxt.InStream);
+        if SockSendStream(ctxt.InStream, 1 shl 20,
+             {noraise=}false, {checkrecv=}true) = nrRetry then
+        begin
+          // the server interrupted the upload by sending something (e.g. 413)
+          if Assigned(OnLog) then
+             OnLog(sllTrace, 'RequestInternal: response during SockSendStream %',
+               [ctxt.InStream], self);
+          include(Http.HeaderFlags, hfConnectionClose); // socket state is wrong
+        end;
       end;
       // wait and retrieve HTTP command line response
       pending := SockReceivePending(Timeout, @loerr); // select/poll
@@ -2373,14 +2344,11 @@ begin
       if IdemPChar(cmd, 'HTTP/1.') and
          (cmd[7] in ['0', '1']) then
       begin
-        // get http numeric status code (200,404...) from 'HTTP/1.x ######'
+        // get http numeric status code (200,404...) from 'HTTP/1.x ###'
         ctxt.Status := GetCardinal(cmd + 9);
         if (ctxt.Status < 200) or
-           (ctxt.Status > 599) then
-        begin
-          ctxt.Status := HTTP_CLIENTERROR;
-          exit;
-        end;
+           (ctxt.Status > 599) then // the HTTP standard requires three digits
+          exit; // abort but returns the received number (may be 0)
       end
       else
       begin
@@ -3459,7 +3427,7 @@ end;
 {$endif USEHTTPREQUEST}
 
 
-{ ******************** TWinHttp TWinINet TWinHttpWebSocketClient }
+{ ******************** TWinHttp TWinINet classes }
 
 {$ifdef USEWININET}
 
@@ -3743,8 +3711,13 @@ begin
   if fHttps and
      IgnoreTlsCertificateErrors then
     if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-       @SECURITY_FLAT_IGNORE_CERTIFICATES, SizeOf(SECURITY_FLAT_IGNORE_CERTIFICATES)) then
+       @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) then
       EWinHttp.RaiseFromLastError;
+  if fExtendedOptions.RedirectMax > 0 then
+    if WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_REDIRECT_POLICY,
+         @REDIRECT_POLICY_ALWAYS, SizeOf(cardinal)) then
+      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS,
+        @fExtendedOptions.RedirectMax, SizeOf(cardinal)); // ignore errors
   L := length(aData);
   if _SendRequest(L) and
      WinHttpApi.ReceiveResponse(fRequest, nil) then
@@ -3753,7 +3726,7 @@ begin
      (GetLastError = ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) and
      IgnoreTlsCertificateErrors and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-       @SECURITY_FLAT_IGNORE_CERTIFICATES, SizeOf(SECURITY_FLAT_IGNORE_CERTIFICATES)) and
+       @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
        pointer(WINHTTP_NO_CLIENT_CERT_CONTEXT), 0) and
      _SendRequest(L) and
@@ -3767,24 +3740,13 @@ function TWinHttp.InternalGetInfo(Info: cardinal): RawUtf8;
 var
   dwSize, dwIndex: cardinal;
   tmp: TSynTempBuffer;
-  i: integer;
 begin
   result := '';
-  dwSize := 0;
+  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if not WinHttpApi.QueryHeaders(fRequest, Info, nil, nil, dwSize, dwIndex) and
-     (GetLastError = ERROR_INSUFFICIENT_BUFFER) then
-  begin
-    tmp.Init(dwSize);
-    if WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
-    begin
-      dwSize := dwSize shr 1;
-      SetLength(result, dwSize);
-      for i := 0 to dwSize - 1 do // fast ANSI 7-bit conversion
-        PByteArray(result)^[i] := PWordArray(tmp.buf)^[i];
-    end;
-    tmp.Done;
-  end;
+  if WinHttpApi.QueryHeaders(fRequest, Info, nil, @tmp, dwSize, dwIndex) then
+    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
+    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
 end;
 
 function TWinHttp.InternalGetInfo32(Info: cardinal): cardinal;
@@ -3801,7 +3763,10 @@ end;
 function TWinHttp.InternalQueryDataAvailable: cardinal;
 begin
   if not WinHttpApi.QueryDataAvailable(fRequest, result) then
-    EWinHttp.RaiseFromLastError;
+    if GetLastError = ERROR_WINHTTP_OPERATION_CANCELLED then
+      result := 0 // connection may be closed by the server e.g. on 30x redirect
+    else
+      EWinHttp.RaiseFromLastError;
 end;
 
 function TWinHttp.InternalReadData(var Data: RawByteString;
@@ -3946,25 +3911,22 @@ begin
       EWinINet.RaiseFromLastError;
   end
   else
-  // blocking send with no callback
-  if not HttpSendRequestA(fRequest, nil, 0, pointer(aData), length(aData)) then
-    EWinINet.RaiseFromLastError;
+    // blocking send with no callback
+    if not HttpSendRequestA(fRequest, nil, 0, pointer(aData), length(aData)) then
+      EWinINet.RaiseFromLastError;
 end;
 
 function TWinINet.InternalGetInfo(Info: cardinal): RawUtf8;
 var
   dwSize, dwIndex: cardinal;
+  tmp: TSynTempBuffer;
 begin
   result := '';
-  dwSize := 0;
+  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if not HttpQueryInfoA(fRequest, Info, nil, dwSize, dwIndex) and
-     (GetLastError = ERROR_INSUFFICIENT_BUFFER) then
-  begin
-    SetLength(result, dwSize - 1);
-    if not HttpQueryInfoA(fRequest, Info, pointer(result), dwSize, dwIndex) then
-      result := '';
-  end;
+  if HttpQueryInfoW(fRequest, Info, @tmp, dwSize, dwIndex) then
+    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
+    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
 end;
 
 function TWinINet.InternalGetInfo32(Info: cardinal): cardinal;
@@ -3997,119 +3959,6 @@ begin
     InternetCloseHandle(FConnection);
   if fSession <> nil then
     InternetCloseHandle(FSession);
-  inherited Destroy;
-end;
-
-
-{ TWinHttpUpgradeable }
-
-function TWinHttpUpgradeable.InternalRetrieveAnswer(
-  var Header, Encoding, AcceptEncoding: RawUtf8;
-  var Data: RawByteString): integer;
-begin
-  result := inherited InternalRetrieveAnswer(Header, Encoding, AcceptEncoding, Data);
-end;
-
-procedure TWinHttpUpgradeable.InternalSendRequest(const aMethod: RawUtf8;
-  const aData: RawByteString);
-begin
-  inherited InternalSendRequest(aMethod, aData);
-end;
-
-constructor TWinHttpUpgradeable.Create(const aServer, aPort: RawUtf8;
-  aHttps: boolean; const aProxyName, aProxyByPass: RawUtf8;
-  ConnectionTimeOut, SendTimeout, ReceiveTimeout: cardinal; aLayer: TNetLayer;
-  const aUserAgent: RawUtf8);
-begin
-  inherited Create(aServer, aPort, aHttps, aProxyName, aProxyByPass,
-    ConnectionTimeOut, SendTimeout, ReceiveTimeout, aLayer, aUserAgent);
-end;
-
-
-{ TWinHttpWebSocketClient }
-
-function TWinHttpWebSocketClient.CheckSocket: boolean;
-begin
-  result := fSocket <> nil;
-end;
-
-constructor TWinHttpWebSocketClient.Create(const aServer, aPort: RawUtf8;
-  aHttps: boolean; const url, aSubProtocol, aProxyName, aProxyByPass: RawUtf8;
-  ConnectionTimeOut, SendTimeout, ReceiveTimeout: cardinal);
-var
-  _http: TWinHttpUpgradeable;
-  inH, outH: RawUtf8;
-  outD: RawByteString;
-begin
-  _http := TWinHttpUpgradeable.Create(aServer, aPort, aHttps, aProxyName,
-    aProxyByPass, ConnectionTimeOut, SendTimeout, ReceiveTimeout);
-  try
-    // WebSocketApi.BeginClientHandshake()
-    if aSubProtocol <> '' then
-      inH := HTTP_WEBSOCKET_PROTOCOL + ': ' + aSubProtocol
-    else
-      inH := '';
-    if _http.Request(url, 'GET', 0, inH, '', '', outH, outD) = 101 then
-      fSocket := _http.fSocket
-    else
-      EWinHttp.RaiseUtf8('%.Create: % handshake failed', [self, _http]);
-  finally
-    _http.Free;
-  end;
-end;
-
-function TWinHttpWebSocketClient.Send(aBufferType: WINHTTP_WEB_SOCKET_BUFFER_TYPE;
-  aBuffer: pointer; aBufferLength: cardinal): cardinal;
-begin
-  if not CheckSocket then
-    result := ERROR_INVALID_HANDLE
-  else
-    result := WinHttpApi.WebSocketSend(
-      fSocket, aBufferType, aBuffer, aBufferLength);
-end;
-
-function TWinHttpWebSocketClient.Receive(
-  aBuffer: pointer; aBufferLength: cardinal;
-  out aBytesRead: cardinal;
-  out aBufferType: WINHTTP_WEB_SOCKET_BUFFER_TYPE): cardinal;
-begin
-  if not CheckSocket then
-    result := ERROR_INVALID_HANDLE
-  else
-    result := WinHttpApi.WebSocketReceive(fSocket, aBuffer, aBufferLength,
-      aBytesRead, aBufferType);
-end;
-
-function TWinHttpWebSocketClient.CloseConnection(
-  const aCloseReason: RawUtf8): cardinal;
-begin
-  if not CheckSocket then
-    result := ERROR_INVALID_HANDLE
-  else
-    result := WinHttpApi.WebSocketClose(fSocket, WEB_SOCKET_SUCCESS_CLOSE_STATUS,
-      pointer(aCloseReason), Length(aCloseReason));
-  if result = 0 then
-    fSocket := nil;
-end;
-
-destructor TWinHttpWebSocketClient.Destroy;
-const
-  CloseReason: PAnsiChar = 'object is destroyed';
-var
-  status: Word;
-  reason: RawUtf8;
-  reasonLength: cardinal;
-begin
-  if CheckSocket then
-  begin
-    // todo: check result
-    WinHttpApi.WebSocketClose(fSocket, WEB_SOCKET_ABORTED_CLOSE_STATUS,
-      pointer(CloseReason), Length(CloseReason));
-    SetLength(reason, WEB_SOCKET_MAX_CLOSE_REASON_LENGTH);
-    WinHttpApi.WebSocketQueryCloseStatus(fSocket, status, pointer(reason),
-      WEB_SOCKET_MAX_CLOSE_REASON_LENGTH, reasonLength);
-    WinHttpApi.CloseHandle(fSocket);
-  end;
   inherited Destroy;
 end;
 
@@ -4827,8 +4676,8 @@ end;
 
 { TJsonClient }
 
-constructor TJsonClient.Create(const aServerAddress: RawUtf8;
-  const aBaseUri: RawUtf8; aKeepAlive: integer);
+constructor TJsonClient.Create(const aServerAddress, aBaseUri: RawUtf8;
+  aKeepAlive: integer);
 begin
   inherited Create;
   if not fServerUri.From(aServerAddress) then
@@ -4897,8 +4746,9 @@ end;
 procedure TJsonClient.RawRequest(const Method, Action,
   InType, InBody, InHeaders: RawUtf8; var Response: TJsonResponse);
 var
-  t, b, h: RawUtf8;
+  a, t, b, h: RawUtf8;
 begin
+  // prepare input paramteters
   h := fInHeaders; // pre-computed from Cookies and DefaultHeaders properties
   if InHeaders <> '' then
     AppendLine(h, [InHeaders]);
@@ -4910,11 +4760,15 @@ begin
     if t = '' then
       t := JSON_CONTENT_TYPE_VAR;
   end;
+  a := Action;
+  while (a <> '') and
+        (a[1] = '/') do
+    delete(a, 1, 1); // avoid dual 'base//action' URI
   Response.Init;
   Response.Method := Method;
   fSafe.Lock; // blocking thread-safe HTTP request
   try
-    fServerUri.Address := fBaseUri + Action;
+    fServerUri.Address := fBaseUri + a;
     Response.Url := fServerUri.Root; // excluding ?parameters=...
     fHttp.Request(fServerUri, Method, h, b, t, fKeepAlive);
     Response.Status := fHttp.Status;
@@ -5185,7 +5039,7 @@ begin
         'Content-Type: text/plain; charset=', TextCharSet, #13#10 +
         'Content-Transfer-Encoding: 8bit']);
     if head <> '' then
-      sock.SockSend(head);
+      sock.SockSendHeaders(pointer(head));
     sock.SockSendCRLF; // end of headers
     sock.SockSend(Text);
     Exec('.', '25');

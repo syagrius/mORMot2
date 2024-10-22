@@ -645,7 +645,7 @@ type
   // any previous value for the name "AB"
   // - dvoReturnNullForUnknownProperty will be used when retrieving any value
   // from its name (for dvObject kind of instance), or index (for dvArray or
-  // dvObject kind of instance)
+  // dvObject kind of instance), when the value is not found
   // - by default, internal values will be copied by-value from one variant
   // instance to another, to ensure proper safety - but it may be too slow:
   // if you set dvoValueCopiedByReference, the internal
@@ -653,6 +653,8 @@ type
   // to avoid memory allocations, BUT it may break internal process if you change
   // some values in place (since VValue/VName and VCount won't match) - as such,
   // if you set this option, ensure that you use the content as read-only
+  // - by default, any string value will be stored as RawUtf8 varString, with
+  // conversion if needed, unless dvoValueDoNotNormalizeAsRawUtf8 is defined
   // - any registered custom types may have an extended JSON syntax (e.g.
   // TBsonVariant does for MongoDB types), and will be searched during JSON
   // parsing, unless dvoJsonParseDoNotTryCustomVariants is set (slightly faster)
@@ -687,6 +689,7 @@ type
     dvoCheckForDuplicatedNames,
     dvoReturnNullForUnknownProperty,
     dvoValueCopiedByReference,
+    dvoValueDoNotNormalizeAsRawUtf8,
     dvoJsonParseDoNotTryCustomVariants,
     dvoJsonParseDoNotGuessCount,
     dvoJsonObjectParseWithinString,
@@ -1873,6 +1876,7 @@ type
     procedure HashAdd(aHashCode: cardinal; var result: PtrInt);
     procedure HashDelete(aArrayIndex, aHashTableIndex: PtrInt; aHashCode: cardinal);
     function RaiseFatalCollision(const caller: shortstring; aHashCode: cardinal): integer;
+    procedure RaiseNoHasher;
     procedure HashTableInit(aHasher: THasher);
     procedure SetEventCompare(const Value: TOnDynArraySortCompare);
     procedure SetEventHash(const Value: TOnDynArrayHashOne);
@@ -2558,7 +2562,7 @@ type
   public
     /// initialize the storage and its internal hash pools
     // - aHashTables is the pool size, and should be a power of two <= 512
-    // (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
+    // (1, 2, 4, 8, 16, 32, 64, 128, 256, 512) - rounded up if not an exact power
     constructor Create(aHashTables: integer = 4); reintroduce;
     /// return a RawUtf8 variable stored within this class
     // - if aText occurs for the first time, add it to the internal string pool
@@ -4608,21 +4612,16 @@ end;
 
 constructor TRawUtf8Interning.Create(aHashTables: integer);
 var
-  p: integer;
   i: PtrInt;
 begin
   inherited Create; // may have been overriden
-  for p := 0 to 9 do
-    if aHashTables = 1 shl p then
-    begin
-      SetLength(fPool, aHashTables);
-      fPoolLast := aHashTables - 1;
-      for i := 0 to fPoolLast do
-        fPool[i].Init;
-      exit;
-    end;
-  ESynException.RaiseUtf8('%.Create(%) not allowed: ' +
-    'should be a power of 2 <= 512', [self, aHashTables]);
+  if aHashTables > 512 then
+    ESynException.RaiseUtf8('%.Create(%) failed as > 512', [self, aHashTables]);
+  aHashTables := NextPowerOfTwo(aHashTables);
+  SetLength(fPool, aHashTables);
+  fPoolLast := aHashTables - 1;
+  for i := 0 to fPoolLast do
+    fPool[i].Init;
 end;
 
 procedure TRawUtf8Interning.Clear;
@@ -5692,14 +5691,14 @@ end;
 
 function _BS_UString(Data: PUnicodeString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 begin
-  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
+  Dest.WriteVar(pointer(Data^), length(Data^) * 2); // length is stored in bytes
   result := SizeOf(pointer);
 end;
 
 function _BL_UString(Data: PUnicodeString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
 begin
   with Source.VarBlob do
-    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
+    FastSynUnicode(Data^, Ptr, Len shr 1); // length was stored in bytes
   result := SizeOf(pointer);
 end;
 
@@ -6328,7 +6327,7 @@ begin
     vt := VARIANT_SIZE[vt];
     if vt <> 0 then
       if vt = 255 then
-        with Source.VarBlob do // valOleStr
+        with Source.VarBlob do // varOleStr (=8)
           SetString(WideString(Data^.vAny), PWideChar(Ptr), Len shr 1)
       else
         Source.Copy(@Data^.VInt64, vt); // simple types
@@ -6339,7 +6338,7 @@ begin
   {$ifdef HASVARUSTRING}
   else if vt = varUString then
     with Source.VarBlob do
-      SetString(UnicodeString(Data^.vAny), PWideChar(Ptr), Len shr 1)
+      FastSynUnicode(UnicodeString(Data^.vAny), Ptr, Len shr 1)
   {$endif HASVARUSTRING}
   else if Assigned(BinaryVariantLoadAsJson) then
     _BL_VariantComplex(pointer(Data), Source)
@@ -9303,16 +9302,24 @@ procedure TDynArrayHasher.Init(aDynArray: PDynArray; aHashItem: TDynArrayHashOne
   aCaseInsensitive: boolean);
 begin
   fDynArray := aDynArray;
-  if not (Assigned(aHashItem) or
-          Assigned(aEventHash)) then
-    aHashItem := PT_HASH[aCaseInsensitive, aDynArray^.Info.ArrayFirstFieldSort];
   fHashItem := aHashItem;
   fEventHash := aEventHash;
-  if not (Assigned(aCompare) or
-          Assigned(aEventCompare)) then
-    aCompare := PT_SORT[aCaseInsensitive, aDynArray^.Info.ArrayFirstFieldSort];
+  if not (Assigned(fHashItem) or
+          Assigned(fEventHash)) then
+  begin
+    fHashItem := PT_HASH[aCaseInsensitive, fDynArray^.Info.ArrayFirstFieldSort];
+    if not Assigned(fHashItem) then // fallback to binary hash if not enough RTTI
+      fEventHash := fDynArray^.Info.ValueFullHash;
+  end;
   fCompare := aCompare;
   fEventCompare := aEventCompare;
+  if not (Assigned(fCompare) or
+          Assigned(fEventCompare)) then
+  begin
+    fCompare := PT_SORT[aCaseInsensitive, fDynArray^.Info.ArrayFirstFieldSort];
+    if not Assigned(fCompare) then // fallback
+      fEventCompare := fDynArray^.Info.ValueFullCompare;
+  end;
   HashTableInit(aHasher);
 end;
 
@@ -9322,10 +9329,14 @@ begin
   fDynArray := aDynArray;
   if aKind in [ptNone, ptEnumeration, ptSet] then
     aKind := fDynArray^.Info.ArrayFirstFieldSort; // use RTTI if not enough
-  fHashItem := PT_HASH[aCaseInsensitive, aKind];
   fEventHash := nil;
-  fCompare := PT_SORT[aCaseInsensitive, aKind];
+  fHashItem := PT_HASH[aCaseInsensitive, aKind];
+  if not Assigned(fHashItem) then // fallback
+    fEventHash := fDynArray^.Info.ValueFullHash;
   fEventCompare := nil;
+  fCompare := PT_SORT[aCaseInsensitive, aKind];
+  if not Assigned(fCompare) then // fallback
+    fEventCompare := fDynArray^.Info.ValueFullCompare;
   HashTableInit(aHasher);
 end;
 
@@ -9361,7 +9372,7 @@ end;
 procedure TDynArrayHasher.SetEventCompare(const Value: TOnDynArraySortCompare);
 begin
   if fDynArray^.GetCount <> 0 then
-    raise EDynArray.Create('TDynArrayHasher: unexpected SetEventCompare');
+    raise EDynArray.Create('TDynArrayHasher: late SetEventCompare');
   fEventCompare := Value;
   HashTableInit(fHasher);
 end;
@@ -9369,7 +9380,7 @@ end;
 procedure TDynArrayHasher.SetEventHash(const Value: TOnDynArrayHashOne);
 begin
   if fDynArray^.GetCount <> 0 then
-    raise EDynArray.Create('TDynArrayHasher: unexpected SetEventHash');
+    raise EDynArray.Create('TDynArrayHasher: late SetEventHash');
   fEventHash := Value;
   HashTableInit(fHasher);
 end;
@@ -9456,44 +9467,49 @@ begin
     result := PIntegerArray(result)[aHashTableIndex];
 end;
 
+procedure TDynArrayHasher.RaiseNoHasher;
+begin
+  EDynArray.RaiseUtf8('TDynArrayHasher: % has no RTTI - use InitSpecific()',
+    [fDynArray^.Info.Name]);
+end;
+
 function TDynArrayHasher.Find(aHashCode: cardinal; aForAdd: boolean): PtrInt;
 var
   first, last, ndx, siz: PtrInt;
   P: PAnsiChar;
 begin
-  if hasHasher in fState then
-  begin
-    result := HashTableIndex(aHashCode);
-    first := result;
-    last := fHashTableSize;
-    P := fDynArray^.Value^;
-    siz := fDynArray^.Info.Cache.ItemSize;
-    repeat
-      ndx := HashTableIndexToIndex(result) - 1; // index+1 was stored
-      if ndx < 0 then
+  if not (hasHasher in fState) then
+    RaiseNoHasher;
+  result := HashTableIndex(aHashCode);
+  first := result;
+  last := fHashTableSize;
+  P := fDynArray^.Value^;
+  siz := fDynArray^.Info.Cache.ItemSize;
+  repeat
+    ndx := HashTableIndexToIndex(result) - 1; // index+1 was stored
+    if ndx < 0 then
+    begin
+      // found void entry
+      result := -(result + 1);
+      exit;
+    end
+    else if not aForAdd and
+            (HashOne(P + ndx * siz) = aHashCode) then
+    begin
+      result := ndx;
+      exit;
+    end;
+    inc(result); // try next entry on hash collision
+    if result = last then
+      // reached the end -> search once from HashTable[0] to HashTable[first-1]
+      if result = first then
+        break
+      else
       begin
-        // found void entry
-        result := -(result + 1);
-        exit;
-      end
-      else if not aForAdd and
-              (HashOne(P + ndx * siz) = aHashCode) then
-      begin
-        result := ndx;
-        exit;
+        result := 0;
+        last := first;
       end;
-      inc(result); // try next entry on hash collision
-      if result = last then
-        // reached the end -> search once from HashTable[0] to HashTable[first-1]
-        if result = first then
-          break
-        else
-        begin
-          result := 0;
-          last := first;
-        end;
-    until false;
-  end;
+  until false;
   result := RaiseFatalCollision('Find', aHashCode);
 end;
 
@@ -9506,56 +9522,55 @@ var
   {$endif DYNARRAYHASHCOLLISIONCOUNT}
   P: PAnsiChar;
 begin
-  if hasHasher in fState then // we need comparison and hash functions
-  begin
-    {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
-    collisions := 0;
-    {$endif DYNARRAYHASHCOLLISIONCOUNT}
-    result := HashTableIndex(aHashCode);
-    first := result;
-    last := fHashTableSize;
-    repeat
-      ndx := HashTableIndexToIndex(result) - 1; // index+1 was stored
-      if ndx < 0 then
-      begin
-        // not found: returns void index in HashTable[] as negative value
-        result := - (result + 1);
-        {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
-        inc(CountCollisions, collisions);
-        inc(CountCollisionsCurrent, collisions);
-        {$endif DYNARRAYHASHCOLLISIONCOUNT}
-        exit;
-      end;
-      // comparison with item is faster than hash e.g. for huge strings
-      with fDynArray^ do
-        P := PAnsiChar(Value^) + ndx * fInfo.Cache.ItemSize;
-      if ((not Assigned(fEventCompare)) and
-          (fCompare(P^, Item^) = 0)) or
-         (Assigned(fEventCompare) and
-          (fEventCompare(P^, Item^) = 0)) then
-      begin
-        // found: returns the matching index
-        if aHashTableIndex <> nil then
-          aHashTableIndex^ := result;
-        result := ndx;
-        exit;
-      end;
-      // hash or slot collision -> search next item
+  if not (hasHasher in fState) then
+    RaiseNoHasher;
+  {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
+  collisions := 0;
+  {$endif DYNARRAYHASHCOLLISIONCOUNT}
+  result := HashTableIndex(aHashCode);
+  first := result;
+  last := fHashTableSize;
+  repeat
+    ndx := HashTableIndexToIndex(result) - 1; // index+1 was stored
+    if ndx < 0 then
+    begin
+      // not found: returns void index in HashTable[] as negative value
+      result := - (result + 1);
       {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
-      inc(collisions);
+      inc(CountCollisions, collisions);
+      inc(CountCollisionsCurrent, collisions);
       {$endif DYNARRAYHASHCOLLISIONCOUNT}
-      inc(result);
-      if result = last then
-        // reached the end -> search once from HashTable[0] to HashTable[first-1]
-        if result = first then
-          break
-        else
-        begin
-          result := 0;
-          last := first;
-        end;
-    until false;
-  end;
+      exit;
+    end;
+    // comparison with item is faster than hash e.g. for huge strings
+    with fDynArray^ do
+      P := PAnsiChar(Value^) + ndx * fInfo.Cache.ItemSize;
+    if ((not Assigned(fEventCompare)) and
+        (fCompare(P^, Item^) = 0)) or
+       (Assigned(fEventCompare) and
+        (fEventCompare(P^, Item^) = 0)) then
+    begin
+      // found: returns the matching index
+      if aHashTableIndex <> nil then
+        aHashTableIndex^ := result;
+      result := ndx;
+      exit;
+    end;
+    // hash or slot collision -> search next item
+    {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
+    inc(collisions);
+    {$endif DYNARRAYHASHCOLLISIONCOUNT}
+    inc(result);
+    if result = last then
+      // reached the end -> search once from HashTable[0] to HashTable[first-1]
+      if result = first then
+        break
+      else
+      begin
+        result := 0;
+        last := first;
+      end;
+  until false;
   result := RaiseFatalCollision('FindOrNew', aHashCode);
 end;
 
@@ -9564,30 +9579,29 @@ function TDynArrayHasher.FindOrNewComp(aHashCode: cardinal; Item: pointer;
 var
   first, last, ndx: PtrInt;
 begin // cut-down version of FindOrNew()
-  if hasHasher in fState then
-  begin
-    if not Assigned(Comp) then
-      Comp := fCompare;
-    ndx := HashTableIndex(aHashCode);
-    first := ndx;
-    last := fHashTableSize;
-    repeat
-      result := HashTableIndexToIndex(ndx) - 1; // Index+1 was stored
-      if (result < 0) or // void slot = not found, or return matching index
-         (Comp((PAnsiChar(fDynArray^.Value^) +
-           result * fDynArray^.fInfo.Cache.ItemSize)^, Item^) = 0) then
-        exit;
-      inc(ndx); // hash or slot collision -> search next item
-      if ndx = last then
-        if ndx = first then
-          break
-        else
-        begin
-          ndx := 0;
-          last := first;
-        end;
-    until false;
-  end;
+  if not (hasHasher in fState) then
+    RaiseNoHasher;
+  if not Assigned(Comp) then
+    Comp := fCompare;
+  ndx := HashTableIndex(aHashCode);
+  first := ndx;
+  last := fHashTableSize;
+  repeat
+    result := HashTableIndexToIndex(ndx) - 1; // Index+1 was stored
+    if (result < 0) or // void slot = not found, or return matching index
+       (Comp((PAnsiChar(fDynArray^.Value^) +
+         result * fDynArray^.fInfo.Cache.ItemSize)^, Item^) = 0) then
+      exit;
+    inc(ndx); // hash or slot collision -> search next item
+    if ndx = last then
+      if ndx = first then
+        break
+      else
+      begin
+        ndx := 0;
+        last := first;
+      end;
+  until false;
   result := RaiseFatalCollision('FindOrNewComp', aHashCode);
 end;
 
@@ -9685,18 +9699,15 @@ end;
 function TDynArrayHasher.FindBeforeAdd(Item: pointer; out wasAdded: boolean;
   aHashCode: cardinal): PtrInt;
 begin
+  if not (hasHasher in fState) then
+    RaiseNoHasher;
   wasAdded := false;
-  if hasHasher in fState then
-  begin
-    result := FindOrNew(aHashCode, Item, nil);
-    if result >= 0 then
-      exit;
-    // found no matching item
-    wasAdded := true;
-    HashAdd(aHashCode, result);
-  end
-  else
-    result := -1
+  result := FindOrNew(aHashCode, Item, nil);
+  if result >= 0 then
+    exit;
+  // found no matching item
+  wasAdded := true;
+  HashAdd(aHashCode, result);
 end;
 
 function TDynArrayHasher.FindBeforeDelete(Item: pointer): PtrInt;

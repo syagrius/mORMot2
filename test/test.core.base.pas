@@ -2831,6 +2831,20 @@ begin
     c.Free;
   end;
   {$ifdef OSWINDOWS}
+  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
+  Check(WinErrorConstant(ERROR_OPERATION_ABORTED)^ = 'OPERATION_ABORTED', 'wecb');
+  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
+  Check(WinErrorConstant(ERROR_MORE_DATA)^ = 'MORE_DATA', 'wecd');
+  Check(WinErrorConstant(ERROR_ACCESS_DENIED)^ = 'ACCESS_DENIED', 'wece');
+  Check(WinErrorConstant(ERROR_WINHTTP_TIMEOUT)^ = 'WINHTTP_TIMEOUT', 'wecf');
+  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecg');
+  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant(ERROR_CONNECTION_INVALID)^  = 'CONNECTION_INVALID', 'weci');
+  Check(WinErrorConstant(ERROR_INSUFFICIENT_BUFFER)^ = 'INSUFFICIENT_BUFFER', 'wecj');
+  Check(WinErrorConstant(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)^ =
+    'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
+  CheckEqual(WinErrorText(1246, nil), 'ERROR__CONTINUE');
+  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER, nil), 'ERROR_INSUFFICIENT_BUFFER');
   Check(IsSystemFolder('c:\program files'));
   Check(IsSystemFolder('c:\program Files\toto'));
   Check(IsSystemFolder('c:\Program files (x86)'));
@@ -3842,10 +3856,46 @@ var
   i, n: PtrInt;
   timer: TPrecisionTimer;
 begin
+  CheckEqual(NextPowerOfTwo(0), 1);
+  CheckEqual(NextPowerOfTwo(1), 1);
+  CheckEqual(NextPowerOfTwo(2), 2);
+  CheckEqual(NextPowerOfTwo(3), 4);
+  CheckEqual(NextPowerOfTwo(4), 4);
+  for i := 5 to 8 do
+    CheckEqual(NextPowerOfTwo(i), 8);
+  for i := 9 to 16 do
+    CheckEqual(NextPowerOfTwo(i), 16);
+  for i := 17 to 32 do
+    CheckEqual(NextPowerOfTwo(i), 32);
+  for i := 1025 to 2048 do
+    CheckEqual(NextPowerOfTwo(i), 2048);
+  for i := 65537 to 131072 do
+    CheckEqual(NextPowerOfTwo(i), 131072);
+  for i := 33554433 to 67108864 do // 33 millions tests in a few ms :)
+    Check(NextPowerOfTwo(i) = 67108864);
   n := 512;
+  CheckEqual(MinPtrInt(1, n), 1);
+  CheckEqual(MaxPtrInt(1, n), n);
+  CheckEqual(MinPtrUInt(1, n), 1);
+  CheckEqual(MaxPtrUInt(1, n), n);
   SetLength(i8, n);
   for i := 0 to n - 1 do
+  begin
     i8[i] := i;
+    CheckEqual(MinPtrInt(i, i), i);
+    CheckEqual(MaxPtrInt(i, i), i);
+    CheckEqual(MinPtrUInt(i, i), i);
+    CheckEqual(MaxPtrUInt(i, i), i);
+    CheckEqual(MinPtrInt(i, n), i);
+    CheckEqual(MaxPtrInt(i, n), n);
+    CheckEqual(MinPtrUInt(i, n), i);
+    CheckEqual(MaxPtrUInt(i, n), n);
+    CheckEqual(MinPtrInt(i, i + 1), i);
+    CheckEqual(MaxPtrInt(i, i - 1), i);
+    CheckEqual(MinPtrUInt(i, i + 1), i);
+    if i > 0 then
+      CheckEqual(MaxPtrUInt(i, i - 1), i);
+  end;
   CheckEqual(ByteScanIndex(pointer(i8), 100, 100), -1);
   CheckEqual(ByteScanIndex(pointer(i8), 101, 100), 100);
   CheckEqual(ByteScanIndex(@i8[1], 100, 0), -1, 'aligned read');
@@ -4894,7 +4944,7 @@ var
   PB: PByte;
   q: RawUtf8;
   Unic: RawByteString;
-  WA: Boolean;
+  WA, HasValidUtf8Avx2: Boolean;
   rb1, rb2, rb3: RawByteString;
 const
   ROWIDS: array[0..17] of PUtf8Char = ('id', 'ID', 'iD', 'rowid', 'ROWid',
@@ -5490,7 +5540,14 @@ begin
       len120 := Utf8TruncatedLength(P, 120)
     else
       len120 := 0;
-    Check(IsValidUtf8Buffer(P, len120), 'IsValidUtF8');
+    Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer');
+    {$ifdef ASMX64AVXNOCONST}
+    HasValidUtf8Avx2 := (cpuHaswell in X64CpuFeatures);
+    if HasValidUtf8Avx2 then
+      Check(IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas');
+    {$else}
+    HasValidUtf8Avx2 := false; // IsValidUtf8Buffer = @IsValidUtf8Pas
+    {$endif ASMX64AVXNOCONST}
     for j := 1 to lenup100 do
     begin
       check(PosChar(P, U[j])^ = U[j], 'PosCharj');
@@ -5510,8 +5567,12 @@ begin
         P[len120] := #0; // no need to go any further
         P[j - 1] := AnsiChar(ord(P[j - 1]) xor 128); // always invalidate the UTF-8 content
         check(not IsValidUtf8Buffer(P, len120), 'IsValidUtf8 up100');
+        if HasValidUtf8Avx2 then
+          check(not IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas up100');
         P[j - 1] := AnsiChar(ord(P[j - 1]) xor 128); // restore
         check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8 restored');
+        if HasValidUtf8Avx2 then
+          check(IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas restored');
         P[len120] := bak;
       end;
     end;
@@ -5549,22 +5610,33 @@ begin
     Check(IsWinAnsi(pointer(Unic), length(Unic) shr 1) = WA);
     Check(IsWinAnsiU(pointer(U)) = WA);
     Up := mormot.core.unicode.UpperCase(U);
-    Check(mormot.core.unicode.UpperCase(mormot.core.unicode.LowerCase(U)) = Up);
-    Check(Utf8IComp(pointer(U), pointer(U)) = 0);
-    Check(Utf8IComp(pointer(U), pointer(Up)) = 0);
-    Check(Utf8ILComp(pointer(U), pointer(U), length(U), length(U)) = 0);
-    Check(Utf8ILComp(pointer(U), pointer(Up), length(U), length(Up)) = 0);
-    Check(Utf8ICompReference(pointer(U), pointer(U)) = 0);
-    Check(Utf8ILCompReference(pointer(U), pointer(U), length(U), length(U)) = 0);
-
+    CheckEqual(mormot.core.unicode.UpperCase(mormot.core.unicode.LowerCase(U)), Up);
+    CheckEqual(Utf8IComp(pointer(U), pointer(U)), 0);
+    CheckEqual(Utf8IComp(pointer(U), pointer(Up)), 0);
+    CheckEqual(Utf8ILComp(pointer(U), pointer(U), length(U), length(U)), 0);
+    CheckEqual(Utf8ILComp(pointer(U), pointer(Up), length(U), length(Up)), 0);
+    CheckEqual(Utf8ICompReference(pointer(U), pointer(U)), 0);
+    CheckEqual(Utf8ILCompReference(pointer(U), pointer(U), length(U), length(U)), 0);
+    CheckEqual(Utf8CompareOS(pointer(U), pointer(U)), 0);
+    CheckEqual(CompareInteger(Utf8CompareOS(pointer(U), pointer(Up)), 0),
+              -CompareInteger(Utf8CompareOS(pointer(Up), pointer(U)), 0));
+    CheckEqual(CompareInteger(Utf8CompareIOS(pointer(U), pointer(Up)), 0),
+              -CompareInteger(Utf8CompareIOS(pointer(Up), pointer(U)), 0));
+    CheckEqual(Utf8CompareIOS(pointer(U), pointer(U)), 0);
+    CheckEqual(Utf8CompareIOS(pointer(U), pointer(Up)), 0);
     //for j := 1 to 5000 do
     try
       //W := WinAnsiString(RandomString(len));
       //U := WinAnsiToUtf8(W);
       //check(IsValidUtf8(U), 'IsValidUtf8U');
       //Up := mormot.core.unicode.UpperCase(U);
+      up4 := Utf8ToRawUcs4(U);
+      CheckEqual(RawUcs4ToUtf8(up4), U);
+      Up2 := UpperCaseReference(U);
       up4 := UpperCaseUcs4Reference(U);
-      CheckEqual(StrPosIReference(pointer(U), Up4), pointer(U));
+      CheckEqual(RawUcs4ToUtf8(up4), Up2);
+      CheckEqual(Ucs4Compare(Utf8ToRawUcs4(Up2), up4), 0);
+      CheckEqual(StrPosIReference(pointer(U), up4), pointer(U));
       if U <> '' then
       begin
         Up2 := 'abcDE G' + U;
@@ -5582,10 +5654,8 @@ begin
       end;
     except
       on E: Exception do
-        CheckUtf8(false, '% for %[%]%', [E.ClassType, length(U),
-          EscapeToShort(U), length(up4)]);
+        CheckUtf8(false, '% for %[%]%', [E, length(U), EscapeToShort(U), length(up4)]);
     end;
-
     CheckEqual(LowerCase(U), LowerCaseAscii7(U));
     L := Length(U);
     SetString(Up, nil, L);
@@ -7794,6 +7864,14 @@ begin
   end;
 end;
 
+type
+  TSDKey = record
+    i: integer;
+    u: TGuid;
+    j: integer;
+  end;
+  TSDKeys = array of TSDKey;
+
 {  TSynDictionary perf numbers on increasing integers or random guid strings
    with FPC 3.2.0 on x86_64 with our fpcx64mm - which is our main server target
 
@@ -8048,6 +8126,7 @@ var
   s, k, key, val: RawUtf8;
   i, n: integer;
   exists: boolean;
+  sdk: TSDKey;
 begin
   {$ifdef HASGENERICS}
   dict := TSynDictionary.New<RawUtf8, RawUtf8>(True);
@@ -8142,6 +8221,42 @@ begin
         end;
       end;
     end;
+  finally
+    dict.Free;
+  end;
+  // keys with no standard RTTI: fallback to binary hash/compare
+  FillCharFast(sdk, SizeOf(sdk), 0);
+  v := 10;
+  dict := TSynDictionary.Create(TypeInfo(TSDKeys), TypeInfo(tvalues));
+  try
+    CheckEqual(dict.Count, 0);
+    CheckEqual(dict.Capacity, 0);
+    Check(not dict.FindAndCopy(sdk, v));
+    Check(dict.Add(sdk, v) = 0);
+    v := 1;
+    Check(v = 1);
+    Check(dict.FindAndCopy(sdk, v));
+    Check(v = 10);
+    sdk.j := 1;
+    Check(not dict.FindAndCopy(sdk, v));
+    sdk.j := 0;
+    CheckEqual(dict.Count, 1);
+    Check(dict.Capacity > 0);
+  finally
+    dict.Free;
+  end;
+  dict := TSynDictionary.Create(TypeInfo(TSDKeys), TypeInfo(tvalues), false,
+    0, nil, nil, ptInteger);
+  try
+    Check(not dict.FindAndCopy(sdk, v));
+    Check(dict.Add(sdk, v) = 0);
+    v := 1;
+    Check(dict.FindAndCopy(sdk, v));
+    Check(v = 10);
+    v := 1;
+    sdk.j := 1;
+    Check(dict.FindAndCopy(sdk, v), 'ptInteger=search i only');
+    Check(v = 10);
   finally
     dict.Free;
   end;

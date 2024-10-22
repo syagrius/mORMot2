@@ -202,6 +202,7 @@ const
   HTTP_HTTPVERSIONNONSUPPORTED = 505;
 
   /// a fake response code, generated for client side panic failure/exception
+  // - for it is the number of a man
   HTTP_CLIENTERROR = 666;
   /// a fake response code, used by THttpServerRequest.SetAsyncResponse
   // - for internal THttpAsyncServer asynchronous process
@@ -1715,13 +1716,17 @@ function GetComputerUuid(disable: TGetComputerUuid = []): RawUtf8; overload;
 {$ifdef OSWINDOWS}
 
 type
-  TThreadID     = DWORD;
+  // publish basic WinAPI types to avoid including "Windows" in our uses clause
   TMessage      = Messages.TMessage;
   HWND          = Windows.HWND;
   BOOL          = Windows.BOOL;
   LARGE_INTEGER = Windows.LARGE_INTEGER;
   TFileTime     = Windows.FILETIME;
   PFileTime     = ^TFileTime;
+
+  /// Windows handle for a Thread - for cross-platform/cross-compiler clarity
+  // - note that on POSIX TThreadID is a pointer and not a 32-bit file handle
+  TThreadID = DWORD;
 
   /// the known Windows Registry Root key used by TWinRegistry.ReadOpen
   TWinRegistryRoot = (
@@ -2232,7 +2237,9 @@ const
 
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383770
   ERROR_WINHTTP_TIMEOUT                 = 12002;
+  ERROR_WINHTTP_OPERATION_CANCELLED     = 12017;
   ERROR_WINHTTP_CANNOT_CONNECT          = 12029;
+  ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED = 12044;
   ERROR_WINHTTP_INVALID_SERVER_RESPONSE = 12152;
   ERROR_MUI_FILE_NOT_FOUND              = 15100;
 
@@ -2886,8 +2893,11 @@ function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
 
 /// return the best known ERROR_* system error message constant texts
 // - without the 'ERROR_' prefix
-// - as used by WinErrorText()
-function WinErrorConstant(Code: cardinal): PUtf8Char;
+// - as used by WinErrorText() and some low-level Windows API wrappers
+function WinErrorConstant(Code: cardinal): PShortString;
+
+/// minimal GetEnumName() for Delphi + FPC on base enum type with no Min/Max
+function WinGetEnumName(Info: PAnsiChar; Value: integer): PShortString;
 
 /// raise an EOSException from the last system error using WinErrorText()
 // - if Code is kept to its default 0, GetLastError is called
@@ -2928,7 +2938,8 @@ function Unicode_CodePage: integer;
 // - on POSIX, use the ICU library, or fallback to FPC RTL widestringmanager
 // with a temporary variable - you would need to include cwstring unit
 // - in practice, is seldom called, unless our proprietary WIN32CASE collation
-// is used in mormot.db.raw.sqlite3
+// is used in mormot.db.raw.sqlite3, or via Utf8CompareOS() or Utf8CompareIOS()
+// functions from mormot.core.unicode
 // - consider Utf8ILCompReference() from mormot.core.unicode.pas for an
 // operating-system-independent Unicode 10.0 comparison function
 function Unicode_CompareString(
@@ -2971,9 +2982,9 @@ function Unicode_InPlaceLower(W: PWideChar; WLen: integer): integer;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
-// - returns dest.buf as PWideChar result, and dest.len as length in WideChars
+// - returns dest.buf as result, and dest.len as length in WideChar (not bytes)
 // - caller should always call Dest.Done to release any (unlikely) allocated memory
-function Unicode_ToUtf8(Text: PUtf8Char; TextLen: PtrInt;
+function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
   var Dest: TSynTempBuffer): PWideChar;
 
 /// returns a system-wide current monotonic timestamp as milliseconds
@@ -3151,7 +3162,7 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 /// get the date and time of one file into a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-function FileAgeToWindowsTime(const FileName: TFileName): integer;
+function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
 // - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
@@ -3429,7 +3440,11 @@ function FileFromString(const Content: RawByteString; const FileName: TFileName;
   FlushOnDisk: boolean = false): boolean;
 
 /// create a File from a memory buffer content
-function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName;
+  FlushOnDisk: boolean = false): boolean;
+
+/// fill a memory buffer from a file content
+function BufferFromFile(const FileName: TFileName; Buf: pointer; Len: PtrInt): boolean;
 
 /// create or append a string content to a File
 // - can optionally rotate the file to a FileName+'.bak'  over a specific size
@@ -3923,7 +3938,7 @@ procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt;
 procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8); overload;
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
-// - just a wrapper around Unicode_ToUtf8() over a temporary buffer
+// - just a wrapper around Unicode_FromUtf8() over a temporary buffer
 // - caller should always call d.Done to release any (unlikely) allocated memory
 function Utf8ToWin32PWideChar(const u: RawUtf8; var d: TSynTempBuffer): PWideChar;
 
@@ -4058,9 +4073,9 @@ procedure RedirectCode(Func, RedirectFunc: pointer);
 { **************** TSynLocker/TSynLocked and Low-Level Threading Features }
 
 type
-  /// a lightweight exclusive non-rentrant lock, stored in a PtrUInt value
+  /// a lightweight exclusive non-reentrant lock, stored in a PtrUInt value
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
-  // - warning: methods are non rentrant, i.e. calling Lock twice in a raw would
+  // - warning: methods are non reentrant, i.e. calling Lock twice in a raw would
   // deadlock: use TRWLock or TSynLocker/TOSLock for reentrant methods
   // - several lightlocks, each protecting a few variables (e.g. a list), may
   // be more efficient than a more global TOSLock/TRWLock
@@ -4086,18 +4101,18 @@ type
     // - does nothing - just for compatibility with TOSLock
     procedure Done;
       {$ifdef HASINLINE} inline; {$endif}
-    /// enter an exclusive non-rentrant lock
+    /// enter an exclusive non-reentrant lock
     procedure Lock;
       {$ifdef HASINLINE} inline; {$endif}
-    /// try to enter an exclusive non-rentrant lock
+    /// try to enter an exclusive non-reentrant lock
     // - if returned true, caller should eventually call UnLock()
     // - could also be used to thread-safely acquire a shared resource
     function TryLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
-    /// check if the non-rentrant lock has been acquired
+    /// check if the non-reentrant lock has been acquired
     function IsLocked: boolean;
       {$ifdef HASINLINE} inline; {$endif}
-    /// leave an exclusive non-rentrant lock
+    /// leave an exclusive non-reentrant lock
     procedure UnLock;
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -4142,18 +4157,18 @@ type
     /// leave a non-upgradable multiple reads lock
     procedure ReadUnLock;
       {$ifdef HASINLINE} inline; {$endif}
-    /// enter a non-rentrant non-upgradable exclusive write lock
+    /// enter a non-reentrant non-upgradable exclusive write lock
     // - warning: nested WriteLock call after a ReadLock or another WriteLock
     // would deadlock
     procedure WriteLock;
       {$ifdef HASINLINE} inline; {$endif}
-    /// try to enter a non-rentrant non-upgradable exclusive write lock
+    /// try to enter a non-reentrant non-upgradable exclusive write lock
     // - if returned true, caller should eventually call WriteUnLock
     // - warning: nested TryWriteLock call after a ReadLock or another WriteLock
     // would deadlock
     function TryWriteLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
-    /// leave a non-rentrant non-upgradable exclusive write lock
+    /// leave a non-reentrant non-upgradable exclusive write lock
     procedure WriteUnLock;
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -4236,7 +4251,7 @@ type
     // - the write lock is exclusive
     // - calling WriteLock within a ReadWriteLock is allowed and won't block
     // - but calling WriteLock within a ReadOnlyLock would deaadlock
-    // - this method is rentrant from a single thread
+    // - this method is reentrant from a single thread
     // - typical usage is the following:
     // ! rwlock.WriteLock; // block any ReadOnlyLock/ReadWriteLock/WriteLock
     // ! try
@@ -4257,10 +4272,10 @@ type
   end;
   PRWLock = ^TRWLock;
 
-  /// the standard rentrant lock supplied by the Operating System
+  /// the standard reentrant lock supplied by the Operating System
   // - maps TRTLCriticalSection, i.e. calls Win32 API or pthreads library
   // - don't forget to call Init and Done to properly initialize the structure
-  // - if you do require a non-rentrant/recursive lock, consider TOSLightLock
+  // - if you do require a non-reentrant/recursive lock, consider TOSLightLock
   // - same signature as TLightLock/TOSLightLock, usable as compile time alternatives
   {$ifdef USERECORDWITHMETHODS}
   TOSLock = record
@@ -4288,7 +4303,7 @@ type
       {$ifdef FPC} inline; {$endif}
   end;
 
-  /// the fastest non-rentrant lock supplied by the Operating System
+  /// the fastest non-reentrant lock supplied by the Operating System
   // - calls Slim Reader/Writer (SRW) Win32 API in exclusive mode or directly
   // the pthread_mutex_*() library calls in non-recursive/fast mode on Linux
   // - on XP, where SRW are not available, fallback to a TLightLock
@@ -4297,7 +4312,7 @@ type
   // - to protect a very small code section of a few CPU cycles with no Init/Done
   // needed, and a lower footprint, you may consider our TLightLock
   // - same signature as TOSLock/TLightLock, usable as compile time alternatives
-  // - warning: non-rentrant, i.e. nested Lock calls would block, as TLightLock
+  // - warning: non-reentrant, i.e. nested Lock calls would block, as TLightLock
   // - no TryLock is defined on Windows, because TryAcquireSRWLockExclusive()
   // raised some unexpected EExternalException C000026 NT_STATUS_RESOURCE_NOT_OWNED
   // ("Attempt to release mutex not owned by caller") during testing
@@ -5826,7 +5841,7 @@ const
    'Gateway Timeout',                   // HTTP_GATEWAYTIMEOUT
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
-   'Client side Exception',             // HTTP_CLIENTERROR = 666
+   'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
    'Invalid Request');                  // 513 - should be last as fallback
 
 
@@ -5875,14 +5890,14 @@ const
     HTTP_HTTPVERSIONNONSUPPORTED,
     511,
     HTTP_CLIENTERROR,
-    513);
+    513); // 'Invalid Request' - should be last as fallback
 
 function StatusCodeToText(Code: cardinal): PRawUtf8;
 var
   i: PtrInt;
 begin
   if Code <> 200 then // optimistic approach :)
-    if (Code < 513) and
+    if (Code <= HTTP_CLIENTERROR) and  // 100..666
        (Code >= 100) then
     begin
       i := WordScanIndex(@HTTP_CODE, length(HTTP_CODE), Code); // may use SSE2
@@ -5903,11 +5918,14 @@ end;
 
 function StatusCodeToShort(Code: cardinal): TShort47;
 begin
-  if Code > 599 then
-    Code := 999; // ensure stay in TShort47
   result[0] := #0;
-  AppendShortCardinal(Code, result);
-  AppendShortChar(' ', @result);
+  if Code <> HTTP_CLIENTERROR then // hide the number of the beast
+  begin
+    if Code > 999 then
+      Code := 999; // ensure stay in TShort47 within standard HTTP 3-digits range
+    AppendShortCardinal(Code, result);
+    AppendShortChar(' ', @result);
+  end;
   AppendShortAnsi7String(StatusCodeToText(Code)^, result);
 end;
 
@@ -6320,7 +6338,7 @@ begin
       Unicode_WideToAnsi(W, PAnsiChar(@res[1]), LW, 255, CodePage));
 end;
 
-function Unicode_ToUtf8(Text: PUtf8Char; TextLen: PtrInt;
+function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
   var Dest: TSynTempBuffer): PWideChar;
 var
   i: PtrInt;
@@ -6340,7 +6358,7 @@ begin
     result[Dest.len] := #0; // Text[TextLen] may not be #0
   end
   else // use the RTL to perform the UTF-8 to UTF-16 conversion
-  begin
+  begin                                     // + SYNTEMPTRAIL included
     Dest.len := Utf8ToUnicode(result, Dest.Len + 16, pointer(Text), TextLen);
     if Dest.len <= 0 then
       Dest.len := 0
@@ -6361,12 +6379,13 @@ function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 var
   yy, mm, dd, h, m, s, ms: word;
 begin
+  result := 0;
+  if DateTime = 0 then
+    exit;
   DecodeDate(DateTime, yy, mm, dd);
   DecodeTime(DateTime, h, m, s, ms);
-  if (yy < 1980) or
-     (yy > 2099) then // hard limit is 2108, but WinAPI up to 2099/12/31
-    result := 0
-  else
+  if (yy >= 1980) and
+     (yy <= 2099) then // hard limit is 2108, but WinAPI up to 2099/12/31
     result := (s shr 1) or (m shl 5) or (h shl 11) or
       cardinal((dd shl 16) or (mm shl 21) or (cardinal(yy - 1980) shl 25));
 end;
@@ -6696,19 +6715,19 @@ var
   chunk, read: PtrInt;
 begin
   result := false;
-  if Size > 0 then
-    repeat
-      chunk := Size;
-      {$ifdef OSWINDOWS}
-      if chunk > 16 shl 20 then
-        chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
-      {$endif OSWINDOWS}
-      read := FileRead(F, Buffer^, chunk);
-      if read <= 0 then
-        exit; // error reading Size bytes
-      inc(PByte(Buffer), read);
-      dec(Size, read);
-    until Size = 0;
+  while Size > 0 do
+  begin
+    chunk := Size;
+    {$ifdef OSWINDOWS}
+    if chunk > 16 shl 20 then
+      chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
+    {$endif OSWINDOWS}
+    read := FileRead(F, Buffer^, chunk);
+    if read <= 0 then
+      exit; // error reading Size bytes
+    inc(PByte(Buffer), read);
+    dec(Size, read);
+  end;
   result := true;
 end;
 
@@ -6840,25 +6859,12 @@ end;
 
 function FileFromString(const Content: RawByteString;
   const FileName: TFileName; FlushOnDisk: boolean): boolean;
-var
-  h: THandle;
 begin
-  result := false;
-  h := FileCreate(FileName);
-  if not ValidHandle(h) then
-    exit;
-  if not FileWriteAll(h, pointer(Content), length(Content)) then
-  begin
-    FileClose(h); // abort on write error
-    exit;
-  end;
-  if FlushOnDisk then
-    FlushFileBuffers(h);
-  FileClose(h);
-  result := true;
+  result := FileFromBuffer(pointer(Content), length(Content), FileName, FlushOnDisk);
 end;
 
-function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName;
+  FlushOnDisk: boolean): boolean;
 var
   h: THandle;
 begin
@@ -6867,6 +6873,21 @@ begin
   if not ValidHandle(h) then
     exit;
   result := FileWriteAll(h, Buf, Len);
+  if result and
+     FlushOnDisk then
+    FlushFileBuffers(h);
+  FileClose(h);
+end;
+
+function BufferFromFile(const FileName: TFileName; Buf: pointer; Len: PtrInt): boolean;
+var
+  h: THandle;
+begin
+  result := false;
+  h := FileOpen(FileName, fmOpenReadShared);
+  if not ValidHandle(h) then
+    exit;
+  result := FileReadAll(h, Buf, Len);
   FileClose(h);
 end;
 
