@@ -823,6 +823,44 @@ begin
   Check(not LdapSafe('abc)'));
   Check(not LdapSafe('*'));
   Check(not LdapSafe('()'));
+  // validate LDIF format
+  Check(IsLdifSafe(nil, 0));
+  Check(IsLdifSafe('toto', 0));
+  Check(IsLdifSafe(nil, -1));
+  Check(IsLdifSafe('toto', -1));
+  Check(IsLdifSafe('toto', 1));
+  Check(IsLdifSafe('toto', 2));
+  Check(IsLdifSafe('toto', 3));
+  Check(IsLdifSafe('toto', 4));
+  Check(not IsLdifSafe('toto', 5), 'ending #0');
+  Check(not IsLdifSafe(':oto', 4));
+  Check(IsLdifSafe('t:to', 4));
+  Check(IsLdifSafe('tot:', 4));
+  Check(not IsLdifSafe(' oto', 4));
+  Check(IsLdifSafe('t to', 4));
+  Check(not IsLdifSafe('tot ', 4));
+  Check(not IsLdifSafe('<oto', 4));
+  Check(IsLdifSafe('t<to', 4));
+  Check(IsLdifSafe('tot<', 4));
+  Check(not IsLdifSafe(#0'oto', 4));
+  Check(not IsLdifSafe('t'#0'to', 4));
+  Check(not IsLdifSafe('tot', 4));
+  Check(IsLdifSafe(#1'oto', 4));
+  Check(IsLdifSafe('t'#1'to', 4));
+  Check(IsLdifSafe('tot'#1'', 4));
+  Check(not IsLdifSafe(#10'oto', 4));
+  Check(not IsLdifSafe('t'#10'to', 4));
+  Check(not IsLdifSafe('tot'#10'', 4));
+  Check(not IsLdifSafe(#13'oto', 4));
+  Check(not IsLdifSafe('t'#13'to', 4));
+  Check(not IsLdifSafe('tot'#13'', 4));
+  k := 100;
+  u := RandomIdentifier(k);
+  for i := 0 to k + 1 do
+    Check(IsLdifSafe(pointer(u), i) = (i <= k));
+  Append(u, ' '); // trailing space is unsafe
+  for i := 0 to k + 2 do
+    Check(IsLdifSafe(pointer(u), i) = (i <= k));
   // validate LDAP filter text parsing
   // against https://ldap.com/ldapv3-wire-protocol-reference-search reference
   CheckEqual(RawLdapTranslateFilter('', {noraise=}true), '');

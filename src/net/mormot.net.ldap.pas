@@ -204,11 +204,15 @@ function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
 
 { **************** LDIF Data Interchange Format }
 
-/// check if the supplied buffer requires base-64 encoding as for RFC 2849
-function IsLdifSafe(p: PUtf8Char; l: integer): boolean;
+/// check if the supplied buffer requires base-64 encoding as RFC 2849 value
+// - i.e. if p[0..l-1] contains SAFE-STRING = [SAFE-INIT-CHAR *SAFE-CHAR]
+// - note that https://www.rfc-editor.org/errata/eid3646 states it applied to
+// also to dn/rdn values
+function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean;
 
-/// append the supplied buffer as specified by RFC 2849
-procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
+/// append the supplied buffer value as specified by RFC 2849
+procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: PtrInt;
+  forcebase64: boolean = false);
 
 
 { **************** LDAP Protocol Definitions }
@@ -762,6 +766,9 @@ const
   ATS_READABLE = [atsRawUtf8 .. atsIntegerAccountType];
   /// the LDAP raw values stored as integer
   ATS_INTEGER = [atsInteger .. atsIntegerAccountType];
+  /// the LDAP raw values stored as raw binary
+  // - always base-64 encoded in LDIF output
+  ATS_BINARY = [atsSid, atsGuid, atsSecurityDescriptor];
 
 /// recognize our common Attribute Types from their standard NAME text
 // - allow to use e.g. AttrTypeStorage[AttributeNameType(AttrName)]
@@ -2047,12 +2054,16 @@ type
     function BeforeAuth(Sender: TObject; const User: RawUtf8): boolean;
     /// remove any previously allowed groups
     procedure AllowGroupClear;
-    /// register the sAMAccountName of the allowed group(s)
+    /// register the sAMAccountName of additional allowed group(s)
     procedure AllowGroupAN(const GroupAN: TRawUtf8DynArray); overload;
-    /// register the sAMAccountName of the allowed group(s) as CSV
+    /// register the sAMAccountName of additional allowed group(s) as CSV
     procedure AllowGroupAN(const GroupANCsv: RawUtf8); overload;
-    /// register the distinguishedName of the allowed group(s)
+    /// register the distinguishedName of additional allowed group(s)
     procedure AllowGroupDN(const GroupDN: TRawUtf8DynArray);
+    /// register all allowed group(s) at once
+    // - same as AllowGroupClear + AllowGroupAN() + AllowGroupDN()
+    // - do nothing if the supplied groups are already the one used
+    procedure AllowGroups(const GroupAN, GroupDN: TRawUtf8DynArray);
     /// allow to customize the BaseDN parameter used for GetUserDN()
     property UserBaseDN: RawUtf8
       read fUserBaseDN write fUserBaseDN;
@@ -2074,6 +2085,9 @@ type
     // - default valucache timeout is 300 seconds, i.e. 5 minutes
     property CacheTimeoutSeconds: integer
       read fCacheTimeoutSeconds write fCacheTimeoutSeconds;
+    /// access to the AllowGroupAN() and AllowGroupDN() primaryGroupID attributes
+    property GroupID: TIntegerDynArray
+      read fGroupID;
   end;
 
 
@@ -2493,40 +2507,43 @@ end;
 
 { **************** LDIF Data Interchange Format }
 
-function IsLdifSafe(p: PUtf8Char; l: integer): boolean; // RFC 2849
+// we follow https://www.rfc-editor.org/rfc/rfc2849 specs
+
+function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean; // RFC 2849
 begin
-  if p <> nil then
+  if (p <> nil) and
+     (l > 0) then
   begin
     result := false;
-    if p^ in [#0 .. ' ', ':', '<', #128 .. #255] then // SAFE-INIT-CHAR
-      exit;
-    inc(p);
+    if p^ in [#0, #10, #13, ' ', ':', '<', #128 .. #255] then
+      exit; // SAFE-INIT-CHAR: <= 127, not NUL, LF, CR, SPACE, COLON, LESS-THAN
     dec(l);
+    if p[l] = ' ' then
+      exit; // "should not end with a space" RFC 2849 point 8)
     if l <> 0 then
       repeat
-        if p^ in [#0, #10, #13, #128 .. #255] then    // SAFE-CHAR
-          exit;
         inc(p);
+        if p^ in [#0, #10, #13, #128 .. #255] then
+          exit; // SAFE-CHAR: <= 127 not NUL, LF, CR
         dec(l);
       until l = 0;
-    if p[-1] = ' ' then
-      exit; // "should not end with a space" RFC 2849 point 8)
   end;
   result := true;
 end;
 
-procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: integer);
+procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: PtrInt; forcebase64: boolean);
 begin
-  if IsLdifSafe(p, l) then
-  begin
-    w.AddDirect(' ');
-    w.AddNoJsonEscape(p, l);
-  end
-  else
+  if forcebase64 or
+     not IsLdifSafe(p, l) then
   begin
     // UTF-8 or binary content is just stored as name:: <base64>
     w.AddDirect(':', ' ');
-    w.WrBase64(pointer(p), l, {withmagic=}false);
+    w.WrBase64(pointer(p), l, {withmagic=}false); // line feeds are optionals
+  end
+  else
+  begin
+    w.AddDirect(' ');
+    w.AddNoJsonEscape(p, l);
   end;
 end;
 
@@ -3863,7 +3880,8 @@ begin
   begin
     w.AddString(fAttributeName); // is either OID or plain alphanum
     w.AddDirect(':');
-    AddLdif(w, pointer(fList[i]), length(fList[i]));
+    AddLdif(w, pointer(fList[i]), length(fList[i]),
+      {forcebase64:} fKnownTypeStorage in ATS_BINARY);
     w.AddDirect(#10);
   end;
 end;
@@ -6553,6 +6571,8 @@ var
   i: PtrInt;
   pid: cardinal;
 begin
+  if GroupAN = nil then
+    exit;
   fSafe.Lock;
   try
     for i := 0 to high(GroupAN) do
@@ -6581,6 +6601,8 @@ var
   i: PtrInt;
   pid: cardinal;
 begin
+  if GroupDN = nil then
+    exit;
   fSafe.Lock;
   try
     for i := 0 to high(GroupDN) do
@@ -6590,6 +6612,22 @@ begin
         AddInteger(fGroupID, pid, {nodup=}true);
       AddRawUtf8(fGroupDN, GroupDN[i], {nodup=}true, {casesens=}true);
     end;
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+procedure TLdapCheckMember.AllowGroups(const GroupAN, GroupDN: TRawUtf8DynArray);
+begin
+  fSafe.Lock;
+  try
+    if RawUtf8DynArraySame(GroupAN, fGroupAN, {caseinsens=}true) and
+       RawUtf8DynArraySame(GroupDN, fGroupDN) then // nothing to change
+      exit;
+    // need to register the new groups
+    AllowGroupClear;
+    AllowGroupAN(GroupAN);
+    AllowGroupDN(GroupDN);
   finally
     fSafe.UnLock;
   end;
