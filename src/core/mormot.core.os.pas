@@ -204,8 +204,7 @@ const
   /// a fake response code, generated for client side panic failure/exception
   // - for it is the number of a man
   HTTP_CLIENTERROR = 666;
-  /// a fake response code, used by THttpServerRequest.SetAsyncResponse
-  // - for internal THttpAsyncServer asynchronous process
+  /// a fake response code, usedfor internal THttpAsyncServer asynchronous process
   HTTP_ASYNCRESPONSE = 777;
 
   /// the successful HTTP response codes after a GET request
@@ -3730,6 +3729,10 @@ var
   ArmFakeStubAddr: pointer;
 {$endif CPUARM}
 
+
+const
+  // 16*4KB (4KB = memory granularity) for ReserveExecutableMemory()
+  STUB_SIZE = 65536;
 
 /// cross-platform reserve some executable memory
 // - using PAGE_EXECUTE_READWRITE flags on Windows, and PROT_READ or PROT_WRITE
@@ -7518,33 +7521,15 @@ var
 
 constructor TFakeStubBuffer.Create;
 begin
-  {$ifdef OSWINDOWS}
-  Stub := VirtualAlloc(nil, STUB_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+  Stub := StubMemoryAlloc;
   if Stub = nil then
-  {$else OSWINDOWS}
-  if not MemoryProtection then
-    Stub := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
-  if (Stub = MAP_FAILED) or
-     MemoryProtection then
-  begin
-    // i.e. on OpenBSD or OSX M1, we can not have w^x protection
-    Stub := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
-    if Stub <> MAP_FAILED then
-      MemoryProtection := True;
-  end;
-  if Stub = MAP_FAILED then
-  {$endif OSWINDOWS}
     raise EOSException.Create('ReserveExecutableMemory(): OS mmap failed');
   PtrArrayAdd(CurrentFakeStubBuffers, self);
 end;
 
 destructor TFakeStubBuffer.Destroy;
 begin
-  {$ifdef OSWINDOWS}
-  VirtualFree(Stub, 0, MEM_RELEASE);
-  {$else}
-  fpmunmap(Stub, STUB_SIZE);
-  {$endif OSWINDOWS}
+  StubMemoryFree(Stub);
   inherited;
 end;
 
@@ -7571,32 +7556,6 @@ begin
     CurrentFakeStubBufferLock.UnLock;
   end;
 end;
-
-{$ifdef UNIX}
-procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
-var
-  aligned: pointer;
-  flags: cardinal;
-begin
-  if not MemoryProtection then
-    // nothing to be done on this platform
-    exit;
-  // toggle execution permission of memory to be able to write into memory
-  aligned := pointer(
-    (PtrUInt(Reserved) div SystemInfo.dwPageSize) * SystemInfo.dwPageSize);
-  if Exec then
-    flags := PROT_READ OR PROT_EXEC
-  else
-    flags := PROT_READ or PROT_WRITE;
-  if SynMProtect(aligned, SystemInfo.dwPageSize shl 1, flags) < 0 then
-     raise EOSException.Create('ReserveExecutableMemoryPageAccess: mprotect fail');
-end;
-{$else}
-procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
-begin
-  // nothing to be done
-end;
-{$endif UNIX}
 
 {$ifndef PUREMORMOT2}
 function GetDelphiCompilerVersion: RawUtf8;
@@ -7766,7 +7725,7 @@ function TSynLibrary.TryLoadLibrary(const aLibrary: array of TFileName;
 var
   i, j: PtrInt;
   {$ifdef OSWINDOWS}
-  cwd,
+  cwd: TFileName;
   {$endif OSWINDOWS}
   lib, libs, nwd: TFileName;
   err: string;
@@ -8801,7 +8760,7 @@ begin
   end;
 end;
 
-{$ifdef CPUINTEL} // don't mess with raw SMBIOS encoding outside of Intel/AMD
+// SMBIOS can be available outside of Intel/AMD - e.g. on aarch64-win64
 
 // from DSP0134 3.6.0 System Management BIOS (SMBIOS) Reference Specification
 const
@@ -8915,8 +8874,6 @@ begin
     inc(PHash128(p)); // search on 16-byte (paragraph) boundaries
   until PtrUInt(p) >= PtrUInt(pend);
 end;
-
-{$endif CPUINTEL}
 
 procedure ComputeGetSmbios;
 begin
@@ -9101,7 +9058,7 @@ begin
   if s = nil then
     exit;
   sEnd := @s[length(raw.Data)];
-  FillCharFast(lines, SizeOf(lines), 0);
+  FillCharFast(lines, SizeOf(lines), ord(sbiUndefined));
   repeat
     if (s[0] = 127) or // type (127=EOT)
        (s[1] < 4) or   // length
