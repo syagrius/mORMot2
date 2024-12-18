@@ -4292,7 +4292,7 @@ begin
         else if v <> #0 then
           if (p^.OffsetSet <= 0) or // has a setter?
              (rcfBoolean in p^.Value.Cache.Flags) or // simple value?
-             (p^.Value.Kind in (rkGetIntegerPropTypes + [rkEnumeration, rkFloat])) then
+             (p^.Value.Kind in (rkIntegerPropTypes + [rkEnumeration, rkFloat])) then
           begin
             if p^.Prop^.SetValueText(Instance, v) then // RTTI conversion
               result := true;
@@ -6275,7 +6275,7 @@ var
 begin
   Source.VarBlob(temp); // load into a private copy for in-place JSON parsing
   try
-    BinaryVariantLoadAsJson(Data^, temp.buf, Source.CustomVariants);
+    _VariantLoadJson(Data^, temp.buf, Source.CustomVariants);
   finally
     temp.Done;
   end;
@@ -6340,10 +6340,10 @@ begin
     with Source.VarBlob do
       FastSynUnicode(UnicodeString(Data^.vAny), Ptr, Len shr 1)
   {$endif HASVARUSTRING}
-  else if Assigned(BinaryVariantLoadAsJson) then
-    _BL_VariantComplex(pointer(Data), Source)
+  else if Assigned(_VariantLoadJson) then
+    _BL_VariantComplex(pointer(Data), Source) // redirect to _VariantLoadJson()
   else
-    Source.ErrorData('RTTI_BINARYLOAD[tkVariant] missing mormot.core.json.pas', []);
+    Source.ErrorData('RTTI_BINARYLOAD[tkVariant] missing mormot.core.variants', []);
   result := SizeOf(Data^);
 end;
 
@@ -8059,9 +8059,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSort(L, J);
         L := I;
@@ -8110,9 +8109,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSortEvent(L, J);
         L := I;
@@ -8161,9 +8159,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSortEventReverse(L, J);
         L := I;
@@ -8209,9 +8206,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSortIndexed(L, J);
         L := I;
@@ -8259,9 +8255,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSortPtr(L, J, Compare, V);
         L := I;
@@ -11279,107 +11274,79 @@ var
 begin
   HashSeed := Random32Not0; // to avoid hash flooding
   // initialize RTTI low-level comparison functions
-  RTTI_ORD_COMPARE[roSByte]  := @_BC_SByte;
-  RTTI_ORD_COMPARE[roUByte]  := @_BC_UByte;
-  RTTI_ORD_COMPARE[roSWord]  := @_BC_SWord;
-  RTTI_ORD_COMPARE[roUWord]  := @_BC_UWord;
-  RTTI_ORD_COMPARE[roSLong]  := @_BC_SLong;
-  RTTI_ORD_COMPARE[roULong]  := @_BC_ULong;
+  RTTI_ORD_COMPARE[roSByte]       := @_BC_SByte;
+  RTTI_ORD_COMPARE[roUByte]       := @_BC_UByte;
+  RTTI_ORD_COMPARE[roSWord]       := @_BC_SWord;
+  RTTI_ORD_COMPARE[roUWord]       := @_BC_UWord;
+  RTTI_ORD_COMPARE[roSLong]       := @_BC_SLong;
+  RTTI_ORD_COMPARE[roULong]       := @_BC_ULong;
   {$ifdef FPC_NEWRTTI}
-  RTTI_ORD_COMPARE[roSQWord] := @_BC_SQWord;
-  RTTI_ORD_COMPARE[roUQWord] := @_BC_UQWord;
+  RTTI_ORD_COMPARE[roSQWord]      := @_BC_SQWord;
+  RTTI_ORD_COMPARE[roUQWord]      := @_BC_UQWord;
   {$endif FPC_NEWRTTI}
-  RTTI_FLOAT_COMPARE[rfSingle]   := @_BC_Single;
-  RTTI_FLOAT_COMPARE[rfDouble]   := @_BC_Double;
-  RTTI_FLOAT_COMPARE[rfExtended] := @_BC_Extended;
-  RTTI_FLOAT_COMPARE[rfComp]     := @_BC_SQWord; // PInt64 is the best
-  RTTI_FLOAT_COMPARE[rfCurr]     := @_BC_SQWord;
+  RTTI_FLOAT_COMPARE[rfSingle]    := @_BC_Single;
+  RTTI_FLOAT_COMPARE[rfDouble]    := @_BC_Double;
+  RTTI_FLOAT_COMPARE[rfExtended]  := @_BC_Extended;
+  RTTI_FLOAT_COMPARE[rfComp]      := @_BC_SQWord; // PInt64 is the best
+  RTTI_FLOAT_COMPARE[rfCurr]      := @_BC_SQWord;
   // initialize RTTI binary persistence and high-level comparison functions
+  RTTI_BINARYSAVE[rkFloat]        := @_BS_Float;
+  RTTI_BINARYLOAD[rkFloat]        := @_BS_Float;
+  RTTI_COMPARE[false, rkFloat]    := @_BC_Float;
+  RTTI_COMPARE[true,  rkFloat]    := @_BC_Float;
+  RTTI_BINARYSAVE[rkLString]      := @_BS_String;
+  RTTI_BINARYLOAD[rkLString]      := @_BL_LString;
+  RTTI_COMPARE[false, rkLString]  := @_BC_LString;
+  RTTI_COMPARE[true,  rkLString]  := @_BCI_LString;
+  {$ifdef HASVARUSTRING}
+  RTTI_BINARYSAVE[rkUString]      := @_BS_UString;
+  RTTI_BINARYLOAD[rkUString]      := @_BL_UString;
+  RTTI_COMPARE[false, rkUString]  := @_BC_WString;
+  RTTI_COMPARE[true,  rkUString]  := @_BCI_WString;
+  {$endif HASVARUSTRING}
+  RTTI_BINARYSAVE[rkWString]      := @_BS_WString;
+  RTTI_BINARYLOAD[rkWString]      := @_BL_WString;
+  RTTI_COMPARE[false, rkWString]  := @_BC_WString;
+  RTTI_COMPARE[true,  rkWString]  := @_BCI_WString;
+  RTTI_BINARYSAVE[rkDynArray]     := @_BS_DynArray;
+  RTTI_BINARYLOAD[rkDynArray]     := @_BL_DynArray;
+  RTTI_COMPARE[false, rkDynArray] := @_BC_DynArray;
+  RTTI_COMPARE[true,  rkDynArray] := @_BCI_DynArray;
+  RTTI_BINARYSAVE[rkArray]        := @_BS_Array;
+  RTTI_BINARYLOAD[rkArray]        := @_BL_Array;
+  RTTI_COMPARE[false, rkArray]    := @_BC_Array;
+  RTTI_COMPARE[true,  rkArray]    := @_BCI_Array;
+  RTTI_BINARYSAVE[rkVariant]      := @_BS_Variant;
+  RTTI_BINARYLOAD[rkVariant]      := @_BL_Variant;
+  RTTI_COMPARE[false, rkVariant]  := @_BC_Variant;
+  RTTI_COMPARE[true,  rkVariant]  := @_BCI_Variant;
+  RTTI_COMPARE[false, rkClass]    := @_BC_Object;
+  RTTI_COMPARE[true,  rkClass]    := @_BCI_Object;
   for k := succ(low(k)) to high(k) do
+    if k in rkHasRttiOrdTypes then // true ordinal types
+    begin
+      RTTI_BINARYSAVE[k]     := @_BS_Ord;
+      RTTI_BINARYLOAD[k]     := @_BL_Ord;
+      RTTI_COMPARE[false, k] := @_BC_Ord;
+      RTTI_COMPARE[true,  k] := @_BC_Ord;
+    end
+    else
     case k of
-      rkInteger,
-      rkEnumeration,
-      rkSet,
-      rkChar,
-      rkWChar
-      {$ifdef FPC}, rkBool{$endif}:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_Ord;
-          RTTI_BINARYLOAD[k] := @_BL_Ord;
-          RTTI_COMPARE[false, k] := @_BC_Ord;
-          RTTI_COMPARE[true,  k] := @_BC_Ord;
-        end;
       {$ifdef FPC} rkQWord, {$endif}
       rkInt64:
         begin
-          RTTI_BINARYSAVE[k] := @_BS_64;
-          RTTI_BINARYLOAD[k] := @_BL_64;
+          RTTI_BINARYSAVE[k]     := @_BS_64;
+          RTTI_BINARYLOAD[k]     := @_BL_64;
           RTTI_COMPARE[false, k] := @_BC_64;
           RTTI_COMPARE[true,  k] := @_BC_64;
-        end;
-      rkFloat:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_Float;
-          RTTI_BINARYLOAD[k] := @_BS_Float;
-          RTTI_COMPARE[false, k] := @_BC_Float;
-          RTTI_COMPARE[true,  k] := @_BC_Float;
-        end;
-      rkLString:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_String;
-          RTTI_BINARYLOAD[k] := @_BL_LString;
-          RTTI_COMPARE[false, k] := @_BC_LString;
-          RTTI_COMPARE[true,  k] := @_BCI_LString;
-        end;
-      {$ifdef HASVARUSTRING}
-      rkUString:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_UString;
-          RTTI_BINARYLOAD[k] := @_BL_UString;
-          RTTI_COMPARE[false, k] := @_BC_WString;
-          RTTI_COMPARE[true,  k] := @_BCI_WString;
-        end;
-      {$endif HASVARUSTRING}
-      rkWString:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_WString;
-          RTTI_BINARYLOAD[k] := @_BL_WString;
-          RTTI_COMPARE[false, k] := @_BC_WString;
-          RTTI_COMPARE[true,  k] := @_BCI_WString;
         end;
       {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
       rkRecord:
         begin
-          RTTI_BINARYSAVE[k] := @_BS_Record;
-          RTTI_BINARYLOAD[k] := @_BL_Record;
+          RTTI_BINARYSAVE[k]     := @_BS_Record;
+          RTTI_BINARYLOAD[k]     := @_BL_Record;
           RTTI_COMPARE[false, k] := @_BC_Record;
           RTTI_COMPARE[true,  k] := @_BCI_Record;
-        end;
-      rkDynArray:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_DynArray;
-          RTTI_BINARYLOAD[k] := @_BL_DynArray;
-          RTTI_COMPARE[false, k] := @_BC_DynArray;
-          RTTI_COMPARE[true,  k] := @_BCI_DynArray;
-        end;
-      rkArray:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_Array;
-          RTTI_BINARYLOAD[k] := @_BL_Array;
-          RTTI_COMPARE[false, k] := @_BC_Array;
-          RTTI_COMPARE[true,  k] := @_BCI_Array;
-        end;
-      rkVariant:
-        begin
-          RTTI_BINARYSAVE[k] := @_BS_Variant;
-          RTTI_BINARYLOAD[k] := @_BL_Variant;
-          RTTI_COMPARE[false, k] := @_BC_Variant;
-          RTTI_COMPARE[true,  k] := @_BCI_Variant;
-        end;
-      rkClass:
-        begin
-          RTTI_COMPARE[false, k] := @_BC_Object;
-          RTTI_COMPARE[true,  k] := @_BCI_Object;
         end;
         // unsupported types will contain nil
     end;

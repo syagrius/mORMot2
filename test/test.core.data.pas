@@ -7,6 +7,14 @@ interface
 
 {$I ..\src\mormot.defines.inc}
 
+// if defined, uses fmtbcd and include TTestCoreProcess._TBcd
+{.$define TEST_DBRAD}
+
+{$ifdef FPC}
+  {$define TEST_DBRAD} // assume we have this unit on FPC
+{$endif FPC}
+
+
 // if defined, TTestCoreProcess.JSONBenchmark will include some other libraries
 
 // on my Laptop, parsing the 1MB People.json expanded array on Win32:
@@ -97,6 +105,10 @@ uses
   mormot.net.sock,
   mormot.db.core,
   mormot.db.nosql.bson,
+  {$ifdef TEST_DBRAD}
+  fmtbcd,
+  mormot.db.rad,
+  {$endif TEST_DBRAD}
   mormot.orm.base,
   mormot.orm.core,
   mormot.rest.client,
@@ -138,6 +150,10 @@ type
     procedure _TDocVariant;
     /// IDocList / IDocDict wrappers
     procedure _IDocAny;
+    {$ifdef TEST_DBRAD}
+    /// our TBcd wrapper functions
+    procedure _TBcd;
+    {$endif TEST_DBRAD}
     /// low-level TDecimal128 decimal value process (as used in BSON)
     procedure _TDecimal128;
     /// BSON process (using TDocVariant)
@@ -272,6 +288,7 @@ type
     fColl: TCollTests;
     fTCollTest: TCollTest;
     fStr: TStringList;
+    function GetColl: TCollTests;
     procedure SetColl(const Value: TCollTests); // validate Setter
   public
     constructor Create;
@@ -280,7 +297,7 @@ type
     property One: TCollTest
       read fTCollTest write fTCollTest;
     property Coll: TCollTests
-      read fColl write SetColl;
+      read GetColl write SetColl;
     property Str: TStringList
       read fStr write fStr;
   end;
@@ -413,13 +430,17 @@ var
 begin
   TextToVariant('1E629839-D230-4EEE-BA04-BE1258EB3AF6', {allowdouble=}true, v);
   Check(VarIsStr(v));
+  Check(VarIsString(v));
   Check(VariantTypeName(v)^ = 'String');
   TextToVariant('261E306F', true, v);
   Check(VarIsStr(v));
+  Check(VarIsString(v));
   TextToVariant('1e-324', true, v);
   Check(VarIsStr(v));
+  Check(VarIsString(v));
   TextToVariant('1e308', true, v);
   Check(VarIsStr(v));
+  Check(VarIsString(v));
   t := nil; // makes the compiler happy
   ValueVarToVariant(nil, 0, oftBoolean, vd, false, t);
   Check(not boolean(v));
@@ -1094,6 +1115,11 @@ begin
   inherited;
 end;
 
+function TCollTst.GetColl: TCollTests;
+begin
+  result := fColl;
+end;
+
 procedure TCollTst.SetColl(const Value: TCollTests);
 begin
   fColl.Free;
@@ -1112,7 +1138,7 @@ type
     property Enum: TSynBackgroundThreadProcessStep
       read fEnum write fEnum default flagIdle;
     property Sets: TSynBackgroundThreadProcessSteps
-      read fSets write fSets default[];
+      read fSets write fSets default [];
   end;
 
   TRange = record
@@ -4012,10 +4038,11 @@ var
   i, n, num: integer;
   d, d2, d3: IDocDict;
   darr: IDocDictDynArray;
-  json, key: RawUtf8;
+  json, json2, json3, key: RawUtf8;
   one: variant;
   any: TDocAnyTest;
-  dt: IDocTest;
+  dt, dt2: IDocTest;
+  ds: array of IDocTest;
   {$ifdef HASIMPLICITOPERATOR}
   f: TDocDictFields;
   v: TDocValue;
@@ -4579,6 +4606,7 @@ begin
   Check(dt = nil);
   CheckEqual(SaveJson(dt, TypeInfo(IDocTest)), 'null');
   Check(LoadJson(dt, '{name:"abc",list:[1,2,3],info:123}', TypeInfo(IDocTest)));
+  dt2 := dt;
   Check(dt <> nil);
   Check(dt.Data.Any <> nil);
   CheckEqual(dt.Data.Any.List.Json, '[]');
@@ -4587,6 +4615,7 @@ begin
   CheckEqual(dt.Data.List.Json, '[1,2,3]');
   Check(dt.Data.Info = 123);
   json := dt.Json;
+  json2 := json;
   CheckEqual(json,
     '{"Any":{"List":[],"Dict":{}},"Name":"abc","List":[1,2,3],"Info":123}');
   CheckEqual(SaveJson(dt, TypeInfo(IDocTest)), json);
@@ -4602,6 +4631,28 @@ begin
   CheckEqual(json, '{"Any":{"List":[1,2,3],"Dict":{"a":4}},' +
     '"Name":"doe","List":["zero"],"Info":["zero"]}');
   CheckEqual(SaveJson(dt, TypeInfo(IDocTest)), json);
+  // validate InterfaceArray*() wrapper functions
+  Check(ds = nil);
+  CheckEqual(length(ds), 0);
+  InterfaceArrayAdd(ds, dt);
+  CheckEqual(length(ds), 1);
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), '[' + json + ']');
+  InterfaceArrayAdd(ds, dt2);
+  CheckEqual(length(ds), 2);
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), '[' + json + ',' +  json2 + ']');
+  InterfaceArrayAdd(ds, dt);
+  CheckEqual(length(ds), 3);
+  json3 := '[' + json + ',' +  json2 + ',' + json + ']';
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), json3);
+  InterfaceArrayDelete(ds, 0);
+  CheckEqual(length(ds), 2);
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), '[' + json2 + ',' + json + ']');
+  InterfaceArrayDelete(ds, 1);
+  CheckEqual(length(ds), 1);
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), '[' + json2 + ']');
+  InterfaceArrayDelete(ds, 0);
+  CheckEqual(length(ds), 0);
+  CheckEqual(SaveJson(ds, TypeInfo(ISerializables)), '[]');
   // validate some user-reported issues
   {$ifdef HASIMPLICITOPERATOR}
   l := DocList('[{"id":"f7518487-6e95-4c90-8438-a6b48d6a8b5f",' +
@@ -4618,6 +4669,75 @@ begin
   end;
   {$endif HASIMPLICITOPERATOR}
 end;
+
+{$ifdef TEST_DBRAD}
+procedure TTestCoreProcess._TBcd;
+var
+  i, l: PtrInt;
+  u, u2: RawUtf8;
+  b, b2: TBcd;
+
+  procedure CheckOne(const msg: RawUtf8);
+  begin
+    Check(u <> '', 'void');
+    Check(TryUtf8ToBcd(u, b));
+    BcdToUtf8(b, u2);
+    Check(u2 <> '');
+    CheckEqual(u, u2, msg);
+  end;
+
+begin
+  Check(not TryUtf8ToBcd('', b));
+  Check(not TryUtf8ToBcd(' ', b));
+  Check(not TryUtf8ToBcd('a', b));
+  Check(not TryUtf8ToBcd('a ', b));
+  u := '1059.4631';
+  CheckOne(u);
+  {$ifndef HASNOSTATICRTTI} // need to be able to use TypeInfo(TBcd)
+  // mORMot 2 new "1059.4631" format
+  u2 := RecordSaveJson(b, TypeInfo(TBcd));
+  CheckEqual(u2, QuotedStrJson(u));
+  FillCharFast(b2, SizeOf(b2), 0);
+  Check(not CompareMem(@b, @b2, SizeOf(b)));
+  Check(RecordLoadJson(b2, u2, TypeInfo(TBcd)));
+  Check(CompareMem(@b, @b2, SizeOf(b)));
+  FillCharFast(b2, SizeOf(b2), 0);
+  // mORMot 1 serialization with Delphi extended RTTI
+  u2 := '{"Precision":1,"SignSpecialPlaces":0,"Fraction":' +
+    '"5000000000000000000000000000000000000000000000000000000000000000"}';
+  Check(RecordLoadJson(b2, u2, TypeInfo(TBcd)));
+  BcdToUtf8(b2, u2);
+  CheckEqual(u2, '5');
+  {$endif HASNOSTATICRTTI}
+  for i := -1000 to 1000 do
+  begin
+    Int32ToUtf8(i, u);
+    CheckOne('-1000...+1000');
+    Int64ToUtf8(Int64(Random64), u);
+    CheckOne('64-bit signed content');
+    if (u[1] <> '-') and
+       (i <> 0) then
+    begin
+      u := u + u + u;
+      CheckOne('54-57 digits integer');
+      insert('.', u, Random32(30) + 2);
+      l := length(u);
+      while u[l] = '0' do
+      begin
+        dec(l);
+        FakeLength(u, l);
+      end;
+      CheckOne('54-57 digits floating point');
+    end;
+    DoubleToStr(RandomDouble * i, u);
+    CheckOne('fixed decimals floating point number');
+    Check(TryUtf8ToBcd(' ' + u + ' ', b2), 'with spaces');
+    BcdToUtf8(b2, u2);
+    Check(u2 <> '');
+    CheckEqual(u, u2, 'with spaces');
+  end;
+end;
+{$endif TEST_DBRAD}
 
 procedure TTestCoreProcess._TDecimal128;
 
@@ -5509,8 +5629,19 @@ var
   vd: double;
   vs: single;
   lTable: TOrmTableJson;
-  lRefreshed: Boolean;
+  lRefreshed: boolean;
+  uu: TRawUtf8DynArray;
 begin
+  Check(pointer(uu) = nil);
+  a.InitArrayFrom(uu, JSON_FAST); // ensure no GPF
+  CheckEqual(a.Count, 0);
+  uu := CsvToRawUtf8DynArray('0,1,2,3');
+  a.InitArrayFrom(uu, TypeInfo(TRawUtf8DynArray), JSON_FAST);
+  CheckEqual(a.Count, 4);
+  CheckEqual(a.ToJson, '["0","1","2","3"]');
+  for i := 0 to a.Count - 1 do
+    CheckEqual(GetInteger(pointer(a.GetItemAsText(i))), i);
+  a.Clear;
   a.Init;
   a.AddObject(['source', 'source0', // not same order as in for loop below
                'id',     0,

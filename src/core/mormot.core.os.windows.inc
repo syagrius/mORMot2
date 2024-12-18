@@ -8,94 +8,130 @@
 
 { ****************** Unicode, Time, File process }
 
-// W32() gets a PWideChar buffer from a TFileName using TW32Temp static buffer
-// W32Copy() forces a temporary copy - as used by GetFileVersionInfo()
+procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
+var
+  tmp: TSynTempBuffer;
+begin
+  tmp.Init(Len * 3);
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len); // use RTL if complex
+  if Len > 0 then
+    dec(Len); // UnicodeToUtf8() result includes the null terminator
+  FastSetString(res, tmp.buf, Len);
+  tmp.Done;
+end;
+
+function IsExtendedPathName(Name: PWideChar): boolean;
+begin
+  result := (Name <> nil) and
+            (Name[0] = '\') and
+            (Name[1] = '\') and
+            (Name[2] = '?') and
+            (Name[3] = '\');
+end;
+
+procedure ExtendedPathName(Name: PWideChar; Len: PtrInt; var Temp: TW32Temp);
+var
+  fp: PWideChar;
+begin
+  Len := Len * 2 + 2; // in bytes, +2 to include ending #0
+  if (Len <= MAX_PATH * 2) or
+     ((Len <= SizeOf(Temp) - 8) and
+      IsExtendedPathName(Name)) then
+  begin
+    MoveFast(Name^, Temp[0], Len); // we can use the supplied UTF-16 file name
+    exit;
+  end;
+  // need to switch to extended-length path
+  Temp[0] := #0;
+  if Len > SizeOf(Temp) - 8 then
+    exit; // avoid buffer overflow
+  // append the full path name to the \\?\ prefix
+  Temp[0] := '\';
+  Temp[1] := '\';
+  Temp[2] := '?';
+  Temp[3] := '\';
+  if ((ord(Name[0]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
+      (Name[1] = ':')) or
+     (GetFullPathNameW(Name, high(Temp) - 4, @Temp[4], fp) = 0) then
+    MoveFast(Name^, Temp[4], Len);
+end;
 
 {$ifdef UNICODE}
 
-function W32Copy(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
+function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean): PWideChar;
 var
   len: PtrInt;
 begin
-  len := length(FileName) * 2 + 2; // +2 to include ending #0
-  if len > SizeOf(Temp) then
-    Temp[0] := #0 // avoid buffer overflow
-  else
-    MoveFast(pointer(FileName)^, Temp, len);
+  result := pointer(FileName);
+  len := length(FileName);
+  if (len = 0) or
+     ((len < MAX_PATH) and
+      not DoCopy) then
+    exit; // most common case could direclty use FileName[] UTF-16 content
+  ExtendedPathName(pointer(FileName), len, Temp);
   result := @Temp;
 end;
 
-// UnicodeString may need to be converted to extended-length path
-function W32(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
-var
-  U: pointer; // hold a UnicodeString but with no try..finally
+procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
 begin
-  if (length(FileName) > MAX_PATH) and
-     (ord(FileName[1]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
-     (FileName[2] = ':') then
-  begin
-    // convert to extended-length path
-    U := nil;
-    TFileName(U) := '\\?\' + FileName;
-    // move to TW32Temp stack buffer
-    result := W32Copy(TFileName(U), Temp);
-    // release temp memory and return the generated static buffer
-    TFileName(U) := '';
-  end
-  else
-    // no conversion nor allocation needed
-    result := pointer(FileName);
+  SetString(fn, P, StrLenW(P)); // TFileName is UnicodeString
 end;
 
 {$else}
 
-// AnsiString is converted to UTF-16, potentially with extended-length path
 procedure W32Convert(const FileName: TFileName; var Temp: TW32Temp);
 var
-  U: SynUnicode;
-  len: PtrInt;
+  u: SynUnicode;
 begin
-  // identical to FPC RTL, which converts to UnicodeString before Wide API call 
-  U := SynUnicode(FileName); // let the RTL + OS do the conversion
-  // switch to extended-length path if needed, allowing up to 32,767 widechars
-  len := length(U);
-  if (len > MAX_PATH) and
-     (FileName[1] in ['A'..'Z', 'a'..'z']) and
-     (FileName[2] = ':') then
-    U := '\\?\' + U;
-  // move to TW32Temp stack buffer
-  len := length(U) * 2 + 2;  // +2 to include ending #0
-  if len > SizeOf(Temp) then
-    Temp[0] := #0 // avoid buffer overflow (rejected by Windows anyway)
-  else
-    MoveFast(pointer(U)^, Temp, len);
+  u := SynUnicode(FileName); // convert with RTL + OS
+  ExtendedPathName(pointer(u), length(u), Temp);
 end;
 
-function W32(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
+function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean): PWideChar;
 var
   i, len: PtrInt;
 begin
+  result := nil;
+  if FileName = '' then
+    exit;
   len := length(FileName);
-  if len = 0 then
-    result := nil
+  if (len < MAX_PATH) and
+     IsAnsiCompatible(pointer(FileName), len) then
+    // most common cases do not need any Unicode conversion
+    for i := 0 to len do // include #0 terminator
+      PWordArray(@Temp)[i] := PByteArray(FileName)[i]
   else
-  begin
-    if (len < MAX_PATH) and
-       IsAnsiCompatible(pointer(FileName), len) then
-      // most common cases do not need any Unicode conversion
-      for i := 0 to len do // include #0 terminator
-        PWordArray(@Temp)[i] := PByteArray(FileName)[i]
-    else
-      // use a temporary SynUnicode variable for complex UTF-16 conversion
-      // or if MAX_PATH is reached and \\?\ prefix is needed for extended length
-      W32Convert(FileName, Temp);
-    result := @Temp;
-  end;
+    // use a temporary SynUnicode variable for complex UTF-16 conversion
+    // or if MAX_PATH is reached and \\?\ prefix is needed for extended-length
+    W32Convert(FileName, Temp);
+  result := @Temp;
 end;
 
-function W32Copy(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
+procedure Win32PWideCharToFileNameConv(P: PWideChar; L: PtrInt; var fn: TFileName);
+var
+  u: SynUnicode;
 begin
-  result := W32(FileName, Temp); // from AnsiString: name is always copied
+  SetString(u, P, l);
+  fn := TFileName(u); // let the RTL do the conversion
+end;
+
+procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
+var
+  l, i: PtrInt;
+begin
+  l := StrLenW(P);
+  if IsAnsiCompatibleW(P, l) then // most common case
+  begin
+    SetString(fn, nil, l);
+    for i := 0 to l - 1 do
+      PByteArray(fn)[i] := PWordArray(P)[i]; // fast direct conversion
+  end
+  {$ifdef FPC}
+  else if DefaultRTLFileSystemCodePage = CP_UTF8 then // happens with Lazarus
+    DoWin32PWideCharToUtf8(P, l, RawUtf8(fn))
+  {$endif FPC}
+  else
+    Win32PWideCharToFileNameConv(P, l, fn);
 end;
 
 {$endif UNICODE}
@@ -109,23 +145,6 @@ procedure _fmt(const Fmt: string; const Args: array of const;
   var result: RawUtf8); overload;
 begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
-end;
-
-procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
-var
-  tmp: TSynTempBuffer;
-begin
-  tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len); // use RTL if complex
-  if Len > 0 then
-    dec(Len); // UnicodeToUtf8() result includes the null terminator
-  FastSetString(res, tmp.buf, Len);
-  tmp.Done;
-end;
-
-procedure DoWin32PWideCharToFileName(P: PWideChar; var fn: TFileName);
-begin
-  fn := TFileName(SynUnicode(P)); // let the RTL do the conversion (if needed)
 end;
 
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
@@ -716,13 +735,9 @@ begin
   if DelayedProc(PathCreateFromUrlW, shlwapiDll, 'shlwapi.dll',
        'PathCreateFromUrlW') and
      (PathCreateFromUrlW(u.buf, @fn, len, 0) = S_OK) then
-    DoWin32PWideCharToFileName(fn, result);
+    Win32PWideCharToFileName(fn, result);
   u.Done;
 end;
-
-const
-  faInvalidFile = faDirectory + faVolumeID{%H-} + faSysFile{%H-} + faHidden{%H-};
-  faDirectoryMask = faDirectory + faHidden{%H-};
 
 function FileDateToDateTime(const FileDate: TFileAge): TDateTime;
 begin
@@ -972,7 +987,7 @@ begin
            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
     exit;
   GetModuleFileNameW(hm, tmp, SizeOf(tmp));
-  DoWin32PWideCharToFileName(tmp, result);
+  Win32PWideCharToFileName(tmp, result);
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -1237,6 +1252,29 @@ begin
     end;
 end;
 
+function ExpandFileName(const FileName: TFileName): TFileName;
+var
+  w, fp: PWideChar;
+  t1, t2: TW32Temp;
+begin
+  result := FileName;
+  if (FileName = '') or
+     ((FileName[2] = ':') and 
+      (length(FileName) < MAX_PATH) and
+      (ord(FileName[1]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
+      (Pos('..', FileName) = 0)) then
+    exit; // it seems to be already expanded 
+  w := W32(FileName, t1);
+  if w = nil then
+    exit;
+  if not IsExtendedPathName(w) then // W32() may have converted to extended-length
+    if GetFullPathNameW(w, high(t2), @t2, fp) = 0 then
+      exit
+    else
+      w := @t2; // full expanded file name from Windows API
+  Win32PWideCharToFileName(w, result);
+end;
+
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
 var
   s, t: TW32Temp;
@@ -1313,10 +1351,10 @@ begin
   // warning: GetSystemTimeAsFileTime() is fast, but not monotonic!
   t32 := Windows.GetTickCount; // we only have the 32-bit counter on XP
   p := @LastTickXP;
-  inc(p^.H, ord(t32 < p^.L)); // wrap-up overflow after 49 days
+  inc(p^.H, ord(t32 < p^.L)); // wrap-up overflow after 49.7 days
   p^.L := t32;
   result := p^.V;
-end; // warning: FPC's GetTickCount64 doesn't handle 49 days wrap on XP :(
+end; // warning: FPC's GetTickCount64 doesn't handle 49.7 days wrap on XP :(
 
 procedure InitializeSRWLockForXP(var P: TOSLightMutex); stdcall;
 begin
@@ -2546,7 +2584,7 @@ begin
 end;
 
 var
-  ConsoleCriticalSection: TOSLock;
+  ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock 
 
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
   NoLineFeed, NoColor: boolean);
@@ -2707,18 +2745,16 @@ var
   st: TSYSTEMTIME;
   tmp: TW32Temp;
 
-  function ReadResourceByName(const From: RawUtf8): RawUtf8;
+  procedure ReadResourceByName(const From: RawUtf8; out Res: RawUtf8);
   var
     str: pointer;
     sz: DWord;
     u: SynUnicode;
   begin
-    u := Utf8Decode('\StringFileInfo\' + lngnfo + '\' + From);
-    VerQueryValueW(pt, pointer(u), str, sz);
-    if sz > 0 then
-      Win32PWideCharToUtf8(str, result)
-    else
-      result := '';
+    u := Utf8Decode(lngnfo + From);
+    if VerQueryValueW(pt, pointer(u), str, sz) and
+       (sz > 0) then
+      Win32PWideCharToUtf8(str, Res);
   end;
 
 begin
@@ -2727,43 +2763,43 @@ begin
     exit;
   // GetFileVersionInfo() modifies the filename parameter data while parsing
   // -> copy the FileName into local tmp buffer to create a writable copy
-  siz := GetFileVersionInfoSizeW(W32Copy(fFileName, tmp), siz2);
+  siz := GetFileVersionInfoSizeW(W32(fFileName, tmp, {copy=}true), siz2);
   if siz > 0 then
   begin
     GetMem(pt, siz);
     try
-      if GetFileVersionInfoW(W32Copy(fFileName, tmp), 0, siz, pt) then
+      if GetFileVersionInfoW(W32(fFileName, tmp, {copy=}true), 0, siz, pt) then
       begin
-        VerQueryValueW(pt, '\', pointer(nfo), siz2);
-        with nfo^ do
-        begin
-          SetVersion({major=}   dwFileVersionMS shr 16,
-                     {minor=}   word(dwFileVersionMS),
-                     {release=} dwFileVersionLS shr 16,
-                     {build=}   word(dwFileVersionLS));
-          if (dwFileDateLS <> 0) and
-             (dwFileDateMS <> 0) then
+        if VerQueryValueW(pt, '\', pointer(nfo), siz2) then
+          with nfo^ do
           begin
-            ft.dwLowDateTime := dwFileDateLS; // built date from version nfo
-            ft.dwHighDateTime := dwFileDateMS;
-            FileTimeToSystemTime(ft, st);
-            fBuildDateTime := EncodeDate(
-              st.wYear, st.wMonth, st.wDay);
+            SetVersion({major=}   dwFileVersionMS shr 16,
+                       {minor=}   dwFileVersionMS and 65535,
+                       {release=} dwFileVersionLS shr 16,
+                       {build=}   dwFileVersionLS and 65535);
+            if (dwFileDateLS <> 0) and
+               (dwFileDateMS <> 0) then
+            begin
+              ft.dwLowDateTime := dwFileDateLS; // built date from version nfo
+              ft.dwHighDateTime := dwFileDateMS;
+              FileTimeToSystemTime(ft, st);
+              fBuildDateTime := EncodeDate(
+                st.wYear, st.wMonth, st.wDay);
+            end;
           end;
-        end;
-        VerQueryValueW(pt, '\VarFileInfo\Translation', pointer(trans), siz2);
-        if siz2 >= 4 then
+        if VerQueryValueW(pt, '\VarFileInfo\Translation', pointer(trans), siz2) and
+           (siz2 >= 4) then
         begin
-          _fmt('%4.4x%4.4x', [trans^[0], trans^[1]], lngnfo);
-          CompanyName      := ReadResourceByName('CompanyName');
-          FileDescription  := ReadResourceByName('FileDescription');
-          FileVersion      := ReadResourceByName('FileVersion');
-          InternalName     := ReadResourceByName('InternalName');
-          LegalCopyright   := ReadResourceByName('LegalCopyright');
-          OriginalFilename := ReadResourceByName('OriginalFilename');
-          ProductName      := ReadResourceByName('ProductName');
-          ProductVersion   := ReadResourceByName('ProductVersion');
-          Comments         := ReadResourceByName('Comments');
+          _fmt('\StringFileInfo\%4.4x%4.4x\', [trans^[0], trans^[1]], lngnfo);
+          ReadResourceByName('CompanyName', CompanyName);
+          ReadResourceByName('FileDescription', FileDescription);
+          ReadResourceByName('FileVersion', FileVersion);
+          ReadResourceByName('InternalName', InternalName);
+          ReadResourceByName('LegalCopyright', LegalCopyright);
+          ReadResourceByName('OriginalFilename',OriginalFilename);
+          ReadResourceByName('ProductName', ProductName);
+          ReadResourceByName('ProductVersion', ProductVersion);
+          ReadResourceByName('Comments', Comments);
         end;
         result := true;
       end;
@@ -2847,7 +2883,7 @@ begin
       begin
         // typically 'C:\Users\<user>\AppData\Local\Temp'
         if GetTempPathW(MAX_PATH, @tmp) <> 0 then // first try Windows API
-          DoWin32PWideCharToFileName(tmp, result);
+          Win32PWideCharToFileName(tmp, result);
         if result = '' then
           result := GetEnvironmentVariable(_ENV[spTemp]); // fallback
       end;
@@ -2857,7 +2893,7 @@ begin
          'SHGetFolderPathW') and
        (SHGetFolderPathW(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
       // retrieved from official CSIDL
-      DoWin32PWideCharToFileName(tmp, result)
+      Win32PWideCharToFileName(tmp, result)
     else
     begin
       // fallback to environment variables (very unlikely)
@@ -3199,7 +3235,7 @@ end;
 function RawTokenGetInfo(tok: THandle; tic: TTokenInformationClass;
   var buf: TSynTempBuffer): cardinal;
 begin
-  buf.Init; // stack-allocated buffer (always enough)
+  buf.Init; // stack-allocated buffer (enough in most cases)
   result := 0; // error
   if (tok = INVALID_HANDLE_VALUE) or
      (tok = 0) or
@@ -3211,7 +3247,7 @@ begin
     exit;
   end;
   buf.Done;
-  buf.Init(result); // we need a bigger buffer
+  buf.Init(result); // we need a bigger buffer (unlikely)
   if not GetTokenInformation(tok, tic, buf.buf, buf.len, result) then
     result := 0;
 end;
@@ -3772,12 +3808,11 @@ function _GetSystemStoreAsPem(CertStore: TSystemCertificateStore): RawUtf8;
 var
   store: HCERTSTORE;
   ctx: PCCERT_CONTEXT;
-  resultlen, certlen: DWord;
+  certlen: DWord;
   tmp: TSynTempBuffer;
 begin
   // call the Windows API to retrieve the System certificates
   result := '';
-  resultlen := 0;
   store := CertOpenSystemStoreW(nil, WINDOWS_CERTSTORE[CertStore]);
   try
     ctx := CertEnumCertificatesInStore(store, nil);
@@ -3790,11 +3825,7 @@ begin
       tmp.Init(certlen); // a PEM is very likely to be < 8KB so will be on stack
       if CryptBinaryToStringA(ctx^.pbCertEncoded, ctx^.cbCertEncoded,
           CRYPT_STRING_BASE64HEADER, tmp.buf, certlen) then
-      begin
-        SetLength(result, resultlen + certlen);
-        MoveFast(tmp.buf^, PByteArray(result)[resultlen], certlen);
-        inc(resultlen, certlen);
-      end;
+         AppendBufferToUtf8(tmp.buf, certlen, result);
       tmp.Done;
       ctx := CertEnumCertificatesInStore(store, ctx); // next certificate
     end;

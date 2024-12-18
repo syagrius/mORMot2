@@ -563,9 +563,11 @@ type
     {$endif PUREMORMOT2}
 
     /// write pending data, then retrieve the whole text as a UTF-8 string
+    // - call CancelAll to reuse this instance after this method (or FlushFinal)
     function Text: RawUtf8;
       {$ifdef HASINLINE}inline;{$endif}
     /// write pending data, then retrieve the whole text as a UTF-8 string
+    // - call CancelAll to reuse this instance after this method (or FlushFinal)
     procedure SetText(var result: RawUtf8; reformat: TTextWriterJsonFormat = jsonCompact);
     /// set the internal stream content with the supplied UTF-8 text
     procedure ForceContent(const text: RawUtf8);
@@ -583,6 +585,7 @@ type
     // FlushFinal at the end of the process, just before using the resulting Stream
     // - if you don't call FlushToStream or FlushFinal, some pending characters
     // may not be copied to the Stream: you should call it before using the Stream
+    // - call CancelAll to reuse this instance after this method - or SetText()
     procedure FlushFinal;
       {$ifdef HASINLINE}inline;{$endif}
 
@@ -859,10 +862,12 @@ type
     procedure AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
       IncludeUnitName, IncludePointer: boolean);
     /// append some binary data as hexadecimal text conversion
-    procedure AddBinToHex(Bin: pointer; BinBytes: PtrInt; LowerHex: boolean = false);
+    procedure AddBinToHex(Bin: pointer; BinBytes: PtrInt; LowerHex: boolean = false;
+      QuotedChar: AnsiChar = #0);
     /// append some binary data as hexadecimal text conversion
     // - append its minimal chars, i.e. excluding last bytes containing 0
-    procedure AddBinToHexMinChars(Bin: pointer; BinBytes: PtrInt; LowerHex: boolean = false);
+    procedure AddBinToHexMinChars(Bin: pointer; BinBytes: PtrInt;
+      LowerHex: boolean = false; QuotedChar: AnsiChar = #0);
     /// fast conversion from binary data into hexa chars, ready to be displayed
     // - using this function with Bin^ as an integer value will serialize it
     // in big-endian order (most-significant byte first), as used by humans
@@ -987,6 +992,7 @@ type
     /// rewind the Stream to the position when Create() was called
     // - note that this does not clear the Stream content itself, just
     // move back its writing position to its initial place
+    // - mandatory call after FlushFinal or Text/SetText() to reuse this instance
     procedure CancelAll;
     /// same as CancelAll, and also reset the CustomOptions
     procedure CancelAllAsNew;
@@ -1520,7 +1526,7 @@ procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
 function VariantCompAsText(A, B: PVarData; caseInsensitive: boolean): integer;
 
 var
-  /// save a variant value into a JSON content
+  /// serialize a variant value into a JSON content
   // - is implemented by mormot.core.json.pas and mormot.core.variants.pas:
   // will raise an exception if none of these units is included in the project
   // - follows the TTextWriter.AddVariant() and VariantLoadJson() format
@@ -1537,10 +1543,10 @@ var
     var result: RawUtf8);
 
   /// unserialize a JSON content into a variant
-  // - is properly implemented by mormot.core.json.pas: if this unit is not
-  // included in the project, this function is nil
+  // - properly implemented by JsonToAnyVariant() in mormot.core.variants.pas :
+  // if this unit is not included in the project, this function is nil
   // - used by mormot.core.data.pas RTTI_BINARYLOAD[tkVariant]() for complex types
-  BinaryVariantLoadAsJson: procedure(var Value: variant; Json: PUtf8Char;
+  _VariantLoadJson: procedure(var Value: variant; Json: PUtf8Char;
     TryCustomVariant: pointer);
 
   /// write a TDateTime into strict ISO-8601 date and/or time text
@@ -1556,6 +1562,11 @@ var
   // - used by TRttiProp.SetValue() for TDateTime properties with a getter
   _Iso8601ToDateTime: function(const iso: RawByteString): TDateTime;
 
+/// wrap ToDouble(Text, V) and _Iso8601ToDateTime(Text)
+function AnyTextToDouble(const Text: RawUtf8; out V: double): boolean;
+
+/// wrap VariantToDouble(Value, V) and _Iso8601ToDateTime(VariantToText(Value))
+function AnyVariantToDouble(const Value: Variant; out V: double): boolean;
 
 type
   /// used e.g. by UInt4DigitsToShort/UInt3DigitsToShort/UInt2DigitsToShort
@@ -1795,6 +1806,9 @@ procedure Append(var Text: RawUtf8; Added: AnsiChar); overload;
 
 /// append one text buffer to a RawUtf8 variable with no code page conversion
 procedure Append(var Text: RawUtf8; Added: pointer; AddedLen: PtrInt); overload;
+
+/// append one short string to a RawUtf8 variable with no code page conversion
+procedure AppendStr(var Text: RawUtf8; const Added: ShortString);
 
 /// append some text items to a RawByteString variable
 procedure Append(var Text: RawByteString; const Args: array of const); overload;
@@ -5258,7 +5272,8 @@ begin
   AddBinToHexDisplayLower(@P, DisplayMinChars(@P, SizeOf(P)), QuotedChar);
 end;
 
-procedure TTextWriter.AddBinToHex(Bin: pointer; BinBytes: PtrInt; LowerHex: boolean);
+procedure TTextWriter.AddBinToHex(Bin: pointer; BinBytes: PtrInt;
+  LowerHex: boolean; QuotedChar: AnsiChar);
 var
   chunk: PtrInt;
 begin
@@ -5267,6 +5282,11 @@ begin
   if B >= BEnd then
     FlushToStream;
   inc(B);
+  if QuotedChar <> #0 then
+  begin
+    B^ := QuotedChar;
+    inc(B);
+  end;
   repeat
     // guess biggest size to be added into buf^ at once
     chunk := (BEnd - B) shr 1; // div 2 -> two hexa chars per byte
@@ -5286,14 +5306,17 @@ begin
     WriteToStream(fTempBuf, B - fTempBuf);
     B := fTempBuf;
   until false;
-  dec(B); // allow CancelLastChar
+  if QuotedChar <> #0 then
+    B^ := QuotedChar
+  else
+    dec(B); // allow CancelLastChar
 end;
 
 procedure TTextWriter.AddBinToHexMinChars(Bin: pointer; BinBytes: PtrInt;
-  LowerHex: boolean);
+  LowerHex: boolean; QuotedChar: AnsiChar);
 begin
   if BinBytes > 0 then
-    AddBinToHex(Bin, DisplayMinChars(Bin, BinBytes), LowerHex);
+    AddBinToHex(Bin, DisplayMinChars(Bin, BinBytes), LowerHex, QuotedChar);
 end;
 
 procedure TTextWriter.AddQuotedStr(Text: PUtf8Char; TextLen: PtrUInt;
@@ -6290,11 +6313,6 @@ end;
 
 {$endif UNICODE}
 
-{$ifndef EXTENDEDTOSHORT_USESTR}
-var // standard FormatSettings (US)
-  SettingsUS: TFormatSettings;
-{$endif EXTENDEDTOSHORT_USESTR}
-
 // used ExtendedToShortNoExp / DoubleToShortNoExp from str/DoubleToAscii output
 function FloatStringNoExp(S: PAnsiChar; Precision: PtrInt): PtrInt;
 var
@@ -6471,6 +6489,14 @@ end;
 
 {$else not EXTENDEDTOSHORT_USESTR}
 
+const
+  /// RTL TFormatSettings closest to the JSON expectations
+  // - used only as fallback for ExtendedToShort() without EXTENDEDTOSHORT_USESTR
+  JsonFormatSettings: TFormatSettings = (
+    ThousandSeparator: #0;
+    DecimalSeparator: '.';
+  {%H-});
+
 function ExtendedToShort(S: PShortString; Value: TSynExtended; Precision: integer): integer;
 {$ifdef UNICODE}
 var
@@ -6478,7 +6504,7 @@ var
 {$endif UNICODE}
 begin
   // use ffGeneral: see https://synopse.info/forum/viewtopic.php?pid=442#p442
-  result := FloatToText(PChar(@S^[1]), Value, fvExtended, ffGeneral, Precision, 0, SettingsUS);
+  result := FloatToText(PChar(@S^[1]), Value, fvExtended, ffGeneral, Precision, 0, JsonFormatSettings);
   {$ifdef UNICODE} // FloatToText(PWideChar) is faster than FloatToText(PAnsiChar)
   for i := 1 to result do
     PByteArray(S)[i] := PWordArray(PtrInt(S) - 1)[i];
@@ -7892,6 +7918,44 @@ begin
   FastAssignNew(bu);
 end;
 
+function AnyTextToDouble(const Text: RawUtf8; out V: double): boolean;
+begin
+  result := true;
+  if Text = '' then
+    PInt64(@V)^ := 0
+  else if not ToDouble(Text, V) then
+    if Assigned(_Iso8601ToDateTime) then
+    begin
+      V := _Iso8601ToDateTime(Text);
+      result := V <> 0;
+    end
+    else
+      result := false;
+end;
+
+function AnyVariantToDouble(const Value: Variant; out V: double): boolean;
+var
+  u: pointer;
+begin
+  u := nil;
+  result := VariantToDouble(Value, V);
+  if not result then
+    if Assigned(_Iso8601ToDateTime) and // may be a TDateTime
+       VarIsString(Value) and
+       VariantToText(Value, RawUtf8(u)) then
+    begin
+      V := 0;
+      if u <> nil then
+      begin
+        V := _Iso8601ToDateTime(RawUtf8(u));
+        FastAssignNew(u);
+        if V = 0 then
+          exit; // not a date
+      end;
+      result := true;
+    end;
+end;
+
 function Int18ToChars3(Value: cardinal): RawUtf8;
 begin
   FastSetString(result, 3);
@@ -8551,7 +8615,7 @@ none:       result := '';
         else
           goto none;
       {$else}
-        PointerToHex(VInterface,result);
+        PointerToHex(VInterface, result);
       {$endif HASINTERFACEASTOBJECT}
       vtVariant:
         VariantToUtf8(VVariant^, result, isString);
@@ -9051,6 +9115,12 @@ procedure Append(var Text: RawUtf8; Added: pointer; AddedLen: PtrInt);
 begin
   if (Added <> nil) and (AddedLen > 0) then
     _App1(Text, Added, AddedLen, 0);
+end;
+
+procedure AppendStr(var Text: RawUtf8; const Added: ShortString);
+begin
+  if Added[0] <> #0 then
+    _App1(Text, @Added[1], ord(Added[0]), 0);
 end;
 
 procedure Append(var Text: RawByteString; const Added: RawByteString);
@@ -10611,14 +10681,6 @@ begin
     TwoDigitsHexLower[i][1] := HexCharsLower[i shr 4];
     TwoDigitsHexLower[i][2] := HexCharsLower[i and $f];
   end;
-  {$ifndef EXTENDEDTOSHORT_USESTR}
-  {$ifdef ISDELPHIXE}
-  SettingsUS := TFormatSettings.Create(ENGLISH_LANGID);
-  {$else}
-  GetLocaleFormatSettings(ENGLISH_LANGID, SettingsUS);
-  {$endif ISDELPHIXE}
-  SettingsUS.DecimalSeparator := '.'; // value may have been overriden :(
-  {$endif EXTENDEDTOSHORT_USESTR}
   {$ifdef DOUBLETOSHORT_USEGRISU}
   MoveFast(TwoDigitLookup[0], TwoDigitByteLookupW[0], SizeOf(TwoDigitLookup));
   for i := 0 to 199 do

@@ -141,17 +141,6 @@ begin
   FastSetString(result, S, P - S);
 end;
 
-procedure RawUtf8Append(var s: RawUtf8; p: PUtf8Char; l: PtrInt);
-var
-  n: PtrInt;
-begin
-  if l = 0 then
-    exit;
-  n := length(s);
-  SetLength(s, n + l);
-  MoveFast(p^, PByteArray(s)[n], l);
-end;
-
 function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
 begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
@@ -1137,10 +1126,6 @@ var
 
 {$endif NOEXCEPTIONINTERCEPT}
 
-const
-  faInvalidFile   = faDirectory;
-  faDirectoryMask = faDirectory;
-
 function FileDateToDateTime(const FileDate: TFileAge): TDateTime;
 begin
   if FileDate <= 0 then
@@ -1848,7 +1833,6 @@ end;
 
 procedure AllocConsole;
 begin
-  StdOut := StdOutputHandle;
 end;
 
 function HasConsole: boolean;
@@ -1857,7 +1841,8 @@ begin
 end;
 
 var
-  TextAttr: integer = 255; // always change the color at startup
+  ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
+  TextAttr: integer = -1; // always change the color at startup
 
 procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
 const
@@ -1879,7 +1864,7 @@ var
   c: TShort8;
 begin
   TextColorCmd(Color, c);
-  RawUtf8Append(s, @c[1], ord(c[0]));
+  AppendShortToUtf8(c, s);
 end;
 
 procedure TextColor(Color: TConsoleColor);
@@ -1887,8 +1872,11 @@ var
   c: TShort8;
 begin
   TextColorCmd(Color, c);
-  if c[0] <> #0 then
-    fpwrite(StdOut, @c[1], ord(c[0])); // single syscall
+  if c[0] = #0 then
+    exit;
+  ConsoleCriticalSection.Lock;
+  fpwrite(StdOut, @c[1], ord(c[0])); // single syscall
+  ConsoleCriticalSection.UnLock;
 end;
 
 procedure TextBackground(Color: TConsoleColor);
@@ -1896,17 +1884,13 @@ begin
   // not implemented yet - but not much needed either
 end;
 
-var
-  ConsoleCriticalSection: TOSLock;
-const
-  PosixLineFeed: AnsiChar = #10;
-
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
   NoLineFeed, NoColor: boolean);
 var
   s: RawUtf8;
 begin
   // pre-compute the whole chars to be sent to the console
+  NoColor := NoColor or (not StdOutIsTTY);
   if NoColor and
      NoLineFeed then
     s := Text // no memory allocation needed
@@ -1914,9 +1898,9 @@ begin
   begin
     if not NoColor then
       TextColorAppend(Color, s);
-    RawUtf8Append(s, pointer(Text), length(Text));
+    AppendBufferToUtf8(pointer(Text), length(Text), s);
     if not NoLineFeed then
-      RawUtf8Append(s, @PosixLineFeed, 1);
+      AppendShortToUtf8(#10, s);
     if not NoColor then
       TextColorAppend(ccLightGray, s);
   end;
@@ -2328,7 +2312,7 @@ var
     fn: RawUtf8;
     withsub: boolean;
   begin
-    dir := FpOpendir(root + subpath); // much faster alternative to FindFirst()
+    dir := FpOpendir(root + subpath); // faster alternative to FindFirst()
     if dir = nil then
       exit;
     sublen := length(subpath);
@@ -3100,6 +3084,7 @@ end;
 
 var
   StubCallAllocMemLastStart: PtrUInt; // avoid unneeded fpmmap() calls
+  StubCallFakeStubAddr: pointer;      // = ArmFakeStubAddr parameter
 
 function StubCallAllocMem(const Size, flProtect: DWORD): pointer;
 const
@@ -3109,7 +3094,7 @@ const
 var
   start, stop, stub, dist: PtrUInt;
 begin
-  stub := PtrUInt(ArmFakeStubAddr); // = @TInterfacedObjectFake.ArmFakeStub
+  stub := PtrUInt(StubCallFakeStubAddr); // = @TInterfacedObjectFake.ArmFakeStub
   if StubCallAllocMemLastStart <> 0 then
     start := StubCallAllocMemLastStart
   else
@@ -3161,12 +3146,12 @@ var
 
 function StubMemoryAlloc: pointer;
 begin
+  result := MAP_FAILED;
   if not StubMemoryExecXorWrite then
     result := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
-  if (result = MAP_FAILED) or
-     StubMemoryExecXorWrite then
+  if result = MAP_FAILED then
   begin
-    // i.e. on OpenBSD or OSX M1, we can not have W and X protection
+    // i.e. on OpenBSD or OSX aarch64, we can not have W and X protection
     result := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
     if result <> MAP_FAILED then
       StubMemoryExecXorWrite := true;
@@ -3991,8 +3976,9 @@ var
   {$endif OSBSDDARWIN}
 begin
   // retrieve Kernel and Hardware information
+  StdOut := StdOutputHandle;
   StdOutIsTTY := not IsDebuggerPresent and
-                 (IsATTY(StdOutputHandle) = 1) and
+                 (IsATTY(StdOut) = 1) and
                  IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
                    'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;

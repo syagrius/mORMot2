@@ -23,6 +23,7 @@ uses
   mormot.core.test,
   mormot.core.perf,
   mormot.core.threads,
+  mormot.core.search,
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.net.sock,
@@ -30,6 +31,7 @@ uses
   mormot.net.client,
   mormot.net.server,
   mormot.net.async,
+  mormot.net.ws.core,
   mormot.net.openapi,
   mormot.net.ldap,
   mormot.net.dns,
@@ -64,8 +66,12 @@ type
     // this is the main method called by RtspOverHttp[BufferedWrite]
     procedure DoRtspOverHttp(options: TAsyncConnectionsOptions);
   published
+    /// Engine.IO and Socket.IO regression tests
+    procedure _SocketIO;
     /// validate mormot.net.openapi unit
     procedure OpenAPI;
+    /// validate THttpProxyCache process
+    procedure _THttpProxyCache;
     /// validate TUriTree high-level structure
     procedure _TUriTree;
     /// validate DNS and LDAP clients (and NTP/SNTP)
@@ -84,6 +90,104 @@ type
 
 
 implementation
+
+procedure TNetworkProtocols._SocketIO;
+var
+  m: TSocketIOMessage;
+begin
+  // validate low-level Socket.IO message decoder
+  Check(not m.Init(''));
+  Check(not m.Init('z'));
+  Check(m.Init('0'));
+  Check(m.PacketType = sioOpen);
+  Check(m.NameSpaceIs('/'));
+  CheckEqual(m.Data, nil);
+  Check(m.DataIs(''));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('0/test,{}'));
+  Check(m.PacketType = sioOpen);
+  Check(m.NameSpaceIs('/test'));
+  Check(m.DataIs('{}'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('1'));
+  Check(m.PacketType = sioDisconnect);
+  Check(m.NameSpaceIs('/'));
+  CheckEqual(m.Data, nil);
+  Check(m.DataIs(''));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('1/admin,'));
+  Check(m.PacketType = sioDisconnect);
+  Check(m.NameSpaceIs('/admin'));
+  Check(not m.NameSpaceIs('/admi'));
+  Check(not m.NameSpaceIs('/admiN'));
+  CheckEqual(m.Data, nil);
+  Check(m.DataIs(''));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('0/admin,{"sid":"oSO0OpakMV_3jnilAAAA"}'));
+  Check(m.PacketType = sioOpen);
+  Check(m.NameSpaceIs('/admin'));
+  Check(m.DataIs('{"sid":"oSO0OpakMV_3jnilAAAA"}'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('4{"message":"Not authorized"}'));
+  Check(m.PacketType = sioConnectError);
+  Check(m.NameSpaceIs('/'));
+  Check(m.DataIs('{"message":"Not authorized"}'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('2["foo"]'));
+  Check(m.PacketType = sioEvent);
+  Check(m.NameSpaceIs('/'));
+  Check(m.DataIs('["foo"]'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('2/admin,["bar"]'));
+  Check(m.PacketType = sioEvent);
+  Check(m.NameSpaceIs('/admin'));
+  Check(m.DataIs('["bar"]'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('212["foo"]'));
+  Check(m.PacketType = sioEvent);
+  Check(m.NameSpaceIs('/'));
+  Check(m.DataIs('["foo"]'));
+  CheckEqual(m.ID, 12);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('3/admin,13["bar"]'));
+  Check(m.PacketType = sioAck);
+  Check(m.NameSpaceIs('/admin'));
+  Check(m.DataIs('["bar"]'));
+  CheckEqual(m.ID, 13);
+  CheckEqual(m.BinaryAttachment, 0);
+  Check(m.Init('51-["baz",{"_placeholder":true,"num":0}]'));
+  Check(m.PacketType = sioBinaryEvent);
+  Check(m.NameSpaceIs('/'));
+  Check(m.DataIs('["baz",{"_placeholder":true,"num":0}]'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 1);
+  Check(m.Init('52-/admin,["baz",{"_placeholder":true,"num":0},{"_placeholder":true,"num":1}]'));
+  Check(m.PacketType = sioBinaryEvent);
+  Check(m.NameSpaceIs('/admin'));
+  Check(m.DataIs('["baz",{"_placeholder":true,"num":0},{"_placeholder":true,"num":1}]'));
+  CheckEqual(m.ID, 0);
+  CheckEqual(m.BinaryAttachment, 2);
+  Check(m.Init('61-15["bar",{"_placeholder":true,"num":0}]'));
+  Check(m.PacketType = sioBinaryAck);
+  Check(m.NameSpaceIs('/'));
+  Check(m.DataIs('["bar",{"_placeholder":true,"num":0}]'));
+  CheckEqual(m.ID, 15);
+  CheckEqual(m.BinaryAttachment, 1);
+  Check(m.Init('61-/admin,1[{"_placeholder":true,"num":0}]'));
+  Check(m.PacketType = sioBinaryAck);
+  Check(m.NameSpaceIs('/admin'));
+  Check(m.DataIs('[{"_placeholder":true,"num":0}]'));
+  CheckEqual(m.ID, 1);
+  CheckEqual(m.BinaryAttachment, 1);
+end;
 
 type
    TMyEnum = (eNone, e1, e2);
@@ -669,18 +773,18 @@ end;
 
 procedure TNetworkProtocols.DNSAndLDAP;
 var
-  ip, u, v, sid: RawUtf8;
+  ip, rev, u, v, sid: RawUtf8;
   o: TAsnObject;
   c: cardinal;
   withntp: boolean;
   guid: TGuid;
-  i, j, k: PtrInt;
+  i, j, k, n: PtrInt;
   dns, clients, a: TRawUtf8DynArray;
   le: TLdapError;
   rl, rl2: TLdapResultList;
   r: TLdapResult;
   at: TLdapAttributeType;
-  ats: TLdapAttributeTypes;
+  ats, ats2: TLdapAttributeTypes;
   sat: TSamAccountType;
   gt: TGroupType;
   gts: TGroupTypes;
@@ -704,7 +808,6 @@ begin
   if hasinternet then
   begin
     utc1 := GetSntpTime(ntp);
-    //writeln(DateTimeMSToString(utc), ' = ', DateTimeMSToString(NowUtc));
     if utc1 <> 0 then
     begin
       utc2 := NowUtc;
@@ -746,10 +849,23 @@ begin
   if hasinternet then
   begin
     ip := DnsLookup('synopse.info');
-    CheckEqual(ip, '62.210.254.173', 'dns1');
+    if ip = '' then
+    begin
+      Sleep(10); // some DNS servers may fail at first: wait a little
+      ip := DnsLookup('synopse.info');
+    end;
+    rev := '62.210.254.173';
+    CheckEqual(ip, rev, 'dns1');
     ip := DnsLookup('blog.synopse.info');
-    CheckEqual(ip, '62.210.254.173', 'dns2');
-    CheckEqual(DnsReverseLookup(ip), '62-210-254-173.rev.poneytelecom.eu', 'rev');
+    CheckEqual(ip, rev, 'dns2');
+    rev := '62-210-254-173.rev.poneytelecom.eu';
+    if DnsReverseLookup(ip) <> rev then
+    begin
+      Sleep(10); // wait a little
+      CheckEqual(DnsReverseLookup(ip), rev, 'rev');
+    end
+    else
+      inc(fAssertions);
   end;
   // validate LDAP distinguished name conversion (no client)
   CheckEqual(DNToCN('CN=User1,OU=Users,OU=London,DC=xyz,DC=local'),
@@ -939,6 +1055,8 @@ begin
   CheckEqual(RawLdapTranslateFilter('(toto)', {noraise=}true), '');
   CheckEqual(RawLdapTranslateFilter('x', {noraise=}true), '');
   // validate LDAP attributes definitions
+  n := 0;
+  ats2 := [];
   for at := low(at) to high(at) do
   begin
     CheckEqual(ToText(at), AttrTypeName[at]);
@@ -951,6 +1069,12 @@ begin
     begin
       CheckEqual(length(a), 1);
       CheckEqual(a[0], ToText(at));
+      include(ats2, at);
+      inc(n);
+      a := ToText(ats2);
+      CheckEqual(length(a), n);
+      for i := 0 to n - 1 do
+        CheckEqual(a[i], ToText(TLdapAttributeType(i + 1)));
     end;
   end;
   for i := low(AttrTypeNameAlt) to high(AttrTypeNameAlt) do
@@ -1180,7 +1304,7 @@ begin
               end;
             Check(one.NetbiosDN <> '', 'NetbiosDN');
             Check(one.ConfigDN <> '', 'ConfigDN');
-            Check(one.Search(one.WellKnownObjects[lkoUsers], {typesonly=}false,
+            Check(one.Search(one.WellKnownObject(lkoUsers), {typesonly=}false,
                   '(cn=users)', ['*']), 'Search');
             Check(one.SearchResult.Count <> 0, 'SeachResult');
             AddConsole('%% = % search=%', [one.Settings.TargetHost, txt,
@@ -1194,7 +1318,7 @@ begin
               if res.CopyObjectSid(sid) then
                 Check(sid <> '');
               FillZero(guid);
-              Check(res.CopyObjectGUID(guid), 'objectGUID');
+              Check(res.CopyObjectGuid(guid), 'objectGUID');
               Check(not IsNullGuid(guid));
               CheckEqual(res.CanonicalName, DNToCN(res.ObjectName));
               Check(IdemPropNameU(res.Attributes[atCommonName], 'users'), 'cn');
@@ -1442,7 +1566,7 @@ begin
     try
       hpc := THttpPeerCacheHook.Create(hps, 'secret');
       try
-        hpc2 := THttpPeerCryptHook.Create('secret');
+        hpc2 := THttpPeerCryptHook.Create('secret', nil, nil);
         try
           hpc2.fSettings := hps;
           hpc2.AfterSettings;
@@ -1489,6 +1613,64 @@ begin
     hps.Free;
   end;
 end;
+
+procedure TNetworkProtocols._THttpProxyCache;
+
+  procedure TryOne(const force, ignore: RawUtf8;
+    const v: array of RawUtf8; const k: array of THttpProxyCacheKind);
+  var
+    m: THttpProxyMem;
+    n: TUriMatchName;
+    i: PtrInt;
+    r: THttpProxyCacheKind;
+  begin
+    m := THttpProxyMem.Create;
+    try
+      m.ForceCsv := force;
+      m.IgnoreCsv := ignore;
+      for i := 0 to high(v) do
+      begin
+        n.Path.Text := pointer(v[i]);
+        n.Path.Len := length(v[i]);
+        n.ParsePath;
+        r := [];
+        if i <= high(k) then
+          r := k[i];
+        Check(m.FromUri(n) = r);
+      end;
+    finally
+      m.Free;
+    end;
+  end;
+
+begin
+  TryOne('', '', ['', 'p', 'p/2', '/2'], []);
+  TryOne('*', '', ['', 'p', 'p/2', '/2'], [[], [pckForce], [pckForce], [pckForce]]);
+  TryOne('*2', '', ['', 'p', 'p/2', '/2'], [[], [], [pckForce], [pckForce]]);
+  TryOne('p*', '', ['', 'p', 'p/2', '/2'], [[], [pckForce]]);
+  TryOne('*', '', ['', 'pas', 'pas/12', '/12'], [[], [pckForce], [pckForce], [pckForce]]);
+  TryOne('*2', '', ['', 'pas', 'pas/12', '/12'], [[], [], [pckForce], [pckForce]]);
+  TryOne('p*', '', ['', 'pas', 'pas/12', '/12'], [[], [pckForce]]);
+  TryOne('', '*', ['', 'p', 'p/2', '/2'], [[], [pckIgnore], [pckIgnore], [pckIgnore]]);
+  TryOne('', '*2', ['', 'p', 'p/2', '/2'], [[], [], [pckIgnore], [pckIgnore]]);
+  TryOne('', 'p*', ['', 'p', 'p/2', '/2'], [[], [pckIgnore]]);
+  TryOne('', '*', ['', 'pas', 'pas/12', '/12'], [[], [pckIgnore], [pckIgnore], [pckIgnore]]);
+  TryOne('', '*2', ['', 'pas', 'pas/12', '/12'], [[], [], [pckIgnore], [pckIgnore]]);
+  TryOne('', 'p*', ['', 'pas', 'pas/12', '/12'], [[], [pckIgnore]]);
+  TryOne('*', '*', ['', 'p', 'p/2', '/2'], [[],
+    [pckForce, pckIgnore], [pckForce, pckIgnore], [pckForce, pckIgnore]]);
+  TryOne('*2', '*2', ['', 'p', 'p/2', '/2'],
+    [[], [], [pckForce, pckIgnore], [pckForce, pckIgnore]]);
+  TryOne('p*', 'p*', ['', 'p', 'p/2', '/2'],
+    [[], [pckForce, pckIgnore]]);
+  TryOne('*', '*', ['', 'pas', 'pas/12', '/12'],
+    [[], [pckForce, pckIgnore], [pckForce, pckIgnore], [pckForce, pckIgnore]]);
+  TryOne('*2', '*2', ['', 'pas', 'pas/12', '/12'],
+    [[], [], [pckForce, pckIgnore], [pckForce, pckIgnore]]);
+  TryOne('p*', 'p*', ['', 'pas', 'pas/12', '/12'],
+    [[], [pckForce, pckIgnore]]);
+end;
+
 
 end.
 

@@ -1660,6 +1660,7 @@ type
     /// find an item in this document, and returns its value as floating point
     // - return false if aName is not found, or if the instance is not a TDocVariant
     // - return true if the name has been found, and aValue stores the value
+    // (trying _Iso8601ToDateTime() if needed)
     // - after a SortByName(aSortedCompare), could use faster binary search
     // - consider using D[] property if you want simple read/write typed access
     function GetAsDouble(const aName: RawUtf8; out aValue: double;
@@ -1765,6 +1766,8 @@ type
       DestByRef: boolean = false): boolean;
     /// return one dvArray value as RawUtf8, from its index
     function GetItemAsText(aIndex: integer): RawUtf8;
+    /// return one dvArray value as 64-bit integer, from its index
+    function GetItemAsInt(aIndex: integer): Int64;
     /// retrieve a reference to a dvObject in the dvArray, from a property value
     // - {aPropName:aPropValue} will be searched within the stored array,
     // and the corresponding item will be copied into Dest, on match
@@ -1891,8 +1894,7 @@ type
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can specify an optional index in the array where to insert
     // - returns the index of the corresponding newly added item
-    function AddItemFromText(const aValue: RawUtf8;
-      aIndex: integer = -1): integer;
+    function AddItemFromText(const aValue: RawUtf8; aIndex: integer = -1): integer;
     /// add a RawUtf8 value to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can specify an optional index in the array where to insert
@@ -2275,6 +2277,7 @@ type
     /// direct access to a dvObject floating-point stored property value from its name
     // - slightly faster than the variant-based Value[] default property
     // - follows dvoNameCaseSensitive and dvoReturnNullForUnknownProperty options
+    // - reading D['prop'] may try _Iso8601ToDateTime() and return a TDateTime
     // - use GetAsDouble if you want to check the availability of the field
     // - D['prop'] := 1.23 would add a new property, or overwrite an existing
     property D[const aName: RawUtf8]: Double
@@ -3416,6 +3419,7 @@ type
     function Get(const key: RawUtf8; var value: Int64): boolean; overload;
     /// access one element in the dictionary, as floating-point double
     // - if the key does not exist or can not be converted, returns false
+    // - Get('prop', value) may try _Iso8601ToDateTime() and return a TDateTime
     function Get(const key: RawUtf8; var value: double): boolean; overload;
     /// access one element in the dictionary, fixed precision currency
     // - if the key does not exist or can not be converted, returns false
@@ -3509,6 +3513,7 @@ type
     property I[const key: RawUtf8]: Int64
       read GetI write SetI;
     /// access one element in the dictionary from its key, as floating-point double
+    // - reading F['prop'] may try _Iso8601ToDateTime() and return a TDateTime
     property F[const key: RawUtf8]: double
       read GetF write SetF;
     /// access one element in the dictionary from its key, as fixed precision currency
@@ -6186,12 +6191,6 @@ function _InitArray(out aDest: TDocVariantData; aOptions: TDocVariantOptions;
 begin
   if aCount < 0 then
     aCount := length(TByteDynArray(aItems));
-  if aCount = 0 then
-  begin
-    TSynVarData(aDest).VType := varNull;
-    result := nil;
-    exit;
-  end;
   {%H-}aDest.Init(aOptions, dvArray);
   aDest.VCount := aCount;
   SetLength(aDest.VValue, aCount);
@@ -7552,9 +7551,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           SortByName(L, J);
         L := I;
@@ -7610,9 +7608,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           SortByValue(L, J);
         L := I;
@@ -7840,9 +7837,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           Sort(L, J);
         L := I;
@@ -8599,7 +8595,7 @@ begin
   if found = nil then
     result := false
   else
-    result := VariantToDouble(PVariant(found)^, aValue);
+    result := AnyVariantToDouble(PVariant(found)^, aValue);
 end;
 
 function TDocVariantData.GetAsRawUtf8(const aName: RawUtf8; out aValue: RawUtf8;
@@ -8907,6 +8903,13 @@ begin
     VariantToUtf8(VValue[aIndex], result)
   else
     InternalNotFound(aIndex);
+end;
+
+function TDocVariantData.GetItemAsInt(aIndex: integer): Int64;
+begin
+  if (cardinal(aIndex) >= cardinal(VCount)) or
+     not VariantToInt64(VValue[aIndex], result) then
+    result := PtrInt(InternalNotFound(aIndex));
 end;
 
 function TDocVariantData.GetDocVariantByProp(
@@ -9437,7 +9440,7 @@ end;
 
 function TDocVariantData.GetDoubleByName(const aName: RawUtf8): Double;
 begin
-  if not VariantToDouble(GetPVariantByName(aName)^, result) then
+  if not AnyVariantToDouble(GetPVariantByName(aName)^, result) then
     result := 0;
 end;
 
@@ -10313,7 +10316,7 @@ begin
   end;
 end;
 
-procedure _BinaryVariantLoadAsJson(var Value: variant; Json: PUtf8Char;
+procedure __VariantLoadJson(var Value: variant; Json: PUtf8Char;
   TryCustomVariant: pointer);
 var
   info: TGetJsonField;
@@ -10674,7 +10677,7 @@ type
 
 function TDocValue.IsString: boolean;
 begin
-  result := VarIsStr(V^);
+  result := VarIsString(V^);
 end;
 
 function TDocValue.Kind: TDocVariantKind;
@@ -11817,7 +11820,7 @@ var
   v: PVariant;
 begin
   v := GetExistingValueAt(key, 'F');
-  if not VariantToDouble(v^, result) then
+  if not AnyVariantToDouble(v^, result) then
     EDocDict.Error('F', key, v^);
 end;
 
@@ -11992,7 +11995,7 @@ var
   v: PVariant;
 begin
   result := GetValueAt(key, v) and
-            VariantToDouble(v^, value);
+            AnyVariantToDouble(v^, value);
 end;
 
 function TDocDict.Get(const key: RawUtf8; var value: currency): boolean;
@@ -12310,9 +12313,9 @@ begin
   JSON_NAMEVALUEINTERN := PDocVariantOptionsBool(@JSON_[mNameValueIntern])^;
   JSON_OPTIONS := PDocVariantOptionsBool(@JSON_[mDefault])^;
   // redirect to the feature complete variant wrapper functions
-  BinaryVariantLoadAsJson := _BinaryVariantLoadAsJson;
   VariantClearSeveral := _VariantClearSeveral;
   _VariantSaveJson := @__VariantSaveJson;
+  _VariantLoadJson := @__VariantLoadJson;
   SortDynArrayVariantComp := pointer(@FastVarDataComp);
   // setup FastVarDataComp() efficient lookup comparison functions
   for ins := false to true do
