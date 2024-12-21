@@ -396,14 +396,16 @@ type
     /// just a wrapper around fErrorMessage := FormatString()
     procedure SetErrorMessage(const Fmt: RawUtf8; const Args: array of const);
     /// serialize a given value as JSON into OutContent and OutContentType fields
-    procedure SetOutJson(Value: pointer; TypeInfo: PRttiInfo); overload;
+    // - this function returns HTTP_SUCCESS
+    function SetOutJson(Value: pointer; TypeInfo: PRttiInfo): cardinal; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// serialize a given TObject as JSON into OutContent and OutContentType fields
-    procedure SetOutJson(Value: TObject); overload;
+    // - this function returns HTTP_SUCCESS
+    function SetOutJson(Value: TObject): cardinal; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// low-level initialization of the associated TJsonWriter instance
     // - will reset and reuse an TJsonWriter associated to this execution context
-    // - as called by SetOutJson() oveloaded methods using RTTI
+    // - as called by SetOutJson() overloaded methods using RTTI
     // - a local TTextWriterStackBuffer should be provided as temporary buffer
     function TempJsonWriter(var temp: TTextWriterStackBuffer): TJsonWriter;
       {$ifdef HASINLINE} inline; {$endif}
@@ -2298,7 +2300,7 @@ type
     fOnServiceMessage: TThreadMethod;
     procedure SetOnWSThreadTerminate(const Value: TOnNotifyThread);
     function GetProtocol(index: integer): THttpApiWebSocketServerProtocol;
-    function getProtocolsCount: integer;
+    function GetProtocolsCount: integer;
     procedure SetOnWSThreadStart(const Value: TOnNotifyThread);
   protected
     function UpgradeToWebSocket(Ctxt: THttpServerRequestAbstract): cardinal;
@@ -2345,7 +2347,7 @@ type
       read GetProtocol;
     /// access to the associated endpoints count
     property ProtocolsCount: integer
-      read getProtocolsCount;
+      read GetProtocolsCount;
     /// event called when the processing thread starts
     property OnWSThreadStart: TOnNotifyThread
       read FOnWSThreadStart write SetOnWSThreadStart;
@@ -3040,6 +3042,7 @@ end;
 destructor THttpServerRequest.Destroy;
 begin
   fTempWriter.Free;
+  // inherited Destroy; is void
 end;
 
 const
@@ -3098,12 +3101,13 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
 
   procedure ProcessErrorMessage;
   begin
+    HtmlEscapeString(fErrorMessage, fOutContentType, hfAnyWhere);
     FormatUtf8(
       '<!DOCTYPE html><html><body style="font-family:verdana">' +
       '<h1>% Server Error %</h1><hr>' +
       '<p>HTTP %</p><p>%</p><small>%</small></body></html>',
       [fServer.ServerName, fRespStatus, StatusCodeToShort(fRespStatus),
-       HtmlEscapeString(fErrorMessage), XPOWEREDVALUE],
+       fOutContentType, XPOWEREDVALUE],
       RawUtf8(fOutContent));
     fOutCustomHeaders := '';
     fOutContentType := 'text/html; charset=utf-8'; // create message to display
@@ -3119,12 +3123,12 @@ begin
   // process content
   Context.ContentLength := 0; // needed by ProcessStaticFile
   Context.ContentLastModified := 0;
-  if (OutContentType <> '') and
-     (OutContentType[1] = '!') then
-    if OutContentType = NORESPONSE_CONTENT_TYPE then
-      OutContentType := '' // true HTTP always expects a response
-    else if (OutContent <> '') and
-            (OutContentType = STATICFILE_CONTENT_TYPE) then
+  if (fOutContentType <> '') and
+     (fOutContentType[1] = '!') then
+    if fOutContentType = NORESPONSE_CONTENT_TYPE then
+      fOutContentType := '' // true HTTP always expects a response
+    else if (fOutContent <> '') and
+            (fOutContentType = STATICFILE_CONTENT_TYPE) then
       ProcessStaticFile;
   if fErrorMessage <> '' then
     ProcessErrorMessage;
@@ -3180,9 +3184,9 @@ begin
   h^.Append(fServer.fRequestHeaders); // Server: and X-Powered-By:
   if hsoIncludeDateHeader in fServer.Options then
     fServer.AppendHttpDate(h^);
-  Context.Content := OutContent;
-  Context.ContentType := OutContentType;
-  OutContent := ''; // dec RefCnt to release body memory ASAP
+  Context.Content := fOutContent;
+  Context.ContentType := fOutContentType;
+  fOutContent := ''; // dec RefCnt to release body memory ASAP
   result := Context.CompressContentAndFinalizeHead(MaxSizeAtOnce); // set State
   // now TAsyncConnectionsSockets.Write(result) should be called
 end;
@@ -3203,22 +3207,24 @@ begin
   result := fTempWriter;
 end;
 
-procedure THttpServerRequest.SetOutJson(Value: pointer; TypeInfo: PRttiInfo);
+function THttpServerRequest.SetOutJson(Value: pointer; TypeInfo: PRttiInfo): cardinal;
 var
   temp: TTextWriterStackBuffer;
 begin
   TempJsonWriter(temp).AddTypedJson(Value, TypeInfo, []);
   fTempWriter.SetText(RawUtf8(fOutContent));
   fOutContentType := JSON_CONTENT_TYPE_VAR;
+  result := HTTP_SUCCESS;
 end;
 
-procedure THttpServerRequest.SetOutJson(Value: TObject);
+function THttpServerRequest.SetOutJson(Value: TObject): cardinal;
 var
   temp: TTextWriterStackBuffer;
 begin
   TempJsonWriter(temp).WriteObject(Value, []);
   fTempWriter.SetText(RawUtf8(fOutContent));
   fOutContentType := JSON_CONTENT_TYPE_VAR;
+  result := HTTP_SUCCESS;
 end;
 
 function THttpServerRequest.RouteOpaque: pointer;
@@ -3379,7 +3385,8 @@ end;
 function THttpServerGeneric.Request(Ctxt: THttpServerRequestAbstract): cardinal;
 begin
   if (self = nil) or
-     fShutdownInProgress then
+     fShutdownInProgress or
+     not Assigned(OnRequest) then
     result := HTTP_NOTFOUND
   else
   begin
@@ -3387,10 +3394,7 @@ begin
        Ctxt.ConnectionThread.InheritsFrom(TSynThread) and
        (not Assigned(TSynThread(Ctxt.ConnectionThread).StartNotified)) then
       NotifyThreadStart(TSynThread(Ctxt.ConnectionThread));
-    if Assigned(OnRequest) then
-      result := OnRequest(Ctxt)
-    else
-      result := HTTP_NOTFOUND;
+    result := OnRequest(Ctxt);
   end;
 end;
 
@@ -8352,7 +8356,7 @@ begin
     result := nil;
 end;
 
-function THttpApiWebSocketServer.getProtocolsCount: integer;
+function THttpApiWebSocketServer.GetProtocolsCount: integer;
 begin
   if self = nil then
     result := 0
@@ -8360,14 +8364,14 @@ begin
     result := Length(fRegisteredProtocols^);
 end;
 
-function THttpApiWebSocketServer.getSendResponseFlags(Ctxt: THttpServerRequest): integer;
+function THttpApiWebSocketServer.GetSendResponseFlags(Ctxt: THttpServerRequest): integer;
 begin
   if (PHTTP_REQUEST(Ctxt.HttpApiRequest)^.UrlContext = WEB_SOCKET_URL_CONTEXT) and
      (fLastConnection <> nil) then
     result := HTTP_SEND_RESPONSE_FLAG_OPAQUE or
       HTTP_SEND_RESPONSE_FLAG_MORE_DATA or HTTP_SEND_RESPONSE_FLAG_BUFFER_DATA
   else
-    result := inherited getSendResponseFlags(Ctxt);
+    result := inherited GetSendResponseFlags(Ctxt);
 end;
 
 function THttpApiWebSocketServer.UpgradeToWebSocket(

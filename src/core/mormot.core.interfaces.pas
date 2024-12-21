@@ -3274,6 +3274,12 @@ asm
 end;
 {$endif HASINLINE}
 
+procedure FakeCallRaise(Fake: TInterfacedObjectFakeRaw; MethodIndex: PtrUInt);
+begin
+  EInterfaceFactory.RaiseUtf8('%.FakeCall(%) failed: out of range %',
+    [Fake, Fake.fFactory.fInterfaceName, MethodIndex]);
+end;
+
 function TInterfacedObjectFakeRaw.FakeCall(stack: PFakeCallStack): Int64;
 var
   me: TInterfacedObjectFakeRaw; // self may be broken by compiler optimizations
@@ -3288,12 +3294,11 @@ begin
   // setup context
   ctxt.Stack := stack;
   if stack.MethodIndex >= PtrUInt(me.fFactory.MethodsCount) then
-    EInterfaceFactory.RaiseUtf8('%.FakeCall(%) failed: out of range %',
-      [me, me.fFactory.fInterfaceName, stack.MethodIndex]);
+    FakeCallRaise(me, stack.MethodIndex);
   ctxt.Method := @me.fFactory.fMethods[stack.MethodIndex];
   ctxt.ResultType := imvNone;
   ctxt.Result := @result;
-  // call execution virtual method
+  // call main execution virtual method
   result := 0;
   me.FakeCallInternalProcess(ctxt);
   // handle float result if needed (ordinals are already stored in result)
@@ -4662,11 +4667,9 @@ begin
     inc(P); // mov r12 (ip),{MethodIndex} : store method index in register
     {$endif ASMORIG}
     // branch ArmFakeStub (24bit relative, word aligned)
-    stub := ((PtrUInt(@TInterfacedObjectFakeRaw.ArmFakeStub) -
-             PtrUInt(P)) shr 2) - 2;
-    if stub and $ff000000 <> 0 then // paranoid check
-      EInterfaceFactory.RaiseUtf8('Compute_FakeVMT=%', [CardinalToHexShort(stub)]);
-    P^ := ($ea shl 24) + (stub and $00ffffff);
+    stub :=
+      ((PtrUInt(@TInterfacedObjectFakeRaw.ArmFakeStub) - PtrUInt(P)) shr 2) - 2;
+    P^ := ($ea shl 24) + (stub and $00ffffff); // note: stub may be < 0
     inc(P);
     P^ := $e320f000;
     inc(P);

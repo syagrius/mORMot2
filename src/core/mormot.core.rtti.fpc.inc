@@ -355,12 +355,12 @@ end;
 
 
 const
+  // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
+  UTF8_NAME: string[7] = 'RawUtf8';
   // FPC RTTI names integer type as "longint"
   INTEGER_NAME:  string[7] = 'Integer';
   // FPC RTTI names cardinal type as "longword"
   CARDINAL_NAME: string[8] = 'Cardinal';
-  // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
-  UTF8_NAME: string[7] = 'RawUtf8';
 
 function TRttiInfo.Name: PShortString;
 begin
@@ -1083,7 +1083,7 @@ begin
       p := pointer(s[i]);
       if p <> nil then
         // use mormot.core.unicode efficient conversion
-        t.AddNoJsonEscape(p, _lstrlen(RawByteString(p)), _lstrcp(RawByteString(p), cp));
+        t.AddNoJsonEscapeCP(p, _lstrlen(RawByteString(p)), _lstrcp(RawByteString(p), cp));
     end;
     t.SetText(u);
   finally

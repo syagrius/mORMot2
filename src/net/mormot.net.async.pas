@@ -79,8 +79,7 @@ type
   // - fSubRead/fSubWrite flags are set when Subscribe() has been called
   // - fInList indicates that ConnectionAdd() did register the connection
   // - fReadPending states that there is a pending event for this connection
-  // - fFromGC is set when the connection has been recycled from the GC list
-  // - note: better keep it as 8 items to fit in a byte (faster access)
+  // - note: better keep it up to 8 items to fit in a byte (faster access)
   TPollAsyncConnectionFlags = set of (
     fWasActive,
     fClosed,
@@ -90,8 +89,7 @@ type
     fSubWrite,
     {$endif USE_WINIOCP}
     fInList,
-    fReadPending,
-    fFromGC
+    fReadPending
   );
 
   /// abstract parent to store information about one TPollAsyncSockets connection
@@ -106,7 +104,7 @@ type
     /// low-level flags used by the state machine about this connection
     fFlags: TPollAsyncConnectionFlags;
     /// used internally e.g. for fRW[] or IOCP or to mark AddGC()
-    fInternalFlags: set of (ifWriteWait, ifInGC, ifSeparateWLock);
+    fInternalFlags: set of (ifWriteWait, ifFromGC, ifInGC, ifSeparateWLock);
     /// the current (reusable) read data buffer of this connection
     fRd: TRawByteStringBuffer;
     /// the current (reusable) write data buffer of this connection
@@ -128,7 +126,7 @@ type
     {$endif USE_WINIOCP}
     /// called when the instance is connected to a poll, after Create or Recycle
     // - i.e. at the end of TAsyncConnections.ConnectionNew(), when Handle is set
-    // - overriding this method is cheaper than its plain Create destructor
+    // - overriding this method is cheaper than its plain Create constructor
     // - default implementation does nothing
     procedure AfterCreate; virtual;
     /// called when the instance is about to be deleted from a poll
@@ -165,6 +163,9 @@ type
     function ReleaseReadMemoryOnIdle: PtrInt; virtual;
     function ReleaseWriteMemoryOnIdle: PtrInt; virtual;
   public
+    /// inherited classes should never call it, but reintroduce their own Create
+    // and override AfterCreate if needed
+    constructor Create; override;
     /// finalize the instance
     destructor Destroy; override;
     /// quick check if this instance seems still active, i.e. its Handle <> 0
@@ -210,7 +211,7 @@ type
   // generational garbage collector of TAsyncConnection instances
   TPollAsyncConnections = record
     Safe: TLightLock;
-    Count: integer;
+    Count: integer; // should be integer, not PtrInt
     Items: array of TPollAsyncConnection;
   end;
   PPollAsyncConnections = ^TPollAsyncConnections;
@@ -969,9 +970,8 @@ type
   protected
     fKeepAliveSec: TAsyncConnectionSec;
     fHeadersSec: TAsyncConnectionSec;
-    fPipelineEnabled: boolean;
-    fPipelinedWrite: boolean;
     fRequestFlags: THttpServerRequestFlags;
+    fPipelineState: set of (pEnabled, pWrite);
     fRespStatus: cardinal;
     fRequest: THttpServerRequest; // recycled between calls
     fConnectionOpaque: THttpServerConnectionOpaque; // two PtrUInt tags
@@ -981,11 +981,12 @@ type
     procedure AfterCreate; override;
     procedure BeforeDestroy; override;
     procedure HttpInit;
+      {$ifdef HASINLINE} inline; {$endif}
     // overriden to wait for background Write to finish
     procedure BeforeProcessRead; override;
     // redirect to fHttp.ProcessRead()
     function OnRead: TPollAsyncSocketOnReadWrite; override;
-    // DoRequest gathered all output in fWR buffer to be sent at once
+    // DoRequest gathered all output in fWr buffer to be sent at once
     function FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
     // redirect to fHttp.ProcessWrite()
     function AfterWrite: TPollAsyncSocketOnReadWrite; override;
@@ -1098,8 +1099,8 @@ type
       read fRequestClass write fRequestClass;
   published
     /// initial capacity of internal per-connection Headers buffer
-    // - 2 KB by default is within the mormot.core.fpcx64mm SMALL blocks limit
-    // so will use up to 3 locks before contention
+    // - the 2KB default is within the mormot.core.fpcx64mm SMALL blocks limit
+    // so will try up to 3 locks before contention
     property HeadersDefaultBufferSize: integer
       read fHeadersDefaultBufferSize write fHeadersDefaultBufferSize;
     /// maximum allowed size in bytes of incoming headers
@@ -1391,6 +1392,11 @@ implementation
 
 { TPollAsyncConnection }
 
+constructor TPollAsyncConnection.Create;
+begin
+  EAsyncConnections.RaiseUtf8('Unexpected %.Create: use AfterCreate', [self]);
+end;
+
 destructor TPollAsyncConnection.Destroy;
 begin
   // note: our light locks do not need any specific release
@@ -1483,15 +1489,13 @@ end;
 function TPollAsyncConnection.ReleaseReadMemoryOnIdle: PtrInt;
 begin
   // caller made fRWSafe[0].TryLock
-  result := fRd.Capacity; // returns number of bytes released
-  fRd.Clear; // fBuffer := ''
+  result := fRd.Clear; // returns number of bytes released
 end;
 
 function TPollAsyncConnection.ReleaseWriteMemoryOnIdle: PtrInt;
 begin
   // caller made fRWSafe[0/1].TryLock
-  result := fWr.Capacity;
-  fWr.Clear;
+  result := fWr.Clear;
 end;
 
 function TPollAsyncConnection.ReleaseMemoryOnIdle: PtrInt;
@@ -1507,10 +1511,11 @@ begin
       inc(result, ReleaseWriteMemoryOnIdle); // do it within the same lock
     fRWSafe[0].UnLock;
   end;
-  if (fWr.Buffer <> nil) and
+  if (ifSeparateWLock in fInternalFlags) and
+     (fWr.Buffer <> nil) and
      fRWSafe[1].TryLock then
   begin
-    ReleaseWriteMemoryOnIdle;
+    inc(result, ReleaseWriteMemoryOnIdle);
     fRWSafe[1].UnLock;
   end;
 end;
@@ -1859,7 +1864,7 @@ end;
 
 function TPollAsyncSockets.Write(connection: TPollAsyncConnection;
   data: pointer; datalen: integer; timeout: integer): boolean;
-var
+var // warning: datalen parameter should be defined as integer, not PtrInt
   P: PByte;
   previous: integer;
   res: TPollAsyncSocketOnReadWrite;
@@ -2019,7 +2024,8 @@ function TPollAsyncSockets.ProcessRead(Sender: TSynThread;
   const notif: TPollSocketResult): boolean;
 var
   connection: TPollAsyncConnection;
-  recved, added, retryms: integer;
+  recved: integer; // should be integer
+  added, retryms: integer;
   pse: TPollSocketEvents;
   res: TNetResult;
   start: Int64;
@@ -2111,7 +2117,9 @@ begin
             UnlockAndCloseConnection(false, connection, ToText(res)^);
             exit;
           end;
-          connection.fRd.Append(@temp, recved); // to reuse fRd.Buffer
+          if recved < 1024 then
+            connection.fRd.Reserve(1024); // minimal reusable fRd.Buffer
+          connection.fRd.Append(@temp, recved);
           inc(added, recved);
         until recved < SizeOf(temp);
         // process the received data by calling connection.OnRead
@@ -2172,7 +2180,7 @@ procedure TPollAsyncSockets.ProcessWrite(
 var
   connection: TPollAsyncConnection;
   buf: PByte;
-  buflen, w: integer;
+  buflen, w: integer; // warning: buflen should be integer, not PtrInt
   res: TPollAsyncSocketOnReadWrite;
   start: Int64;
 begin
@@ -2358,7 +2366,7 @@ constructor TAsyncConnection.Create(aOwner: TAsyncConnections;
   const aRemoteIP: TNetAddr);
 begin
   fOwner := aOwner;
-  inherited Create;
+  // inherited Create; use AfterCreate instead
   fFlags := [fWasActive]; // by definition
   fRemoteIP4 := aRemoteIP.IP4;
   aRemoteIP.IP(fRemoteIP, {localasvoid=}true);
@@ -2366,8 +2374,8 @@ end;
 
 procedure TAsyncConnection.Recycle(const aRemoteIP: TNetAddr);
 begin
-  fFlags := [fFromGC, fWasActive];
-  fInternalFlags := [];
+  fFlags := [fWasActive];
+  fInternalFlags := [ifFromGC];
   fRd.Reset;
   fWr.Reset;
   fRWSafe[0].Init;
@@ -2829,8 +2837,8 @@ begin
     finally
       fGC1.Safe.UnLock;
     end;
-    // wait 2 seconds until no pending event is in queue and free instances
-    n2 := OneGC(fGC2, tofree, fLastOperationMS, 2000);
+    // wait 10 seconds until no pending event is in queue and free instances
+    n2 := OneGC(fGC2, tofree, fLastOperationMS, 10000);
   finally
     fGC2.Safe.UnLock;
   end;
@@ -3070,6 +3078,8 @@ end;
 
 function TAsyncConnections.ConnectionCreate(aSocket: TNetSocket;
   const aRemoteIp: TNetAddr; out aConnection: TAsyncConnection): boolean;
+var
+  pool: PPollAsyncConnections;
 begin
   // you can override this class then call ConnectionNew
   if Terminated then
@@ -3077,17 +3087,17 @@ begin
   else
   begin
     aConnection := nil;
-    with fGC2 do // recycle 2nd gen instances e.g. for short-living HTTP/1.0
-      if (Count > 0) and
-         Safe.TryLock then
+    pool := @fGC2; // recycle 2nd gen instances e.g. for short-living HTTP/1.0
+    if (pool^.Count > 0) and
+       pool^.Safe.TryLock then
+    begin
+      if pool^.Count > 0 then
       begin
-        if Count > 0 then
-        begin
-          dec(Count);
-          aConnection := pointer(Items[Count]);
-        end;
-        Safe.UnLock;
+        dec(pool^.Count);
+        aConnection := pool^.Items[pool^.Count] as TAsyncConnection;
       end;
+      pool^.Safe.UnLock;
+    end;
     if aConnection = nil then
       aConnection := fConnectionClass.Create(self, aRemoteIp)
     else
@@ -3123,7 +3133,7 @@ begin
   if acoVerboseLog in fOptions then
     DoLog(sllTrace, 'ConnectionNew % sock=% count=% gc=%',
       [aConnection, pointer(aSocket), fConnectionCount,
-       fFromGC in aConnection.fFlags], self);
+       ifFromGC in aConnection.fInternalFlags], self);
   result := true; // indicates aSocket owned by the pool
 end;
 
@@ -3518,13 +3528,14 @@ begin
         exclude(c.fFlags, fWasActive);
         c.fLastOperation := sec;
       end
-      else
+      else // inactive connection
       begin
-        // inactive connection: check if some events should be triggerred
-        // e.g. TWebSocketAsyncConnection would send ping/pong heartbeats
+        // check if some working memory could be released
         if (gc <> 0) and
            (c.fLastOperation < gc) then
           inc(gced, c.ReleaseMemoryOnIdle); // quick non virtual method
+        // check if some events should be triggerred
+        // e.g. TWebSocketAsyncConnection would send ping/pong heartbeats
         if (allowed <> 0) and
            (c.fLastOperation < allowed) then
           ObjArrayAddCount(idle, c, idles); // calls below, outside the lock
@@ -3541,7 +3552,7 @@ begin
     try
       c := idle[i];
       if c.OnLastOperationIdle(sec) then
-        inc(notified); // e.g. TWebSocketAsyncConnection ping was sent
+        inc(notified); // e.g. a TWebSocketAsyncConnection ping was sent
       if Terminated then
         break;
     except
@@ -3618,7 +3629,7 @@ begin
     // initial accept() will be directly redirected to atpReadPending threads
     // with no initial fRead.SubScribe() to speed up e.g. HTTP/1.0
     fSockets.fRead.AddOnePending(TPollSocketTag(Sender), [pseRead],
-      {aSearchExisting=} false{fFromGC in Sender.fFlags});
+      {aSearchExisting=} false{ifFromGC in Sender.fInternalFlags});
     ThreadPollingWakeup(1);
     result := true; // no Subscribe() -> delayed in atpReadPending if needed
   end
@@ -3682,7 +3693,7 @@ end;
 procedure TAsyncServer.Shutdown;
 var
   i: PtrInt;
-  len: integer;
+  len: integer; // should be integer
   touchandgo: TNetSocket; // paranoid ensure Accept() is released
   ev: TNetEvents;
   host, port: RawUtf8;
@@ -3799,7 +3810,7 @@ var
   connection: TAsyncConnection;
   start: Int64;
   bytes: cardinal;
-  len: integer;
+  len: integer; // should be integer
   sin: TNetAddr;
 begin
   // Accept() incoming connections
@@ -4052,10 +4063,10 @@ end;
 
 function THttpAsyncConnection.ReleaseReadMemoryOnIdle: PtrInt;
 begin
+  // caller made fRWSafe[0].TryLock
   result := inherited ReleaseReadMemoryOnIdle + // clean fRd memory
-            fHttp.Head.Capacity + fHttp.Process.Capacity;
-  fHttp.Head.Clear;
-  fHttp.Process.Clear;
+            fHttp.Head.Clear +
+            fHttp.Process.Clear;
 end;
 
 procedure THttpAsyncConnection.OnAfterWriteSubscribe;
@@ -4151,7 +4162,7 @@ end;
 function THttpAsyncClientConnection.AfterWrite: TPollAsyncSocketOnReadWrite;
 var
   data: PByte;
-  datalen: integer;
+  datalen: integer; // warning: datalen should be defined as integer, not PtrInt
 begin
   repeat // just to avoid a goto
     result := soClose; // e.g. unexpected state
@@ -4175,6 +4186,7 @@ begin
               break; // e.g. TLS handshake failure
             end;
           // compute the request command and headers
+          fHttp.Head.Reset;
           fHttp.Head.Append([
             fHttp.CommandMethod, ' /', fHttp.CommandUri, ' HTTP/1.1'#13#10 +
             'Host: ', fHttp.Host, #13#10 +
@@ -4348,21 +4360,26 @@ end;
 
 { THttpAsyncServerConnection }
 
+procedure THttpAsyncServerConnection.HttpInit;
+begin
+  fHttp.ProcessInit; // ready to process a new HTTP request
+  fHeadersSec := 0;
+  fBytesRecv := 0; // reset stats
+  fBytesSend := 0;
+end;
+
 procedure THttpAsyncServerConnection.AfterCreate;
 begin
   fServer := (fOwner as THttpAsyncConnections).fAsyncServer;
-  if fServer <> nil then
-  begin
-    fHttp.Interning := fServer.fInterning;
-    fHttp.Compress := fServer.fCompress;
-    fHttp.CompressAcceptEncoding := fServer.fCompressAcceptEncoding;
-    fHttp.Options := fServer.fDefaultRequestOptions;
-    if fServer.fServerKeepAliveTimeOutSec <> 0 then
-      fKeepAliveSec := fServer.Async.fLastOperationSec +
-                       fServer.fServerKeepAliveTimeOutSec;
-    if hsoEnablePipelining in fServer.Options then
-      fPipelineEnabled := true;
-  end;
+  fHttp.Interning := fServer.fInterning;
+  fHttp.Compress := fServer.fCompress;
+  fHttp.CompressAcceptEncoding := fServer.fCompressAcceptEncoding;
+  fHttp.Options := fServer.fDefaultRequestOptions;
+  if fServer.fServerKeepAliveTimeOutSec <> 0 then
+    fKeepAliveSec := fServer.Async.fLastOperationSec +
+                     fServer.fServerKeepAliveTimeOutSec;
+  if hsoEnablePipelining in fServer.Options then
+    fPipelineState := [pEnabled];
   HttpInit;
   // inherited AfterCreate; // void parent method
 end;
@@ -4372,9 +4389,12 @@ begin
   inherited Recycle(aRemoteIP);
   fHttp.Reset;
   if fServer <> nil then
+  begin
     if fServer.fServerKeepAliveTimeOutSec <> 0 then
       fKeepAliveSec := fServer.Async.fLastOperationSec +
                        fServer.fServerKeepAliveTimeOutSec;
+    fPipelineState := fPipelineState * [pEnabled];
+  end;
 end;
 
 function THttpAsyncServerConnection.GetConnectionOpaque: PHttpServerConnectionOpaque;
@@ -4396,33 +4416,24 @@ begin
   // inherited BeforeDestroy; // void parent method
 end;
 
-procedure THttpAsyncServerConnection.HttpInit;
-begin
-  fHttp.ProcessInit; // ready to process this HTTP request
-  fHttp.Head.Reserve(fServer.HeadersDefaultBufferSize); // reusable 2KB buffer
-  fHeadersSec := 0;
-  fBytesRecv := 0; // reset stats
-  fBytesSend := 0;
-end;
-
 function THttpAsyncServerConnection.FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
 var
   P: PByte;
-  PLen: integer; // should be exact integer, not PtrInt
+  PLen: integer; // warning: PLen should be defined as integer, not PtrInt
 begin
   result := soContinue;
-  fPipelinedWrite := false;
-  PLen := fWR.Len;
+  exclude(fPipelineState, pWrite);
+  PLen := fWr.Len;
   if PLen = 0 then
     exit;
-  P := fWR.Buffer;
+  P := fWr.Buffer;
   if not fOwner.fSockets.RawWrite(self, P, PLen) or
      (PLen <> 0) then // PLen<>0 if OS sending buffer is full
   begin
     fOwner.DoLog(sllWarning, 'OnRead: pipelined send error', [], self);
     result := soClose;
   end;
-  fWR.Reset;
+  fWr.Reset; // we could reuse the buffer
 end;
 
 procedure THttpAsyncServerConnection.BeforeProcessRead;
@@ -4463,19 +4474,19 @@ begin
     previous := fHttp.State;
     // use the HTTP state machine to asynchronously parse fRd input
     result := soContinue;
+    if fHttp.Head.Buffer = nil then
+     fHttp.Head.Reserve(fServer.HeadersDefaultBufferSize); // preallocate once
     st.P := fRd.Buffer;
     st.Len := fRd.Len;
     // process one request (or several in case of pipelined input/output)
-    fPipelinedWrite := false;
     while fHttp.ProcessRead(st, {returnOnStateChange=}false) do
     begin
       // detect pipelined GET input
-      if fPipelineEnabled and
-         (st.Len <> 0) and // there are still data in the input read buffer
-         (not fPipelinedWrite) and
+      if (st.Len <> 0) and // there are still data in the input read buffer
+         (fPipelineState = [pEnabled]) and // no pWrite yet
          (fKeepAliveSec > 0) and
          not (hfConnectionClose in fHttp.HeaderFlags) then
-        fPipelinedWrite := true; // DoRequest will gather output in fWR
+        include(fPipelineState, pWrite); // DoRequest will gather output in fWr
       // handle main steps change
       case fHttp.State of
         hrsGetBodyChunkedHexFirst,
@@ -4493,9 +4504,10 @@ begin
           result := soClose;
         end;
       end;
-      if fPipelinedWrite then
+      if pWrite in fPipelineState then
       begin
-        if fWR.Len > 128 shl 10 then // flush more than 128KB of pending output
+        if fWr.Len > 128 shl 10 then
+          // flush when got more than 128KB of pending output
           if FlushPipelinedWrite <> soContinue then
             result := soClose;
         if (result <> soContinue) or
@@ -4507,7 +4519,8 @@ begin
         break; // rejected, authenticated, async or upgraded
       previous := fHttp.State;
     end;
-    if fPipelinedWrite then
+    // no more available input
+    if pWrite in fPipelineState then // time to flush the pipelined responses
        if FlushPipelinedWrite <> soContinue then
          result := soClose;
     if fHttp.State = hrsGetHeaders then
@@ -4638,7 +4651,7 @@ end;
 function THttpAsyncServerConnection.DoReject(
   status: integer): TPollAsyncSocketOnReadWrite;
 var
-  len: integer;
+  len: integer; // should not be PtrInt
 begin
   if fServer.SetRejectInCommandUri(fHttp, fConnectionID, status) then
     result := soContinue
@@ -4771,7 +4784,7 @@ function THttpAsyncServerConnection.DoResponse(
   res: TPollAsyncSocketOnReadWrite): TPollAsyncSocketOnReadWrite;
 var
   output: PRawByteStringBuffer;
-  sent: integer;
+  sent: integer; // warning: sent should be defined as integer, not PtrInt
   p: PByte;
 begin
   result := res;
@@ -4780,12 +4793,7 @@ begin
     fServer.fAsync.fSockets.fSendBufferSize);
   // SetupResponse() set fHttp.State as hrsSendBody or hrsResponseDone
   fRespStatus := fRequest.RespStatus;
-  // release memory of all COW fields ASAP if HTTP header was interned
-  if fHttp.Interning = nil then
-    FreeAndNil(fRequest) // more efficient to create a new instance
-  else
-    fRequest.CleanupInstance; // let all headers have refcount=1
-  if fPipelinedWrite then
+  if pWrite in fPipelineState then
     // we are in HTTP pipelined mode: input stream had several requests
     if fHttp.State <> hrsResponseDone then
     begin
@@ -4798,10 +4806,10 @@ begin
     end
     else
     begin
-      fWr.Append(output.Buffer, output.Len); // append to the fWR output buffer
+      fWr.Append(output.Buffer, output.Len);
       result := AfterWrite; // be ready for the next pipelined request
     end
-  else
+  else // regular non-pipelined mode
     // now try socket send() with headers (and small body if hrsResponseDone)
     if fHttp.State = hrsResponseDone then
     begin

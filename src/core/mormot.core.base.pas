@@ -828,7 +828,7 @@ procedure FastAssignNew(var d; s: pointer = nil);
 /// internal function to assign any constant or ref-counted AnsiString/RawUtf8
 // - caller should have tested that pointer(d) <> nil
 procedure FastAssignNewNotVoid(var d; s: pointer); overload;
-  {$ifndef FPC_CPUX64}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifndef FPC_CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// internal function used by FastSetString/FastSetStringCP
 function FastNewString(len, codepage: PtrInt): PAnsiChar;
@@ -4646,7 +4646,7 @@ begin
   if NoDuplicates then
   begin
     result := Hash128Index(pointer(guids), length(guids), @guid);
-    if result>=0 then
+    if result >= 0 then
       exit;
   end;
   result := length(guids);
@@ -4738,7 +4738,7 @@ begin // O(1) branchless algorithm for 32-bit values
   result := (result or (result shr 16)) + 1;
 end;
 
-{$ifndef FPC_ASMX64}
+{$ifndef FPC_CPUX64} // dedicated asm on x86_64 only
 
 procedure FastAssignNew(var d; s: pointer);
 var
@@ -4766,7 +4766,7 @@ begin
     FreeMem(sr);
 end;
 
-{$endif FPC_ASMX64}
+{$endif FPC_CPUX64}
 
 function FastNewString(len, codepage: PtrInt): PAnsiChar;
 var
@@ -4894,7 +4894,7 @@ begin
     FakeLength(s, len);
 end;
 
-procedure FakeSetLength(var s: RawByteString; len: PtrInt); overload;
+procedure FakeSetLength(var s: RawByteString; len: PtrInt);
 begin
   if len <= 0 then
     FastAssignNew(s)
@@ -7896,7 +7896,7 @@ begin
     result := PtrArrayAdd(aPtrArray, aItem, aPtrArrayCount);
 end;
 
-function PtrArrayAddFrom(var aDestArray; const aSourceArray): PtrInt; overload;
+function PtrArrayAddFrom(var aDestArray; const aSourceArray): PtrInt;
 var
   n: PtrInt;
   s: TPointerDynArray absolute aSourceArray;
@@ -12768,22 +12768,17 @@ begin
 end;
 
 function TRawByteStringStream.Write(const Buffer; Count: Longint): Longint;
+var
+  needed: PtrInt;
 begin
   result := Count;
-  if result > 0 then
-    if fDataString = '' then // inlined FastSetString()
-    begin
-      pointer(fDataString) := FastNewString(result, CP_UTF8);
-      MoveFast(Buffer, pointer(fDataString)^, result);
-      fPosition := result;
-    end
-    else
-    begin
-      if fPosition + result > length(fDataString) then
-        SetLength(fDataString, fPosition + result); // resize
-      MoveFast(Buffer, PByteArray(fDataString)[fPosition], result);
-      inc(fPosition, result);
-    end;
+  if result <= 0 then
+    exit;
+  needed := fPosition + result;
+  if needed > length(fDataString) then
+    SetLength(fDataString, needed); // resize
+  MoveFast(Buffer, PByteArray(fDataString)[fPosition], result);
+  fPosition := needed;
 end;
 
 procedure TRawByteStringStream.GetAsText(StartPos, Len: PtrInt; var Text: RawUtf8);

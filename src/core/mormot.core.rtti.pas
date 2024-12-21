@@ -801,7 +801,7 @@ type
   /// main entry-point wrapper to access RTTI for a given pascal type
   // - as returned by the TypeInfo() low-level compiler function
   // - other RTTI objects can be computed from a pointer to this structure
-  // - user types defined as an alias don't have this type information:
+  // - by desgin, user types defined as an alias don't have its own TypeInfo():
   // ! type
   // !   TNewType = TOldType;
   // here TypeInfo(TNewType) = TypeInfo(TOldType)
@@ -1337,7 +1337,7 @@ type
   {$ifdef HASNOSTATICRTTI}
   /// enough Delphi 7/2007 RTTI fields to mimic TRttiInfo.RecordManagedFields
   TFakeTypeInfo = packed record
-    Kind: TTypeKind;
+    Kind: TRttiKind;
     case integer of
       4: (
         Name4: string[4];
@@ -6804,8 +6804,7 @@ begin
   Dest^ := result;
 end;
 
-procedure DynArrayCopy(Dest, Source: PPointer; Info: PRttiInfo;
-  SourceExtCount: PInteger);
+procedure DynArrayCopy(Dest, Source: PPointer; Info: PRttiInfo; SourceExtCount: PInteger);
 var
   n, siz: PtrInt;
   nfo: PRttiInfo;
@@ -6851,14 +6850,14 @@ begin
     DynArrayEnsureUnique(@Value, TypeInfo(TIntegerDynArray));
 end;
 
-procedure EnsureUnique(var Value: TRawUtf8DynArray); overload;
+procedure EnsureUnique(var Value: TRawUtf8DynArray);
 begin
   if (Value <> nil) and
      (PDACnt(PAnsiChar(Value) - _DACNT)^ > 1) then
     DynArrayEnsureUnique(@Value, TypeInfo(TRawUtf8DynArray));
 end;
 
-procedure EnsureUnique(var Value: TVariantDynArray); overload;
+procedure EnsureUnique(var Value: TVariantDynArray);
 begin
   if (Value <> nil) and
      (PDACnt(PAnsiChar(Value) - _DACNT)^ > 1) then
@@ -9176,7 +9175,7 @@ end;
 
 function TRttiCustom.ClassNewInstance: pointer;
 begin
-  if fCache.Kind = rkClass then
+  if fCache.Kind = rkClass then // would work also for rkInterface
     result := TRttiCustomNewInstance(fCache.NewInstance)(self)
   else
     result := nil;
@@ -9889,23 +9888,23 @@ var
   info: PRttiInfo;
 begin
   info := PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^;
-  if info <> nil then
-    result := DoRegister(info)
-  else
+  if info <> nil then // always available on FPC and Delphi 2010+
   begin
-    // generate fake RTTI for classes without {$M+}, e.g. TObject or Exception
-    RegisterSafe.Lock;
-    try
-      result := FindClass(ObjectClass); // search again (for thread safety)
-      if result <> nil then
-        exit; // already registered in the background
-      result := GlobalClass.Create;
-      result.FromRtti(nil); // just set rcfWithoutRtti flag
-      result.SetValueClass(ObjectClass, nil); // before NoRttiSetAndRegister()
-      result.NoRttiSetAndRegister(ptClass, ToText(ObjectClass));
-    finally
-      RegisterSafe.UnLock;
-    end;
+    result := DoRegister(info);
+    exit;
+  end;
+  // generate fake RTTI for classes without {$M+} on Delphi 7/2007
+  RegisterSafe.Lock;
+  try
+    result := FindClass(ObjectClass); // search again (for thread safety)
+    if result <> nil then
+      exit; // already registered in the background
+    result := GlobalClass.Create;
+    result.FromRtti(nil); // just set rcfWithoutRtti flag
+    result.SetValueClass(ObjectClass, nil); // before NoRttiSetAndRegister()
+    result.NoRttiSetAndRegister(ptClass, ToText(ObjectClass));
+  finally
+    RegisterSafe.UnLock;
   end;
 end;
 
