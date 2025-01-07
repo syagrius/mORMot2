@@ -566,8 +566,8 @@ type
   TGuidShortString = string[38];
 
   /// cross-compiler type used for string length
-  // - FPC uses PtrInt/SizeInt, Delphi uses longint even on CPU64
-  TStrLen = {$ifdef FPC} SizeInt {$else} longint {$endif};
+  // - FPC uses PtrInt/SizeInt, Delphi uses 32-bit integer even on CPU64
+  TStrLen = {$ifdef FPC} SizeInt {$else} integer {$endif};
   /// pointer to cross-compiler type used for string length
   PStrLen = ^TStrLen;
   
@@ -584,12 +584,12 @@ type
   PStrCnt = ^TStrCnt;
 
   /// cross-compiler type used for dynarray reference counter
-  // - FPC uses PtrInt/SizeInt, Delphi uses longint even on CPU64
+  // - FPC uses PtrInt/SizeInt, Delphi uses 32-bit even on CPU64
   TDACnt = {$ifdef DACNT32} integer {$else} SizeInt {$endif};
   /// pointer to cross-compiler type used for dynarray reference counter
   PDACnt = ^TDACnt;
 
-  /// cross-compiler return type of IUnknown._AddRef/_Release methods
+  /// cross-compiler return exact type of IUnknown._AddRef/_Release methods
   // - used to reduce the $ifdef when implementing interfaces in Delphi and FPC
   TIntCnt = {$ifdef FPC} longint {$else} integer {$endif};
   /// cross-compiler return type of IUnknown.QueryInterface method
@@ -610,7 +610,7 @@ type
         {$endif CPU64}
         {$endif STRCNT32}
         {$endif HASCODEPAGE}
-        refCnt: TStrCnt; // =SizeInt on older FPC, =longint since FPC 3.4
+        refCnt: TStrCnt; // =SizeInt on older FPC, =integer since FPC 3.4
         length: TStrLen;
       );
     {$ifdef HASCODEPAGE}
@@ -644,9 +644,9 @@ type
     elemSize: Word;
   {$endif HASCODEPAGE}
     /// string reference count (basic garbage memory mechanism)
-    refCnt: TStrCnt; // 32-bit longint with Delphi
+    refCnt: TStrCnt; // 32-bit integer with Delphi
     /// equals length(s) - i.e. size in AnsiChar/WideChar, not bytes
-    length: TStrLen; // 32-bit longint with Delphi
+    length: TStrLen; // 32-bit integer with Delphi
   end;
 
   /// map the Delphi/FPC dynamic array header (stored before each instance)
@@ -656,7 +656,7 @@ type
     _Padding: cardinal;
     {$endif}
     /// dynamic array reference count (basic garbage memory mechanism)
-    refCnt: TDACnt; // 32-bit longint with Delphi
+    refCnt: TDACnt; // 32-bit integer with Delphi
     /// length in element count
     // - size in bytes = length*ElemSize
     length: TDALen; // PtrInt/NativeInt
@@ -2778,13 +2778,13 @@ function Rdtsc: Int64;
 
 /// compatibility function, to be implemented according to the running CPU
 // - expect the same result as the homonymous Win32 API function, i.e.
-// returns I + 1, and store I + 1 within I in an atomic/tread-safe way
+// returns I + 1, and store I + 1 within I in an atomic/thread-safe way
 // - FPC will define this function as intrinsic for non-Intel CPUs
 function InterlockedIncrement(var I: integer): integer;
 
 /// compatibility function, to be implemented according to the running CPU
 // - expect the same result as the homonymous Win32 API function, i.e.
-// returns I - 1, and store I - 1 within I in an atomic/tread-safe way
+// returns I - 1, and store I - 1 within I in an atomic/thread-safe way
 // - FPC will define this function as intrinsic for non-Intel CPUs
 function InterlockedDecrement(var I: integer): integer;
 
@@ -3431,6 +3431,8 @@ type
     /// add two AnsiChar just after another Add() within trailing 16 bytes margin
     procedure AddDirect(const c1, c2: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// append an unsigned number as text to the internal buffer
+    procedure AddU(v: PtrUInt);
     /// finalize the Add() temporary storage, and create a RawByteString from it
     procedure Done(var Dest; CodePage: cardinal = CP_RAWBYTESTRING); overload;
   end;
@@ -3888,9 +3890,9 @@ const
   {$endif ISDELPHI}
 
   /// those TVarData.VType values are meant to be direct values
-  VTYPE_SIMPLE = [varEmpty..varDate, varBoolean, varShortInt..varWord64,
-    {$ifdef OSWINDOWS} varOleInt, varOleUInt, varOlePAnsiChar, varOlePWideChar,
-      varOleFileTime, {$endif OSWINDOWS} varUnknown];
+  VTYPE_SIMPLE = [varEmpty..varDate, varBoolean, varShortInt..varWord64
+    {$ifdef OSWINDOWS} , varOleInt, varOleUInt, varOlePAnsiChar, varOlePWideChar,
+      varOleFileTime {$endif OSWINDOWS}];
   /// those TVarData.VType values are meant to be number values and need no escape
   VTYPE_NUMERIC = [varSmallInt .. varDouble, varCurrency, varBoolean .. varOleUInt];
   /// bitmask used by our inlined VarClear() to avoid unneeded VarClearProc()
@@ -4434,7 +4436,7 @@ uses
 
 procedure VarClearAndSetType(var v: variant; vtype: integer);
 begin
-  if TSynVarData(v).VType and VTYPE_STATIC <> 0 then
+  if (TSynVarData(v).VType and VTYPE_STATIC) <> 0 then
     VarClearProc(TVarData(v));
   TSynVarData(v).VType := vtype;
 end;
@@ -4442,7 +4444,7 @@ end;
 {$ifdef HASINLINE}
 procedure VarClear(var v: variant); // defined here for proper inlining
 begin
-  if TSynVarData(v).VType and VTYPE_STATIC <> 0 then
+  if (TSynVarData(v).VType and VTYPE_STATIC) <> 0 then
     VarClearProc(TVarData(v))
   else
     TSynVarData(v).VType := 0;
@@ -11380,6 +11382,15 @@ begin
   inc(added, 2); // append directly within SYNTEMPTRAIL bytes
 end;
 
+procedure TSynTempBuffer.AddU(v: PtrUint);
+var
+  t: array[0..23] of AnsiChar;
+  P: PAnsiChar;
+begin
+  P := StrUInt32(@t[23], v);
+  Add(P, @t[23] - P);
+end;
+
 procedure TSynTempBuffer.Done(var Dest; CodePage: cardinal);
 begin
   FastSetStringCP(Dest, buf, added, CodePage);
@@ -12065,7 +12076,7 @@ begin
   typ := typ and cardinal(not varByRef);
   case typ of
     varVariant:
-      if integer(PVarData(TVarData(Source).VPointer)^.VType) in VTYPE_SIMPLE then
+      if cardinal(PVarData(TVarData(Source).VPointer)^.VType) in VTYPE_SIMPLE then
       begin
         Dest := PVarData(TVarData(Source).VPointer)^;
         result := true;

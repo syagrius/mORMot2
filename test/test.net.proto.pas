@@ -99,14 +99,13 @@ begin
   Check(not m.Init(''));
   Check(not m.Init('z'));
   Check(m.Init('0'));
-  Check(m.PacketType = sioOpen);
+  Check(m.PacketType = sioConnect);
   Check(m.NameSpaceIs('/'));
-  CheckEqual(m.Data, nil);
   Check(m.DataIs(''));
   CheckEqual(m.ID, 0);
   CheckEqual(m.BinaryAttachment, 0);
   Check(m.Init('0/test,{}'));
-  Check(m.PacketType = sioOpen);
+  Check(m.PacketType = sioConnect);
   Check(m.NameSpaceIs('/test'));
   Check(m.DataIs('{}'));
   CheckEqual(m.ID, 0);
@@ -114,7 +113,6 @@ begin
   Check(m.Init('1'));
   Check(m.PacketType = sioDisconnect);
   Check(m.NameSpaceIs('/'));
-  CheckEqual(m.Data, nil);
   Check(m.DataIs(''));
   CheckEqual(m.ID, 0);
   CheckEqual(m.BinaryAttachment, 0);
@@ -123,12 +121,11 @@ begin
   Check(m.NameSpaceIs('/admin'));
   Check(not m.NameSpaceIs('/admi'));
   Check(not m.NameSpaceIs('/admiN'));
-  CheckEqual(m.Data, nil);
   Check(m.DataIs(''));
   CheckEqual(m.ID, 0);
   CheckEqual(m.BinaryAttachment, 0);
   Check(m.Init('0/admin,{"sid":"oSO0OpakMV_3jnilAAAA"}'));
-  Check(m.PacketType = sioOpen);
+  Check(m.PacketType = sioConnect);
   Check(m.NameSpaceIs('/admin'));
   Check(m.DataIs('{"sid":"oSO0OpakMV_3jnilAAAA"}'));
   CheckEqual(m.ID, 0);
@@ -851,7 +848,7 @@ begin
     ip := DnsLookup('synopse.info');
     if ip = '' then
     begin
-      Sleep(10); // some DNS servers may fail at first: wait a little
+      Sleep(200); // some DNS servers may fail at first: wait a little
       ip := DnsLookup('synopse.info');
     end;
     rev := '62.210.254.173';
@@ -861,7 +858,7 @@ begin
     rev := '62-210-254-173.rev.poneytelecom.eu';
     if DnsReverseLookup(ip) <> rev then
     begin
-      Sleep(10); // wait a little
+      Sleep(200); // wait a little
       CheckEqual(DnsReverseLookup(ip), rev, 'rev');
     end
     else

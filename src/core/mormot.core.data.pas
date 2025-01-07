@@ -2108,7 +2108,7 @@ type
       const ExceptionArgs: array of const;
       aNewIndex: PPtrInt = nil): pointer; overload;
     /// ensure a given element name is unique, then add it to the array
-    // - just a wrapper to AddUniqueName(aName,'',[],aNewIndex)
+    // - just a wrapper to AddUniqueName(aName, '', [], aNewIndex)
     function AddUniqueName(const aName: RawUtf8;
       aNewIndex: PPtrInt = nil): pointer; overload;
     /// search for a given element name, make it unique, and add it to the array
@@ -7065,6 +7065,8 @@ procedure TDynArray.ItemCopy(Source, Dest: pointer);
 var
   nfo: TRttiCustom;
 begin
+  if Source = Dest then
+    exit;
   nfo := fInfo.ArrayRtti;
   if (nfo <> nil) and // inlined nfo.ValueCopy() to avoid MoveFast() twice
      Assigned(nfo.Copy) then // managed or 2/4/8..32 bytes move (also T*ObjArray)
@@ -7329,19 +7331,19 @@ function TDynArray.ItemMoveTo(index: PtrInt; Dest: pointer): boolean;
 var
   p: pointer;
 begin
+  result := false;
   p := ItemPtr(index);
   if (p = nil) or
      (Dest = nil) then
-  begin
-    result := false;
     exit;
-  end;
+  result := true;
+  if p = Dest then
+    exit;
   if (fInfo.ArrayRtti <> nil) and
      not fNoFinalize then
     fInfo.ArrayRtti.ValueFinalize(Dest); // also handle T*ObjArray
   MoveFast(p^, Dest^, fInfo.Cache.ItemSize);
   FillCharFast(p^, fInfo.Cache.ItemSize, 0);
-  result := true;
 end;
 
 procedure TDynArray.ItemCopyFrom(Source: pointer; index: PtrInt;
@@ -7350,12 +7352,12 @@ var
   p: pointer;
 begin
   p := ItemPtr(index);
-  if p <> nil then
-  begin
-    if ClearBeforeCopy then // safer if Source is a copy of p^
-      ItemClear(p);
-    ItemCopy(Source, p);
-  end;
+  if (p = nil) or
+     (p = Source) then
+    exit;
+  if ClearBeforeCopy then // safer if Source is a copy of p^
+    ItemClear(p);
+  ItemCopy(Source, p);
 end;
 
 {$ifdef CPU64}
@@ -8734,10 +8736,11 @@ begin
   arrayptr := PPtrInt(arrayptr)^;
   if extcount <> 0 then
   begin
-    // fCountP^ as external capacity
+    // fCountP^ as external length
     oldlen := PInteger(extcount)^;
     delta := aCount - oldlen;
-    if delta = 0 then
+    if (delta = 0) and
+       (aCount <> 0) then
       exit;
     PInteger(extcount)^ := aCount; // store new length
     if arrayptr <> 0 then

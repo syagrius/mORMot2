@@ -516,12 +516,16 @@ var
   /// TDocVariant options to be used for case-sensitive TSynNameValue-like
   // storage, with optional extended JSON syntax serialization
   // - consider using JSON_FAST_EXTENDED for case-insensitive objects
+  // - JSON_NAMEVALUE[false] equals JSON_[mNameValue]
+  // - JSON_NAMEVALUE[true] equals JSON_[mNameValueExtended]
   JSON_NAMEVALUE: TDocVariantOptionsBool;
 
   /// TDocVariant options to be used for case-sensitive TSynNameValue-like
   // storage, RawUtf8 interning and optional extended JSON syntax serialization
   // - consider using JSON_FAST_EXTENDED for case-insensitive objects,
   // or JSON_NAMEVALUE[] if you don't expect names and values interning
+  // - JSON_NAMEVALUEINTERN[false] equals JSON_[mNameValueIntern]
+  // - JSON_NAMEVALUEINTERN[true] equals JSON_[mNameValueInternExtended]
   JSON_NAMEVALUEINTERN: TDocVariantOptionsBool;
 
   // - JSON_OPTIONS[false] is e.g. _Json() and _JsonFmt() functions default
@@ -555,7 +559,7 @@ type
   // be a good idea to use such a pointer via DocVariantData(aVariant)^ or
   // _Safe(aVariant)^ instead of TDocVariantData(aVariant),
   // if you are not sure how aVariant was allocated (may be not _Obj/_Json)
-  // - note: due to a local variable lifetime change in Delphi 11, don't use
+  // - note: due to a local variable lifetime change since Delphi 11, don't use
   // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
   // call _DV() and a local TDocVariantData instead of a PDocVariantData
   PDocVariantData = ^TDocVariantData;
@@ -2346,12 +2350,13 @@ function ToText(kind: TDocVariantKind): PShortString; overload;
 /// direct access to a TDocVariantData from a given variant instance
 // - return a pointer to the TDocVariantData corresponding to the variant
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
-// - raise an EDocVariant exception if the instance is not a TDocVariant
+// - raise an EDocVariant exception if the instance is not a TDocVariant - use
+// _Safe() or _SafeObject/_SafeArray() to avoid an exception
 // - the following direct trans-typing may fail, e.g. for varByRef value:
 // ! TDocVariantData(aVarDoc.ArrayProp).Add('new item');
 // - so you can write the following:
 // ! DocVariantData(aVarDoc.ArrayProp).AddItem('new item');
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function DocVariantData(const DocVariant: variant): PDocVariantData;
@@ -2384,7 +2389,7 @@ const
 // !   dv := _Safe(aDocVariant);
 // !   for ndx := 0 to dv.Count-1 do // here Count=0 for the "fake" result
 // !     writeln(dv.Names[ndx]);
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant): PDocVariantData; overload;
@@ -2395,7 +2400,7 @@ function _Safe(const DocVariant: variant): PDocVariantData; overload;
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
 // - will check the supplied document kind, i.e. either dvObject or dvArray and
 // raise a EDocVariant exception if it does not match
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant;
@@ -2408,7 +2413,7 @@ function _Safe(const DocVariant: variant;
 // (e.g. when retrieved by late binding)
 // - return false if the supplied Value is not a TDocVariant, but e.g. a string,
 // a number or another type of custom variant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant; out DV: PDocVariantData): boolean; overload;
@@ -2418,7 +2423,7 @@ function _Safe(const DocVariant: variant; out DV: PDocVariantData): boolean; ove
 // - return true and set DV with a pointer to the TDocVariantData
 // corresponding to the variant instance, if it is a dvArray
 // - return false if the supplied Value is not an array TDocVariant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _SafeArray(const Value: variant; out DV: PDocVariantData): boolean; overload;
@@ -2432,24 +2437,24 @@ function _SafeArray(const Value: variant; ExpectedCount: integer;
 // - return true and set DV with a pointer to the TDocVariantData
 // corresponding to the variant instance, if it is a dvObject
 // - return false if the supplied Value is not an object TDocVariant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _SafeObject(const Value: variant; out DV: PDocVariantData): boolean;
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant): TDocVariantData; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant;
   ExpectedKind: TDocVariantKind): TDocVariantData; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant;
   var DV: TDocVariantData): boolean; overload;
   {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
@@ -5665,6 +5670,19 @@ function DocVariantToObject(var doc: TDocVariantData; obj: TObject;
 var
   p: PtrInt;
   prop: PRttiCustomProp;
+  dv: PDocVariantData;
+
+  procedure DoComplex;
+  var
+    json: RawUtf8;
+    valid: boolean;
+  begin
+    json := dv^.ToJson;
+    if (json <> '') and
+       (json <> 'null')  then
+      PropertyFromJson(prop, obj, pointer(json), valid, JSONPARSER_TOLERANTOPTIONS);
+  end;
+
 begin
   if doc.IsObject and
      (doc.Count > 0) and
@@ -5676,7 +5694,10 @@ begin
     begin
       prop := objRtti.Props.Find(doc.Names[p]);
       if prop <> nil then
-        prop^.Prop.SetValue(obj, doc.Values[p]);
+        if not prop^.Prop.SetValue(obj, doc.Values[p]) then
+          if (prop^.Value.Kind = rkClass) and
+             _Safe(doc.Values[p], dv) then
+            DoComplex;
     end;
     result := true;
   end

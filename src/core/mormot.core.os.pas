@@ -1734,6 +1734,8 @@ type
   /// Windows handle for a Thread - for cross-platform/cross-compiler clarity
   // - note that on POSIX TThreadID is a pointer and not a 32-bit file handle
   TThreadID = DWORD;
+  /// a TThreadID-sized unsigned integer, to ease TThreadID alignment
+  TThreadIDInt = cardinal;
 
   /// the known Windows Registry Root key used by TWinRegistry.ReadOpen
   TWinRegistryRoot = (
@@ -2788,6 +2790,10 @@ procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 {$ifdef OSPOSIX}
+
+type
+  /// a TThreadID-sized unsigned integer, to ease TThreadID alignment
+  TThreadIDInt = PtrUInt;
 
 {$ifndef OSLINUX} // try to stabilize MacOS/BSD pthreads API calls
   {$define NODIRECTTHREADMANAGER}
@@ -4153,7 +4159,7 @@ type
   private
     Flags: PtrUInt;
     ThreadID: TThreadID; // pointer on POSIX, DWORD on Windows
-    ReentrantCount: cardinal;
+    ReentrantCount: TThreadIDInt;
     procedure LockSpin; // called by the Lock method when inlined
   public
     /// to be called if the instance has not been filled with 0
@@ -4161,7 +4167,7 @@ type
     procedure Init;
       {$ifdef HASINLINE} inline; {$endif}
     /// could be called to finalize the instance as a TOSLock
-    // - does nothing - just for compatibility with TOSLock
+    // - will make any further TryLock fail - also for compatibility with TOSLock
     procedure Done;
       {$ifdef HASINLINE} inline; {$endif}
     /// enter an exclusive reentrant lock
@@ -4172,6 +4178,10 @@ type
     // - could also be used to thread-safely acquire a shared resource
     function TryLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
+    /// acquire this lock for the current thread, ignore any previous state
+    // - could be done to safely acquire and finalize a resource
+    // - this method is reentrant: you can call Lock/UnLock on this thread
+    procedure ForceLock;
     /// check if the reentrant lock has been acquired
     function IsLocked: boolean;
       {$ifdef HASINLINE} inline; {$endif}
@@ -4661,7 +4671,7 @@ type
     /// safe locked access to a pointer/TObject value
     // - you may store up to 7 variables, using an 0..6 index, shared with
     // Locked, LockedBool, LockedInt64 and LockedUtf8 array properties
-    // - pointers will be stored internally as a varUnknown variant
+    // - pointers will be stored internally as a varAny variant
     // - returns nil if the Index is out of range, or does not store a pointer
     // - allow concurrent thread reading if RWUse was set to uRWLock
     property LockedPointer[Index: integer]: pointer
@@ -4689,7 +4699,7 @@ type
     /// safe locked in-place exchange of a pointer/TObject value
     // - you may store up to 7 variables, using an 0..6 index, shared with
     // Locked and LockedUtf8 array properties
-    // - pointers will be stored internally as a varUnknown variant
+    // - pointers will be stored internally as a varAny variant
     // - returns the previous stored value, nil if the Index is out of range,
     // or does not store a pointer
     function LockedPointerExchange(Index: integer; Value: pointer): pointer;
@@ -9329,7 +9339,9 @@ begin
 end;
 
 procedure TMultiLightLock.Done;
-begin // just for compatibility with TOSLock
+begin
+  Flags := PtrUInt(-1);
+  ThreadID := TThreadID(0); // invalid combination to let TryLock fail
 end;
 
 procedure TMultiLightLock.Lock;
@@ -9373,6 +9385,13 @@ begin
     inc(ReentrantCount);       // locked by this thread - make it reentrant
     result := true;
   end;
+end;
+
+procedure TMultiLightLock.ForceLock;
+begin
+  Flags := PtrUInt(-1); // forced acquisition, whatever the current state is
+  ThreadID := GetCurrentThreadId;
+  ReentrantCount := MaxInt; // make this method reentrant
 end;
 
 function TMultiLightLock.IsLocked: boolean;
@@ -9810,10 +9829,15 @@ end;
 procedure TSynLocker.Done;
 var
   i: PtrInt;
+  v: PSynVarData;
 begin
-  for i := 0 to fPaddingUsedCount - 1 do
-    if Padding[i].VType and VTYPE_STATIC <> 0 then
-      VarClearProc(Padding[i].Data);
+  v := @Padding[0];
+  for i := 1 to fPaddingUsedCount do
+  begin
+    if (v^.VType and VTYPE_STATIC) <> 0 then
+      VarClearProc(v^.Data); // won't include varAny = SetPointer
+    inc(v);
+  end;
   DeleteCriticalSection(fSection);
   fInitialized := false;
 end;
@@ -10036,8 +10060,8 @@ begin
   {$endif HASFASTTRYFINALLY}
     RWLock(cReadOnly);
     with Padding[Index].Data do
-      if VType = varUnknown then
-        result := VUnknown;
+      if VType = varAny then
+        result := VAny;
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -10054,7 +10078,7 @@ begin
         fPaddingUsedCount := Index + 1;
       with Padding[Index] do
       begin
-        VarClearAndSetType(variant(Data), varUnknown);
+        VarClearAndSetType(variant(Data), varAny);
         VAny := Value;
       end;
     finally
@@ -10141,13 +10165,13 @@ begin
       with Padding[Index] do
       begin
         if Index < fPaddingUsedCount then
-          if VType = varUnknown then
+          if VType = varAny then
             result := VAny
           else
             VarClearProc(Data)
         else
           fPaddingUsedCount := Index + 1;
-        VType := varUnknown;
+        VType := varAny;
         VAny := Value;
       end;
     finally

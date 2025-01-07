@@ -2050,7 +2050,7 @@ const
   /// map a PtrUInt type to the TRttiParserType set
   ptPtrUInt = {$ifdef CPU64} ptQWord {$else} ptCardinal {$endif};
 
-  /// which TRttiParserType are not simple types
+  /// which TRttiParserType are not simple/straigthforward types
   // - ptTimeLog and ptOrm are complex, since more than one TypeInfo() may
   // map to their TRttiParserType - see also TRttiParserComplexType
   ptComplexTypes =
@@ -4552,7 +4552,7 @@ begin
     v.VType := 0;
     GetVariantProp(Instance, variant(v), {byref=}true);
     VariantToUtf8(variant(v), result);
-    if v.VType and VTYPE_STATIC <> 0 then
+    if (v.VType and VTYPE_STATIC) <> 0 then
       VarClearProc(v.Data);
   end;
 end;
@@ -7581,7 +7581,7 @@ begin
         rfSingle:
           result := ptSingle;
         rfDouble:
-          // PT_INFO[ptDateTime/ptDateTimeMS] have been found above
+          // TDateTime/TDateTimeMS/TDate have been found above
           result := ptDouble;
         rfCurr:
           result := ptCurrency;
@@ -7752,7 +7752,7 @@ end;
 procedure TRttiCustom.ValueFinalizeAndClear(Data: pointer);
 begin
   ValueFinalize(Data);
-  if not (rcfIsManaged in fFlags) then // managed fields are already set to nil
+  if not (fCache.Kind in rkPerReference) then // fields not already set to nil
     FillCharFast(Data^, fCache.Size, 0);
 end;
 
@@ -7974,7 +7974,7 @@ begin
       varEmpty,
       varNull:
         result := true;
-      varUnknown,
+      varUnknown, // rkChar, rkWChar, rkSString as VAny: RawUtf8
       varString,
       varOleStr
       {$ifdef HASVARUSTRING}, varUString {$endif}:

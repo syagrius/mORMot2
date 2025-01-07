@@ -158,6 +158,7 @@ type
     // - you may send data asynchronously using Connection.wr.Append()
     function AfterWrite: TPollAsyncSocketOnReadWrite; virtual;
     /// this method is called when the sockets is closing
+    // - overriden e.g. by TWebSocketAsyncConnection to notify the closing
     procedure OnClose; virtual;
     /// called by ReleaseMemoryOnIdle within the read lock: clean fRd here
     function ReleaseReadMemoryOnIdle: PtrInt; virtual;
@@ -281,13 +282,11 @@ type
     function OnError(connection: TPollAsyncConnection;
       events: TPollSocketEvents): boolean; virtual; abstract;
     procedure OnClosed(connection: TPollAsyncConnection); virtual; abstract;
-    procedure UnlockAndCloseConnection(writer: boolean;
-      var connection: TPollAsyncConnection; const caller: ShortString);
     procedure RegisterConnection(connection: TPollAsyncConnection); virtual; abstract;
     function SubscribeConnection(const caller: shortstring;
       connection: TPollAsyncConnection; sub: TPollSocketEvent): boolean;
     procedure CloseConnection(var connection: TPollAsyncConnection;
-      const caller: shortstring);
+      const caller: shortstring); // set connection:=nil and close+GC
     function RawWrite(connection: TPollAsyncConnection;
       var data: PByte; var datalen: integer): boolean;
     function DoAfterWrite(const caller: shortstring;
@@ -457,7 +456,6 @@ type
     // just log the error, and close connection if acoOnErrorContinue is not set
     function OnError(connection: TPollAsyncConnection;
       events: TPollSocketEvents): boolean; override;
-    // log the closing
     procedure OnClosed(connection: TPollAsyncConnection); override;
   public
     /// add some data to the asynchronous output buffer of a given connection
@@ -671,21 +669,21 @@ type
     // - use efficient O(log(n)) binary search
     // - this method won't keep the main Lock, but this class will ensure that
     // the returned pointer will last for at least 100ms until Free is called
-    function ConnectionFind(aHandle: TConnectionAsyncHandle): TAsyncConnection;
+    function ConnectionFind(Handle: TConnectionAsyncHandle): TAsyncConnection;
     /// high-level access to a connection instance, from its handle
-    // - use efficient O(log(n)) binary search
+    // - use efficient O(log(n)) binary search of a TAsyncConnection instance
     // - will also thread-safely attempt to acquire one of the connection's lock
     // - returns nil if the handle was not found and acquired within WaitTimeoutMS
-    function ConnectionFindAndWaitLock(aHandle: TConnectionAsyncHandle;
-      LockWriter: boolean; WaitTimeoutMS: cardinal): TAsyncConnection;
+    function ConnectionFindAndWaitLock(Handle: TConnectionAsyncHandle;
+      LockWriter: boolean; WaitTimeoutMS: cardinal): pointer;
     /// low-level access to a connection instance, from its handle
     // - use efficient O(log(n)) binary search, since handles are increasing
     // - caller should have called Lock before this method is done
-    function LockedConnectionSearch(aHandle: TConnectionAsyncHandle): TAsyncConnection;
+    function LockedConnectionSearch(Handle: TConnectionAsyncHandle): TAsyncConnection;
     /// remove an handle from the internal list, and close its connection
     // - raise an exception if acoNoConnectionTrack option was defined
     // - could be executed e.g. from a TAsyncConnection.OnRead method
-    function ConnectionRemove(aHandle: TConnectionAsyncHandle): boolean;
+    function ConnectionRemove(Handle: TConnectionAsyncHandle): boolean;
     /// call ConnectionRemove unless acoNoConnectionTrack is set
     procedure EndConnection(connection: TAsyncConnection);
     /// add some data to the asynchronous output buffer of a given connection
@@ -1089,7 +1087,7 @@ type
     /// finalize the HTTP Server
     destructor Destroy; override;
     /// send an asynchronous response to the client, e.g. after slow DB process
-    procedure AsyncResponse(Connection: TConnectionAsyncHandle;
+    procedure AsyncResponse(Handle: TConnectionAsyncHandle;
       const Content, ContentType: RawUtf8; Status: cardinal = HTTP_SUCCESS); override;
     /// access async connections to any remote HTTP server
     // - will reuse the threads pool and sockets polling of this instance
@@ -1525,10 +1523,9 @@ var
   endtix: Int64;
   ms: integer;
 begin
-  result := (self <> nil) and
-            (fSocket <> nil);
-  if not result then
-    exit; // socket closed
+  result := false;
+  if IsClosed then
+    exit;
   result := TryLock(writer);
   if result or
      (timeoutMS = 0) then
@@ -1917,7 +1914,7 @@ begin
       connection.UnLock({writer=}true)
     else
       // sending or subscription error -> abort
-      UnlockAndCloseConnection(true, connection, 'Write() finished');
+      CloseConnection(connection, 'Write() failure');
     LockedDec32(@fProcessingWrite);
   end
   else
@@ -1929,28 +1926,6 @@ begin
     LockedDec32(@fProcessingWrite);
   end;
   //DoLog('Write: done fProcessingWrite=%', [fProcessingWrite]);
-end;
-
-procedure TPollAsyncSockets.UnlockAndCloseConnection(writer: boolean;
-  var connection: TPollAsyncConnection; const caller: ShortString);
-var
-  c: TPollAsyncConnection;
-begin
-  c := connection;
-  connection := nil;
-  if (c = nil) or
-     (fClosed in c.fFlags) then
-    exit;
-  {if fDebugLog <> nil then
-    DoLog('UnlockSlotAndCloseConnection: % on handle=%',
-      [caller, connection.Handle]);}
-  // first unlock (if needed)
-  c.fRWSafe[0].Init;
-  c.fRWSafe[1].Init;
-  // optional process - e.g. TWebSocketAsyncConnection = focConnectionClose
-  c.OnClose; // called before slot/socket closing - set fClosed flag
-  // Stop() will try to acquire this lock -> notify no need to wait
-  CloseConnection(c, caller);
 end;
 
 function TPollAsyncSockets.SubscribeConnection(const caller: shortstring;
@@ -2001,22 +1976,34 @@ end;
 
 procedure TPollAsyncSockets.CloseConnection(
   var connection: TPollAsyncConnection; const caller: shortstring);
+var
+  c: TPollAsyncConnection;
 begin
   try
-    if connection.IsDangling then
-    begin
-      connection := nil; // wrong reference
+    // wipe supplied instance reference ASAP to own it from now on
+    c := connection;
+    connection := nil;
+    // check for wrong reference (paranoid)
+    if c.IsDangling then
       exit;
+    // final acquisition of connection's read+write locks for this thread
+    if (not c.WaitLock({writer=}false, 1000)) or
+       ((ifSeparateWLock in c.fInternalFlags) and
+        (not c.WaitLock({writer=}true, 1000))) then
+    begin
+      c.fRWSafe[0].ForceLock; // locks should be available within 1000 ms
+      c.fRWSafe[1].ForceLock
     end;
-    if not (fClosed in connection.fFlags) then
-      // if not already done in UnlockAndCloseConnection
-      connection.OnClose; // called before slot/socket closing
+    // call OnClose virtual method once
+    if not (fClosed in c.fFlags) then
+      // before slot/socket closing: needed for TWebSocketAsyncConnection
+      c.OnClose; // set fClosed flag
     // set socket := nil and async unsubscribe for next PollForPendingEvents()
-    Stop(connection, caller);
+    Stop(c, caller);
     // now safe to perform fOwner.ConnectionDelete() for async instance GC
-    OnClosed(connection);
+    OnClosed(c);
   except
-    connection := nil;   // user code may be unstable
+    // just ignore any exception here (may leak memory at the cost of stability)
   end;
 end;
 
@@ -2074,7 +2061,7 @@ begin
           if not connection.OnFirstRead(self) then
           begin
             // TLS error -> abort
-            UnlockAndCloseConnection(false, connection, 'ProcessRead OnFirstRead');
+            CloseConnection(connection, 'ProcessRead OnFirstRead');
             exit;
           end;
           // waiting a little just after accept() helps a idle server to respond
@@ -2114,7 +2101,7 @@ begin
           if res <> nrOk then
           begin
             // socket closed gracefully or unrecoverable error -> abort
-            UnlockAndCloseConnection(false, connection, ToText(res)^);
+            CloseConnection(connection, ToText(res)^);
             exit;
           end;
           if recved < 1024 then
@@ -2130,38 +2117,40 @@ begin
           try
             // process connection.fRd incoming data (outside of the lock)
             if connection.OnRead = soClose then
-              UnlockAndCloseConnection(false, connection, 'ProcessRead OnRead');
+              CloseConnection(connection, 'ProcessRead OnRead');
           except
-            UnlockAndCloseConnection(false, connection, 'ProcessRead Exception');
+            CloseConnection(connection, 'ProcessRead Exception');
           end;
         end
         else
           result := false; // retry later
         // ensure this connection will be tracked for next recv()
-        if connection <> nil then // UnlockAndCloseConnection() may set Free+nil
+        if connection <> nil then // CloseConnection() set connection := nil
         begin
-          connection.UnLock(false); // UnlockSlotAndCloseConnection set slot=nil
           {$ifdef USE_WINIOCP}
+          // IOCP requires per-notification subscription
           if not fIocp.PrepareNext(connection.fIocp, wieRecv) then
-            CloseConnection(connection, 'ProcessRead PrepareNext');
           {$else}
-          if (connection.fSocket <> nil) and
-             not (fClosed in connection.fFlags) and
-             not (fSubRead in connection.fFlags) then
+          if not (fSubRead in connection.fFlags) then
             // it is time to subscribe for any future read on this connection
             if not SubscribeConnection('read', connection, pseRead) then
-              if fDebugLog <> nil then
-                DoLog('ProcessRead: Subscribe failed % %', [connection, fRead]);
           {$endif USE_WINIOCP}
+          begin
+            if fDebugLog <> nil then
+              DoLog('ProcessRead: Subscribe failed %', [connection]);
+            CloseConnection(connection, 'ProcessRead Subscribe failure');
+          end;
+          connection.UnLock({writer=}false); // eventual lock release
         end;
       end
-      else
+      else // TryLock(read) failed
       begin
         if fDebugLog <> nil then
           // happens on thread contention
           DoLog('ProcessRead: TryLock failed %', [connection]);
         SleepHiRes(0); // avoid switch threads for nothing
         {$ifdef USE_WINIOCP}
+        // IOCP requires per-notification subscription
         if not fIocp.PrepareNext(connection.fIocp, wieRecv) then
           CloseConnection(connection, 'ProcessRead waitlock iocp');
         {$endif USE_WINIOCP}
@@ -2170,8 +2159,6 @@ begin
     end;
   finally
     LockedDec32(@fProcessingRead);
-    if connection <> nil then
-      connection.fReadThread := nil;
   end;
 end;
 
@@ -2260,7 +2247,7 @@ begin
       {$endif USE_WINIOCP}
     finally
       if res = soClose then // sending error or AfterWrite abort
-        UnlockAndCloseConnection(true, connection, 'ProcessWrite')
+        CloseConnection(connection, 'ProcessWrite')
       else
         connection.UnLock({writer=}true);
     end
@@ -2341,7 +2328,7 @@ begin
           SubscribeConnection('waitwrite', connection, pseWrite);
       finally
         if res = soClose then
-          UnlockAndCloseConnection(true, connection, 'ProcessWaitingWrite')
+          CloseConnection(connection, 'ProcessWaitingWrite')
         else
           connection.UnLock({writer=}true);
       end
@@ -3327,19 +3314,19 @@ begin
 end;
 
 function TAsyncConnections.LockedConnectionSearch(
-  aHandle: TConnectionAsyncHandle): TAsyncConnection;
+  Handle: TConnectionAsyncHandle): TAsyncConnection;
 var
   i, n: PtrInt;
 begin
   // caller should have made fConnectionLock.Lock()
   result := nil;
-  if aHandle <= 0 then
+  if Handle <= 0 then
     exit;
   i := fLastConnectionFind;
   n := fConnectionCount;
   if (i >= n) or
-     (fConnection[i].Handle <> aHandle) then
-    i := FastFindConnection(pointer(fConnection), n - 1, aHandle); // O(log(n))
+     (fConnection[i].Handle <> Handle) then
+    i := FastFindConnection(pointer(fConnection), n - 1, Handle); // O(log(n))
   if i >= 0 then
   begin
     fLastConnectionFind := i;
@@ -3350,12 +3337,12 @@ begin
 end;
 
 function TAsyncConnections.ConnectionFind(
-  aHandle: TConnectionAsyncHandle): TAsyncConnection;
+  Handle: TConnectionAsyncHandle): TAsyncConnection;
 begin
   result := nil;
   if (self = nil) or
      Terminated or
-     (aHandle <= 0) or
+     (Handle <= 0) or
      (acoNoConnectionTrack in fOptions) then
     exit;
   fConnectionLock.ReadOnlyLock;
@@ -3364,7 +3351,7 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    result := LockedConnectionSearch(aHandle); // O(log(n)) binary search
+    result := LockedConnectionSearch(Handle); // O(log(n)) binary search
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -3372,15 +3359,15 @@ begin
   end;
 end;
 
-function TAsyncConnections.ConnectionFindAndWaitLock(aHandle: TConnectionAsyncHandle;
-  LockWriter: boolean; WaitTimeoutMS: cardinal): TAsyncConnection;
+function TAsyncConnections.ConnectionFindAndWaitLock(Handle: TConnectionAsyncHandle;
+  LockWriter: boolean; WaitTimeoutMS: cardinal): pointer;
 var
   endtix, tix: Int64;
   ms: integer;
 begin
   result := nil;
   if (self = nil) or
-     (aHandle <= 0) or
+     (Handle <= 0) or
      (acoNoConnectionTrack in fOptions) then
     exit;
   ms := 0;
@@ -3389,18 +3376,11 @@ begin
   begin
     fConnectionLock.ReadOnlyLock;
     try
-      result := LockedConnectionSearch(aHandle); // O(log(n)) binary search
+      result := LockedConnectionSearch(Handle); // O(log(n)) binary search
       if result = nil then
         exit; // too late, or invalid handle
-      if result.TryLock(LockWriter) then
-        if not result.IsClosed then
-          exit // open connection sub-locked within main ReadOnlyLock
-        else
-        begin
-          result.UnLock(LockWriter);
-          result := nil; // too late
-          exit;
-        end;
+      if TAsyncConnection(result).TryLock(LockWriter) then
+        exit; // found and locked within main ReadOnlyLock
     finally
       fConnectionLock.ReadOnlyUnLock;
     end;
@@ -3417,7 +3397,7 @@ begin
 end;
 
 function TAsyncConnections.ConnectionRemove(
-  aHandle: TConnectionAsyncHandle): boolean;
+  Handle: TConnectionAsyncHandle): boolean;
 var
   i: integer; // integer, not PtrInt for ConnectionFindAndLock(@i)
   conn: TAsyncConnection;
@@ -3425,9 +3405,9 @@ begin
   result := false;
   if (self = nil) or
      Terminated or
-     (aHandle <= 0) then
+     (Handle <= 0) then
     exit;
-  conn := ConnectionFindAndLock(aHandle, cWrite, @i);
+  conn := ConnectionFindAndLock(Handle, cWrite, @i);
   if conn <> nil then
     try
       if not fSockets.Stop(conn, 'ConnectionRemove') then
@@ -3437,7 +3417,7 @@ begin
       fConnectionLock.WriteUnLock;
     end;
   if not result then
-    DoLog(sllTrace, 'ConnectionRemove(%)=false', [aHandle], self);
+    DoLog(sllTrace, 'ConnectionRemove(%)=false', [Handle], self);
 end;
 
 procedure TAsyncConnections.EndConnection(connection: TAsyncConnection);
@@ -4984,27 +4964,23 @@ begin
   FreeAndNil(fExecuteEvent);
 end;
 
-procedure THttpAsyncServer.AsyncResponse(Connection: TConnectionAsyncHandle;
+procedure THttpAsyncServer.AsyncResponse(Handle: TConnectionAsyncHandle;
   const Content, ContentType: RawUtf8; Status: cardinal);
 var
-  locked: boolean;
   c: THttpAsyncServerConnection;
   res: TPollAsyncSocketOnReadWrite;
 begin
-  // thread-safe locate the connection using O(log(n)) binary search
-  locked := true;
-  c := pointer(fAsync.ConnectionFindAndWaitLock(
-    {handle=}Connection, {wr=}false, {ms=}40));
+  // thread-safe locate the connection using O(log(n)) Handle binary search
+  c := fAsync.ConnectionFindAndWaitLock(Handle, {LockWrite=}false, {ms=}40);
   if c <> nil then
   // process within the read lock, since may respond before state is set
   try
-    // verify expected connection state, to avoid race condition
-    if (c.fHandle <> Connection) or
-       (c.fHttp.State <> hrsWaitAsyncProcessing) or
+    // verify expected connection state
+    if (c.fHttp.State <> hrsWaitAsyncProcessing) or
        not (rfAsynchronous in c.fHttp.ResponseFlags) then // paranoid
     begin
       fAsync.DoLog(sllWarning, 'AsyncResponse(#%) failed state=%',
-        [Connection, ToText(c.fHttp.State)^], self);
+        [Handle, ToText(c.fHttp.State)^], self);
       exit; // will call c.UnLock()
     end;
     // finalize and send the response back to the client
@@ -5018,18 +4994,14 @@ begin
     if c.DoResponse(res) = soClose then
     begin
       if acoVerboseLog in fAsync.fOptions then
-        fAsync.DoLog(sllTrace, 'final AsyncResponse: closing #%', [Connection], self);
-      locked := false;
-      c.fRWSafe[0].Init; // unlock before close
-      c.fRWSafe[1].Init;
+        fAsync.DoLog(sllTrace, 'final AsyncResponse: closing #%', [Handle], self);
       fAsync.fSockets.CloseConnection(TPollAsyncConnection(c), 'AsyncResponse');
     end;
   finally
-    if locked then
-      c.UnLock({wr=}false);
+    c.UnLock({LockWrite=}false); // unless CloseConnection set c := nil
   end
   else if acoVerboseLog in fAsync.fOptions then
-    fAsync.DoLog(sllTrace, 'late AsyncResponse on closed #%', [Connection], self);
+    fAsync.DoLog(sllTrace, 'late AsyncResponse on closed #%', [Handle], self);
 end;
 
 function THttpAsyncServer.Clients: THttpAsyncClientConnections;

@@ -2037,8 +2037,9 @@ begin
   Check(ACities.Count = Length(Province.Cities));
   Check(ACities.Count = 10001);
   TestCities;
+  count := 7;
   ACities.Init(TypeInfo(TCityDynArray), Province.Cities, @count);
-  ACities.Clear;
+  CheckEqual(count, 0);
   for i := 0 to 100000 do
   begin
     City.Name := IntToString(i);
@@ -2046,7 +2047,8 @@ begin
     City.Longitude := i * 6.13;
     Check(ACities.Add(City) = i);
   end;
-  Check(ACities.Count = count);
+  CheckEqual(count, 100001);
+  CheckEqual(ACities.Count, count);
   TestCities;
 end;
 
@@ -2788,7 +2790,7 @@ begin
   // oldest Delphi can't compile TypeInfo(TGuid) -> use PT_INFO[ptGuid]
   s := RecordSaveJson(g, PT_INFO[ptGuid]);
   FillCharFast(g2, SizeOf(g2), 0);
-  Check(RecordLoadJson(g2, pointer(s), PT_INFO[ptGuid]) <> nil);
+  Check(RecordLoadJsonInPlace(g2, pointer(s), PT_INFO[ptGuid]) <> nil);
   Check(IsEqualGuid(g2, g));
   FillCharFast(h, SizeOf(h), 1);
   for pt := ptGuid to ptHash512 do
@@ -8479,6 +8481,15 @@ var
     end;
   end;
 
+  procedure SetDict;
+  begin
+    {$ifdef HASGENERICS}
+    dict := TSynDictionary.New<RawUtf8, RawUtf8>(True);
+    {$else}
+    dict := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray), TypeInfo(TRawUtf8DynArray), True);
+    {$endif HASGENERICS}
+  end;
+
 var
   v: tvalue;
   s, k, key, val: RawUtf8;
@@ -8486,15 +8497,31 @@ var
   exists: boolean;
   sdk: TSDKey;
 begin
-  {$ifdef HASGENERICS}
-  dict := TSynDictionary.New<RawUtf8, RawUtf8>(True);
-  {$else}
-  dict := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray), TypeInfo(TRawUtf8DynArray), True);
-  {$endif HASGENERICS}
+  SetDict;
   try
+    CheckEqual(dict.Count, 0);
+    CheckEqual(dict.Capacity, 0);
+  finally
+    dict.Free;
+  end;
+  SetDict;
+  try
+    CheckEqual(dict.Count, 0);
+    CheckEqual(dict.Capacity, 0);
+    dict.Capacity := 64;
+    CheckEqual(dict.Count, 0);
+    CheckEqual(dict.Capacity, 64);
+  finally
+    dict.Free;
+  end;
+  SetDict;
+  try
+    CheckEqual(dict.Count, 0);
+    CheckEqual(dict.Capacity, 0);
     key := 'Foobar';
     val := 'lol';
     dict.AddOrUpdate(key, val);
+    CheckEqual(dict.Count, 1);
     s := dict.SaveToJson;
     CheckEqual(s, '{"Foobar":"lol"}');
     key := 'foobar';
@@ -8502,6 +8529,7 @@ begin
     dict.AddOrUpdate(key, val);
     s := dict.SaveToJson;
     CheckEqual(s, '{"Foobar":"xxx"}');
+    CheckEqual(dict.Count, 1);
     key := 'FooBar';
     dict.FindAndCopy(key, val, False);
     CheckEqual(val, 'xxx');
@@ -8971,7 +8999,7 @@ begin
     tmp := DynArraySaveJson(arr, TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
     ObjArrayClear(arr);
     CheckEqual(length(arr), 0);
-    DynArrayLoadJson(arr, pointer(tmp), TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
+    DynArrayLoadJsonInPlace(arr, pointer(tmp), TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
     CheckEqual(length(arr), MAX + 1);
     for i := 0 to MAX do
     begin

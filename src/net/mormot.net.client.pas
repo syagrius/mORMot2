@@ -2412,10 +2412,11 @@ begin
         include(Http.HeaderFlags, hfConnectionClose);
       // retrieve Body content (if any)
       if (ctxt.Status >= HTTP_SUCCESS) and
-         (ctxt.Status <> HTTP_NOCONTENT) and
-         (ctxt.Status <> HTTP_NOTMODIFIED) and
-         not HttpMethodWithNoBody(ctxt.Method) then
-         // HEAD or status 100..109,204,304 -> no body (RFC 2616 section 4.3)
+         // HEAD/OPTIONS or status 100..109,204,304 -> no body (RFC 2616 #4.3)
+         ((Http.ContentLength <> 0) or // server bug of 204,304 with body
+          ((ctxt.Status <> HTTP_NOCONTENT) and
+           (ctxt.Status <> HTTP_NOTMODIFIED))) and
+         not HttpMethodWithNoBody(ctxt.Method) then // HEAD/OPTIONS
       begin
         // specific TStreamRedirect expectations
         bodystream := ctxt.OutStream;
@@ -3804,11 +3805,22 @@ var
   tmp: TSynTempBuffer;
 begin
   result := '';
-  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if WinHttpApi.QueryHeaders(fRequest, Info, nil, @tmp, dwSize, dwIndex) then
-    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
-    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
+  dwSize := tmp.Init; // first try with stack buffer (in bytes)
+  try
+    if not WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
+    begin
+      if GetLastError <> ERROR_INSUFFICIENT_BUFFER then
+        exit;
+      dwIndex := 0;
+      tmp.Init(dwSize); // need more space (seldom needed)
+      if not WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
+        exit;
+    end;
+    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+  finally
+    tmp.Done;
+  end;
 end;
 
 function TWinHttp.InternalGetInfo32(Info: cardinal): cardinal;
@@ -3984,11 +3996,22 @@ var
   tmp: TSynTempBuffer;
 begin
   result := '';
-  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if HttpQueryInfoW(fRequest, Info, @tmp, dwSize, dwIndex) then
-    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
-    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
+  dwSize := tmp.Init; // first try with stack buffer (in bytes)
+  try
+    if not HttpQueryInfoW(fRequest, Info, tmp.buf, dwSize, dwIndex) then
+    begin
+      if GetLastError <> ERROR_INSUFFICIENT_BUFFER then
+        exit;
+      dwIndex := 0;
+      tmp.Init(dwSize); // need more space (seldom needed)
+      if not HttpQueryInfoW(fRequest, Info, tmp.buf, dwSize, dwIndex) then
+        exit;
+    end;
+    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+  finally
+    tmp.Done;
+  end;
 end;
 
 function TWinINet.InternalGetInfo32(Info: cardinal): cardinal;
@@ -4635,7 +4658,7 @@ begin
     j := pointer(Rtti.RegisterType(ResInfo));
   if (j <> nil) and
      not (jcoResultNoClear in fOptions) then
-    j.ValueFinalizeAndClear(Res); // clear result before request or parsing
+    j.ValueFinalizeAndClear(Res); // void result before request or parsing
   try
     RawRequest(Method, Action, '', b, Headers, r); // blocking thread-safe request
   except
@@ -4652,7 +4675,7 @@ begin
   if Assigned(fOnAfter) then
     fOnAfter(self, r);
   if CheckRequestError(r, CustomError) or // HTTP status error
-     (j = nil) then          // no response JSON to parse
+     (j = nil) then                       // no JSON response to parse
     exit;
   u := pointer(r.Content); // parse in-place the returned body
   j.ValueLoadJson(Res, u, nil,

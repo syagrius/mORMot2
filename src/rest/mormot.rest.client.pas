@@ -502,12 +502,12 @@ type
     /// the identifier of the callback, as sent to the server side
     // - computed from TRestClientUriCallbacks.fCurrentID counter
     ID: TRestClientCallbackID;
+    /// set to TRUE if the instance was released from the server
+    ReleasedFromServer: boolean;
     /// weak pointer typecast to the associated IInvokable variable
     Instance: pointer;
     //// information about the associated IInvokable
     Factory: TInterfaceFactory;
-    /// set to TRUE if the instance was released from the server
-    ReleasedFromServer: boolean;
   end;
 
   /// points to information about registered interface callbacks
@@ -2795,7 +2795,7 @@ var
   json: RawUtf8;
 begin
   result := (CallBackGet('stat', ['findservice', aServiceName], json) = HTTP_SUCCESS) and
-    (DynArrayLoadJson(URI, pointer({%H-}json), TypeInfo(TRestServerUriDynArray)) <> nil);
+    (DynArrayLoadJsonInPlace(URI, pointer({%H-}json), TypeInfo(TRestServerUriDynArray)) <> nil);
 end;
 
 function TRestClientUri.ServiceRetrieveAssociated(const aInterface: TGuid;
