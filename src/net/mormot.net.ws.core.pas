@@ -321,6 +321,9 @@ type
     /// compute a new instance of the WebSockets protocol, with same parameters
     // - by default, will return nil, as expected for Client-side only
     function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; virtual;
+    /// reuse an existing protocol instance on a new connection
+    // - called e.g. by THttpClientWebSockets.WebSocketsUpgrade(aReconnect=true)
+    procedure Reset; virtual;
     /// the sub-protocols supported by this client (not used on server side)
     // - as transmitted in the 'Sec-WebSocket-Protocol:' header during upgrade
     // - returns Name by default, but could be e.g. 'synopsebin, synopsebinary'
@@ -393,7 +396,7 @@ type
       read fUpgradeUri write fUpgradeUri;
     /// the "Bearer" HTTP header value on which this protocol has been upgraded
     property UpgradeBearerToken: RawUtf8
-      read fUpgradeBearerToken;
+      read fUpgradeBearerToken write fUpgradeBearerToken;
     /// the last error message, during frame processing
     property LastError: string
       read fLastError;
@@ -782,6 +785,7 @@ type
     procedure Log(const frame: TWebSocketFrame; const aMethodName: ShortString;
       aEvent: TSynLogLevel = sllTrace; DisableRemoteLog: boolean = false); virtual;
     function SendPendingOutgoingFrames: integer;
+    procedure WaitThreadStarted;
     function HiResDelay(var start: Int64): Int64;
   public
     /// initialize the WebSockets process on a given connection
@@ -794,6 +798,9 @@ type
     // - if needed, will notify the other end with a focConnectionClose frame
     // - will release the TWebSocketProtocol associated instance
     destructor Destroy; override;
+    /// reuse an existing process instance on a new connection
+    // - called e.g. by THttpClientWebSockets.WebSocketsUpgrade(aReconnect=true)
+    procedure Reset(aConnectionID: THttpServerConnectionID); virtual;
     /// abstract low-level method to retrieve pending input data
     // - should return the number of bytes (<=count) received and written to P
     // - is defined separated to allow multi-thread pooling
@@ -1148,6 +1155,8 @@ var
      dvoNameCaseSensitive];
 
 type
+  TSocketIOLocalNamespace = class;
+
   /// exception class raised during Engine.IO process
   EEngineIO = class(ESynException);
   /// exception class raised during Socket.IO process
@@ -1167,8 +1176,8 @@ type
   // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
   // - if the result is not '', it is expected to be JSON array acknowledgment
   // payload, e.g. from JsonEncodeArray([])
-  TOnSocketIOEvent = function(const EventName: RawUtf8;
-    const Data: TDocVariantData): RawJson of object;
+  TOnSocketIOEvent = function(Sender: TSocketIOLocalNamespace;
+    const EventName: RawUtf8; const Data: TDocVariantData): RawJson of object;
   /// Socket.IO process published methods handler signature
   // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
   // - required signature of TSocketIOLocalNamespace.RegisterPublishedMethods()
@@ -1240,7 +1249,7 @@ type
   // - dispatch received sioAck to effective handler
   TSocketIORemoteNamespace = class(TSocketIONamespace)
   protected
-    fSid: RawUtf8;
+    fSid, fHandshakeData: RawUtf8;
     fAckIdCursor: TSocketIOAckID;
     fCallbacks: array of TSocketIOCallback;
     /// Generate a new event acknowledgment ID, incrementing the internal cursor
@@ -1248,10 +1257,10 @@ type
   public
     /// initialize this instance
     constructor Create(aOwner: TEngineIOAbstract;
-      const aNameSpace, aSid: RawUtf8); reintroduce; virtual;
+      const aNameSpace, aSid, aHandshakeData: RawUtf8); reintroduce; virtual;
     /// initialize a new instance from an incoming connection message
     constructor CreateFromConnectMessage(const aMessage: TSocketIOMessage;
-      aOwner: TEngineIOAbstract);
+      const aHandshakeData: RawUtf8; aOwner: TEngineIOAbstract);
     /// emit an event to Self.NameSpace, with an optional callback
     // - returns the packet ID if aCallback is assigned, SIO_NO_ACK otherwise
     // - aDataArray is an optional JSON array of values, without any [ ] chars
@@ -1260,6 +1269,9 @@ type
     /// handle an acknowledge message and call the associated callback
     // - will raise an ESocketIO if the packet is invalid or ID was not found
     procedure Acknowledge(const aMessage: TSocketIOMessage);
+    /// low-level associated JSON array data supplied to Connect()
+    property HandshakeData: RawUtf8
+      read fHandshakeData write fHandshakeData;
   published
     /// the associated Socket.IO Session ID, as computed on the server side
     property Sid: RawUtf8
@@ -1270,7 +1282,7 @@ type
 
   /// a local Socket.IO namespace definition
   TEventHandler = record
-    /// the event name
+    /// the event name (should be the first field for TDynArrayHashed)
     Name: RawUtf8;
     /// the event callback which will be executed for this event name
     OnEvent: TOnSocketIOEvent;
@@ -1280,6 +1292,16 @@ type
   PEventHandler = ^TEventHandler;
   TLocalNamespaceEventHandlers = array of TEventHandler;
 
+  /// options to tune globally TSocketIOLocalNamespace behavior
+  // - snoIgnoreUnknownEvent will let HandleEvent() raise no exception and
+  // ignore if the received event name is unknown
+  // - snoIgnoreIncorrectData will let HandleEvent raise no exception and
+  // ignore if the received message has unexpected/incorrect associated JSON
+  TSocketIOLocalNamespaceOption = (
+    snoIgnoreUnknownEvent,
+    snoIgnoreIncorrectData);
+  TSocketIOLocalNamespaceOptions = set of TSocketIOLocalNamespaceOption;
+
   /// abstract parent class for local namespace object
   // - map namespace event to their handlers
   // - dispatch received sioEvent to effective handler
@@ -1287,9 +1309,14 @@ type
   protected
     fHandler: TLocalNamespaceEventHandlers;
     fHandlers: TDynArrayHashed;
+    fOptions: TSocketIOLocalNamespaceOptions;
     // called by Create: can override this method to register some events
     procedure RegisterHandlers; virtual;
   public
+    /// global callback triggerred when any event message is received and
+    // decoded for this name space
+    OnEventReceived: procedure(Sender: TSocketIOLocalNamespace;
+      const EventName: RawUtf8; var Data: TDocVariantData) of object;
     /// initialize this instance
     constructor Create(aOwner: TEngineIOAbstract;
       const aNamespace: RawUtf8 = '/'); reintroduce;
@@ -1303,8 +1330,18 @@ type
     // - the methods should follow the TOnSocketIOMethod exact signature, e.g.
     // ! function eventname(const Data: TDocVariantData): RawJson;
     procedure RegisterPublishedMethods(aInstance: TObject);
+    /// register all handlers of another local namespace
+    // - as used by TSocketsIOClient.OnReconnect()
+    procedure RegisterFrom(aAnother: TSocketIOLocalNamespace);
     /// dispatch an event message to the appropriate handler
-    procedure HandleEvent(const aMessage: TSocketIOMessage); virtual;
+    procedure HandleEvent(const aMessage: TSocketIOMessage;
+      aIgnoreUnknownEvent: boolean); virtual;
+    /// raw access to the internal events list
+    property Handler: TLocalNamespaceEventHandlers
+      read fHandler;
+    /// customize the process on this local namespace
+    property Options: TSocketIOLocalNamespaceOptions
+      read fOptions write fOptions;
   end;
   PSocketIOLocalNamespace = ^TSocketIOLocalNamespace;
   TSocketIOLocalNamespaces = array of TSocketIOLocalNamespace;
@@ -1522,6 +1559,10 @@ begin
   fName := aName;
   fUri := aUri;
   fConnectionFlags := [hsrWebsockets];
+end;
+
+procedure TWebSocketProtocol.Reset;
+begin
 end;
 
 function TWebSocketProtocol.Clone(const aClientUri: RawUtf8): TWebSocketProtocol;
@@ -2868,7 +2909,6 @@ begin
   inherited Create; // may have been overriden
   fProcessName := aProcessName;
   fProtocol := aProtocol;
-  fProtocol.AfterUpgrade(self); // e.g. for TWebSocketSocketIOClientProtocol
   fConnectionID := aProtocol.ConnectionID;
   fOwnerThread := aOwnerThread;
   fSettings := aSettings;
@@ -2876,6 +2916,7 @@ begin
   fOutgoing := TWebSocketFrameList.Create(0);
   InitializeCriticalSection(fSafeIn);
   InitializeCriticalSection(fSafeOut);
+  fProtocol.AfterUpgrade(self); // e.g. for TWebSocketSocketIOClientProtocol
 end;
 
 procedure TWebSocketProcess.Shutdown(waitForPong: boolean);
@@ -2955,6 +2996,14 @@ begin
   DeleteCriticalSection(fSafeIn); // to be done lately to avoid GPF
   DeleteCriticalSection(fSafeOut);
   inherited Destroy;
+end;
+
+procedure TWebSocketProcess.Reset(aConnectionID: THttpServerConnectionID);
+begin
+  fConnectionID := 0;
+  fState := wpsCreate;
+  fProcessEnded := false;
+  fProtocol.Reset;
 end;
 
 procedure TWebSocketProcess.ProcessStart;
@@ -3155,6 +3204,18 @@ begin
   except // don't be optimistic: abort and close connection
     fState := wpsClose;
   end;
+end;
+
+procedure TWebSocketProcess.WaitThreadStarted;
+var
+  endtix: Int64;
+begin
+  endtix := GetTickCount64 + 5000;
+  repeat
+    SleepHiRes(0);
+  until fProcessEnded or
+        (fState <> wpsCreate) or
+        (GetTickCount64 > endtix);
 end;
 
 function TWebSocketProcess.HiResDelay(var start: Int64): Int64;
@@ -3846,14 +3907,30 @@ begin
       OnMethod := TOnSocketIOMethod(met[m].Method);
 end;
 
-procedure TSocketIOLocalNamespace.HandleEvent(const aMessage: TSocketIOMessage);
+procedure TSocketIOLocalNamespace.RegisterFrom(aAnother: TSocketIOLocalNamespace);
+var
+  i: integer;
+  s: PEventHandler;
+begin
+  if aAnother = nil then
+    exit;
+  s := pointer(aAnother.fHandler);
+  for i := 1 to length(aAnother.fHandler) do
+  begin
+    PEventHandler(fHandlers.AddUniqueName(s^.Name))^ := s^;
+    inc(s);
+  end;
+end;
+
+procedure TSocketIOLocalNamespace.HandleEvent(const aMessage: TSocketIOMessage;
+  aIgnoreUnknownEvent: boolean);
 var
   ndx: PtrInt;
   event, ack: RawUtf8;
   data: TDocVariantData;
   d: PDocVariantData;
 begin
-  // validate input context
+  // validate input context (paranoid checks)
   if (fNameSpace <> '*') and
      not aMessage.NameSpaceIs(fNameSpace) then
     ESocketIO.RaiseUtf8('%.HandleEvent: unexpected namespace ([%]<>[%])',
@@ -3865,22 +3942,32 @@ begin
   if not aMessage.DataGet(data) or
      not data.IsArray or
      (data.Count = 0) then
-    ESocketIO.RaiseUtf8('%.HandleEvent: message is not a JSON array', [self]);
-  // retrieve event name and search for associated handler
+    if snoIgnoreIncorrectData in fOptions then
+      exit // ignore in silence
+    else
+      ESocketIO.RaiseUtf8('%.HandleEvent: message is not a JSON array', [self]);
   VariantToUtf8(data.Values[0], event);
-  ndx := fHandlers.FindHashed(event);
-  if ndx < 0 then
-    ESocketIO.RaiseUtf8('%.HandleEvent: unknown event % for namespace %',
-      [event, fNameSpace]);
-  // call the handler
   data.Delete(0); // trim the event name from the data array
   d := @data;
   if (d^.Count = 1) and
      _Safe(d^.Values[0])^.IsObject then
     d := _Safe(d^.Values[0]); // return a single object as root (common case)
+  // optional callback
+  if Assigned(OnEventReceived) then
+    OnEventReceived(self, event, d^);
+  // retrieve event name and search for associated handler
+  ndx := fHandlers.FindHashed(event);
+  if ndx < 0 then
+    if aIgnoreUnknownEvent or
+       (snoIgnoreUnknownEvent in fOptions) then
+      exit // ignore in silence
+    else
+      ESocketIO.RaiseUtf8('%.HandleEvent: unknown event % for namespace %',
+        [event, fNameSpace]);
+  // call the handler
   with fHandler[ndx] do
     if Assigned(OnEvent) then
-      ack := OnEvent(event, d^)
+      ack := OnEvent(self, event, d^)
     else if Assigned(OnMethod) then
       ack := OnMethod(d^);
   // optionally call back the server with an ACK payload
@@ -3894,7 +3981,7 @@ end;
 { TSocketIORemoteNamespace }
 
 constructor TSocketIORemoteNamespace.Create(aOwner: TEngineIOAbstract;
-  const aNameSpace, aSid: RawUtf8);
+  const aNameSpace, aSid, aHandshakeData: RawUtf8);
 begin
   inherited Create;
   fOwner := aOwner;
@@ -3903,10 +3990,11 @@ begin
   else
     fNameSpace := aNameSpace;
   fSid := aSid;
+  fHandshakeData := aHandshakeData;
 end;
 
 constructor TSocketIORemoteNamespace.CreateFromConnectMessage(
-  const aMessage: TSocketIOMessage; aOwner: TEngineIOAbstract);
+  const aMessage: TSocketIOMessage; const aHandshakeData: RawUtf8; aOwner: TEngineIOAbstract);
 var
   data: TDocVariantData;
   sid, namespace: RawUtf8;
@@ -3915,7 +4003,7 @@ begin
      not data.GetAsRawUtf8('sid', sid) then
     EEngineIO.RaiseUtf8('%.Create: missing "sid" in message', [aOwner]);
   aMessage.NameSpaceGet(namespace);
-  Create(aOwner, namespace, sid);
+  Create(aOwner, namespace, sid, aHandshakeData);
 end;
 
 function SocketIOCallbackSearch(cb: PSocketIOCallback; n: integer;
@@ -3987,7 +4075,7 @@ begin
       [self, aMessage.NameSpaceShort, fNameSpace]);
   if (aMessage.PacketType <> sioAck) or
      (aMessage.ID = SIO_NO_ACK) then
-    ESocketIO.RaiseUtf8('%.Acknowledge: message %#% is not an valid ' +
+    ESocketIO.RaiseUtf8('%.Acknowledge: message %#% is not a valid ' +
       'acknowledgment message for namespace %',
       [self, ToText(aMessage.PacketType)^, aMessage.ID, fNameSpace]);
   // search for the registered callback
