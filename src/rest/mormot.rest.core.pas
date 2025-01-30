@@ -1206,14 +1206,14 @@ type
     /// retrieve the "Content-Type" value from InHead
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
     procedure InBodyType(var ContentType: RawUtf8;
-      GuessJsonIfNoneSet: boolean = True);
+      GuessJsonIfNoneSet: boolean = true);
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve the "Content-Type" value from OutHead
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
-    function OutBodyType(GuessJsonIfNoneSet: boolean = True): RawUtf8;
+    function OutBodyType(GuessJsonIfNoneSet: boolean = true): RawUtf8;
     /// check if the "Content-Type" value from OutHead is JSON
     // - if GuessJsonIfNoneSet is TRUE, assume JSON is used
-    function OutBodyTypeIsJson(GuessJsonIfNoneSet: boolean = True): boolean;
+    function OutBodyTypeIsJson(GuessJsonIfNoneSet: boolean = true): boolean;
     /// just a wrapper around FindNameValue(InHead,UpperName)
     // - use e.g. as
     // ! Call.Header(HEADER_REMOTEIP_UPPER) or Call.Header(HEADER_BEARER_UPPER)
@@ -1263,7 +1263,12 @@ type
   TRestClientKind = (
     ckUnknown,
     ckFramework,
-    ckAJAX);
+    ckAjax);
+
+  TRestUriInputCookie = record
+    Name, Value: RawUtf8; // only computed if InCookie[] is used
+  end;
+  PRestUriInputCookie = ^TRestUriInputCookie;
 
   /// abstract calling context for any Server-Side REST process
   // - is inherited e.g. by TRestServerUriContext for TRestServer.Uri processing
@@ -1277,14 +1282,13 @@ type
     fInHeaderLastName: RawUtf8;
     fInHeaderLastValue: RawUtf8;
     fOutSetCookie: RawUtf8;
-    fInputCookies: array of record
-      Name, Value: RawUtf8; // only computed if InCookie[] is used
-    end;
+    fInputCookies: array of TRestUriInputCookie; // only if InCookie[] is used
     fJwtContent: PJwtContent;
     fTix64: Int64;
     function GetUserAgent: RawUtf8;
     function GetInHeader(const HeaderName: RawUtf8): RawUtf8;
     procedure RetrieveCookies;
+    function FindCookie(var CookieName: RawUtf8): PRestUriInputCookie;
     function GetInCookie(CookieName: RawUtf8): RawUtf8;
     procedure SetInCookie(CookieName, CookieValue: RawUtf8);
     procedure SetOutSetCookie(const aOutSetCookie: RawUtf8); virtual;
@@ -3786,6 +3790,7 @@ var
   n: PtrInt;
   P: PUtf8Char;
   cookie, cn, cv: RawUtf8;
+  c: PRestUriInputCookie;
 begin
   fInputCookiesRetrieved := true;
   FindNameValue(fCall.InHead, 'COOKIE:', cookie);
@@ -3793,6 +3798,8 @@ begin
   n := 0;
   while P <> nil do
   begin
+    if IdemPChar(P, '__SECURE-') then
+      inc(P, 9); // e.g. if rsoCookieSecure is in Server.Options
     GetNextItemTrimed(P, '=', cn);
     GetNextItemTrimed(P, ';', cv);
     if (cn = '') and
@@ -3800,8 +3807,9 @@ begin
       break;
     if n = length(fInputCookies) then
       SetLength(fInputCookies, NextGrow(n));
-    fInputCookies[n].Name := cn;
-    fInputCookies[n].Value := cv;
+    c := @fInputCookies[n];
+    c^.Name := cn;
+    c^.Value := cv;
     inc(n);
     if n > COOKIE_MAXCOUNT_DOSATTACK then
       ERestException.RaiseUtf8('%.RetrieveCookies overflow (%): DOS attempt?',
@@ -3811,46 +3819,55 @@ begin
     DynArrayFakeLength(fInputCookies, n);
 end;
 
-procedure TRestUriContext.SetInCookie(CookieName, CookieValue: RawUtf8);
+function TRestUriContext.FindCookie(var CookieName: RawUtf8): PRestUriInputCookie;
 var
-  i, n: PtrInt;
+  i: integer;
 begin
+  result := nil;
   TrimSelf(CookieName);
   if (self = nil) or
      (CookieName = '') then
     exit;
   if not fInputCookiesRetrieved then
     RetrieveCookies;
-  n := length(fInputCookies);
-  for i := 0 to n - 1 do
-    if fInputCookies[i].Name = CookieName then // cookies are case-sensitive
-    begin
-      fInputCookies[i].Value := CookieValue; // in-place update
-      exit;
-    end;
-  SetLength(fInputCookies, n + 1);
-  fInputCookies[n].Name := CookieName;
-  fInputCookies[n].Value := CookieValue;
+  result := pointer(fInputCookies);
+  if result = nil then
+    exit;
+  for i := 1 to length(fInputCookies) do
+    if result^.Name = CookieName then // cookies are case-sensitive
+      exit
+    else
+      inc(result);
+  result := nil;
+end;
+
+procedure TRestUriContext.SetInCookie(CookieName, CookieValue: RawUtf8);
+var
+  n: PtrInt;
+  c: PRestUriInputCookie;
+begin
+  c := FindCookie(CookieName);
+  if (self = nil) or
+     (CookieName = '') then
+    exit;
+  if c = nil then
+  begin
+    n := length(fInputCookies);
+    SetLength(fInputCookies, n + 1);
+    c := @fInputCookies[n];
+    c^.Name := CookieName;
+  end;
+  c^.Value := CookieValue;
 end;
 
 function TRestUriContext.GetInCookie(CookieName: RawUtf8): RawUtf8;
 var
-  i: PtrInt;
+  c: PRestUriInputCookie;
 begin
   result := '';
-  TrimSelf(CookieName);
-  if (self = nil) or
-     (CookieName = '') then
-    exit;
-  if not fInputCookiesRetrieved then
-    RetrieveCookies;
-  for i := 0 to length(fInputCookies) - 1 do
-    if fInputCookies[i].Name = CookieName then
-    begin
-      // cookies are case-sensitive
-      result := fInputCookies[i].Value;
-      exit;
-    end;
+  c := FindCookie(CookieName);
+  if c <> nil then
+    result := c^.Value;
 end;
 
 procedure TRestUriContext.SetOutSetCookie(const aOutSetCookie: RawUtf8);

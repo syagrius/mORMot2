@@ -957,7 +957,7 @@ type
     // - see TextLength for the total number of bytes, on both stream and memory
     function PendingBytes: PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
-      /// how many bytes are currently available in the internal memory buffer
+    /// how many bytes are currently available in the internal memory buffer
     function AvailableBytes: PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// how many bytes were currently written on disk/stream
@@ -1093,15 +1093,27 @@ function NeedsXmlEscape(text: PUtf8Char): boolean;
 // - just a wrapper around TTextWriter.AddXmlEscape() process
 function XmlEscape(const text: RawUtf8): RawUtf8;
 
+/// quickly identify if any character appears in an UTF-8 string
+function NeedsEscape(text: PUtf8Char; const toescape: TSynAnsicharSet): boolean;
+
 /// escape as \xx hexadecimal some chars from a set into a pre-allocated buffer
 // - dest^ should have at least srclen * 3 bytes, for \## trios
 function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
-  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): PUtf8Char;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): PUtf8Char; overload;
+
+/// escape as \xx hexadecimal one char into a pre-allocated buffer
+// - dest^ should have at least srclen * 3 bytes, for \## trios
+function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
+  toescape, escape: AnsiChar): PUtf8Char; overload;
 
 /// escape as \xx hexadecimal some chars from a set into a new RawUtf8 string
 // - as used e.g. by LdapEscape()
 function EscapeHex(const src: RawUtf8;
-  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): RawUtf8;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): RawUtf8; overload;
+
+/// escape as \xx hexadecimal one char into a new RawUtf8 string
+function EscapeHex(const src: RawUtf8;
+  toescape: AnsiChar; escape: AnsiChar = '\'): RawUtf8; overload;
 
 /// un-escape \xx or \c encoded chars from a pre-allocated buffer
 // - any CR/LF after \ will also be ignored
@@ -1868,7 +1880,7 @@ function MakeCsv(const Value: array of const; EndWithComma: boolean = false;
   Comma: AnsiChar = ','): RawUtf8;
 
 /// direct conversion of a RTL string into a console OEM-encoded String
-// - under Windows, will use the CP_OEMCP encoding
+// - under Windows, will use GetConsoleOutputCP() codepage, following CP_OEM
 // - under Linux, will expect the console to be defined with UTF-8 encoding
 function StringToConsole(const S: string): RawByteString;
 
@@ -2730,7 +2742,7 @@ begin
   P := pointer(Csv);
   if P = nil then
     exit;
-  first := True;
+  first := true;
   for i := 0 to high(Values) do
   begin
     s := GetNextItemString(P);
@@ -3700,7 +3712,7 @@ begin
   fTempBuf := aBuf;
   dec(aBuf);
   B := aBuf;   // Add() methods will append at B+1
-  BEnd := @aBuf[aBufSize - 15]; // BEnd := B-16 to avoid overwrite/overread
+  BEnd := @aBuf[aBufSize - 15]; // BEnd := B+size-16 to avoid overwrite/overread
   {$ifndef PUREMORMOT2}
   if DefaultTextWriterTrimEnum then
     Include(fCustomOptions, twoTrimLeftEnumSets);
@@ -3793,6 +3805,8 @@ end;
 function TTextWriter.AvailableBytes: PtrUInt;
 begin
   result := BEnd - B;
+  if PtrInt(result) < 0 then
+    result := 0; // may happen with AddDirect/AddComma
 end;
 
 procedure TTextWriter.Add(const c: AnsiChar);
@@ -3932,7 +3946,7 @@ begin
   result := nil;
   if Len >= fTempBufSize - 16 then
     exit;
-  if BEnd - B <= Len then
+  if BEnd - B <= Len then // note: PtrInt(BEnd - B) could be < 0
     FlushToStream;
   result := B + 1;
 end;
@@ -4358,7 +4372,7 @@ procedure TTextWriter.AddShort(Text: PUtf8Char; TextLen: PtrInt);
 begin
   if TextLen <= 0 then
     exit;
-  if BEnd - B <= TextLen then
+  if BEnd - B <= TextLen then // note: PtrInt(BEnd - B) could be < 0
     FlushToStream;
   MoveFast(Text^, B[1], TextLen);
   inc(B, TextLen);
@@ -4448,12 +4462,11 @@ var
 begin
   if (B >= fTempBuf) and
      (B^ = #9) then
-    // we just already added an indentation level - do it once
-    exit;
+    exit; // we just already added an indentation level - do it once
   ntabs := fHumanReadableLevel;
   if ntabs >= cardinal(fTempBufSize) then
     ntabs := 0; // fHumanReadableLevel=-1 after the last level of a document
-  if BEnd - B <= PtrInt(ntabs) then
+  if BEnd - B <= PtrInt(ntabs) then // note: PtrInt(BEnd - B) could be < 0
     FlushToStream;
   PCardinal(B + 1)^ := 13 + 10 shl 8; // CR + LF
   if ntabs > 0 then
@@ -4467,7 +4480,7 @@ var
 begin
   while aCount > 0 do
   begin
-    n := BEnd - B;
+    n := BEnd - B; // note: PtrInt(BEnd - B) could be < 0
     if n <= aCount then
     begin
       FlushToStream;
@@ -4654,7 +4667,7 @@ begin
      (Len > 0) then
     if Len < fTempBufSize then // can be inlined for small chunk
     begin
-      if BEnd - B <= Len then
+      if BEnd - B <= Len then  // note: PtrInt(BEnd - B) could be < 0
         FlushToStream;
       MoveFast(P^, B[1], Len);
       inc(B, Len);
@@ -4919,7 +4932,7 @@ var
   L: PtrInt;
 begin
   L := ord(Text[0]);
-  if BEnd - B <= L then
+  if BEnd - B <= L then // note: PtrInt(BEnd - B) could be < 0
     FlushToStream;
   inc(B);
   if L > 0 then
@@ -5204,7 +5217,7 @@ begin
         AddString(Text) // would overfill our buffer -> manual append
     else
     begin
-      if BEnd - B <= siz then
+      if BEnd - B <= siz then // note: PtrInt(BEnd - B) could be < 0
         FlushToStream;
       for i := 1 to count do
       begin
@@ -5227,11 +5240,11 @@ end;
 procedure TTextWriter.AddBinToHexDisplayLower(Bin: pointer; BinBytes: PtrInt;
   QuotedChar: AnsiChar);
 var
-  max: PtrUInt;
+  max: PtrInt;
 begin
-  max := PtrUInt(BinBytes) * 2 + 1;
-  if PtrUInt(BEnd - B) <= max then
-    if max >= cardinal(fTempBufSize) then
+  max := BinBytes * 2 + 1;
+  if BEnd - B <= max then // note: PtrInt(BEnd - B) could be < 0
+    if PtrUInt(max) >= PtrUInt(fTempBufSize) then
       exit // too big for a single call
     else
       FlushToStream;
@@ -5303,11 +5316,11 @@ begin
     else
       mormot.core.text.BinToHex(PAnsiChar(Bin), PAnsiChar(B), chunk);
     inc(B, chunk * 2);
-    inc(PByte(Bin), chunk);
     dec(BinBytes, chunk);
     if BinBytes = 0 then
       break;
-    // FlushToStream writes B-fTempBuf+1 -> special one below:
+    inc(PByte(Bin), chunk);
+    // FlushToStream writes B-fTempBuf+1 -> need custom code here
     WriteToStream(fTempBuf, B - fTempBuf);
     B := fTempBuf;
   until false;
@@ -5500,7 +5513,8 @@ var
   beg: PUtf8Char;
   esc: PAnsiCharToByte;
 begin
-  if Text = nil then
+  if (Text = nil) or
+     (Text^ = #0) then
     exit;
   esc := @XML_ESC;
   repeat
@@ -5513,149 +5527,6 @@ begin
     AddShorter(XML_ESCAPED[esc[Text^]]);
     inc(Text);
   until Text^ = #0;
-end;
-
-
-{ TEchoWriter }
-
-constructor TEchoWriter.Create(Owner: TTextWriter);
-begin
-  fWriter := Owner;
-  if Assigned(fWriter.OnFlushToStream) then
-    ESynException.RaiseUtf8('Unexpected %.Create', [self]);
-  fWriter.OnFlushToStream := FlushToStream; // register
-end;
-
-destructor TEchoWriter.Destroy;
-begin
-  if (fWriter <> nil) and
-     (TMethod(fWriter.OnFlushToStream).Data = self) then
-    fWriter.OnFlushToStream := nil; // unregister
-  inherited Destroy;
-end;
-
-procedure TEchoWriter.EchoPendingToBackground(aLevel: TSynLogLevel);
-var
-  n, cap: PtrInt;
-begin
-  fBackSafe.Lock;
-  try
-    n := fBack.Count;
-    if length(fBack.Level) = n then
-    begin
-      cap := NextGrow(n);
-      SetLength(fBack.Level, cap);
-      SetLength(fBack.Text, cap);
-    end;
-    fBack.Level[n] := aLevel;
-    fBack.Text[n] := fEchoBuf;
-  finally
-    fBackSafe.UnLock;
-  end;
-end;
-
-procedure TEchoWriter.AddEndOfLine(aLevel: TSynLogLevel);
-var
-  e: PtrInt;
-begin
-  if twoEndOfLineCRLF in fWriter.CustomOptions then
-    fWriter.AddCR
-  else
-    fWriter.Add(#10);
-  if fEchos = nil then
-    exit; // no redirection yet
-  fEchoStart := EchoFlush;
-  if fEchoPendingExecuteBackground then
-    EchoPendingToBackground(aLevel)
-  else
-    for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
-      try
-        fEchos[e](self, aLevel, fEchoBuf);
-      except // remove callback in case of exception during echoing
-        MultiEventRemove(fEchos, e);
-      end;
-  fEchoBuf := '';
-end;
-
-procedure TEchoWriter.EchoPendingExecute;
-var
-  todo: TEchoWriterBack; // thread-safe per reference copy
-  i, e: PtrInt;
-begin
-  if fBack.Count = 0 then
-    exit;
-  fBackSafe.Lock;
-  MoveFast(fBack, todo, SizeOf(fBack)); // fast copy without refcount
-  FillCharFast(fBack, SizeOf(fBack), 0);
-  fBackSafe.UnLock;
-  for i := 0 to todo.Count - 1 do
-    for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
-      try
-        fEchos[e](self, todo.Level[i], todo.Text[i]);
-      except // remove callback in case of exception during echoing in user code
-        MultiEventRemove(fEchos, e);
-        if fEchos = nil then
-          break;
-      end;
-end;
-
-procedure TEchoWriter.FlushToStream(Text: PUtf8Char; Len: PtrInt);
-begin
-  if fEchos = nil then
-    exit;
-  EchoFlush;
-  fEchoStart := 0;
-end;
-
-procedure TEchoWriter.EchoAdd(const aEcho: TOnTextWriterEcho);
-begin
-  if self <> nil then
-    if MultiEventAdd(fEchos, TMethod(aEcho)) then
-      if fEchos <> nil then
-        fEchoStart := fWriter.B - fWriter.fTempBuf + 1; // ignore any previous buffer
-end;
-
-procedure TEchoWriter.EchoRemove(const aEcho: TOnTextWriterEcho);
-begin
-  if self <> nil then
-    MultiEventRemove(fEchos, TMethod(aEcho));
-end;
-
-function TEchoWriter.EchoFlush: PtrInt;
-var
-  L, LI: PtrInt;
-  P: PUtf8Char;
-begin
-  P := fWriter.fTempBuf;
-  result := fWriter.B - P + 1;
-  L := result - fEchoStart;
-  inc(P, fEchoStart);
-  while (L > 0) and
-        (P[L - 1] in [#10, #13]) do // trim right CR/LF chars
-    dec(L);
-  if L = 0 then
-    exit;
-  LI := length(fEchoBuf); // fast append to fEchoBuf
-  SetLength(fEchoBuf, LI + L);
-  MoveFast(P^, PByteArray(fEchoBuf)[LI], L);
-end;
-
-procedure TEchoWriter.EchoReset;
-begin
-  fEchoBuf := '';
-end;
-
-function TEchoWriter.GetEndOfLineCRLF: boolean;
-begin
-  result := twoEndOfLineCRLF in fWriter.CustomOptions;
-end;
-
-procedure TEchoWriter.SetEndOfLineCRLF(aEndOfLineCRLF: boolean);
-begin
-  if aEndOfLineCRLF then
-    fWriter.CustomOptions := fWriter.CustomOptions + [twoEndOfLineCRLF]
-  else
-    fWriter.CustomOptions := fWriter.CustomOptions - [twoEndOfLineCRLF];
 end;
 
 
@@ -5803,20 +5674,44 @@ begin
   result := false;
 end;
 
+function NeedsEscape(text: PUtf8Char; const toescape: TSynAnsicharSet): boolean;
+var
+  c: AnsiChar;
+begin
+  result := true;
+  if text <> nil then
+    repeat
+      c := text^;
+      if c = #0 then
+        break
+      else if c in toescape then
+        exit
+      else
+        inc(text);
+    until false;
+  result := false;
+end;
+
 function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
   const toescape: TSynAnsicharSet; escape: AnsiChar): PUtf8Char;
+var
+  c: AnsiChar;
+  hex: PByteToWord; // better code generation on x86_64 and arm
 begin
+  hex := @TwoDigitsHexWB;
   result := dest;
   if srclen > 0 then
     repeat
-      if src^ in toescape then
+      c := src^;
+      if c in toescape then
       begin
         result^ := escape;
-        result := pointer(ByteToHex(pointer(result + 1), ord(src^)));
+        PWord(result + 1)^ := hex[ord(c)];
+        inc(result, 3);
       end
       else
       begin
-        result^ := src^;
+        result^ := c;
         inc(result);
       end;
       inc(src);
@@ -5829,6 +5724,11 @@ function EscapeHex(const src: RawUtf8;
 var
   l: PtrInt;
 begin
+  if not NeedsEscape(pointer(src), toescape) then
+  begin
+    result := src; // obvious
+    exit;
+  end;
   l := length(src);
   if l <> 0 then
   begin
@@ -5837,6 +5737,48 @@ begin
       toescape, escape) - pointer(result);
   end;
   FakeSetLength(result, l); // return in-place with no realloc
+end;
+
+function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
+  toescape, escape: AnsiChar): PUtf8Char;
+var
+  c: AnsiChar;
+  hex: PByteToWord; // better code generation on x86_64 and arm
+begin
+  hex := @TwoDigitsHexWB;
+  result := dest;
+  if srclen > 0 then
+    repeat
+      c := src^;
+      if c = toescape then
+      begin
+        result^ := escape;
+        PWord(result + 1)^ := hex[ord(c)];
+        inc(result, 3);
+      end
+      else
+      begin
+        result^ := c;
+        inc(result);
+      end;
+      inc(src);
+      dec(srclen);
+    until srclen = 0;
+end;
+
+function EscapeHex(const src: RawUtf8; toescape, escape: AnsiChar): RawUtf8;
+var
+  l: PtrInt;
+begin
+  if PosExChar(toescape, src) = 0 then
+  begin
+    result := src; // obvious
+    exit;
+  end;
+  l := length(src);
+  FastSetString(result, l * 3); // allocate maximum size
+  FakeSetLength(result, EscapeHexBuffer(pointer(src), pointer(result), l,
+    toescape, escape) - pointer(result));
 end;
 
 function UnescapeHexBuffer(src, dest: PUtf8Char; escape: AnsiChar): PUtf8Char;
@@ -5864,7 +5806,7 @@ begin
           inc(result);
           continue;
         end;
-        if src^ = #0 then // expect valid \c
+        if src^ = #0 then // unexpected \c into c (drop the escape)
           break;
       end;
       result^ := src^;
@@ -5916,6 +5858,149 @@ begin
       toescape, escape) - pointer(result);
   end;
   FakeSetLength(result, l); // return in-place with no realloc
+end;
+
+
+{ TEchoWriter }
+
+constructor TEchoWriter.Create(Owner: TTextWriter);
+begin
+  fWriter := Owner;
+  if Assigned(fWriter.OnFlushToStream) then
+    ESynException.RaiseUtf8('Unexpected %.Create', [self]);
+  fWriter.OnFlushToStream := FlushToStream; // register
+end;
+
+destructor TEchoWriter.Destroy;
+begin
+  if (fWriter <> nil) and
+     (TMethod(fWriter.OnFlushToStream).Data = self) then
+    fWriter.OnFlushToStream := nil; // unregister
+  inherited Destroy;
+end;
+
+procedure TEchoWriter.EchoPendingToBackground(aLevel: TSynLogLevel);
+var
+  n, cap: PtrInt;
+begin
+  fBackSafe.Lock;
+  try
+    n := fBack.Count;
+    if length(fBack.Level) = n then
+    begin
+      cap := NextGrow(n);
+      SetLength(fBack.Level, cap);
+      SetLength(fBack.Text, cap);
+    end;
+    fBack.Level[n] := aLevel;
+    fBack.Text[n] := fEchoBuf;
+  finally
+    fBackSafe.UnLock;
+  end;
+end;
+
+procedure TEchoWriter.AddEndOfLine(aLevel: TSynLogLevel);
+var
+  e: PtrInt;
+begin
+  if twoEndOfLineCRLF in fWriter.CustomOptions then
+    fWriter.AddCR
+  else
+    fWriter.Add(#10);
+  if fEchos = nil then
+    exit; // no redirection yet
+  fEchoStart := EchoFlush;
+  if fEchoPendingExecuteBackground then
+    EchoPendingToBackground(aLevel)
+  else
+    for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
+      try
+        fEchos[e](self, aLevel, fEchoBuf);
+      except // remove callback in case of exception during echoing
+        MultiEventRemove(fEchos, e);
+      end;
+  fEchoBuf := '';
+end;
+
+procedure TEchoWriter.EchoPendingExecute;
+var
+  todo: TEchoWriterBack; // thread-safe per reference copy
+  i, e: PtrInt;
+begin
+  if fBack.Count = 0 then
+    exit;
+  fBackSafe.Lock;
+  MoveFast(fBack, todo, SizeOf(fBack)); // fast copy without refcount
+  FillCharFast(fBack, SizeOf(fBack), 0);
+  fBackSafe.UnLock;
+  for i := 0 to todo.Count - 1 do
+    for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
+      try
+        fEchos[e](self, todo.Level[i], todo.Text[i]);
+      except // remove callback in case of exception during echoing in user code
+        MultiEventRemove(fEchos, e);
+        if fEchos = nil then
+          break;
+      end;
+end;
+
+procedure TEchoWriter.FlushToStream(Text: PUtf8Char; Len: PtrInt);
+begin
+  if fEchos = nil then
+    exit;
+  EchoFlush;
+  fEchoStart := 0;
+end;
+
+procedure TEchoWriter.EchoAdd(const aEcho: TOnTextWriterEcho);
+begin
+  if self <> nil then
+    if MultiEventAdd(fEchos, TMethod(aEcho)) then
+      if fEchos <> nil then
+        fEchoStart := fWriter.B - fWriter.fTempBuf + 1; // ignore any previous buffer
+end;
+
+procedure TEchoWriter.EchoRemove(const aEcho: TOnTextWriterEcho);
+begin
+  if self <> nil then
+    MultiEventRemove(fEchos, TMethod(aEcho));
+end;
+
+function TEchoWriter.EchoFlush: PtrInt;
+var
+  L, LI: PtrInt;
+  P: PUtf8Char;
+begin
+  P := fWriter.fTempBuf;
+  result := fWriter.B - P + 1;
+  L := result - fEchoStart;
+  inc(P, fEchoStart);
+  while (L > 0) and
+        (P[L - 1] in [#10, #13]) do // trim right CR/LF chars
+    dec(L);
+  if L = 0 then
+    exit;
+  LI := length(fEchoBuf); // fast append to fEchoBuf
+  SetLength(fEchoBuf, LI + L);
+  MoveFast(P^, PByteArray(fEchoBuf)[LI], L);
+end;
+
+procedure TEchoWriter.EchoReset;
+begin
+  fEchoBuf := '';
+end;
+
+function TEchoWriter.GetEndOfLineCRLF: boolean;
+begin
+  result := twoEndOfLineCRLF in fWriter.CustomOptions;
+end;
+
+procedure TEchoWriter.SetEndOfLineCRLF(aEndOfLineCRLF: boolean);
+begin
+  if aEndOfLineCRLF then
+    fWriter.CustomOptions := fWriter.CustomOptions + [twoEndOfLineCRLF]
+  else
+    fWriter.CustomOptions := fWriter.CustomOptions - [twoEndOfLineCRLF];
 end;
 
 
@@ -8200,7 +8285,8 @@ begin
 end;
 
 procedure PrepareTempUtf8(var Res: TTempUtf8; Len: PtrInt);
-begin // Res.Len has been set by caller
+  {$ifdef FPC} inline; {$endif} // Delphi XE8 fails to inline this anyway :(
+begin
   Res.Len := Len;
   Res.Text := @Res.Temp;
   if Len <= SizeOf(Res.Temp) then // no memory allocation needed
@@ -8219,8 +8305,6 @@ end;
 
 procedure WideToTempUtf8(WideChar: PWideChar; WideCharCount: PtrUInt;
   var Res: TTempUtf8);
-var
-  tmp: TSynTempBuffer;
 begin
   if (WideChar = nil) or
      (WideCharCount = 0) then
@@ -8228,7 +8312,7 @@ begin
     Res.Text := nil;
     Res.Len := 0;
   end
-  else if IsAnsiCompatibleW(WideChar, WideCharCount) then // very common case
+  else if IsAnsiCompatibleW(WideChar, WideCharCount) then // most common case
   begin
     PrepareTempUtf8(Res, WideCharCount);
     repeat
@@ -8238,11 +8322,9 @@ begin
   end
   else
   begin
-    tmp.Init(WideCharCount * 3);
-    PrepareTempUtf8(Res, RawUnicodeToUtf8(tmp.buf, tmp.len + 1,
-      WideChar, WideCharCount, [ccfNoTrailingZero]));
-    MoveFast(tmp.buf^, Res.Text^, Res.Len);
-    tmp.Done;
+    PrepareTempUtf8(Res, WideCharCount * 3); // use temporarly worst case
+    Res.Len := RawUnicodeToUtf8(Res.Text, Res.Len + 1,
+      WideChar, WideCharCount, [ccfNoTrailingZero]);
   end;
 end;
 
@@ -9597,7 +9679,8 @@ function DefaultSynLogExceptionToStr(WR: TTextWriter;
   const Context: TSynLogExceptionContext): boolean;
 var
   extcode: cardinal;
-  extnames: TPUtf8CharDynArray;
+  extnames: TPShortStringDynArray;
+  extname: PShortString;
   i: PtrInt;
 begin
   WR.AddClassName(Context.EClass);
@@ -9617,7 +9700,12 @@ begin
         {$else}
         WR.AddShort(' [unhandled ');
         {$endif OSWINDOWS}
-        WR.AddNoJsonEscape(extnames[i]);
+        extname := extnames[i];
+        if extname^[0] <> #0 then
+          if extname^[1] = '_' then // trim e.g. TDotNetException initial _ char
+            WR.AddNoJsonEscape(@extname^[2], ord(extname^[0]) - 1)
+          else
+            WR.AddShort(extname^);
         WR.AddShort('Exception]');
       end;
     end;

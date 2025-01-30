@@ -607,7 +607,7 @@ type
     /// implement generational garbage collector of TAsyncConnection instances
     // - we define two generations: the first has a TTL of KeepConnectionInstanceMS
     // (100ms) and are used to avoid GPF or confusion on still active connections;
-    // the second has a TTL of 2 seconds and will be used by ConnectionCreate to
+    // the second has a TTL of 10 seconds and will be used by ConnectionCreate to
     // recycle e.g. THttpAsyncConnection instances between HTTP/1.0 calls
     fGC1, fGC2: TPollAsyncConnections;
     fOnIdle: array of TOnPollSocketsIdle;
@@ -990,7 +990,7 @@ type
     function AfterWrite: TPollAsyncSocketOnReadWrite; override;
     // quickly reject incorrect requests (payload/timeout/OnBeforeBody)
     function DoReject(status: integer): TPollAsyncSocketOnReadWrite;
-    function DecodeHeaders: integer; virtual;
+    function DecodeHeaders: integer; virtual; // e.g. hfConnectionUpgrade override
     function DoHeaders: TPollAsyncSocketOnReadWrite;
     function DoRequest: TPollAsyncSocketOnReadWrite;
     function DoResponse(res: TPollAsyncSocketOnReadWrite): TPollAsyncSocketOnReadWrite;
@@ -2284,8 +2284,8 @@ begin
           connection.fWr.Clear;
         end;
       soWaitWrite:
-        with fWaitingWrite do
-          ObjArrayAdd(Items, connection, Safe, @Count);
+        ObjArrayAdd(fWaitingWrite.Items, connection,
+          fWaitingWrite.Safe, @fWaitingWrite.Count);
     end;
   except
     connection.fWr.Clear;
@@ -2333,8 +2333,8 @@ begin
           connection.UnLock({writer=}true);
       end
       else // retry if locked (unlikely)
-        with fWaitingWrite do
-          ObjArrayAdd(Items, connection, Safe, @Count);
+        ObjArrayAdd(fWaitingWrite.Items, connection,
+          fWaitingWrite.Safe, @fWaitingWrite.Count);
   end;
 end;
 
@@ -2734,8 +2734,7 @@ begin
   with fSockets.fWaitingWrite do
     if Count <> 0 then
       PtrArrayDelete(Items, aConnection, Safe, @Count);
-  with fGC1 do // add to 1st generation
-    ObjArrayAdd(Items, aConnection, Safe, @Count);
+  ObjArrayAdd(fGC1.Items, aConnection, fGC1.Safe, @fGC1.Count); // to 1st gen
 end;
 
 function OneGC(var gen, dst: TPollAsyncConnections; lastms, oldms: cardinal): PtrInt;
@@ -2753,7 +2752,7 @@ begin
     c := pointer(gen.Items[i]);
     if c.fLastOperation <= oldms then // AddGC() set c.fLastOperation as ms
     begin
-      // release after timeout
+      // move to next generation list after timeout
       if d = length(dst.Items) then
         SetLength(dst.Items, NextGrow(d));
       dst.Items[d] := c;
@@ -2831,11 +2830,10 @@ begin
   end;
   if n1 + n2 + tofree.Count = 0 then
     exit;
-  // np := fSockets.fRead.DeleteSeveralPending(pointer(gc), ngc); always 0
-  // actually release the connection instances
   if Assigned(fLog) then
     fLog.Add.Log(sllTrace, 'DoGC #1=% #2=% free=% client=%',
       [n1, n2, tofree.Count, fSockets.Count], self);
+  // actually release the deprecated connection instances
   if tofree.Count > 0 then
     FreeGC(tofree);
 end;
@@ -3074,20 +3072,23 @@ begin
   else
   begin
     aConnection := nil;
-    pool := @fGC2; // recycle 2nd gen instances e.g. for short-living HTTP/1.0
+    // first try to recycle 2nd gen instances e.g. for short-living HTTP/1.0
+    pool := @fGC2;
     if (pool^.Count > 0) and
        pool^.Safe.TryLock then
     begin
       if pool^.Count > 0 then
       begin
         dec(pool^.Count);
-        aConnection := pool^.Items[pool^.Count] as TAsyncConnection;
+        aConnection := TAsyncConnection(pool^.Items[pool^.Count]);
       end;
       pool^.Safe.UnLock;
     end;
     if aConnection = nil then
+      // need to allocate and initialize a new instance
       aConnection := fConnectionClass.Create(self, aRemoteIp)
     else
+      // reuse the existing instance of a closed connection
       aConnection.Recycle(aRemoteIP);
     result := ConnectionNew(aSocket, aConnection, {add=}false);
   end;

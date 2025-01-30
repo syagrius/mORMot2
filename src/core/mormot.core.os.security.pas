@@ -1339,6 +1339,18 @@ procedure ObjectUuidToText(const guid: TGuid; uuid: TAppendShortUuid;
 // - use O(n) case-insensitive brute force search over ATTR_TXT[] values
 function ShortToKnownUuid(const text: ShortString; out uuid: TGuid): boolean;
 
+/// return a human-friendly algorithm name from a OID text of most used X.509
+// Certificate signature algorithms
+// - returns e.g. 'sha256RSA' for CertAlgoName('1.2.840.113549.1.1.11')
+// - returns '' if the OID is not known
+function CertAlgoName(const OID: RawUtf8): RawUtf8;
+
+/// return the hash algorithm name from a OID text of a X.509 Certificate
+// signature algorithm
+// - returns e.g. 'SHA256' for CertAlgoHash('1.2.840.113549.1.1.11')
+// - returns '' if the OID is not known
+function CertAlgoHash(const OID: RawUtf8): RawUtf8;
+
 
 { ****************** Security Descriptor Definition Language (SDDL) }
 
@@ -2797,6 +2809,76 @@ begin
   end;
 end;
 
+const
+  OID_CERT: array[0 .. 14] of RawUtf8 = (
+    '1.2.840.113549.1.1.4',   // Md5Rsa
+    '1.2.840.113549.1.1.5',   // Sha1Rsa
+    '1.2.840.113549.1.1.11',  // Sha256Rsa
+    '1.2.840.113549.1.1.12',  // Sha384Rsa
+    '1.2.840.113549.1.1.13',  // Sha512Rsa
+    '1.2.840.113549.1.1.14',  // Sha224Rsa
+    '2.16.840.1.101.3.4.2.1', // Sha256RsaPss
+    '2.16.840.1.101.3.4.2.2', // Sha384RsaPss
+    '2.16.840.1.101.3.4.2.3', // Sha512RsaPss
+    '1.2.840.10045.4.1',      // Sha1Ecc
+    '1.2.840.10045.4.3.1',    // Sha224Ecc
+    '1.2.840.10045.4.3.2',    // Sha256Ecc
+    '1.2.840.10045.4.3.3',    // Sha384Ecc
+    '1.2.840.10045.4.3.4',    // Sha512Ecc
+    '1.3.101.110');           // Sha512EdDSA
+  OID_CERT_NAME: array[-1 .. high(OID_CERT)] of RawUtf8 = (
+    '',
+    'md5RSA',        // Md5Rsa
+    'sha1RSA',       // Sha1Rsa
+    'sha256RSA',     // Sha256Rsa
+    'sha384RSA',     // Sha384Rsa
+    'sha512RSA',     // Sha512Rsa
+    'sha224RSA',     // Sha224Rsa
+    'sha256PSS',     // Sha256RsaPss
+    'sha384PSS',     // Sha384RsaPss
+    'sha512PSS',     // Sha512RsaPss
+    'sha1ECC',       // Sha1Ecc
+    'sha224ECC',     // Sha224Ecc
+    'sha256ECC',     // Sha256Ecc
+    'sha384ECC',     // Sha384Ecc
+    'sha512ECC',     // Sha512Ecc
+    'sha512EDDSA');  // Sha512EdDSA
+  OID_CERT_HASH: array[-1 .. high(OID_CERT)] of RawUtf8 = (
+    '',
+    'MD5',           // Md5Rsa
+    'SHA1',          // Sha1Rsa
+    'SHA256',        // Sha256Rsa
+    'SHA384',        // Sha384Rsa
+    'SHA512',        // Sha512Rsa
+    'SHA224',        // Sha224Rsa
+    'SHA256',        // Sha256RsaPss
+    'SHA384',        // Sha384RsaPss
+    'SHA512',        // Sha512RsaPss
+    'SHA1',          // Sha1Ecc
+    'SHA224',        // Sha224Ecc
+    'SHA256',        // Sha256Ecc
+    'SHA384',        // Sha384Ecc
+    'SHA512',        // Sha512Ecc
+    'SHA512');       // Sha512EdDSA
+
+function CertAlgoIndex(const OID: RawUtf8): PtrInt;
+begin
+  if OID = '' then
+    result := -1
+  else
+    result := FindNonVoidRawUtf8(@OID_CERT, pointer(OID), length(OID), length(OID_CERT));
+end;
+
+function CertAlgoName(const OID: RawUtf8): RawUtf8;
+begin
+  result := OID_CERT_NAME[CertAlgoIndex(OID)];
+end;
+
+function CertAlgoHash(const OID: RawUtf8): RawUtf8;
+begin
+  result := OID_CERT_HASH[CertAlgoIndex(OID)];
+end;
+
 
 { ****************** Security Descriptor Definition Language (SDDL) }
 
@@ -2809,14 +2891,51 @@ const
     // TWellKnownRid in SDDL_WKR[] order
     'ROLALGDADUDGDCDDCASAEAPACNAPKAEKRSHO';
 var
-  SID_SDDLW: packed array[byte] of word absolute SID_SDDL; // for fast lookup
+  SddlInitialized: boolean; // delayed initialization of those lookup constants
   SDDL_WKS_INDEX: array[TWellKnownSid] of byte; // into 1..48
   SDDL_WKR_INDEX: array[TWellKnownRid] of byte; // into 49..66
+  SID_SDDLW: packed array[byte] of word absolute SID_SDDL;
+
+procedure SddlInitialize;
+var
+  wks: TWellKnownSid;
+  wkr: TWellKnownRid;
+  sam: TSecAccess;
+  i: PtrInt;
+begin
+  GlobalLock;
+  try
+    if SddlInitialized then
+      exit;
+    SddlInitialized := true;
+    for i := low(SDDL_WKS) to high(SDDL_WKS) do
+    begin
+      wks := SDDL_WKS[i];
+      include(wksWithSddl, wks);
+      SDDL_WKS_INDEX[wks] := i;
+    end;
+    for i := low(SDDL_WKR) to high(SDDL_WKR) do
+    begin
+      wkr := SDDL_WKR[i];
+      include(wkrWithSddl, wkr);
+      SDDL_WKR_INDEX[wkr] := i + high(SDDL_WKS);
+    end;
+    for i := low(SDDL_OPER) to high(SDDL_OPER) do
+      SDDL_OPER_INDEX[SDDL_OPER[i]] := i;
+    for sam := low(sam) to high(sam) do
+      if SAM_SDDL[sam][0] <> #0  then
+        include(samWithSddl, sam);
+  finally
+    GlobalUnLock;
+  end;
+end;
 
 function KnownSidToSddl(wks: TWellKnownSid): RawUtf8;
 var
   i: PtrInt;
 begin
+  if not SddlInitialized then
+    SddlInitialize;
   FastAssignNew(result);
   i := SDDL_WKS_INDEX[wks];
   if i <> 0 then
@@ -2827,6 +2946,8 @@ function KnownRidToSddl(wkr: TWellKnownRid): RawUtf8;
 var
   i: PtrInt;
 begin
+  if not SddlInitialized then
+    SddlInitialize;
   FastAssignNew(result);
   i := SDDL_WKR_INDEX[wkr];
   if i <> 0 then
@@ -2908,6 +3029,8 @@ var
 begin
   if sid = nil then
     exit;
+  if not SddlInitialized then
+    SddlInitialize;
   k := SidToKnown(sid);
   i := SDDL_WKS_INDEX[k];
   if i <> 0 then
@@ -3043,6 +3166,8 @@ var
 begin
   if cardinal(mask) = 0 then
     exit;
+  if not SddlInitialized then
+    SddlInitialize;
   i := IntegerScanIndex(@SAR_MASK, length(SAR_MASK), cardinal(mask));
   if i >= 0 then
     AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
@@ -3152,6 +3277,8 @@ procedure SddlUnaryToText(tok: TSecConditionalToken; var l, u: RawUtf8);
 var
   op: PRawUtf8;
 begin
+  if not SddlInitialized then
+    SddlInitialize;
   op := @SDDL_OPER_TXT[SDDL_OPER_INDEX[tok]];
   if tok = sctNot then
     // inner parenth for '!(..)'
@@ -3166,6 +3293,8 @@ procedure SddlBinaryToText(tok: TSecConditionalToken; var l, r, u: RawUtf8);
 var
   op: PRawUtf8;
 begin
+  if not SddlInitialized then
+    SddlInitialize;
   op := @SDDL_OPER_TXT[SDDL_OPER_INDEX[tok]];
   if tok in [sctContains, sctAnyOf, sctNotContains, sctNotAnyOf] then
     if (r <> '') and
@@ -3380,6 +3509,8 @@ begin
     ord('a') .. ord('z'),
     $80 .. $ff: // allow any UTF-8 identifier without any decoding
       begin
+        if not SddlInitialized then
+          SddlInitialize;
         result := sctLocalAttribute;
         repeat
           inc(s);
@@ -4483,6 +4614,8 @@ end;
 
 procedure TSecurityDescriptor.Clear;
 begin
+  if not SddlInitialized then
+    SddlInitialize;
   Finalize(self);
   Flags := [scSelfRelative];
   Modified := [];
@@ -5238,35 +5371,6 @@ end;
 
 {$endif OSWINDOWS}
 
-
-procedure InitializeUnit;
-var
-  wks: TWellKnownSid;
-  wkr: TWellKnownRid;
-  sam: TSecAccess;
-  i: PtrInt;
-begin
-  for i := low(SDDL_WKS) to high(SDDL_WKS) do
-  begin
-    wks := SDDL_WKS[i];
-    include(wksWithSddl, wks);
-    SDDL_WKS_INDEX[wks] := i;
-  end;
-  for i := low(SDDL_WKR) to high(SDDL_WKR) do
-  begin
-    wkr := SDDL_WKR[i];
-    include(wkrWithSddl, wkr);
-    SDDL_WKR_INDEX[wkr] := i + high(SDDL_WKS);
-  end;
-  for i := low(SDDL_OPER) to high(SDDL_OPER) do
-    SDDL_OPER_INDEX[SDDL_OPER[i]] := i;
-  for sam := low(sam) to high(sam) do
-    if SAM_SDDL[sam][0] <> #0  then
-      include(samWithSddl, sam);
-end;
-
-initialization
-  InitializeUnit;
 
 end.
 

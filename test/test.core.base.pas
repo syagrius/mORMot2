@@ -175,6 +175,7 @@ type
     property values: TComplexNumberObjArray read fValues write fValues;
   end;
 
+// sorting function to order by StrIComp(TOrmPeople.FirstName)
 function TOrmPeopleCompareByFirstName(const A, B): integer;
 
 
@@ -282,6 +283,10 @@ type
     procedure _TSynLogFile;
     /// client side geniune 64 bit identifiers generation
     procedure _TSynUniqueIdentifier;
+    {$ifdef OSWINDOWS}
+    /// some Windows-specific tests
+    procedure WindowsSpecificApi;
+    {$endif OSWINDOWS}
   end;
 
 
@@ -2957,45 +2962,6 @@ begin
   finally
     c.Free;
   end;
-  {$ifdef OSWINDOWS}
-  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(ERROR_OPERATION_ABORTED)^ = 'OPERATION_ABORTED', 'wecb');
-  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
-  Check(WinErrorConstant(ERROR_MORE_DATA)^ = 'MORE_DATA', 'wecd');
-  Check(WinErrorConstant(ERROR_ACCESS_DENIED)^ = 'ACCESS_DENIED', 'wece');
-  Check(WinErrorConstant(ERROR_WINHTTP_TIMEOUT)^ = 'WINHTTP_TIMEOUT', 'wecf');
-  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecg');
-  Check(WinErrorConstant($800b010d)^ = '', 'wech');
-  Check(WinErrorConstant(ERROR_CONNECTION_INVALID)^  = 'CONNECTION_INVALID', 'weci');
-  Check(WinErrorConstant(ERROR_INSUFFICIENT_BUFFER)^ = 'INSUFFICIENT_BUFFER', 'wecj');
-  Check(WinErrorConstant(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)^ =
-    'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
-  CheckEqual(WinErrorText(1246, nil), 'ERROR__CONTINUE');
-  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER, nil), 'ERROR_INSUFFICIENT_BUFFER');
-  Check(IsSystemFolder('c:\program files'));
-  Check(IsSystemFolder('c:\program Files\toto'));
-  Check(IsSystemFolder('c:\Program files (x86)'));
-  Check(IsSystemFolder('d:\Program Files (X86)\toto'));
-  Check(IsSystemFolder('c:\windows'));
-  Check(IsSystemFolder('c:\windows\toto'));
-  Check(not IsSystemFolder('c:\program file'));
-  Check(not IsSystemFolder('c:\program files other\toto'));
-  Check(not IsSystemFolder('c:\windowstorage'));
-  if IsUacVirtualizationEnabled then
-  begin
-    Check(IsUacVirtualFolder('c:\program files'));
-    Check(IsUacVirtualFolder('c:\program Files\toto'));
-    Check(IsUacVirtualFolder('c:\Program files (x86)'));
-    Check(IsUacVirtualFolder('d:\Program Files (X86)\toto'));
-    Check(IsUacVirtualFolder('c:\windows'));
-    Check(IsUacVirtualFolder('c:\windows\toto'));
-    Check(not IsUacVirtualFolder('c:\program file'));
-    Check(not IsUacVirtualFolder('c:\program files other\toto'));
-    Check(not IsUacVirtualFolder('c:\windowstorage'));
-  end
-  else
-    Check(not IsUacVirtualFolder('c:\program files'));
-  {$endif OSWINDOWS}
 end;
 
 procedure TTestCoreBase._IsMatch;
@@ -3462,6 +3428,7 @@ var
   tmp: RawUtf8;
   vs: TRawUtf8DynArray;
   timer: TPrecisionTimer;
+  caseinsensitive: boolean;
 
   procedure DoOne(const u: RawUtf8);
   var
@@ -3477,61 +3444,71 @@ const
   DIRSIZE = ONESIZE * (MAX + 1);
   INTSIZE = ONESIZE * 512;
 begin
-  int := TRawUtf8Interning.Create(1);
-  try
-    CheckEqual(int.Count, 0);
-    DoOne('test');
-    CheckEqual(int.Count, 1);
-    DoOne('test');
-    CheckEqual(int.Count, 1);
-    CheckEqual(int.Clean, 1);
-    DoOne('single');
-    CheckEqual(int.Count, 1);
-    CheckEqual(int.Clean, 1);
-    CheckEqual(int.Count, 0);
-    CheckEqual(int.Clean, 0);
-    CheckEqual(int.Count, 0);
-    DoOne('single1');
-    CheckEqual(int.Count, 1);
-    DoOne('single1');
-    CheckEqual(int.Count, 1);
-    DoOne('test2');
-    CheckEqual(int.Count, 2);
-    DoOne('test2');
-    CheckEqual(int.Count, 2);
-    DoOne('single2');
-    CheckEqual(int.Count, 3);
-    CheckEqual(int.Clean, 3);
-    CheckEqual(int.Count, 0);
-    int.Unique(tmp, 'kept', 4);
-    CheckEqual(tmp, 'kept');
-    CheckEqual(GetRefCount(tmp), 2);
-    CheckEqual(int.Count, 1);
-    CheckEqual(int.Clean, 0);
-    CheckEqual(int.Count, 1);
-    tmp := '';
-    CheckEqual(int.Clean, 1);
-    CheckEqual(int.Count, 0);
-    int.Clear;
-    CheckEqual(int.Count, 0);
-    CheckEqual(int.Clean, 0);
-    CheckEqual(int.Count, 0);
-  finally
-    int.Free;
-  end;
-  int := TRawUtf8Interning.Create(16);
-  try
-    for i := 0 to MAX do
-    begin
-      v := i and 511;
-      int.Unique(tmp, SmallUInt32Utf8[v]);
-      check(Utf8ToInteger(tmp) = v);
+  for caseinsensitive := false to true do
+  begin
+    int := TRawUtf8Interning.Create(1, caseinsensitive);
+    try
+      CheckEqual(int.Count, 0);
+      DoOne('test');
+      CheckEqual(int.Count, 1);
+      DoOne('test');
+      CheckEqual(int.Count, 1);
+      CheckEqual(int.Clean, 1);
+      DoOne('single');
+      CheckEqual(int.Count, 1);
+      CheckEqual(int.Clean, 1);
+      CheckEqual(int.Count, 0);
+      CheckEqual(int.Clean, 0);
+      CheckEqual(int.Count, 0);
+      DoOne('single1');
+      CheckEqual(int.Count, 1);
+      DoOne('single1');
+      CheckEqual(int.Count, 1);
+      DoOne('test2');
+      CheckEqual(int.Count, 2);
+      DoOne('test2');
+      CheckEqual(int.Count, 2);
+      DoOne('single2');
+      CheckEqual(int.Count, 3);
+      CheckEqual(int.Clean, 3);
+      CheckEqual(int.Count, 0);
+      int.Unique(tmp, 'kept', 4);
+      CheckEqual(tmp, 'kept');
+      CheckEqual(GetRefCount(tmp), 2);
+      tmp := '';
+      if caseinsensitive then
+        int.Unique(tmp, 'KEPT', 4) // should be identified as previous 'kept'
+      else
+        int.Unique(tmp, 'kept', 4);
+      CheckEqual(tmp, 'kept');
+      CheckEqual(GetRefCount(tmp), 2);
+      CheckEqual(int.Count, 1);
+      CheckEqual(int.Clean, 0);
+      CheckEqual(int.Count, 1);
+      tmp := '';
+      CheckEqual(int.Clean, 1);
+      CheckEqual(int.Count, 0);
+      int.Clear;
+      CheckEqual(int.Count, 0);
+      CheckEqual(int.Clean, 0);
+      CheckEqual(int.Count, 0);
+    finally
+      int.Free;
     end;
-    checkEqual(int.Count, 512);
-    checkEqual(int.Clean, 0);
-    checkEqual(int.Count, 512);
-  finally
-    int.Free;
+    int := TRawUtf8Interning.Create(16, caseinsensitive);
+    try
+      for i := 0 to MAX do
+      begin
+        v := i and 511;
+        int.Unique(tmp, SmallUInt32Utf8[v]);
+        check(Utf8ToInteger(tmp) = v);
+      end;
+      checkEqual(int.Count, 512);
+      checkEqual(int.Clean, 0);
+      checkEqual(int.Count, 512);
+    finally
+      int.Free;
+    end;
   end;
   int := TRawUtf8Interning.Create(4);
   try
@@ -4237,11 +4214,11 @@ procedure TTestCoreBase.NumericalConversions;
   begin
     s := DoubleToString(v);
     val(s, d, err);
-    Check(err = 0);
+    CheckEqual(err, 0);
     CheckSame(d, v);
     StringToUtf8(s, u);
     d := GetExtended(pointer(u), err);
-    Check(err = 0);
+    CheckEqual(err, 0);
     CheckSame(d, v);
   end;
 
@@ -4583,6 +4560,17 @@ begin
   Check(UInt32ToUtf8(1599638299) = '1599638299');
   Check(Int32ToUtf8(-1599638299) = '-1599638299');
   Check(Int64ToUtf8(-1271083787498396012) = '-1271083787498396012');
+  CheckEqual(Int64ToUtf8(242161819595454762), '242161819595454762');
+  // detect 64-bit integer overflow in GetExtended()
+  CheckDoubleToShort(95.0290695380, '95.029069538');
+  Check(ToDouble('95.0290695380', d), '95.02');
+  CheckSame(d, 95.029069538);
+  Check(ToDouble('95.02906953800000000000', d), '95.x');
+  CheckSame(d, 95.029069538);
+  Check(ToDouble('184467440737095514', d), '184467440737095514');
+  CheckSame(d, 184467440737095514);
+  Check(ToDouble('1844674407370955148', d), '1844674407370955148');
+  CheckSame(d, 1844674407370955148);
   //  SQLite text-to-float converter routine failed with this number
   Check(ToDouble('18446744073709551488', d), '18446744073709551488');
   CheckSame(d, 1.8446744074e+19, 1e+10);
@@ -4591,9 +4579,11 @@ begin
   CheckDoubleToShortSame(d);
   CheckDoubleToShort(1234567890123456789, '1.2345678901234568E18');
   CheckDoubleToShortSame(1234567890123456789);
+  CheckDoubleToShortSame(18446744073709551);
+  CheckDoubleToShortSame(184467440737095514);
+  CheckDoubleToShortSame(1844674407370955148);
   {$endif FPC}
-  s := Int64ToUtf8(242161819595454762);
-  Check(s = '242161819595454762');
+  // validate ScanUtf8()
   Check(ScanUtf8('1 2 3', '  %', [@i, @j, @d]) = 0);
   Check(ScanUtf8('', '%d%d%f', [@i, @j, @d]) = 0);
   Check(ScanUtf8('1 2 7', '%d%d%f', [@i, @j, @d]) = 3);
@@ -5095,6 +5085,7 @@ var
   Unic: RawByteString;
   WA, HasValidUtf8Avx2: Boolean;
   rb1, rb2, rb3: RawByteString;
+  eng: TSynAnsiConvert;
 const
   ROWIDS: array[0..17] of PUtf8Char = ('id', 'ID', 'iD', 'rowid', 'ROWid',
     'ROWID', 'rowiD', 'ROWId', // ok
@@ -5941,15 +5932,55 @@ begin
   FastSetString(U, @CHINESE_TEXT, 9);
   CheckEqual(StrLen(pointer(U)), 9);
   SU := Utf8ToSynUnicode(U);
-  rb1 := TSynAnsiConvert.Engine(936).UnicodeStringToAnsi(SU); // GB2312_CHARSET
-  CheckEqual(length(rb1), 7);
-  SU2 := TSynAnsiConvert.Engine(936).AnsiToUnicodeString(rb1);
+  eng := TSynAnsiConvert.Engine(936);
+  Check(eng <> nil, 'Engine(936)');
+  rb1 := eng.UnicodeStringToAnsi(SU); // GB2312
+  CheckEqual(length(rb1), 7, 'cp936a');
+  SU2 := eng.AnsiToUnicodeString(rb1);
   Check(SU = SU2);
   rb1 := '';
-  rb1 := TSynAnsiConvert.Engine(936).Utf8ToAnsi(U);
+  rb1 := eng.Utf8ToAnsi(U);
   CheckEqual(length(rb1), 7);
-  U2 := TSynAnsiConvert.Engine(936).AnsiToUtf8(rb1);
+  U2 := eng.AnsiToUtf8(rb1);
   CheckEqual(U, U2);
+  eng := TSynAnsiConvert.Engine(54936);
+  Check(eng <> nil, 'Engine(54936)');
+  rb1 := eng.UnicodeStringToAnsi(SU); // GB18030
+  if rb1 <> '' then // some Windows versions won't support this code page
+  begin
+    CheckEqual(length(rb1), 7, 'cp54936a');
+    SU2 := eng.AnsiToUnicodeString(rb1);
+    Check(SU = SU2, 'cp54936b');
+    rb1 := '';
+    rb1 := eng.Utf8ToAnsi(U);
+    CheckEqual(length(rb1), 7, 'cp54936c');
+    U2 := eng.AnsiToUtf8(rb1);
+    CheckEqual(U, U2, 'cp54936d');
+    {$ifdef HASCODEPAGE}
+    rb2 := U;
+    CheckEqual(length(rb2), 9);
+    SetCodePage(rb2, 54936, {convert=}true);
+    CheckEqual(length(u), 9);
+    CheckEqual(length(rb1), 7);
+    CheckEqual(length(rb2), 7);
+    Check(rb1 = rb2, 'setcodepage');
+    Check(SortDynArrayRawByteString(rb1, rb2) = 0);
+    {$endif HASCODEPAGE}
+    SetLength(U, 4);
+    PCardinal(U)^ := $A59AAAF0; // valid in GB18030 only
+    SU := Utf8ToSynUnicode(U);  // 69 D8 A5 DE , UTF16, Code Point: \uD869\uDEA5
+    CheckEqual(PCardinal(SU)^, $DEA5D869);
+    RB1 := eng.Utf8ToAnsi(U);
+    Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
+    RB2 := eng.UnicodeStringToAnsi(SU);
+    Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
+    U2 := eng.AnsiToUtf8(RB1);
+    CheckEqual(U2, U, 'AnsiToUtf8');
+  end;
+  Check(CodePageToText(CP_UTF8) = 'utf8');
+  Check(CodePageToText(CP_UTF16) = 'utf16le');
+  Check(CodePageToText(CP_WINANSI) = 'cp1252');
+  Check(CodePageToText(54936) = 'gb18030');
   Check(UnQuoteSqlStringVar('"one two"', U) <> nil);
   Check(U = 'one two');
   Check(UnQuoteSqlStringVar('one two', U) <> nil);
@@ -8106,6 +8137,7 @@ const
 var
   nv: TSynNameValue;
   i: integer;
+  v: RawUtf8;
   tmp: TSynTempBuffer;
 begin
   nv.Init(false);
@@ -8114,46 +8146,48 @@ begin
     nv.Add(UInt32ToUtf8(i), UInt32ToUtf8(i + MAX));
   check(nv.Count = MAX);
   for i := 1 to MAX do
-    check(nv.Find(UInt32ToUtf8(i)) = i - 1);
+    checkEqual(nv.Find(UInt32ToUtf8(i)), i - 1);
   for i := MAX + 1 to MAX * 2 do
     check(nv.Find(UInt32ToUtf8(i)) < 0);
   for i := 1 to MAX do
-    check(nv.Value(UInt32ToUtf8(i)) = UInt32ToUtf8(i + MAX));
-  for i := 1 to MAX do
-    check(nv.Str[UInt32ToUtf8(i)] = UInt32ToUtf8(i + MAX));
+  begin
+    UInt32ToUtf8(i + MAX, v);
+    checkEqual(nv.Value(UInt32ToUtf8(i)), v);
+    checkEqual(nv.Str[UInt32ToUtf8(i)], v);
+  end;
   nv.InitFromNamesValues(['a', 'b'], ['1', 'be']);
-  check(nv.Count = 2);
-  check(nv.Str['a'] = '1');
-  check(nv.Str['b'] = 'be');
-  check(nv.Str['c'] = '');
-  check(nv.ValueInt('a') = 1);
-  check(nv.ValueInt('b') = 0);
-  check(nv.ValueInt('c') = 0);
-  check(nv.AsCsv('=', ';') = 'a=1;b=be;');
-  check(nv.AsJson = '{"a":"1","b":"be"}');
+  checkEqual(nv.Count, 2);
+  checkEqual(nv.Str['a'], '1');
+  checkEqual(nv.Str['b'], 'be');
+  checkEqual(nv.Str['c'], '');
+  checkEqual(nv.ValueInt('a'), 1);
+  checkEqual(nv.ValueInt('b'), 0);
+  checkEqual(nv.ValueInt('c'), 0);
+  checkEqual(nv.AsCsv('=', ';'), 'a=1;b=be;');
+  checkEqual(nv.AsJson, '{"a":"1","b":"be"}');
   tmp.Init('{a:10,b:"bee"}');
   check(nv.InitFromJson(tmp.buf));
-  check(nv.Count = 2);
-  check(nv.Str['a'] = '10');
-  check(nv.Str['b'] = 'bee');
-  check(nv.Str['c'] = '');
-  check(nv.Int['a'] = 10);
-  check(nv.Int['b'] = 0);
-  check(nv.Int['c'] = 0);
-  check(nv.AsCsv('=', ';') = 'a=10;b=bee;');
-  check(nv.AsJson = '{"a":"10","b":"bee"}');
+  checkEqual(nv.Count, 2);
+  checkEqual(nv.Str['a'], '10');
+  checkEqual(nv.Str['b'], 'bee');
+  checkEqual(nv.Str['c'], '');
+  checkEqual(nv.Int['a'], 10);
+  checkEqual(nv.Int['b'], 0);
+  checkEqual(nv.Int['c'], 0);
+  checkEqual(nv.AsCsv('=', ';'), 'a=10;b=bee;');
+  checkEqual(nv.AsJson, '{"a":"10","b":"bee"}');
   check(nv.Delete('b'));
-  check(nv.ValueInt('a') = 10);
-  check(nv.Str['b'] = '');
+  checkEqual(nv.ValueInt('a'), 10);
+  checkEqual(nv.Str['b'], '');
   check(not nv.Delete('b'));
-  check(nv.DeleteByValue('10') = 1);
-  check(nv.ValueInt('a') = 0);
-  check(nv.DeleteByValue('10') = 0);
-  check(nv.Count = 0);
-  check(nv.AsCsv('=', ';') = '');
+  checkEqual(nv.DeleteByValue('10'), 1);
+  checkEqual(nv.ValueInt('a'), 0);
+  checkEqual(nv.DeleteByValue('10'), 0);
+  checkEqual(nv.Count, 0);
+  checkEqual(nv.AsCsv('=', ';'), '');
   tmp.Init('{"a":20,b:"bi"]');
   check(not nv.InitFromJson(tmp.buf));
-  check(nv.Count = 0);
+  checkEqual(nv.Count, 0);
 end;
 
 procedure TTestCoreBase._TSynUniqueIdentifier;
@@ -9064,6 +9098,84 @@ begin
   result := StrIComp(
     pointer(TOrmPeople(A).FirstName), pointer(TOrmPeople(B).FirstName));
 end;
+
+{$ifdef OSWINDOWS}
+
+procedure TTestCoreBase.WindowsSpecificApi;
+
+  procedure Win32DotNetException(code: cardinal; const expected: RawUtf8);
+  var
+    e: TPShortStringDynArray;
+    i: PtrInt;
+    v: RawUtf8;
+  begin
+    Check(e = nil);
+    Win32DotNetExceptions(code, e);
+    CheckEqual(v, '');
+    for i := 0 to high(e) do
+      Append(v, [e[i]^, ' ']);
+    CheckEqual(v, expected);
+  end;
+
+var
+  nfo: TWinProcessInfo;
+begin
+  // validate Windows API error code recognition
+  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
+  Check(WinErrorConstant(ERROR_OPERATION_ABORTED)^ = 'OPERATION_ABORTED', 'wecb');
+  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
+  Check(WinErrorConstant(ERROR_MORE_DATA)^ = 'MORE_DATA', 'wecd');
+  Check(WinErrorConstant(ERROR_ACCESS_DENIED)^ = 'ACCESS_DENIED', 'wece');
+  Check(WinErrorConstant(ERROR_WINHTTP_TIMEOUT)^ = 'WINHTTP_TIMEOUT', 'wecf');
+  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecg');
+  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant(ERROR_CONNECTION_INVALID)^  = 'CONNECTION_INVALID', 'weci');
+  Check(WinErrorConstant(ERROR_INSUFFICIENT_BUFFER)^ = 'INSUFFICIENT_BUFFER', 'wecj');
+  Check(WinErrorConstant(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)^ =
+    'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
+  Check(WinErrorConstant(ERROR_INVALID_PARAMETER)^ = 'INVALID_PARAMETER', 'wecl');
+  CheckEqual(WinErrorText(1246, nil), 'ERROR__CONTINUE');
+  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER, nil), 'ERROR_INSUFFICIENT_BUFFER');
+  // validate DotNet exceptions error code recognition
+  Win32DotNetException(0, '');
+  Win32DotNetException(9234, '');
+  Win32DotNetException($800703E9, '_StackOverflow ');
+  Win32DotNetException($80131500, '_ _SUDSGenerator _SUDSParser ');
+  // validate UAC specific functions
+  Check(IsSystemFolder('c:\program files'));
+  Check(IsSystemFolder('c:\program Files\toto'));
+  Check(IsSystemFolder('c:\Program files (x86)'));
+  Check(IsSystemFolder('d:\Program Files (X86)\toto'));
+  Check(IsSystemFolder('c:\windows'));
+  Check(IsSystemFolder('c:\windows\toto'));
+  Check(not IsSystemFolder('c:\program file'));
+  Check(not IsSystemFolder('c:\program files other\toto'));
+  Check(not IsSystemFolder('c:\windowstorage'));
+  if IsUacVirtualizationEnabled then
+  begin
+    Check(IsUacVirtualFolder('c:\program files'));
+    Check(IsUacVirtualFolder('c:\program Files\toto'));
+    Check(IsUacVirtualFolder('c:\Program files (x86)'));
+    Check(IsUacVirtualFolder('d:\Program Files (X86)\toto'));
+    Check(IsUacVirtualFolder('c:\windows'));
+    Check(IsUacVirtualFolder('c:\windows\toto'));
+    Check(not IsUacVirtualFolder('c:\program file'));
+    Check(not IsUacVirtualFolder('c:\program files other\toto'));
+    Check(not IsUacVirtualFolder('c:\windowstorage'));
+  end
+  else
+    Check(not IsUacVirtualFolder('c:\program files'));
+  // validate raw Windows process access
+  FillCharFast(nfo, SizeOf(nfo), 0);
+  GetProcessInfo(GetCurrentProcessId, nfo);
+  Check(nfo.CommandLine <> '', 'Cmd0');
+  Check(PosEx(Executable.ProgramName, SynUnicodeToUtf8(nfo.CommandLine)) > 0, 'Cmd1');
+  Check(nfo.AvailableInfo = [wpaiPID..wpaiImagePath], 'AvailableInfo');
+  CheckEqual(nfo.PID, GetCurrentProcessId, 'PID');
+  Check(nfo.AffinityMask <> 0, 'AffinityMask');
+end;
+
+{$endif OSWINDOWS}
 
 
 initialization

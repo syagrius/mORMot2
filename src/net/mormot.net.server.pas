@@ -1617,6 +1617,20 @@ type
       read fUuid write fUuid;
   end;
 
+  /// information about THttpPeerCrypt.MessageDecode() success
+  THttpPeerCryptMessageDecode = (
+    mdOk,
+    mdBLen,
+    mdB64,
+    mdBearer,
+    mdLen,
+    mdCrc,
+    mdAes,
+    mdSeq,
+    mdKind,
+    mdHw,
+    mdAlgo);
+
   /// abstract parent to THttpPeerCache for its cryptographic core
   THttpPeerCrypt = class(TInterfacedPersistent)
   protected
@@ -1640,9 +1654,10 @@ type
       out aMsg: THttpPeerCacheMessage); virtual;
     function MessageEncode(const aMsg: THttpPeerCacheMessage): RawByteString;
     function MessageDecode(aFrame: PAnsiChar; aFrameLen: PtrInt;
-      out aMsg: THttpPeerCacheMessage): boolean;
+      out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
+    function Check(Status: THttpPeerCryptMessageDecode; const Ctxt: ShortString): boolean;
     function BearerDecode(const aBearerToken: RawUtf8;
-      out aMsg: THttpPeerCacheMessage): boolean; virtual;
+      out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode; virtual;
     function LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
       var aResp : THttpPeerCacheMessage; const aUrl: RawUtf8;
       aOutStream: TStreamRedirect; aRetry: boolean): integer;
@@ -1849,7 +1864,10 @@ const
   PEER_CACHE_PATTERN = '*.cache';
 
 function ToText(pcf: THttpPeerCacheMessageKind): PShortString; overload;
+function ToText(md: THttpPeerCryptMessageDecode): PShortString; overload;
 function ToText(const msg: THttpPeerCacheMessage): shortstring; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: shortstring);
 
 
 {$ifdef USEWININET}
@@ -3022,16 +3040,16 @@ begin
   fConnectionFlags := aConnectionFlags;
   fConnectionOpaque := aConnectionOpaque;
   // reset fields as Create() does
-  fHost := '';
-  fAuthBearer := '';
-  fUserAgent := '';
+  FastAssignNew(fHost);
+  FastAssignNew(fAuthBearer);
+  FastAssignNew(fUserAgent);
   fRespStatus := 0;
   fOutContent := '';
-  fOutContentType := '';
-  fOutCustomHeaders := '';
+  FastAssignNew(fOutContentType);
+  FastAssignNew(fOutCustomHeaders);
   fAuthenticationStatus := hraNone;
   fInternalFlags := [];
-  fAuthenticatedUser := '';
+  FastAssignNew(fAuthenticatedUser);
   fErrorMessage := '';
   fUrlParamPos := nil;
   fRouteNode := nil;
@@ -5342,10 +5360,10 @@ begin
 end;
 
 function THttpPeerCrypt.MessageDecode(aFrame: PAnsiChar; aFrameLen: PtrInt;
-  out aMsg: THttpPeerCacheMessage): boolean;
+  out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
 
-  procedure DoDecode; // sub-function to avoid any hidden try..finally
-  var
+  function DoDecode: THttpPeerCryptMessageDecode;
+  var // sub-function to avoid any hidden try..finally
     encoded, plain: RawByteString;
   begin
     // AES-GCM-128 decoding and authentication
@@ -5357,41 +5375,70 @@ function THttpPeerCrypt.MessageDecode(aFrame: PAnsiChar; aFrameLen: PtrInt;
       fAesSafe.UnLock;
     end;
     // check consistency of the decoded THttpPeerCacheMessage value
+    result := mdAes;
     if length(plain) <> SizeOf(aMsg) then
       exit;
     MoveFast(pointer(plain)^, aMsg, SizeOf(aMsg));
+    result := mdSeq;
     if aMsg.Kind in PCF_RESPONSE then
       if (aMsg.Seq < fFrameSeqLow) or
          (aMsg.Seq > cardinal(fFrameSeq)) then // compare with local sequence
         exit;
-    result := (ord(aMsg.Kind) <= ord(high(aMsg.Kind))) and
-              (ord(aMsg.Hardware) <= ord(high(aMsg.Hardware))) and
-              (ord(aMsg.Hash.Algo) <= ord(high(aMsg.Hash.Algo))); // antifuzzing
+    result := mdKind;
+    if ord(aMsg.Kind) > ord(high(aMsg.Kind)) then
+      exit;
+    result := mdHw;
+    if ord(aMsg.Hardware) > ord(high(aMsg.Hardware)) then
+      exit;
+    result := mdAlgo;
+    if ord(aMsg.Hash.Algo) > ord(high(aMsg.Hash.Algo)) then
+      exit;
+    result := mdOk;
   end;
 
 begin
-  result := false;
-  // quickly reject any fuzzing attempt
+  // quickly reject any naive fuzzing attempt
+  result := mdLen;
   dec(aFrameLen, 4);
-  if (aFrameLen >= SizeOf(aMsg) + SizeOf(TAesBlock) * 2 {iv+padding}) and
-     (PCardinal(aFrame + aFrameLen)^ =
-       crc32c(fSharedMagic, aFrame, aFrameLen)) then
-    DoDecode;
+  if aFrameLen < SizeOf(aMsg) + SizeOf(TAesBlock) * 2 {iv+padding} then
+    exit;
+  result := mdCrc;
+  if PCardinal(aFrame + aFrameLen)^ = crc32c(fSharedMagic, aFrame, aFrameLen) then
+    // decode and verify the frame content
+    result := DoDecode;
 end;
 
 function THttpPeerCrypt.BearerDecode(const aBearerToken: RawUtf8;
-  out aMsg: THttpPeerCacheMessage): boolean;
+  out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
 var
   tok: array[0.. 511] of AnsiChar; // no memory allocation
   bearerlen, toklen: PtrInt;
 begin
   bearerlen := length(aBearerToken);
   toklen := Base64uriToBinLength(bearerlen);
-  result := (toklen > SizeOf(aMsg)) and
-            (toklen < SizeOf(tok)) and
-            Base64uriToBin(pointer(aBearerToken), @tok, bearerlen, toklen) and
-            MessageDecode(@tok, toklen, aMsg) and
-            (aMsg.Kind = pcfBearer);
+  result := mdBLen;
+  if toklen > SizeOf(tok) then
+    exit;
+  result := mdB64;
+  if not Base64uriToBin(pointer(aBearerToken), @tok, bearerlen, toklen) then
+    exit;
+  result := MessageDecode(@tok, toklen, aMsg);
+  if (result = mdOk) and
+     (aMsg.Kind <> pcfBearer) then
+    result := mdBearer;
+end;
+
+function THttpPeerCrypt.Check(Status: THttpPeerCryptMessageDecode;
+  const Ctxt: ShortString): boolean;
+begin
+  result := true;
+  if Status = mdOk then
+    exit;
+  if fLog <> nil then
+    with fLog.Family do
+      if sllTrace in Level then
+        Add.Log(sllTrace, '% Decode=%', [Ctxt, ToText(Status)^], self);
+  result := false;
 end;
 
 function THttpPeerCrypt.LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
@@ -5638,7 +5685,7 @@ begin
   end;
   // validate the input frame content
   ok := (len >= SizeOf(fMsg) + SizeOf(TAesBlock) * 2) and
-        fOwner.MessageDecode(pointer(fFrame), len, fMsg);
+        fOwner.Check(fOwner.MessageDecode(pointer(fFrame), len, fMsg), 'OnFrameReceived');
   if ok then
     if (fMsg.Kind in PCF_RESPONSE) and    // responses are broadcasted on POSIX
        (fMsg.DestIP4 <> fOwner.fIP4) then // will also detect any unexpected NAT
@@ -6278,30 +6325,55 @@ begin
   result := fUdpServer.Broadcast(req, alone);
 end;
 
+type
+  TOnBeforeBodyErr = set of (
+    eBearer, eGet, eUrl, eIp1, eBanned, eDecode, eIp2, eUuid);
+
 function THttpPeerCache.OnBeforeBody(var aUrl, aMethod, aInHeaders,
   aInContentType, aRemoteIP, aBearerToken: RawUtf8; aContentLength: Int64;
   aFlags: THttpServerRequestFlags): cardinal;
 var
   msg: THttpPeerCacheMessage;
+  msgText: ShortString;
   ip4: cardinal;
+  err: TOnBeforeBodyErr;
 begin
   // should return HTTP_SUCCESS=200 to continue the process, or an HTTP
   // error code to reject the request immediately as a "TeaPot", close the
   // socket and ban this IP for a few seconds at accept() level
-  result := HTTP_FORBIDDEN;
-  if (length(aBearerToken) > (SizeOf(msg) div 3) * 4) and // base64uri length
-     IsGet(aMethod) and
-     (aUrl <> '') and // URI is just ignored but something should be specified
-     IPToCardinal(aRemoteIP, ip4) and
-     not fInstable.IsBanned(ip4) and // banned for RejectInstablePeersMin
-     BearerDecode(aBearerToken, msg) and
-     (msg.IP4 = fIP4) and
-     (IsZero(THash128(msg.Uuid)) or // IsZero for "fake" response bearer
-      IsEqualGuid(msg.Uuid, fUuid)) then
-    result := HTTP_SUCCESS
-  else if not fVerboseLog then
+  err := [];
+  if length(aBearerToken) < (SizeOf(msg) div 3) * 4 then // base64uri length
+    include(err, eBearer);
+  if not IsGet(aMethod) then
+    include(err, eGet);
+  if aUrl = '' then // URI is just ignored but something should be specified
+    include(err, eUrl);
+  if not IPToCardinal(aRemoteIP, ip4) then
+    include(err, eIp1);
+  if fInstable.IsBanned(ip4) then // banned for RejectInstablePeersMin
+    include(err, eBanned);
+  msgtext[0] := #0;
+  if Check(BearerDecode(aBearerToken, msg), 'OnBeforeBody') then
+  begin
+    inc(msgtext[0]); // to trigger ToText() below
+    if msg.IP4 <> fIP4 then
+      include(err, eIp2);
+    if not ((IsZero(THash128(msg.Uuid)) or // IsZero for "fake" response bearer
+           IsEqualGuid(msg.Uuid, fUuid))) then
+      include(err, eUuid);
+  end
+  else
+    include(err, eDecode);
+  result := HTTP_SUCCESS;
+  if err = [] then
     exit;
-  fLog.Add.Log(sllTrace, 'OnBeforeBody=% from %', [result, aRemoteIP], self);
+  result := HTTP_FORBIDDEN;
+  if not fVerboseLog then
+    exit;
+  if msgtext[0] <> #0 then
+    MsgToShort(msg, msgtext);
+  fLog.Add.Log(sllTrace, 'OnBeforeBody=% % % % [%] %', [result, aRemoteIP,
+    aMethod, aUrl, GetSetNameShort(TypeInfo(TOnBeforeBodyErr), @err), msgtext], self);
 end;
 
 procedure THttpPeerCache.OnIdle(tix64: Int64);
@@ -6523,7 +6595,7 @@ var
 begin
   // retrieve context - already checked by OnBeforeBody
   result := HTTP_BADREQUEST;
-  if BearerDecode(Ctxt.AuthBearer, msg) then
+  if Check(BearerDecode(Ctxt.AuthBearer, msg), 'OnRequest') then
   try
     // get local filename from decoded bearer hash
     progsize := 0;
@@ -6556,7 +6628,17 @@ begin
   result := GetEnumName(TypeInfo(THttpPeerCacheMessageKind), ord(pcf));
 end;
 
+function ToText(md: THttpPeerCryptMessageDecode): PShortString;
+begin
+  result := GetEnumName(TypeInfo(THttpPeerCryptMessageDecode), ord(md));
+end;
+
 function ToText(const msg: THttpPeerCacheMessage): shortstring;
+begin
+  MsgToShort(msg, result);
+end;
+
+procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: shortstring);
 var
   l: PtrInt;
   algo: PUtf8Char;
@@ -6752,7 +6834,7 @@ begin
       Http.CreateHttpHandle(fReqQueue));
   fReceiveBufferSize := 1 shl 20; // i.e. 1 MB
   if Suspended then
-    Suspended := False;
+    Suspended := false;
 end;
 
 constructor THttpApiServer.CreateClone(From: THttpApiServer);

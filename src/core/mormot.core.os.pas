@@ -1021,6 +1021,9 @@ var
   // to run seamlessly on 64-bit Windows
   // - equals always FALSE if the current executable is a 64-bit image
   IsWow64: boolean;
+  /// is set to TRUE if the current process running through a software emulation
+  // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
+  IsWow64Emulation: boolean;
   /// the current System information, as retrieved for the current process
   // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
   // to retrieve the real top-most system information
@@ -1974,7 +1977,7 @@ function IsUacVirtualizationEnabled: boolean;
 function ReadRegString(Key: THandle; const Path, Value: string): string;
 
 /// convenient late-binding of any external library function
-// - just wrapper around LoadLibray + GetProcAddress once over a pointer
+// - thread-safe wrapper around LoadLibray + GetProcAddress once over a pointer
 function DelayedProc(var api; var lib: THandle;
   libname: PChar; procname: PAnsiChar): boolean;
 
@@ -2014,13 +2017,13 @@ const
   // - but more than 260 chars are possible with the \\?\..... prefix
   // or by disabling the limitation in registry since Windows 10, version 1607
   // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-  // - extended-length path allows up to 32,767 widechars
-  // - but 2047 chars seems big enough in practice e.g. with NTFS - POSIX uses 4096
+  // - extended-length path allows up to 32,767 widechars in theory, but 2047
+  // widechars seems big enough in practice e.g. with NTFS - POSIX uses 4096
   W32_MAX = 2047;
 
 type
-  /// 4KB stack buffer for no heap allocation during UTF-16 encoding or
-  // switch to extended-length path
+  /// 4KB stack buffer for no heap allocation during UTF-16 path encoding or
+  // switch to extended-length on > MAX_PATH
   TW32Temp = array[0..W32_MAX] of WideChar;
 
 /// efficiently return a PWideChar from a TFileName on all compilers
@@ -2471,10 +2474,12 @@ type
   // libraries for Unicode support, internationalization and globalization
   // - used by Unicode_CompareString, Unicode_AnsiToWide, Unicode_WideToAnsi,
   // Unicode_InPlaceUpper and Unicode_InPlaceLower function from this unit
-  TIcuLibrary = packed object
-  protected
+  // - can maintain a thread-safe cache of up to 16 code page converters,
+  // via SharedUcnv() and SharedUcnvUnLock()
+  TIcuLibrary = record
+  private
     icu, icudata, icui18n: pointer;
-    Loaded: boolean;
+    fLoaded: boolean;
     procedure DoLoad(const LibName: TFileName = ''; Version: string = '');
     procedure Done;
   public
@@ -2482,6 +2487,8 @@ type
     ucnv_open: function (converterName: PAnsiChar; var err: SizeInt): pointer; cdecl;
     /// finalize the ICU text converter for a given encoding
     ucnv_close: procedure (converter: pointer); cdecl;
+    /// reset the ICU text converter for a given encoding
+    ucnv_reset: procedure (converter: pointer); cdecl;
     /// customize the ICU text converter substitute char
     ucnv_setSubstChars: procedure (converter: pointer;
       subChars: PAnsiChar; len: byte; var err: SizeInt); cdecl;
@@ -2526,6 +2533,22 @@ type
     // - wrapper around ucnv_open/ucnv_setSubstChars/ucnv_setFallback calls
     // - caller should make ucnv_close() once done with the returned instance
     function ucnv(codepage: cardinal): pointer;
+    /// return a shared ICU text converter instance
+    // - the first call will initialize a shared instance for the whole process
+    // - if nil is returned, regular ucnv() should be called with a local instance
+    // - if <> nil is returned, SharedUcnvUnLock should eventually be called
+    function SharedUcnv(codepage: cardinal; out ndx: PtrInt): pointer;
+    /// release the SharedUcnv() instance
+    procedure SharedUcnvUnLock(ndx: PtrInt);
+  private
+    // implement a thread-safe cache of up to 16 converters
+    fSharedLock: PtrUInt; // = TLightLock
+    fSharedCP: array[0 .. 15] of word; // CPU cache friendly lookup
+    fShared: array[0 .. 15] of record
+      Lock: PtrUInt; // = TLightLock
+      Cnv: pointer;
+    end;
+    fSharedCount, fSharedLast: integer;
   end;
 
 var
@@ -3006,6 +3029,9 @@ function Unicode_InPlaceLower(W: PWideChar; WLen: integer): integer;
 function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
   var Dest: TSynTempBuffer): PWideChar;
 
+/// return a code page number into human-friendly (or ICU) text
+procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
+
 /// returns a system-wide current monotonic timestamp as milliseconds
 // - will use the corresponding native API function under Vista+, or will be
 // redirected to a custom wrapper function for older Windows versions (XP)
@@ -3106,7 +3132,7 @@ type
     ELevel: TSynLogLevel;
     /// retrieve some extended information about a given Exception
     // - on Windows, recognize most DotNet CLR Exception Names
-    function AdditionalInfo(out ExceptionNames: TPUtf8CharDynArray): cardinal;
+    function AdditionalInfo(out ExceptionNames: TPShortStringDynArray): cardinal;
   end;
 
   /// the global function signature expected by RawExceptionIntercept()
@@ -3474,8 +3500,10 @@ function AppendToFile(const Content: RawUtf8; const FileName: TFileName;
   BackupOverMaxSize: Int64 = 0): boolean;
 
 /// compute an unique temporary file name
-// - following 'exename_123.tmp' pattern, in the system temporary folder
-function TemporaryFileName: TFileName;
+// - return by default GetSystemPath(spTemp) + 'exename_xxxxxxxx.tmp'
+// - return the first non-existing file name: caller would ensure it is writable
+function TemporaryFileName(FolderName: TFileName = '';
+  ExeName: RawUtf8 = ''): TFileName;
 
 /// extract a path from a file name like ExtractFilePath function
 // - but cross-platform, i.e. detect both '\' and '/' on all platforms
@@ -3970,6 +3998,14 @@ procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
 // - caller should always call d.Done to release any (unlikely) allocated memory
 function Utf8ToWin32PWideChar(const u: RawUtf8; var d: TSynTempBuffer): PWideChar;
 
+/// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+// - returns true and set A on conversion success from UTF-8 to code page CP
+// - as used internally by Utf8ToConsole()
+function Win32Utf8ToAnsi(P: pointer; L, CP: integer; var A: RawByteString): boolean;
+
+/// get DotNet exception class names from HRESULT - published for testing purpose
+procedure Win32DotNetExceptions(code: cardinal; var names: TPShortStringDynArray);
+
 /// ask the Operating System to convert a file URL to a local file path
 // - only Windows has a such a PathCreateFromUrlW() API
 // - POSIX define this in mormot.net.http.pas, where TUri is available
@@ -4022,7 +4058,7 @@ var
   AppendShortUuid: TAppendShortUuid;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
-// - under Windows, will use the CP_OEM encoding
+// - under Windows, will use GetConsoleOutputCP() codepage, following CP_OEM
 // - under Linux, will expect the console to be defined with UTF-8 encoding
 // - we don't propose any ConsoleToUtf8() function because Windows depends on
 // the running program itself: most should generates CP_OEM (e.g. 850) as expected,
@@ -6419,24 +6455,21 @@ function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
 var
   i: PtrInt;
 begin
-  result := nil;
-  if Text = nil then
-    TextLen := 0;
-  Dest.Init(TextLen * 2); // maximum absolute UTF-16 size in bytes (pure ASCII)
-  if Dest.len = 0 then
-    exit;
-  result := Dest.buf;
-  if IsAnsiCompatible(pointer(Text), TextLen) then // fastest optimistic way
+  if (Text = nil) or
+     (TextLen <= 0) then
+    result := Dest.Init(0)
+  else if IsAnsiCompatible(pointer(Text), TextLen) then // optimistic way
   begin
-    Dest.len := TextLen;
+    result := Dest.Init(TextLen);
     for i := 0 to TextLen - 1 do
       PWordArray(result)[i] := PByteArray(Text)[i];
     result[Dest.len] := #0; // Text[TextLen] may not be #0
   end
   else // use the RTL to perform the UTF-8 to UTF-16 conversion
-  begin                                     // + SYNTEMPTRAIL included
-    Dest.len := Utf8ToUnicode(result, Dest.Len + 16, pointer(Text), TextLen);
-    if Dest.len <= 0 then
+  begin                               
+    result := Dest.Init(TextLen * 2); // maximum absolute UTF-16 size in bytes
+    Dest.len := Utf8ToUnicode(result, TextLen + 8, pointer(Text), TextLen);
+    if Dest.len <= 0 then                  // + 8 = + SYNTEMPTRAIL/2
       Dest.len := 0
     else
     begin
@@ -6444,6 +6477,47 @@ begin
       result[Dest.len] := #0; // missing on FPC
     end;
   end;
+end;
+
+procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
+begin
+  case codepage of
+    950:
+      Name := 'BIG5';
+    CP_UTF16:
+      Name := 'UTF16LE';
+    1201:
+      Name := 'UTF16BE';
+    20932:
+      Name := 'EUC-JP';
+    28591 .. 28605:
+      begin
+        Name := 'ISO-8859-';
+        AppendShortCardinal(codepage - 28590, Name);
+      end;
+    50220 .. 50222:
+      Name := 'ISO-2022-JP-2';
+    50225:
+      Name := 'ISO-2022-KR';
+    50227:
+      Name := 'ISO-2022-CN';
+    51936:
+      Name := 'EUC-CN';  // EUC Simplified Chinese
+    51949:
+      Name := 'EUC-KR';  // EUC Korean
+    52936:
+      Name := 'HZ';      // HZ-GB2312 Simplified Chinese
+    54936:
+      Name := 'GB18030'; // GB18030 Simplified Chinese
+    CP_UTF8:
+      Name := 'UTF8';
+  else
+    begin  // 'CP####' is enough for most code pages
+      Name := 'CP';
+      AppendShortCardinal(codepage, Name);
+    end;
+  end;
+  Name[ord(Name[0]) + 1] := #0; // ensure is ASCIIZ - e.g. for ucnv_open()
 end;
 
 function NowUtc: TDateTime;
@@ -7012,26 +7086,28 @@ begin
 end;
 
 var
-  _TmpCounter: integer;
+  _TmpCounter: integer; // global thread-safe counter for this process
 
-function TemporaryFileName: TFileName;
+function TemporaryFileName(FolderName: TFileName; ExeName: RawUtf8): TFileName;
 var
-  folder: TFileName;
   retry: integer;
 begin
-  // fast cross-platform implementation
-  folder := GetSystemPath(spTemp);
+  if FolderName = '' then
+    FolderName := GetSystemPath(spTemp)
+  else
+    FolderName := IncludeTrailingPathDelimiter(FolderName);
+  if ExeName = '' then
+    ExeName := Executable.ProgramName;
   if _TmpCounter = 0 then
-    _TmpCounter := Random31Not0; // avoid paranoid overflow
-  retry := 10;
-  repeat
+    _TmpCounter := Random31Not0; // to avoid collision and easily forged names
+  for retry := 1 to 10 do // no endless loop
+  begin
     // thread-safe unique file name generation
     result := Format('%s%s_%x.tmp',
-      [folder, Executable.ProgramName, InterlockedIncrement(_TmpCounter)]);
+      [FolderName, ExeName, InterlockedIncrement(_TmpCounter)]);
     if not FileExists(result) then
       exit;
-    dec(retry); // no endless loop
-  until retry = 0;
+  end;
   raise EOSException.Create('TemporaryFileName failed');
 end;
 

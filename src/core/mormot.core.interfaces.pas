@@ -262,7 +262,7 @@ type
     /// is 0 for the root interface, 1..n for all inherited interfaces
     HierarchyLevel: byte;
     /// describe expected method arguments
-    // - Args[0] always is imvSelf
+    // - Args[0] is always imvSelf
     // - if method is a function, an additional imdResult argument is appended
     Args: TInterfaceMethodArgumentDynArray;
     /// the index of the result pseudo-argument in Args[] (signed 8-bit)
@@ -2919,32 +2919,32 @@ begin
       P := nil
     else
       inc(P);
+    a := pointer(Args);
     for i := 1 to length(Args) - 1 do
+    begin
       if P = nil then
-        break
-      else
-        begin
-          a := @Args[i];
-          if Input then
-          begin
-            if a^.ValueDirection in [imdOut, imdResult] then
-              continue;
-          end
-          else if a^.ValueDirection = imdConst then
-            continue;
-          W.AddPropName(a^.ParamName^);
-          P := GotoNextNotSpace(P);
-          Value := P;
-          P := GotoEndJsonItem(P);
-          if P = nil then
-          begin
-            W.AddNull; // malformatted input (or JSON_BIN_MAGIC_C)
-            break;
-          end;
-          if P^ = ',' then
-            inc(P); // include ending ','
-          W.AddNoJsonEscape(Value, P - Value);
-        end;
+        break;
+      inc(a);
+      if Input then
+      begin
+        if a^.ValueDirection in [imdOut, imdResult] then
+          continue;
+      end
+      else if a^.ValueDirection = imdConst then
+        continue;
+      W.AddPropName(a^.ParamName^);
+      P := GotoNextNotSpace(P);
+      Value := P;
+      P := GotoEndJsonItem(P);
+      if P = nil then
+      begin
+        W.AddNull; // malformatted input (or JSON_BIN_MAGIC_C)
+        break;
+      end;
+      if P^ = ',' then
+        inc(P); // include ending ','
+      W.AddNoJsonEscape(Value, P - Value);
+    end;
     W.CancelLastComma('}');
     W.SetText(result);
   finally
@@ -3460,7 +3460,7 @@ end;
 procedure TInterfacedObjectFake.FakeCallSetJsonToStack(
   var ctxt: TFakeCallContext; R: PUtf8Char);
 var
-  arg, ValLen: integer;
+  arg, ValLen: integer; // both should be integers, not PtrInt
   V: PPointer;
   Val: PUtf8Char;
   a: PInterfaceMethodArgument;
@@ -5881,7 +5881,7 @@ begin
     raise EInterfaceStub.CreateUtf8(
       '%.IntCheckCount(): Unexpected % operator', [self, Ord(aOperator)]);
   end;
-  InternalCheck(ok, True, 'ExpectsCount(''%'',%,%) failed: count=%',
+  InternalCheck(ok, true, 'ExpectsCount(''%'',%,%) failed: count=%',
     [fInterface.Methods[aMethodIndex].Uri, ToText(aOperator)^, aCount, aComputed]);
 end;
 
@@ -5906,7 +5906,7 @@ begin
                 IntCheckCount(m, num, ExpectedPassCountOperator, ExpectedPassCount);
               end;
     if fInterfaceExpectedTraceHash <> 0 then
-      InternalCheck(LogHash = fInterfaceExpectedTraceHash, True,
+      InternalCheck(LogHash = fInterfaceExpectedTraceHash, true,
         'ExpectsTrace(%) returned %', [fInterfaceExpectedTraceHash, LogHash]);
     if eTrace in fHasExpects then
       for m := 0 to fInterface.MethodsCount - 1 do
@@ -5918,7 +5918,7 @@ begin
               if ExpectedTraceHash <> 0 then
                 InternalCheck(
                   ExpectedTraceHash = Hash32(IntGetLogAsText(asmndx, Params,
-                    [wName, wParams, wResults], ',')), True,
+                    [wName, wParams, wResults], ',')), true,
                   'ExpectsTrace(''%'') failed', [fInterface.Methods[m].Uri]);
         end;
   finally

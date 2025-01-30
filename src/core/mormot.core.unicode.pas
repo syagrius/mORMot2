@@ -319,12 +319,12 @@ function CharSetToCodePage(CharSet: integer): cardinal;
 /// convert a code page to a char set
 function CodePageToCharSet(CodePage: cardinal): integer;
 
-/// return a code page number into human-friendly text
-function CodePageToText(aCodePage: cardinal): TShort16;
-
 /// check if a code page is known to be of fixed width, i.e. not MBCS
 // - i.e. will be implemented as a TSynAnsiFixedWidth
 function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
+
+/// return a code page number into human-friendly text
+function CodePageToText(aCodePage: cardinal): TShort16;
 
 
 { **************** UTF-8 / UTF-16 / Ansi Conversion Classes }
@@ -1410,7 +1410,7 @@ function PosCharAny(Str: PUtf8Char; Characters: PAnsiChar): PUtf8Char;
 /// a non case-sensitive RawUtf8 version of Pos()
 // - uppersubstr is expected to be already in upper case
 // - this version handle only 7-bit ASCII (no accentuated characters)
-// - see PosIU() if you want an UTF-8 version with accentuated chars support
+// - see PosIU() if you want an UTF-8 version with WinAnsi accents support
 function PosI(uppersubstr: PUtf8Char; const str: RawUtf8): PtrInt;
 
 /// a non case-sensitive version of Pos()
@@ -1420,7 +1420,8 @@ function StrPosI(uppersubstr, str: PUtf8Char): PUtf8Char;
 
 /// a non case-sensitive RawUtf8 version of Pos()
 // - substr is expected to be already in upper case
-// - this version will decode the UTF-8 content before using NormToUpper[]
+// - this version will decode the UTF-8 content before using NormToUpper[],
+// so will support only WinAnsi (Code Page 1252) codepoints
 // - see PosI() for a non-accentuated, but faster version
 function PosIU(substr: PUtf8Char; const str: RawUtf8): integer;
 
@@ -1472,6 +1473,8 @@ type
   /// function prototype used internally for UTF-8 buffer comparison
   // - also used e.g. in mormot.core.variants unit
   TUtf8Compare = function(P1, P2: PUtf8Char): PtrInt;
+  /// function prototype used internally for UTF-8 buffer hashing
+  TUtf8Hasher = function(P: PUtf8Char; L: PtrUInt): cardinal;
 
 var
   /// a quick wrapper to StrComp or StrIComp comparison functions
@@ -1645,16 +1648,16 @@ function SameTextU(const S1, S2: RawUtf8): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fast conversion of the supplied text into 8-bit uppercase
-// - this will not only convert 'a'..'z' into 'A'..'Z', but also accentuated
-// latin characters ('e' acute into 'E' e.g.), using NormToUpper[] array
+// - this will not only convert 'a'..'z' into 'A'..'Z', but also WinAnsi
+// accentuated latin characters ('e' acute into 'E' e.g.), using NormToUpper[]
 // - it will therefore decode the supplied UTF-8 content to handle more than
 // 7-bit of ascii characters (so this function is dedicated to WinAnsi code page
 // 1252 characters set)
 function UpperCaseU(const S: RawUtf8): RawUtf8;
 
 /// fast conversion of the supplied text into 8-bit lowercase
-// - this will not only convert 'A'..'Z' into 'a'..'z', but also accentuated
-// latin characters ('E' acute into 'e' e.g.), using NormToLower[] array
+// - this will not only convert 'A'..'Z' into 'a'..'z', but also WinAnsi
+// accentuated latin characters ('E' acute into 'e' e.g.), using NormToLower[]
 // - it will therefore decode the supplied UTF-8 content to handle more than
 // 7-bit of ascii characters
 function LowerCaseU(const S: RawUtf8): RawUtf8;
@@ -1723,6 +1726,12 @@ procedure LowerCaseCopy(Text: PUtf8Char; Len: PtrInt; var Dest: RawUtf8);
 // will therefore be correct with true UTF-8 content, but only for 7-bit
 procedure LowerCaseSelf(var S: RawUtf8);
   {$ifdef HASINLINE} inline; {$endif}
+
+/// fast in-place conversion of the supplied variable text into lowercase
+procedure LowerCaseShort(var S: ShortString);
+
+/// fast in-place conversion of the supplied variable text into uppercase
+procedure UpperCaseShort(var S: ShortString);
 
 /// check if a text variable content matches a given case conversion table
 function IsCase(const S: RawUtf8; Table: PNormTable): boolean;
@@ -3500,17 +3509,8 @@ end;
 
 function CodePageToText(aCodePage: cardinal): TShort16;
 begin
-  case aCodePage of
-    CP_UTF8:
-      result := 'utf8';
-    CODEPAGE_US:
-      result := 'WinAnsi';
-  else
-    begin
-      PCardinal(@result)^ := 2 + ord('c') shl 8 + ord('p') shl 16;
-      AppendShortCardinal(aCodePage, result);
-    end;
-  end;
+  Unicode_CodePageName(aCodePage, result);
+  LowerCaseShort(result); // more convenient
 end;
 
 
@@ -3556,7 +3556,7 @@ begin
   if SourceChars > 0 then
     // rely on the Operating System for all remaining ASCII characters
     inc(Dest,
-      Unicode_AnsiToWide(Source, Dest, SourceChars, SourceChars, fCodePage));
+      Unicode_AnsiToWide(Source, Dest, SourceChars, SourceChars + 8, fCodePage));
   if not NoTrailingZero then
     Dest^ := #0;
   result := Dest;
@@ -3594,7 +3594,7 @@ begin
     result := Dest
   else
   begin
-    u := AnsiBufferToUnicode(tmp.Init(SourceChars * 3), Source, SourceChars);
+    u := AnsiBufferToUnicode(tmp.Init(SourceChars * 2), Source, SourceChars);
     result := Dest + RawUnicodeToUtf8(Dest, SourceChars * 3, tmp.buf,
       (PtrUInt(u) - PtrUInt(tmp.buf)) shr 1, [ccfNoTrailingZero]);
     tmp.Done;
@@ -3786,7 +3786,7 @@ begin
     // rely on the Operating System for all remaining ASCII characters
     if SourceChars <> 0 then
       inc(Dest,
-        Unicode_WideToAnsi(Source, Dest, SourceChars, SourceChars * 3, fCodePage));
+        Unicode_WideToAnsi(Source, Dest, SourceChars, SourceChars * 3 + 4, fCodePage));
   end;
   result := Dest;
 end;
@@ -3920,7 +3920,7 @@ begin
     result := ''
   else
   begin
-    u := tmp.Init(SourceChars * 2 + 2);
+    u := tmp.Init(SourceChars * 2);
     result := UnicodeBufferToAnsi(u,
       From.AnsiBufferToUnicode(u, Source, SourceChars) - u);
     tmp.Done;
@@ -5772,8 +5772,7 @@ function IdemPCharAnsi(
   {$else}
   const table: PNormTable;
   {$endif CPUX86NOTPIC}
-  p: PUtf8Char; up: PAnsiChar): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  p: PUtf8Char; up: PAnsiChar): boolean; {$ifdef HASINLINE}inline;{$endif}
 begin
   // in this local IdemPChar() version, p and up are expected to be <> nil
   result := false;
@@ -5794,8 +5793,7 @@ function IdemPCharByte(
   {$else}
   const table: PByteArray;
   {$endif CPUX86NOTPIC}
-  p: PUtf8Char; up: PAnsiChar): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  p: PUtf8Char; up: PAnsiChar): boolean; {$ifdef HASINLINE}inline;{$endif}
 begin
   // in this local IdemPChar() version, p and up are expected to be <> nil
   result := false;
@@ -7469,14 +7467,20 @@ begin
   FastAssignNew(Dest, tmp);
 end;
 
-procedure CaseSelf(var S: RawUtf8; Table: PNormTable);
-var
-  i: PtrInt;
-  p: PUtf8Char;
+procedure CaseConvert(p: PUtf8Char; l: integer; Table: PNormTable);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  p := UniqueRawUtf8(S);
-  for i := 0 to length(S) - 1 do
-    p[i] := Table[p[i]]; // branchless conversion
+  if l <> 0 then
+    repeat
+      p^ := Table[p^]; // branchless conversion
+      inc(p);
+      dec(l)
+    until l = 0;
+end;
+
+procedure CaseSelf(var S: RawUtf8; Table: PNormTable);
+begin
+  CaseConvert(UniqueRawUtf8(S), length(S), Table);
 end;
 
 function UpperCase(const S: RawUtf8): RawUtf8;
@@ -7512,6 +7516,16 @@ end;
 procedure LowerCaseSelf(var S: RawUtf8);
 begin
   CaseSelf(S, @NormToLowerAnsi7);
+end;
+
+procedure UpperCaseShort(var S: ShortString);
+begin
+  CaseConvert(@S[1], ord(S[0]), @NormToUpperAnsi7);
+end;
+
+procedure LowerCaseShort(var S: ShortString);
+begin
+  CaseConvert(@S[1], ord(S[0]), @NormToLowerAnsi7);
 end;
 
 function IsCase(const S: RawUtf8; Table: PNormTable): boolean;

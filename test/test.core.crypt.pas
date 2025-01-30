@@ -74,8 +74,8 @@ type
     /// CompressShaAes() using SHA-256 / AES-256-CTR algorithm over SynLZ
     procedure _CompressShaAes;
     {$endif PUREMORMOT2}
-    /// AES-based pseudorandom number generator
-    procedure _TAesPNRG;
+    /// AES-based (and OpenSSL) pseudorandom number generator
+    procedure _PRNG;
     /// CryptDataForCurrentUser() function
     procedure _CryptDataForCurrentUser;
     {$ifdef OSWINDOWS}
@@ -123,40 +123,53 @@ begin
 end;
 
 procedure TTestCoreCrypto._SHA1;
-const
-  Test1Out: TSha1Digest = (
-    $A9, $99, $3E, $36, $47, $06, $81, $6A, $BA, $3E, $25,
-    $71, $78, $50, $C2, $6C, $9C, $D0, $D8, $9D);
-  Test2Out: TSha1Digest = (
-    $84, $98, $3E, $44, $1C, $3B, $D2, $6E, $BA, $AE, $4A,
-    $A1, $F9, $51, $29, $E5, $E5, $46, $70, $F1);
-var
-  s: RawByteString;
-  SHA: TSha1;
-  Digest: TSha1Digest;
-begin
-  //Check(false, 'expected');
-  Check(SingleTest('abc', Test1Out));
-  Check(SingleTest('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', Test2Out));
-  s := 'Wikipedia, l''encyclopedie libre et gratuite';
-  SHA.Full(pointer(s), length(s), Digest);
-  CheckEqual(Sha1DigestToString(Digest), 'c18cc65028bbdc147288a2d136313287782b9c73');
-  HmacSha1('', '', Digest);
-  CheckEqual(Sha1DigestToString(Digest), 'fbdb1d1b18aa6c08324b7d64b71fb76370690e1d');
-  HmacSha1('key', 'The quick brown fox jumps over the lazy dog', Digest);
-  CheckEqual(Sha1DigestToString(Digest), 'de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9');
-  // from https://www.ietf.org/rfc/rfc6070.txt
-  Pbkdf2HmacSha1('password', 'salt', 1, Digest);
-  s := Sha1DigestToString(Digest);
-  CheckEqual(s, '0c60c80f961f0e71f3a9b524af6012062fe037a6');
-  Pbkdf2HmacSha1('password', 'salt', 2, Digest);
-  s := Sha1DigestToString(Digest);
-  CheckEqual(s, 'ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957');
-  Pbkdf2HmacSha1('password', 'salt', 4096, Digest);
-  s := Sha1DigestToString(Digest);
-  CheckEqual(s, '4b007901b765489abead49d926f721d065a429c1');
-end;
 
+  procedure DoTest;
+  const
+    Test1Out: TSha1Digest = (
+      $A9, $99, $3E, $36, $47, $06, $81, $6A, $BA, $3E, $25,
+      $71, $78, $50, $C2, $6C, $9C, $D0, $D8, $9D);
+    Test2Out: TSha1Digest = (
+      $84, $98, $3E, $44, $1C, $3B, $D2, $6E, $BA, $AE, $4A,
+      $A1, $F9, $51, $29, $E5, $E5, $46, $70, $F1);
+  var
+    s: RawByteString;
+    SHA: TSha1;
+    Digest: TSha1Digest;
+  begin
+    //Check(false, 'expected');
+    Check(SingleTest('abc', Test1Out));
+    Check(SingleTest('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', Test2Out));
+    s := 'Wikipedia, l''encyclopedie libre et gratuite';
+    SHA.Full(pointer(s), length(s), Digest);
+    CheckEqual(Sha1DigestToString(Digest), 'c18cc65028bbdc147288a2d136313287782b9c73');
+    HmacSha1('', '', Digest);
+    CheckEqual(Sha1DigestToString(Digest), 'fbdb1d1b18aa6c08324b7d64b71fb76370690e1d');
+    HmacSha1('key', 'The quick brown fox jumps over the lazy dog', Digest);
+    CheckEqual(Sha1DigestToString(Digest), 'de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9');
+    // from https://www.ietf.org/rfc/rfc6070.txt
+    Pbkdf2HmacSha1('password', 'salt', 1, Digest);
+    s := Sha1DigestToString(Digest);
+    CheckEqual(s, '0c60c80f961f0e71f3a9b524af6012062fe037a6');
+    Pbkdf2HmacSha1('password', 'salt', 2, Digest);
+    s := Sha1DigestToString(Digest);
+    CheckEqual(s, 'ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957');
+    Pbkdf2HmacSha1('password', 'salt', 4096, Digest);
+    s := Sha1DigestToString(Digest);
+    CheckEqual(s, '4b007901b765489abead49d926f721d065a429c1');
+  end;
+
+begin
+  DoTest;
+  {$ifdef ASMX64}
+  if cfSHA in CpuFeatures then
+  begin
+    Exclude(CpuFeatures, cfSHA); // validate regular code without SHA-NI
+    DoTest;
+    Include(CpuFeatures, cfSHA);
+  end;
+  {$endif ASMX64}
+end;
 
 procedure TTestCoreCrypto._SHA256;
 
@@ -185,6 +198,7 @@ procedure TTestCoreCrypto._SHA256;
   end;
 
   procedure DoTest;
+  // validate against some well known (e.g. FIPS186-2) reference vectors
   const
     D1: TSha256Digest = ($ba, $78, $16, $bf, $8f, $01, $cf, $ea, $41, $41, $40,
       $de, $5d, $ae, $22, $23, $b0, $03, $61, $a3, $96, $17, $7a, $9c, $b4, $10,
@@ -195,6 +209,9 @@ procedure TTestCoreCrypto._SHA256;
     D3: TSha256Digest = ($94, $E4, $A9, $D9, $05, $31, $23, $1D, $BE, $D8, $7E,
       $D2, $E4, $F3, $5E, $4A, $0B, $F4, $B3, $BC, $CE, $EB, $17, $16, $D5, $77,
       $B1, $E0, $8B, $A9, $BA, $A3);
+    { $ python
+      >>> import hashlib
+      >>> hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 4096).hex() }
     DIG4096 = 'c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a';
   var
     Digest: THash512Rec;
@@ -234,21 +251,35 @@ procedure TTestCoreCrypto._SHA256;
     check(Sha256DigestToString(Digest.Lo) = DIG4096);
     c := 'a';
     sha.Init;
-    for i := 1 to 1000000 do
+    for i := 1 to 1000000 do // one million 'a' chars, read one-by-one
       sha.Update(@c, 1);
     sha.Final(Digest.Lo);
     Check(Sha256DigestToString(Digest.Lo) =
       'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0');
+    CheckEqual(Sha224(''),
+      'd14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f');
+    CheckEqual(Sha256(''),
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    CheckEqual(Sha224('The quick brown fox jumps over the lazy dog'),
+      '730e109bd7a8a32b1cb9d9a09aa2325d2430587ddbc0c38bad911525');
+    CheckEqual(Sha224('The quick brown fox jumps over the lazy dog.'),
+      '619cba8e8e05826e9b8c519c0a5c68f4fb653e8a3d8aa04bb2c8cd4c');
   end;
 
 begin
   DoTest;
   {$ifdef ASMX64}
-  if cfSSE41 in CpuFeatures then
+  if cfSSE41 in CpuFeatures then // validate regular code without Sha256Sse4()
   begin
     Exclude(CpuFeatures, cfSSE41);
     DoTest;
     Include(CpuFeatures, cfSSE41);
+  end;
+  if cfSHA in CpuFeatures then // validate regular code without SHA-NI
+  begin
+    Exclude(CpuFeatures, cfSHA);
+    DoTest;
+    Include(CpuFeatures, cfSHA);
   end;
   {$endif ASMX64}
 end;
@@ -338,230 +369,267 @@ procedure TTestCoreCrypto._SHA512;
     end;
   end;
 
-const
-  FOX: RawByteString = 'The quick brown fox jumps over the lazy dog';
-  ABCU: RawByteString = 'abcdefghbcdefghicdefghijdefghijkefghijklfghijk' +
-    'lmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu';
-var
-  dig: THash512Rec;
-  i: PtrInt;
-  sha: TSha512;
-  c: AnsiChar;
-  temp: RawByteString;
-begin
-  // includes SHA-384 and SHA-512/256, which are truncated SHA-512
-  CheckEqual(SHA384(''),
-    '38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63' +
-    'f6e1da274edebfe76f65fbd51ad2f14898b95b');
-  CheckEqual(SHA384('abc'),
-    'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605' +
-    'a43ff5bed8086072ba1e7cc2358baeca134c825a7');
-  CheckEqual(SHA384(ABCU), '09330c33f711' +
-    '47e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039');
-  CheckEqual(Sha512_256(''),
-    'c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a');
-  CheckEqual(Sha512_256('abc'),
-    '53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23');
-  CheckEqual(Sha512_256(ABCU),
-    '3928e184fb8690f840da3988121d31be65cb9d3ef83ee6146feac861e19b563a');
-  CheckEqual(Sha512(''),
-    'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
-    '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
-  CheckEqual(Sha512(FOX),
-    '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
-    '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-  CheckEqual(Sha512(FOX + '.'),
-    '91ea1245f20d46ae9a037a989f54f1f790f0a47607eeb8a14d128' +
-    '90cea77a1bbc6c7ed9cf205e67b7f2b8fd4c7dfd3a7a8617e45f3c463d481c7e586c39ac1ed');
-  sha.Init;
-  for i := 1 to length(FOX) do
-    sha.Update(@FOX[i], 1);
-  sha.Final(dig.b);
-  Check(Sha512DigestToString(dig.b) = '07e547d9586f6a73f73fbac0435ed76951218fb7d0c' +
-    '8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-  {$ifdef USE_OPENSSL}
-  if TOpenSslHash.IsAvailable then
-    CheckEqual(TOpenSslHash.Hash('sha512', ''),
+  procedure DoTest;
+  const
+    FOX: RawByteString = 'The quick brown fox jumps over the lazy dog';
+    ABCU: RawByteString = 'abcdefghbcdefghicdefghijdefghijkefghijklfghijk' +
+      'lmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu';
+  var
+    dig: THash512Rec;
+    i: PtrInt;
+    sha: TSha512;
+    c: AnsiChar;
+    temp: RawByteString;
+  begin
+    // includes SHA-384 and SHA-512/256, which are truncated SHA-512
+    CheckEqual(SHA384(''),
+      '38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63' +
+      'f6e1da274edebfe76f65fbd51ad2f14898b95b');
+    CheckEqual(SHA384('abc'),
+      'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605' +
+      'a43ff5bed8086072ba1e7cc2358baeca134c825a7');
+    CheckEqual(SHA384(ABCU), '09330c33f711' +
+      '47e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039');
+    CheckEqual(Sha512_256(''),
+      'c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a');
+    CheckEqual(Sha512_256('abc'),
+      '53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23');
+    CheckEqual(Sha512_256(ABCU),
+      '3928e184fb8690f840da3988121d31be65cb9d3ef83ee6146feac861e19b563a');
+    CheckEqual(Sha512(''),
       'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
       '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
-    CheckEqual(TOpenSslHash.Hash('sha512', FOX),
+    CheckEqual(Sha512(FOX),
       '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
       '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-  {$endif USE_OPENSSL}
-  c := 'a';
-  sha.Init;
-  for i := 1 to 1000 do
-    sha.Update(@c, 1);
-  sha.Final(dig.b);
-  Check(Sha512DigestToString(dig.b) =
-    '67ba5535a46e3f86dbfbed8cbbaf0125c76ed549ff8' +
-    'b0b9e03e0c88cf90fa634fa7b12b47d77b694de488ace8d9a65967dc96df599727d3292a8d9d447709c97');
-  SetLength(temp, 1000);
-  FillCharFast(pointer(temp)^, 1000, ord('a'));
-  Check(Sha512(temp) = Sha512DigestToString(dig.b));
-  for i := 1 to 1000000 do
-    sha.Update(@c, 1);
-  sha.Final(dig.b);
-  Check(Sha512DigestToString(dig.b) =
-    'e718483d0ce769644e2e42c7bc15b4638e1f98b13b2' +
-    '044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b');
-  Test('', '', 'b936cee86c9f87aa5d3c6f2e84cb5a4239a5fe50480a' +
-    '6ec66b70ab5b1f4ac6730c6c515421b327ec1d69402e53dfb49ad7381eb067b338fd7b0cb22247225d47');
-  Test('key', FOX, 'b42af09057bac1e2d41708e48a902e09b5ff7f12ab42' +
-    '8a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a');
-  Test(FOX + FOX, FOX, '19e504ba787674baa63471436a4ec5a71ba359a0f2d375' +
-    '12edd4db69dce1ec6a0e48f0ae460fc9342fbb453cf2942a0e3fa512dd361e30f0e8b8fc8c7a4ece96');
-  Test('Jefe', 'what do ya want for nothing?',
-    '164b7a7bfcf819e2e395fbe73b56e0a387bd64222e8' +
-    '31fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737');
-  Test('password', 'salt', '867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5' +
-    'd513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce', 1);
-  Test('password', 'salt', 'd197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87' +
-    'f6902e072f457b5143f30602641b3d55cd335988cb36b84376060ecd532e039b742a239434af2d5', 4096);
-  HmacSha256('Jefe', 'what do ya want for nothing?', dig.Lo);
-  CheckEqual(Sha256DigestToString(dig.Lo),
-    '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
-  HmacSha384('Jefe', 'what do ya want for nothing?', dig.b384);
-  Check(Sha384DigestToString(dig.b384) = 'af45d2e376484031617f78d2b58a6b1' +
-    'b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649');
-  Pbkdf2HmacSha384('password', 'salt', 4096, dig.b384);
-  Check(Sha384DigestToString(dig.b384) = '559726be38db125bc85ed7895f6e3cf574c7a01c' +
-    '080c3447db1e8a76764deb3c307b94853fbe424f6488c5f4f1289626');
-  Pbkdf2HmacSha512('passDATAb00AB7YxDTT', 'saltKEYbcTcXHCBxtjD', 1, dig.b);
-  Check(Sha512DigestToString(dig.b) = 'cbe6088ad4359af42e603c2a33760ef9d4017a7b2aad10af46' +
-    'f992c660a0b461ecb0dc2a79c2570941bea6a08d15d6887e79f32b132e1c134e9525eeddd744fa');
-  Pbkdf2HmacSha384('passDATAb00AB7YxDTTlRH2dqxDx19GDxDV1zFMz7E6QVqK',
-    'saltKEYbcTcXHCBxtjD2PnBh44AIQ6XUOCESOhXpEp3HrcG', 1, dig.b384);
-  Check(Sha384DigestToString(dig.b384) =
-    '0644a3489b088ad85a0e42be3e7f82500ec189366' +
-    '99151a2c90497151bac7bb69300386a5e798795be3cef0a3c803227');
-  { // rounds=100000 is slow, so not tested by default
-  Pbkdf2HmacSha512('passDATAb00AB7YxDTT','saltKEYbcTcXHCBxtjD',100000,dig);
-  Check(Sha512DigestToString(dig)='accdcd8798ae5cd85804739015ef2a11e32591b7b7d16f76819b30'+
-    'b0d49d80e1abea6c9822b80a1fdfe421e26f5603eca8a47a64c9a004fb5af8229f762ff41f');
-  Pbkdf2HmacSha384('passDATAb00AB7YxDTTlRH2dqxDx19GDxDV1zFMz7E6QVqK','saltKEYbcTcXHCBxtj'+
-    'D2PnBh44AIQ6XUOCESOhXpEp3HrcG',100000,PHash384(@dig)^);
-  Check(Sha384DigestToString(PHash384(@dig)^)='bf625685b48fe6f187a1780c5cb8e1e4a7b0dbd'+
-    '6f551827f7b2b598735eac158d77afd3602383d9a685d87f8b089af30');
-  }
+    CheckEqual(Sha512(FOX + '.'),
+      '91ea1245f20d46ae9a037a989f54f1f790f0a47607eeb8a14d128' +
+      '90cea77a1bbc6c7ed9cf205e67b7f2b8fd4c7dfd3a7a8617e45f3c463d481c7e586c39ac1ed');
+    sha.Init;
+    for i := 1 to length(FOX) do
+      sha.Update(@FOX[i], 1);
+    sha.Final(dig.b);
+    Check(Sha512DigestToString(dig.b) = '07e547d9586f6a73f73fbac0435ed76951218fb7d0c' +
+      '8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
+    {$ifdef USE_OPENSSL}
+    if TOpenSslHash.IsAvailable then
+      CheckEqual(TOpenSslHash.Hash('sha512', ''),
+        'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
+        '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
+      CheckEqual(TOpenSslHash.Hash('sha512', FOX),
+        '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
+        '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
+    {$endif USE_OPENSSL}
+    c := 'a';
+    sha.Init;
+    for i := 1 to 1000 do
+      sha.Update(@c, 1);
+    sha.Final(dig.b); // one thousand 'a' char
+    Check(Sha512DigestToString(dig.b) =
+      '67ba5535a46e3f86dbfbed8cbbaf0125c76ed549ff8' +
+      'b0b9e03e0c88cf90fa634fa7b12b47d77b694de488ace8d9a65967dc96df599727d3292a8d9d447709c97');
+    SetLength(temp, 1000);
+    FillCharFast(pointer(temp)^, 1000, ord('a'));
+    Check(Sha512(temp) = Sha512DigestToString(dig.b));
+    for i := 1 to 1000000 do
+      sha.Update(@c, 1);
+    sha.Final(dig.b); // one million 'a' char
+    Check(Sha512DigestToString(dig.b) =
+      'e718483d0ce769644e2e42c7bc15b4638e1f98b13b2' +
+      '044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b');
+    Test('', '', 'b936cee86c9f87aa5d3c6f2e84cb5a4239a5fe50480a' +
+      '6ec66b70ab5b1f4ac6730c6c515421b327ec1d69402e53dfb49ad7381eb067b338fd7b0cb22247225d47');
+    Test('key', FOX, 'b42af09057bac1e2d41708e48a902e09b5ff7f12ab42' +
+      '8a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a');
+    Test(FOX + FOX, FOX, '19e504ba787674baa63471436a4ec5a71ba359a0f2d375' +
+      '12edd4db69dce1ec6a0e48f0ae460fc9342fbb453cf2942a0e3fa512dd361e30f0e8b8fc8c7a4ece96');
+    Test('Jefe', 'what do ya want for nothing?',
+      '164b7a7bfcf819e2e395fbe73b56e0a387bd64222e8' +
+      '31fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737');
+    Test('password', 'salt', '867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5' +
+      'd513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce', 1);
+    Test('password', 'salt', 'd197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87' +
+      'f6902e072f457b5143f30602641b3d55cd335988cb36b84376060ecd532e039b742a239434af2d5', 4096);
+    HmacSha256('Jefe', 'what do ya want for nothing?', dig.Lo);
+    CheckEqual(Sha256DigestToString(dig.Lo),
+      '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
+    HmacSha384('Jefe', 'what do ya want for nothing?', dig.b384);
+    Check(Sha384DigestToString(dig.b384) = 'af45d2e376484031617f78d2b58a6b1' +
+      'b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649');
+    Pbkdf2HmacSha384('password', 'salt', 4096, dig.b384);
+    Check(Sha384DigestToString(dig.b384) = '559726be38db125bc85ed7895f6e3cf574c7a01c' +
+      '080c3447db1e8a76764deb3c307b94853fbe424f6488c5f4f1289626');
+    Pbkdf2HmacSha512('passDATAb00AB7YxDTT', 'saltKEYbcTcXHCBxtjD', 1, dig.b);
+    Check(Sha512DigestToString(dig.b) = 'cbe6088ad4359af42e603c2a33760ef9d4017a7b2aad10af46' +
+      'f992c660a0b461ecb0dc2a79c2570941bea6a08d15d6887e79f32b132e1c134e9525eeddd744fa');
+    Pbkdf2HmacSha384('passDATAb00AB7YxDTTlRH2dqxDx19GDxDV1zFMz7E6QVqK',
+      'saltKEYbcTcXHCBxtjD2PnBh44AIQ6XUOCESOhXpEp3HrcG', 1, dig.b384);
+    Check(Sha384DigestToString(dig.b384) =
+      '0644a3489b088ad85a0e42be3e7f82500ec189366' +
+      '99151a2c90497151bac7bb69300386a5e798795be3cef0a3c803227');
+    { // rounds=100000 is slow, so not tested by default
+    Pbkdf2HmacSha512('passDATAb00AB7YxDTT','saltKEYbcTcXHCBxtjD',100000,dig);
+    Check(Sha512DigestToString(dig)='accdcd8798ae5cd85804739015ef2a11e32591b7b7d16f76819b30'+
+      'b0d49d80e1abea6c9822b80a1fdfe421e26f5603eca8a47a64c9a004fb5af8229f762ff41f');
+    Pbkdf2HmacSha384('passDATAb00AB7YxDTTlRH2dqxDx19GDxDV1zFMz7E6QVqK','saltKEYbcTcXHCBxtj'+
+      'D2PnBh44AIQ6XUOCESOhXpEp3HrcG',100000,PHash384(@dig)^);
+    Check(Sha384DigestToString(PHash384(@dig)^)='bf625685b48fe6f187a1780c5cb8e1e4a7b0dbd'+
+      '6f551827f7b2b598735eac158d77afd3602383d9a685d87f8b089af30');
+    }
+  end;
+
+begin
+  DoTest;
+  {$ifdef ASMX86}
+  if cfSSSE3 in CpuFeatures then // validate regular code without sha512_compress()
+  begin
+    Exclude(CpuFeatures, cfSSSE3);
+    DoTest;
+    Include(CpuFeatures, cfSSSE3);
+  end;
+  {$endif ASMX86}
+  {$ifdef ASMX64}
+  if cfSSE41 in CpuFeatures then // validate regular code without sha512_sse4()
+  begin
+    Exclude(CpuFeatures, cfSSE41);
+    DoTest;
+    Include(CpuFeatures, cfSSE41);
+  end;
+  {$endif ASMX64}
 end;
 
 procedure TTestCoreCrypto._SHA3;
-const
-  HASH1 = '79f38adec5c20307a98ef76e8324afbfd46cfd81b22e3973c65fa1bd9de31787';
-  DK = '7bbdbe37ea70dd2ed640837ff8a926d381806ffa931695addd38ab950d35ad1880' +
-    '1a8290e8d97fe14cdfd3cfdbcd0fe766d3e6e4636bd0a17d710a61678db363';
-var
-  instance: TSha3;
-  secret, data, encrypted: RawByteString;
-  dig: THash256;
-  h512: THash512Rec;
-  s, i: PtrInt;
-  sign: TSynSigner;
-begin
-  // validate against official NIST vectors
-  // taken from http://csrc.nist.gov/groups/ST/toolkit/examples.html#aHashing
-  // see also https://www.di-mgt.com.au/sha_testvectors.html
-  CheckEqual(instance.FullStr(SHA3_224, nil, 0),
-    '6B4E03423667DBB73B6E15454F0EB1ABD4597F9A1B078E3F5B5A6BC7');
-  CheckEqual(instance.FullStr(SHA3_256, nil, 0),
-    'A7FFC6F8BF1ED76651C14756A061D662F580FF4DE43B49FA82D80A4B80F8434A');
-  CheckEqual(instance.FullStr(SHA3_384, nil, 0),
-    '0C63A75B845E4F7D01107D852E4C2485C51A50AAAA94FC61995E71BBEE983A2AC3713831264ADB47FB6BD1E058D5F004');
-  CheckEqual(instance.FullStr(SHA3_512, nil, 0),
-    'A69F73CCA23A9AC5C8B567DC185A756E97C982164FE25859E0D1DCC1475C80A615B2123AF1F5F94C11E3E9402C3AC558F500199D95B6D3E301758586281DCD26');
-  CheckEqual(instance.FullStr(SHAKE_128, nil, 0),
-    '7F9C2BA4E88F827D616045507605853ED73B8093F6EFBC88EB1A6EACFA66EF26');
-  CheckEqual(instance.FullStr(SHAKE_256, nil, 0),
-    '46B9DD2B0BA88D13233B3FEB743EEB243FCD52EA62B81B82B50C27646ED5762FD75DC4DDD8C0F200CB05019D67B592F6FC821C49479AB48640292EACB3B7C4BE');
-  SetLength(data, 200);
-  FillCharFast(pointer(data)^, 200, $A3);
-  CheckEqual(instance.FullStr(SHA3_224, pointer(data), length(data)),
-    '9376816ABA503F72F96CE7EB65AC095DEEE3BE4BF9BBC2A1CB7E11E0');
-  CheckEqual(instance.FullStr(SHA3_256, pointer(data), length(data)),
-    '79F38ADEC5C20307A98EF76E8324AFBFD46CFD81B22E3973C65FA1BD9DE31787');
-  CheckEqual(instance.FullStr(SHA3_384, pointer(data), length(data)),
-    '1881DE2CA7E41EF95DC4732B8F5F002B189CC1E42B74168ED1732649CE1DBCDD76197A31FD55EE989F2D7050DD473E8F');
-  CheckEqual(instance.FullStr(SHA3_512, pointer(data), length(data)),
-    'E76DFAD22084A8B1467FCF2FFA58361BEC7628EDF5F3FDC0E4805DC48CAEECA81B7C13C30ADF52A3659584739A2DF46BE589C51CA1A4A8416DF6545A1CE8BA00');
-  {$ifdef ASMX64AVXNOCONST}
-  if cpuAVX2 in X64CpuFeatures then
+
+  procedure DoTest;
+  const
+    HASH1 = '79f38adec5c20307a98ef76e8324afbfd46cfd81b22e3973c65fa1bd9de31787';
+    DK    = '7bbdbe37ea70dd2ed640837ff8a926d381806ffa931695addd38ab950d35ad18' +
+            '801a8290e8d97fe14cdfd3cfdbcd0fe766d3e6e4636bd0a17d710a61678db363';
+  var
+    instance: TSha3;
+    secret, data, encrypted: RawByteString;
+    dig: THash256;
+    h512: THash512Rec;
+    s, i: PtrInt;
+    sign: TSynSigner;
   begin
-    exclude(X64CpuFeatures, cpuAVX2); // validate plain x86_64 asm version
+    // validate against official NIST vectors
+    // taken from http://csrc.nist.gov/groups/ST/toolkit/examples.html#aHashing
+    // see also https://www.di-mgt.com.au/sha_testvectors.html
+    CheckEqual(instance.FullStr(SHA3_224, nil, 0),
+      '6B4E03423667DBB73B6E15454F0EB1ABD4597F9A1B078E3F5B5A6BC7');
     CheckEqual(instance.FullStr(SHA3_256, nil, 0),
       'A7FFC6F8BF1ED76651C14756A061D662F580FF4DE43B49FA82D80A4B80F8434A');
+    CheckEqual(instance.FullStr(SHA3_384, nil, 0),
+      '0C63A75B845E4F7D01107D852E4C2485C51A50AAAA94FC61995E71BBEE983A2A' +
+      'C3713831264ADB47FB6BD1E058D5F004');
+    CheckEqual(instance.FullStr(SHA3_512, nil, 0),
+      'A69F73CCA23A9AC5C8B567DC185A756E97C982164FE25859E0D1DCC1475C80A6' +
+      '15B2123AF1F5F94C11E3E9402C3AC558F500199D95B6D3E301758586281DCD26');
+    CheckEqual(instance.FullStr(SHAKE_128, nil, 0),
+      '7F9C2BA4E88F827D616045507605853ED73B8093F6EFBC88EB1A6EACFA66EF26');
+    CheckEqual(instance.FullStr(SHAKE_256, nil, 0),
+      '46B9DD2B0BA88D13233B3FEB743EEB243FCD52EA62B81B82B50C27646ED5762F' +
+      'D75DC4DDD8C0F200CB05019D67B592F6FC821C49479AB48640292EACB3B7C4BE');
+    SetLength(data, 200);
+    FillCharFast(pointer(data)^, 200, $A3);
+    CheckEqual(instance.FullStr(SHA3_224, pointer(data), length(data)),
+      '9376816ABA503F72F96CE7EB65AC095DEEE3BE4BF9BBC2A1CB7E11E0');
     CheckEqual(instance.FullStr(SHA3_256, pointer(data), length(data)),
       '79F38ADEC5C20307A98EF76E8324AFBFD46CFD81B22E3973C65FA1BD9DE31787');
-    include(X64CpuFeatures, cpuAVX2);
+    CheckEqual(instance.FullStr(SHA3_384, pointer(data), length(data)),
+      '1881DE2CA7E41EF95DC4732B8F5F002B189CC1E42B74168ED1732649CE1DBCDD' +
+      '76197A31FD55EE989F2D7050DD473E8F');
+    CheckEqual(instance.FullStr(SHA3_512, pointer(data), length(data)),
+      'E76DFAD22084A8B1467FCF2FFA58361BEC7628EDF5F3FDC0E4805DC48CAEECA8' +
+      '1B7C13C30ADF52A3659584739A2DF46BE589C51CA1A4A8416DF6545A1CE8BA00');
+    instance.Init(SHA3_256);
+    for i := 1 to length(data) do
+      instance.Update(pointer(data), 1);
+    instance.Final(dig);
+    Check(Sha256DigestToString(dig) = HASH1);
+    Check(sign.Full(saSha3256, data, nil, 0) = HASH1);
+    instance.Init(SHA3_256);
+    instance.Update(pointer(data), 100);
+    instance.Update(pointer(data), 50);
+    instance.Update(pointer(data), 20);
+    instance.Update(pointer(data), 10);
+    instance.Update(pointer(data), 10);
+    instance.Update(pointer(data), 5);
+    instance.Update(pointer(data), 5);
+    instance.Final(dig, true); // NoInit=true to check Extendable-Output Function
+    CheckEqual(Sha256DigestToString(dig), HASH1);
+    instance.Final(dig, true);
+    CheckEqual(Sha256DigestToString(dig),
+      'f85500852a5b9bb4a35440e7e4b4dba9184477a4c97b97ab0b24b91a8b04d1c8');
+    for i := 1 to 200 do
+    begin
+      FillZero(dig);
+      instance.Final(dig, true);
+      Check(not IsZero(dig), 'Sha3 XOF mode');
+    end;
+    instance.Final(dig);
+    CheckEqual(Sha256DigestToString(dig),
+      '75f8b0591e2baeae027d56c14ef3bc014d9dd29cce08b8b184528589147fc252',
+      'Sha3 XOF vector');
+    encrypted := instance.Cypher('secret', 'toto');
+    CheckEqual(mormot.core.text.BinToHex(encrypted), 'BF013A29');
+    CheckEqual(BinToHexLower(encrypted), 'bf013a29');
+    for s := 0 to 3 do
+    begin
+      secret := RandomString(s * 3);
+      Check(instance.Cypher(secret, '') = '');
+      for i := 1 to 1000 do
+      begin
+        data := RandomString(i);
+        {$ifdef FPC}
+        SetCodePage(data, CP_RAWBYTESTRING, {convert=}false);
+        {$endif FPC}
+        encrypted := instance.Cypher(secret, data);
+        Check((i < 16) or
+              (encrypted <> data));
+        instance.InitCypher(secret);
+        Check(instance.Cypher(encrypted) = data);
+      end;
+    end;
+    Pbkdf2Sha3(SHA3_512, 'pass', 'salt', 1000, @h512);
+    checkEqual(Sha512DigestToString(h512.b), DK);
+    FillZero(h512.b);
+    check(Sha512DigestToString(h512.b) <> DK);
+    sign.Pbkdf2(saSha3512, 'pass', 'salt', 1000, h512);
+    checkEqual(Sha512DigestToString(h512.b), DK);
+    FillZero(h512.b);
+    check(Sha512DigestToString(h512.b) <> DK);
+    sign.Pbkdf2('{algo:"sha-3/512",secret:"pass",salt:"salt",rounds:1000}', h512);
+    checkEqual(Sha512DigestToString(h512.b), DK);
+    sign.Pbkdf2('{algo:"sha-3/512",secret:"pass",salt:"salt",rounds:100}', h512);
+    check(Sha512DigestToString(h512.b) <> DK);
+    // taken from https://en.wikipedia.org/wiki/SHA-3
+    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dog'),
+      'F4202E3C5852F9182A0430FD8144F0A74B95E7417ECAE17DB0F8CFEED0E3E66E');
+    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dof'),
+      '853F4538BE0DB9621A6CEA659A06C1107B1F83F02B13D18297BD39D7411CF10C');
+  end;
+
+begin
+  DoTest;
+  {$ifdef ASMX64AVXNOCONST}
+  if cpuAVX2 in X64CpuFeatures then // validate without KeccakPermutationAvx2()
+  begin
+    Exclude(X64CpuFeatures, cpuAVX2);
+    DoTest;
+    Include(X64CpuFeatures, cpuAVX2);
   end;
   {$endif ASMX64AVXNOCONST}
-  instance.Init(SHA3_256);
-  for i := 1 to length(data) do
-    instance.Update(pointer(data), 1);
-  instance.Final(dig);
-  Check(Sha256DigestToString(dig) = HASH1);
-  Check(sign.Full(saSha3256, data, nil, 0) = HASH1);
-  instance.Init(SHA3_256);
-  instance.Update(pointer(data), 100);
-  instance.Update(pointer(data), 50);
-  instance.Update(pointer(data), 20);
-  instance.Update(pointer(data), 10);
-  instance.Update(pointer(data), 10);
-  instance.Update(pointer(data), 5);
-  instance.Update(pointer(data), 5);
-  instance.Final(dig, true); // NoInit=true to check Extendable-Output Function
-  CheckEqual(Sha256DigestToString(dig), HASH1);
-  instance.Final(dig, true);
-  CheckEqual(Sha256DigestToString(dig),
-    'f85500852a5b9bb4a35440e7e4b4dba9184477a4c97b97ab0b24b91a8b04d1c8');
-  for i := 1 to 200 do
-  begin
-    FillZero(dig);
-    instance.Final(dig, true);
-    Check(not IsZero(dig), 'Sha3 XOF mode');
-  end;
-  instance.Final(dig);
-  CheckEqual(Sha256DigestToString(dig),
-    '75f8b0591e2baeae027d56c14ef3bc014d9dd29cce08b8b184528589147fc252',
-    'Sha3 XOF vector');
-  encrypted := instance.Cypher('secret', 'toto');
-  CheckEqual(mormot.core.text.BinToHex(encrypted), 'BF013A29');
-  CheckEqual(BinToHexLower(encrypted), 'bf013a29');
-  for s := 0 to 3 do
-  begin
-    secret := RandomString(s * 3);
-    Check(instance.Cypher(secret, '') = '');
-    for i := 1 to 1000 do
-    begin
-      data := RandomString(i);
-      {$ifdef FPC}
-      SetCodePage(data, CP_RAWBYTESTRING, {convert=}false);
-      {$endif FPC}
-      encrypted := instance.Cypher(secret, data);
-      Check((i < 16) or
-            (encrypted <> data));
-      instance.InitCypher(secret);
-      Check(instance.Cypher(encrypted) = data);
-    end;
-  end;
-  Pbkdf2Sha3(SHA3_512, 'pass', 'salt', 1000, @h512);
-  check(Sha512DigestToString(h512.b) = DK);
-  FillZero(h512.b);
-  sign.Pbkdf2(saSha3512, 'pass', 'salt', 1000, h512);
-  check(Sha512DigestToString(h512.b) = DK);
-  // taken from https://en.wikipedia.org/wiki/SHA-3
-  CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dog'),
-    'F4202E3C5852F9182A0430FD8144F0A74B95E7417ECAE17DB0F8CFEED0E3E66E');
-  CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dof'),
-    '853F4538BE0DB9621A6CEA659A06C1107B1F83F02B13D18297BD39D7411CF10C');
 end;
 
-procedure TTestCoreCrypto._TAesPNRG;
+procedure TTestCoreCrypto._PRNG;
 var
   timer: TPrecisionTimer;
   i: integer;
   big: RawByteString;
 begin
+  // validate TAesPrgn (+ TAesPrngOsl) generators
   check(TAesPrng.IsAvailable);
   check(TSystemPrng.IsAvailable);
   Prng(TAesPrng, 'mORMot');
@@ -597,11 +665,23 @@ var
 begin
   if not meta.IsAvailable then
     exit;
+  // basic 16-bytes AES block validation
+  FillZero(b1);
+  FillZero(b2);
+  Check(IsZero(b1));
+  Check(IsZero(b2));
+  Check(IsEqual(b1, b2));
+  Check(CompareMem(@b1, @b2, SizeOf(b1)));
   p := meta.Main;
   p.FillRandom(b1);
+  Check(not IsZero(b1));
+  Check(IsZero(b2));
+  Check(not IsEqual(b1, b2));
   p.FillRandom(b2);
+  Check(not IsZero(b2));
   Check(not IsEqual(b1, b2));
   Check(not CompareMem(@b1, @b2, SizeOf(b1)));
+  // validate this PRNG class
   clo := 0;
   chi := 0;
   dlo := 0;
@@ -615,21 +695,23 @@ begin
     a2.FillRandom(b2);
     Check(not IsEqual(b1, b2));
     Check(not CompareMem(@b1, @b2, SizeOf(b1)));
-    Check(a1.FillRandom(0) = '');
-    Check(a1.FillRandomHex(0) = '');
+    CheckEqual(a1.FillRandom(0), '');
+    CheckEqual(a1.FillRandomHex(0), '');
     for i := 1 to 2000 do
     begin
+      s1 := '';
+      s2 := '';
       s1 := a1.FillRandom(i);
       s2 := a2.FillRandom(i);
-      check(length(s1) = i);
-      check(length(s2) = i);
+      CheckEqual(length(s1), i);
+      CheckEqual(length(s2), i);
       if i > 4 then
-        check(s1 <> s2);
+        checkUtf8(s1 <> s2, 'prng len=%', [i]);
       // compress the output to validate (somehow) its randomness
-      check(length(AlgoSynLZ.Compress(s1)) > i, 'random should not compress');
-      check(length(AlgoSynLZ.Compress(s2)) > i, 'random should not compress');
+      check(length(AlgoSynLZ.Compress(s1)) > i, 'random1 should not compress');
+      check(length(AlgoSynLZ.Compress(s2)) > i, 'random2 should not compress');
       s1 := a1.FillRandomHex(i);
-      check(length(s1) = i * 2);
+      CheckEqual(length(s1), i * 2);
       check(mormot.core.text.HexToBin(pointer(s1), nil, i));
       // verify Random32 / RandomDouble / RandomDouble distribution
       c := a1.Random32;
@@ -669,27 +751,29 @@ begin
     a1.Free;
     a2.Free;
   end;
-  Check(clo + chi = 2000);
-  Check(dlo + dhi = 4000);
-  Check(elo + ehi = 4000);
+  CheckEqual(clo + chi, 2000);
+  CheckEqual(dlo + dhi, 4000);
+  CheckEqual(elo + ehi, 4000);
   CheckUtf8((clo >= 900) and
             (clo <= 1100), 'Random32 distribution clo=%', [clo]);
   CheckUtf8((dlo >= 1800) and
             (dlo <= 2200), 'RandomDouble distribution dlo=%', [dlo]);
   CheckUtf8((elo >= 1800) and
             (elo <= 2200), 'RandomExt distribution elo=%', [elo]);
+  // verify AFSplit/AFUnsplit anti-forensic secret distribution
   s1 := p.FillRandom(100);
   for i := 1 to length(s1) do
     for stripes := 0 to 10 do
     begin
       split := p.AFSplit(pointer(s1)^, i, stripes);
-      check(length(split) = i * (stripes + 1));
+      CheckEqual(length(split), i * (stripes + 1));
       check(TAesPrng.AFUnsplit(split, pointer(s2)^, i));
       check(CompareMem(pointer(s1), pointer(s2), i));
     end;
-  check(PosEx(s1, split) = 0);
+  CheckEqual(PosEx(s1, split), 0);
+  // some raw benchmark
   timer.Start;
-  Check(p.Random32(0) = 0);
+  CheckEqual(p.Random32(0), 0);
   for i := 1 to 50000 do
     Check(p.Random32(i) < cardinal(i));
   for i := 0 to 50000 do
@@ -723,7 +807,7 @@ begin
   for i := 0 to MAX - 1 do
   begin
     plain := TAesPrng.Main.FillRandom(i);
-    check(length(plain) = i);
+    CheckEqual(length(plain), i);
     UInt32ToUtf8(i, appsec);
     enc := func(plain, appsec, true);
     if not ((plain = '') or
@@ -733,8 +817,8 @@ begin
           (enc <> ''));
     check(length(enc) >= length(plain));
     test := func(enc, appsec, false);
-    check(length(test) = i);
-    check(test = plain);
+    CheckEqual(length(test), i);
+    CheckEqual(test, plain);
     inc(size, i + length(enc));
   end;
   if dpapi then
@@ -1477,13 +1561,68 @@ const
   HASHALIGN = 4; // you may try with paranoid 32 here
 var
   buf: RawByteString;
+  u: RawUtf8;
   P: PAnsiChar;
   msg: string;
   unalign: PtrInt;
   exp321, exp322, exp323, exp324, exp325: cardinal;
   exp641, exp642: QWord;
   hasher: TSynHasher;
+  h, h2: THashAlgo;
+  s, s2: TSignAlgo;
 begin
+  for h := low(h) to high(h) do
+  begin
+    u := ToUtf8(h);
+    Check(u <> '');
+    Check(TextToHashAlgo(u, h2));
+    Check(h = h2);
+    Check(TextToHashAlgo(' ' + u, h2));
+    Check(h = h2);
+    Check(TextToHashAlgo(' ' + u + ' ', h2));
+    Check(h = h2);
+    Check(TextToHashAlgo(HASH_EXT[h], h2));
+    Check(h = h2);
+    u := ShortStringToUtf8(ToText(h)^);
+    Check(u <> '');
+    Check(TextToHashAlgo(u, h2));
+    Check(h = h2);
+  end;
+  Check(TextToHashAlgo('SHA-512/256', h2));
+  Check(h2 = hfSHA512_256);
+  Check(TextToHashAlgo('SHA-3/256', h2));
+  Check(h2 = hfSHA3_256);
+  Check(TextToHashAlgo('SHA-3/512', h2));
+  Check(h2 = hfSHA3_512);
+  Check(not TextToHashAlgo('SHA5122', h));
+  Check(not TextToHashAlgo('SHA512256', h));
+  for s := low(s) to high(s) do
+  begin
+    u := ToUtf8(s);
+    Check(u <> '');
+    Check(TextToSignAlgo(u, s2));
+    Check(s = s2);
+    Check(TextToSignAlgo(' ' + u, s2));
+    Check(s = s2);
+    Check(TextToSignAlgo(' ' + u + ' ', s2));
+    Check(s = s2);
+    u := ShortStringToUtf8(ToText(s)^);
+    Check(u <> '');
+    Check(TextToSignAlgo(u, s2));
+    Check(s = s2);
+  end;
+  Check(TextToSignAlgo('SHA-512', s2));
+  Check(s2 = saSHA512);
+  Check(TextToSignAlgo('SHA-3/256', s2));
+  Check(s2 = saSHA3256);
+  Check(TextToSignAlgo('SHA3-512', s2));
+  Check(s2 = saSHA3512);
+  Check(TextToSignAlgo('SHAKE-128', s2));
+  Check(s2 = saSha3S128);
+  Check(TextToSignAlgo('SHAKE/256', s2));
+  Check(s2 = saSha3S256);
+  Check(not TextToSignAlgo('SHA5122', s));
+  Check(not TextToSignAlgo('SHA512256', s));
   Check(Adler32SelfTest);
   SetLength(buf, HASHESMAX + HASHALIGN);
   exp321 := 0;
@@ -1856,14 +1995,56 @@ begin
 end;
 
 procedure TTestCoreCrypto._AES;
+
+  procedure NistVector(aes: TAesAbstractClass; const plain, iv: RawByteString;
+    ks: integer; const key: RawUtf8; const expected: RawUtf8);
+  var
+    k, c, d, e: RawByteString;
+    a: TAesAbstract;
+  begin
+    Check(plain <> '');
+    Check((length(iv) = 16) or
+          (iv = ''));
+    CheckEqual(length(plain) and AesBlockMod, 0);
+    k := mormot.core.text.HexToBin(Key);
+    Check(length(k) in [16, 24, 32]);
+    e := mormot.core.text.HexToBin(expected);
+    CheckEqual(length(e) and AesBlockMod, 0);
+    CheckEqual(length(k) shl 3, ks);
+    SetLength(c, length(plain));
+    SetLength(d, length(plain));
+    a := aes.Create(pointer(k)^, ks);
+    try
+      if iv <> '' then
+        a.IV := PAesBlock(iv)^;
+      a.Encrypt(pointer(plain), pointer(c), length(plain));
+    finally
+      a.Free;
+    end;
+    CheckEqual(mormot.core.text.BinToHex(c), expected);
+    a := aes.Create(pointer(k)^, ks);
+    try
+      if iv <> '' then
+        a.IV := PAesBlock(iv)^;
+      a.Decrypt(pointer(c), pointer(d), length(plain));
+    finally
+      a.Free;
+    end;
+    Check(d = plain);
+    {writeln('plain=',BinToHex(plain));
+    writeln('key=',BinToHex(k));
+    writeln('ciphered=',BinToHex(c));
+    writeln('deciph=',BinToHex(d));}
+  end;
+
 const
   MAX = 4096 * 1024;  // test 4 MB data, i.e. multi-threaded AES
   MODES: array[0..9
      {$ifdef USE_OPENSSL} + 7 {$endif}
      {$ifdef USE_PROV_RSA_AES} + 2 {$endif}] of TAesAbstractClass = (
-     // 0      1        2        3        4          5            6
+     // 0      1         2        3        4         5        6
      TAesEcb, TAesCbc, TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesGcm,
-     // 7           8         9
+     // 7      8         9
      TAesCfc, TAesOfc, TAesCtc
      {$ifdef USE_OPENSSL} ,
      // 10          11         12         13         14
@@ -1877,7 +2058,7 @@ const
      {$endif USE_PROV_RSA_AES}); // TAesCfbApi and TAesOfbApi are not compliant?
 var
   A: TAes;
-  st, orig, crypted, s2, s3, s4: RawByteString;
+  st, orig, crypted, s2, s3, s4, nistplain, nistiv: RawByteString;
   Key: TSha256Digest;
   s, b, p: TAesBlock;
   iv: THash128Rec;
@@ -1920,6 +2101,75 @@ begin
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
+    // FIPS 197 and SP 800-38A - Advanced Encryption Standard (AES) tests
+    nistplain := mormot.core.text.HexToBin(
+      '6BC1BEE22E409F96E93D7E117393172AAE2D8A571E03AC9C9EB76FAC45AF8E51' +
+      '30C81C46A35CE411E5FBC1191A0A52EFF69F2445DF4F9B17AD2B417BE66C3710');
+    nistiv := mormot.core.text.HexToBin(
+      '000102030405060708090A0B0C0D0E0F');
+    NistVector(TAesEcb, nistplain, '', 128,
+      '2B7E151628AED2A6ABF7158809CF4F3C',
+      '3AD77BB40D7A3660A89ECAF32466EF97F5D3D58503B9699DE785895A96FDBAAF' +
+      '43B1CD7F598ECE23881B00E3ED0306887B0C785E27E8AD3F8223207104725DD4');
+    NistVector(TAesEcb, nistplain, '', 192,
+      '8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B',
+      'BD334F1D6E45F25FF712A214571FA5CC974104846D0AD3AD7734ECB3ECEE4EEF' +
+      'EF7AFD2270E2E60ADCE0BA2FACE6444E9A4B41BA738D6C72FB16691603C18E0E');
+    NistVector(TAesEcb, nistplain, '', 256,
+      '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
+      'F3EED1BDB5D2A03C064B5A7E3DB181F8591CCB10D410ED26DC5BA74A31362870' +
+      'B6ED21B99CA6F4F9F153E7B1BEAFED1D23304B7A39F9F3FF067D8D8F9E24ECC7');
+    NistVector(TAesCbc, nistplain, nistiv, 128,
+      '2B7E151628AED2A6ABF7158809CF4F3C',
+      '7649ABAC8119B246CEE98E9B12E9197D5086CB9B507219EE95DB113A917678B2' +
+      '73BED6B8E3C1743B7116E69E222295163FF1CAA1681FAC09120ECA307586E1A7');
+    NistVector(TAesCbc, nistplain, nistiv, 192,
+      '8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B',
+      '4F021DB243BC633D7178183A9FA071E8B4D9ADA9AD7DEDF4E5E738763F69145A' +
+      '571B242012FB7AE07FA9BAAC3DF102E008B0E27988598881D920A9E64F5615CD');
+    NistVector(TAesCbc, nistplain, nistiv, 256,
+      '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
+      'F58C4C04D6E5F1BA779EABFB5F7BFBD69CFC4E967EDB808D679F777BC6702C7D' +
+      '39F23369A9D9BACFA530E26304231461B2EB05E2C39BE9FCDA6C19078C6A9D1B');
+    NistVector(TAesCfb, nistplain, nistiv, 128,
+      '2B7E151628AED2A6ABF7158809CF4F3C',
+      '3B3FD92EB72DAD20333449F8E83CFB4AC8A64537A0B3A93FCDE3CDAD9F1CE58B' +
+      '26751F67A3CBB140B1808CF187A4F4DFC04B05357C5D1C0EEAC4C66F9FF7F2E6');
+    NistVector(TAesCfb, nistplain, nistiv, 192,
+      '8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B',
+      'CDC80D6FDDF18CAB34C25909C99A417467CE7F7F81173621961A2B70171D3D7A' +
+      '2E1E8A1DD59B88B1C8E60FED1EFAC4C9C05F9F9CA9834FA042AE8FBA584B09FF');
+    NistVector(TAesCfb, nistplain, nistiv, 256,
+      '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
+      'DC7E84BFDA79164B7ECD8486985D386039FFED143B28B1C832113C6331E5407B' +
+      'DF10132415E54B92A13ED0A8267AE2F975A385741AB9CEF82031623D55B1E471');
+    NistVector(TAesOfb, nistplain, nistiv, 128,
+      '2B7E151628AED2A6ABF7158809CF4F3C',
+      '3B3FD92EB72DAD20333449F8E83CFB4A7789508D16918F03F53C52DAC54ED825' +
+      '9740051E9C5FECF64344F7A82260EDCC304C6528F659C77866A510D9C1D6AE5E');
+    NistVector(TAesOfb, nistplain, nistiv, 192,
+      '8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B',
+      'CDC80D6FDDF18CAB34C25909C99A4174FCC28B8D4C63837C09E81700C1100401' +
+      '8D9A9AEAC0F6596F559C6D4DAF59A5F26D9F200857CA6C3E9CAC524BD9ACC92A');
+    NistVector(TAesOfb, nistplain, nistiv, 256,
+      '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
+      'DC7E84BFDA79164B7ECD8486985D38604FEBDC6740D20B3AC88F6AD82A4FB08D' +
+      '71AB47A086E86EEDF39D1C5BBA97C4080126141D67F37BE8538F5A8BE740E484');
+    nistiv := mormot.core.text.HexToBin(
+      'F0F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF');
+    NistVector(TAesCtr, nistplain, nistiv, 128,
+      '2B7E151628AED2A6ABF7158809CF4F3C',
+      '874D6191B620E3261BEF6864990DB6CE9806F66B7970FDFF8617187BB9FFFDFF' +
+      '5AE4DF3EDBD5D35E5B4F09020DB03EAB1E031DDA2FBE03D1792170A0F3009CEE');
+    NistVector(TAesCtr, nistplain, nistiv, 192,
+      '8E73B0F7DA0E6452C810F32B809079E562F8EAD2522C6B7B',
+      '1ABC932417521CA24F2B0459FE7E6E0B090339EC0AA6FAEFD5CCC2C6F4CE8E94' +
+      '1E36B26BD1EBC670D1BD1D665620ABF74F78A7F6D29809585A97DAEC58C6B050');
+    NistVector(TAesCtr, nistplain, nistiv, 256,
+      '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
+      '601EC313775789A5B7A7F504BBF3D228F443E3CA4D62B59ACA84E990CACAF5C5' +
+      '2B0930DAA23DE94CE87017BA2D84988DDFC9C58DB67AADA613C2DD08457941A6');
+    // check both mORMot and OpenSSL against our reference vectors
     {%H-}Timer[noaesni].Init;
     for k := 0 to 2 do
     begin
@@ -2154,19 +2404,19 @@ begin
   CpuFeatures := backup;
   {$endif CPUINTEL}
   // see https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
-  st := HexToBin('636869636b656e207465726979616b69');
+  st := mormot.core.text.HexToBin('636869636b656e207465726979616b69');
   CheckEqual(length(st), 16);
   FillZero(iv.b);
   cts := TAesCbc.Create(PHash128(st)^);
   try
-    orig := HexToBin('4920776f756c64206c696b652074686520');
+    orig := mormot.core.text.HexToBin('4920776f756c64206c696b652074686520');
     crypted := cts.EncryptCts(orig);
     CheckEqual(BinToHex(crypted), 'C6353568F2BF8CB4D8A580362DA7FF7F97');
     cts.iv := iv.b; // reset IV
     s2 := cts.DecryptCts(crypted);
     CheckEqual(s2, orig);
     cts.iv := iv.b;
-    orig := HexToBin(
+    orig := mormot.core.text.HexToBin(
       '4920776f756c64206c696b65207468652047656e6572616c20476175277320');
     crypted := cts.EncryptCts(orig);
     CheckEqual(BinToHex(crypted),

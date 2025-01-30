@@ -1814,11 +1814,15 @@ type
     function IsCA: boolean;
     /// if the Certificate issuer is itself
     function IsSelfSigned: boolean;
-    /// returns e.g. '128 ecdsa-with-SHA256' or '256 ecdsa-with-SHA512'
-    // or '128 ED25519'
+    /// retrieve the signature algorithm as human-readable text
+    // - returns e.g. '128 ecdsa-with-SHA256' or '256 ecdsa-with-SHA512'
+    // '128 RSA-SHA256' or '128 ED25519'
     // - the first number being the actual security bits of the algorithm
     // as retrieved by X509_get_signature_info()
     function GetSignatureAlgo: RawUtf8;
+    /// retrieve the digest name used for the signature algorithm
+    // - returns e.g. 'SHA256'
+    function GetSignatureHash: RawUtf8;
     /// the X509v3 Key and Extended Key Usage Flags of this Certificate
     function GetUsage: TX509Usages;
     /// check a X509v3 Key and Extended Key Usage Flag of this Certificate
@@ -9603,6 +9607,18 @@ begin
   end;
 end;
 
+function X509.GetSignatureHash: RawUtf8;
+var
+  md: integer;
+begin
+  result := '';
+  md := 0;
+  if (@self <> nil) and
+     (X509_get_signature_info(@self, @md, nil, nil, nil) = OPENSSLSUCCESS) and
+     (md <> 0) then
+    result := OBJ_nid2sn(md);
+end;
+
 const
   KU: array[kuEncipherOnly .. kuDecipherOnly] of integer = (
     X509v3_KU_ENCIPHER_ONLY,
@@ -10134,8 +10150,6 @@ var
   i: PtrInt;
 begin
   result := '';
-  if X509 = nil then
-    exit;
   for i := 0 to length(X509) - 1 do
     result := result +  X509[i].PeerInfo + '---------'#13#10;
 end;
@@ -10271,6 +10285,7 @@ type
       LastError, CipherName: PRawUtf8);
     function GetCipherName: RawUtf8;
     function GetRawTls: pointer;
+    function GetRawCert(SignHashName: PRawUtf8): RawByteString;
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function ReceivePending: integer;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
@@ -10289,6 +10304,7 @@ begin
   c := _PeerVerify;
   c.fContext.PeerIssuer := peer.IssuerName;
   c.fContext.PeerSubject := peer.SubjectName;
+  c.fContext.PeerCert := peer;
   try
     result := ord(c.fContext.OnEachPeerVerify(
       c.fSocket, c.fContext, wasok <> 0, c.fSsl, peer));
@@ -10379,12 +10395,8 @@ begin
   fSocket := Socket;
   fContext := @Context;
   // reset output information
+  ResetNetTlsContext(Context);
   fLastError := @Context.LastError;
-  Context.CipherName := '';
-  Context.PeerIssuer := '';
-  Context.PeerSubject := '';
-  Context.PeerInfo := '';
-  Context.LastError := '';
   // prepare TLS connection properties
   fCtx := SSL_CTX_new(TLS_client_method);
   SetupCtx(Context, {bind=}false);
@@ -10430,6 +10442,7 @@ begin
         // writeln(fPeer.SetUsage([kuCodeSign, kuDigitalSignature, kuTlsServer, kuTlsClient]));
         Context.PeerIssuer := fPeer.IssuerName;
         Context.PeerSubject := fPeer.SubjectName;
+        Context.PeerCert := fPeer;
         if Context.WithPeerInfo or
            (not Context.IgnoreCertificateErrors and
             not fSsl.IsVerified(@Context.LastError)) then
@@ -10440,6 +10453,7 @@ begin
         writeln('SerialNumber=',fPeer.SerialNumber);
         writeln(fPeer.GetSerial.ToDecimal);
         writeln(fPeer.GetSignatureAlgo);
+        writeln(fPeer.GetSignatureHash);
         writeln(fPeer.GetIssuerName.ToDigest);
         exts := fPeer.SubjectAlternativeNames;
         for len := 0 to high(exts) do
@@ -10636,6 +10650,17 @@ begin
   result := fSsl;
 end;
 
+function TOpenSslNetTls.GetRawCert(SignHashName: PRawUtf8): RawByteString;
+begin
+  result := '';
+  if (fSsl = nil) or
+     (fSsl.PeerCertificate = nil) then
+    exit;
+  result := fSsl.PeerCertificate^.ToBinary;
+  if SignHashName <> nil then
+    SignHashName^ := fSsl.PeerCertificate^.GetSignatureHash;
+end;
+
 destructor TOpenSslNetTls.Destroy;
 begin
   if fSsl <> nil then // client or AfterAccept server connection
@@ -10643,6 +10668,8 @@ begin
     if fDoSslShutdown then
       SSL_shutdown(fSsl);
     fSsl.Free;
+    if fContext <> nil then
+      fContext^.PeerCert := nil;
   end;
   if fCtx <> nil then
     fCtx.Free; // client or AfterBind server context

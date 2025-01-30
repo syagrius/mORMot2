@@ -775,7 +775,7 @@ type
   // - wasok=true if the TLS library did validate the incoming certificate
   // - should process the supplied peer information, and return true to continue
   // and accept the connection, or false to abort the connection
-  // - Context.PeerIssuer and PeerSubject have been properly populated from Peer
+  // - Context.PeerIssuer, PeerSubject and PeerCert have been properly populated
   // - TLS and Peer are opaque structures, typically OpenSSL PSSL and PX509 pointers
   TOnNetTlsEachPeerVerify = function(Socket: TNetSocket; Context: PNetTlsContext;
     wasok: boolean; TLS, Peer: pointer): boolean of object;
@@ -895,11 +895,14 @@ type
     // - e.g. 'CN=synopse.info'
     // - populated on both SChannel and OpenSSL
     PeerSubject: RawUtf8;
-    /// output: detailed information about the connected Peer
+    /// output: detailed information about the connected Peer as text
     // - stored in the native format of the TLS library, e.g. X509_print()
     // or ToText(TWinCertInfo)
     // - only populated if WithPeerInfo was set to true, or an error occurred
     PeerInfo: RawUtf8;
+    /// output: full detailed raw information about the connected Peer
+    // - is a PX509 on OpenSSL, or a PWinCertInfo from mormot.lib.sspi on SChannel
+    PeerCert: pointer;
     /// output: low-level details about the last error at TLS level
     // - typically one X509_V_ERR_* integer constant
     LastError: RawUtf8;
@@ -955,6 +958,9 @@ type
     // - typically a PSSL on OpenSSL, so you can use e.g. PSSL().PeerCertificate,
     // or a PCtxtHandle on SChannel
     function GetRawTls: pointer;
+    /// return the low-level certificate binary content
+    // - and optionally the name of its signature algorithm hash (e.g. 'SHA256')
+    function GetRawCert(SignHashName: PRawUtf8 = nil): RawByteString;
     /// receive some data from the TLS layer
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     /// check if there are some input data within the TLS buffers
@@ -1921,6 +1927,10 @@ type
     /// low-level socket handle as pointer, initialized after Open() with socket
     property Sock: TNetSocket
       read fSock write fSock;
+    /// low-level access to the TLS layer implementation class
+    // - may be using OpenSSL or the SChannel API
+    property Secure: INetTls
+      read fSecure;
     /// after CreateSockIn, use Readln(SockIn^,s) to read a line from the opened socket
     property SockIn: PTextFile
       read fSockIn;
@@ -3892,6 +3902,7 @@ begin
   FastAssignNew(TLS.PeerIssuer);
   FastAssignNew(TLS.PeerSubject);
   FastAssignNew(TLS.PeerInfo);
+  TLS.PeerCert := nil;
   FastAssignNew(TLS.LastError);
 end;
 

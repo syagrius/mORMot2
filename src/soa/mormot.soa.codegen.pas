@@ -1037,7 +1037,7 @@ begin
       services.AddItem(rec);
     end;
     fSOA := _ObjFast([
-      'enabled',          True,
+      'enabled',          true,
       'services',         variant(services),
       'expectMangledUri', fServer.Services.ExpectMangledUri]);
   end;
@@ -2032,7 +2032,8 @@ procedure TServiceClientCommandLine.ShowMethod(service: TInterfaceFactory;
   const
     IN_OUT: array[boolean] of RawUtf8 = ('OUT', ' IN');
   var
-    arg, i: integer;
+    arg: integer;  // should be integer for ArgNextInput/ArgNextOutput below
+    i: PtrInt;
     line, typ: RawUtf8;
   begin
     ToConsole('%', [IN_OUT[input]], ccDarkGray, {nolinefeed=}true);

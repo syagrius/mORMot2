@@ -770,7 +770,7 @@ end;
 
 procedure TNetworkProtocols.DNSAndLDAP;
 var
-  ip, rev, u, v, sid: RawUtf8;
+  ip, rev, u, v, json, sid: RawUtf8;
   o: TAsnObject;
   c: cardinal;
   withntp: boolean;
@@ -1057,7 +1057,16 @@ begin
   for at := low(at) to high(at) do
   begin
     CheckEqual(ToText(at), AttrTypeName[at]);
-    CheckUtf8(AttributeNameType(AttrTypeName[at]) = at, ToText(at));
+    CheckUtf8(AttributeNameType(AttrTypeName[at]) = at, AttrTypeName[at]);
+    u := AttrTypeName[at];
+    CheckEqual(u, AttrTypeName[at]);
+    Check(pointer(u) = pointer(AttrTypeName[at]));
+    UpperCaseSelf(u);
+    Check(IdemPropNameU(u, AttrTypeName[at]));
+    Check((u = '') or (pointer(u) <> pointer(AttrTypeName[at])));
+    AttributeNameNormalize(u);
+    CheckEqual(u, AttrTypeName[at]);
+    Check(pointer(u) = pointer(AttrTypeName[at]));
     ats := [at];
     a := ToText(ats);
     if at = low(at) then
@@ -1147,10 +1156,12 @@ begin
     r.Attributes[atObjectClass] := 'person';
     CheckEqual(r.Attributes.Count, 1);
     r.Attributes.AddPairs(['cn', 'John Doe',
-                           'cn', v,
-                           'sn', 'Doe']);
+                           'CN', v,           // CN will be identified as cn
+                           'Sn', 'Doe']);     // Sn will be normalized as sn
     CheckEqual(r.Attributes.Count, 3);
-    CheckHash(rl.GetJson([]), $8AAB69D2);
+    json := rl.GetJson([]);
+// '{"bar":{"foo":{"objectName":"CN=foo,OU=bar","objectClass":"person","cn":["John Doe",v],"sn":"Doe"}}}'
+    CheckHash(json, $8AAB69D2);
     CheckHash(rl.GetJson([roRawValues]), $8AAB69D2);
     CheckHash(rl.GetJson([roNoDCAtRoot]), $8AAB69D2);
     CheckHash(rl.GetJson([roNoObjectName]), $6A4853FA);
@@ -1549,6 +1560,8 @@ var
   hpc2: THttpPeerCryptHook; // another instance to validate remote decoding
   hps: THttpPeerCacheSettings;
   msg, msg2: THttpPeerCacheMessage;
+  m, m2: RawUtf8;
+  res: THttpPeerCryptMessageDecode;
   i, n, alter: integer;
   tmp: RawByteString;
   timer: TPrecisionTimer;
@@ -1577,23 +1590,29 @@ begin
             msg.Hash.Hash.i0 := i;
             tmp := hpc.MessageEncode(msg);
             Check(tmp <> '');
-            Check(hpc2.MessageDecode(pointer(tmp), length(tmp), msg2), 'hpc2');
+            res := hpc2.MessageDecode(pointer(tmp), length(tmp), msg2);
+            Check(res = mdOk, 'hpc2');
             CheckEqual(msg2.Size, i);
             Check(CompareMem(@msg, @msg2, SizeOf(msg)));
           end;
           NotifyTestSpeed('messages', n * 2, n * 2 * SizeOf(msg), @timer);
-          Check(ToText(msg) = ToText(msg2));
+          m := RawUtf8(ToText(msg));
+          m2 := RawUtf8(ToText(msg2));
+          CheckEqual(m, m2);
           timer.Start;
           n := 10000;
           for i := 1 to n do
           begin
             alter := Random32(length(tmp));
             inc(PByteArray(tmp)[alter]); // should be detected at crc level
-            Check(not hpc2.MessageDecode(pointer(tmp), length(tmp), msg2), 'alt');
+            res := hpc2.MessageDecode(pointer(tmp), length(tmp), msg2);
+            if CheckFailed(res = mdCrc, 'alt') then
+              TestFailed('alt=%', [ToText(res)^]);
             dec(PByteArray(tmp)[alter]); // restore
           end;
           NotifyTestSpeed('altered', n, n * SizeOf(msg), @timer);
-          Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2), 'hpc');
+          res := hpc.MessageDecode(pointer(tmp), length(tmp), msg2);
+          Check(res = mdOk, 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
           for i := 1 to 10 do
             Check(hpc.Ping = nil);

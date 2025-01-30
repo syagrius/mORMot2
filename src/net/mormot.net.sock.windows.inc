@@ -10,6 +10,7 @@
 
 uses
   Windows,
+  mormot.core.os.security,
   mormot.lib.sspi; // for Low-Level SSPI/SChannel Functions
 
 
@@ -1885,6 +1886,7 @@ type
     fAccept: boolean;
     fAcceptCert: mormot.core.os.PCCERT_CONTEXT;
     fAcceptCertStore: HCERTSTORE;
+    fPeerInfo: TWinCertInfo;
     procedure ESChannelRaiseLastError(const ctx: shortstring; res: cardinal);
     function CheckSEC_E_OK(const ctx: shortstring; res: integer): cardinal;
     function FreeAndCheckSocket(const ctx: shortstring; res: integer;
@@ -1902,6 +1904,7 @@ type
       LastError, CipherName: PRawUtf8);
     function GetCipherName: RawUtf8;
     function GetRawTls: pointer;
+    function GetRawCert(SignHashName: PRawUtf8): RawByteString;
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function ReceivePending: integer;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
@@ -2029,9 +2032,10 @@ procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
 var
   cred: TSChannelCred;
   buf: THandshakeBuf;
-  nfo: TWinCertInfo;
   res, f, trial: cardinal;
 begin
+  // reset output information
+  ResetNetTlsContext(Context);
   // method called once to attach the socket from the client side
   fSocket := Socket;
   fServerAddressW := SynUnicode(ServerAddress);
@@ -2091,13 +2095,14 @@ begin
           raise;
     end;
   Context.CipherName := GetCipherName;
-  if TlsCertInfo(fCtxt, nfo) then
+  if TlsCertInfo(fCtxt, fPeerInfo) then
   begin
-    Context.PeerIssuer := nfo.IssuerName;
-    Context.PeerSubject := nfo.SubjectName;
+    Context.PeerIssuer := fPeerInfo.IssuerName;
+    Context.PeerSubject := fPeerInfo.SubjectName;
+    Context.PeerCert := @fPeerInfo;
     if Context.WithPeerInfo and
        Assigned(WinCertInfoToText) then
-      Context.PeerInfo := WinCertInfoToText(nfo);
+      Context.PeerInfo := WinCertInfoToText(fPeerInfo);
   end;
 end;
 
@@ -2188,6 +2193,15 @@ end;
 function TSChannelNetTls.GetRawTls: pointer;
 begin
   result := @fCtxt; // return as PCtxtHandle
+end;
+
+function TSChannelNetTls.GetRawCert(SignHashName: PRawUtf8): RawByteString;
+var
+  oid: RawUtf8;
+begin
+  result := TlsCertRaw(fCtxt, @oid);
+  if SignHashName <> nil then
+    SignHashName^ := CertAlgoHash(oid);
 end;
 
 function TSChannelNetTls.HandshakeStep(buf: PByteArray; var len: integer): cardinal;

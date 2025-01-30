@@ -177,8 +177,8 @@ function IsString(P: PUtf8Char): boolean;
 // - this version will NOT recognize JSON null/false/true as strings
 // - e.g. IsStringJson('0')=false, IsStringJson('abc')=true,
 // but IsStringJson('null')=false
-// - will follow the JSON definition of number, i.e. '0123' is a string (i.e.
-// '0' is excluded at the begining of a number) and '123' is not a string
+// - will follow the JSON definition of number, i.e. '0123' is a string (since
+// '0' is excluded at the begining of a number) and '123' or '12.3' are no string
 function IsStringJson(P: PUtf8Char): boolean;
 
 /// test if the supplied text buffer seems to be a correct (extended) JSON value
@@ -1281,7 +1281,7 @@ type
     /// initialize the dictionary storage, specifying keys/values as generic types
     // - just a convenient wrapper around TSynDictionary.Create()
     // - consider IKeyValue<> from mormot.core.collections.pas, for more robust
-    // generics-based code where TKey/TValue are propagated to all methods
+    // generics-based code where TKey/TValue types are propagated to most methods
     class function New<TKey, TValue>(aKeyCaseInsensitive: boolean = false;
       aTimeoutSeconds: cardinal = 0; aCompressAlgo: TAlgoCompress = nil;
       aHasher: THasher = nil; aKeySpecific: TRttiParserType = ptNone): TSynDictionary;
@@ -1804,6 +1804,8 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// parse a property value, properly calling any setter
     procedure ParsePropComplex(Data: pointer);
+    /// make GetInteger(Value) and check against Ctxt.Options and Ctxt.Info
+    procedure ValueEnumNotString(Data: PByte);
   end;
 
   PJsonParserContext = ^TJsonParserContext;
@@ -2868,9 +2870,14 @@ begin
     result := false;
     exit;
   end;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
+  while P^ <= ' ' do
+    if P^ = #0 then
+    begin
+      result := true;
+      exit;
+    end
+    else
+      inc(P);
   tab := @JSON_CHARS;
   c4 := PInteger(P)^;
   if (((c4 = NULL_LOW) or
@@ -5805,11 +5812,12 @@ var
   t: TClass;
   n: integer;
   flags: set of ( // will be a register on x86_64 to make the main loop fast
-    isNotFirst, noStored, noDefault, noHook, noVoid, isHumanReadable);
+    isNotFirst, noStored, noDefault, noHook, noVoidDetect, isHumanReadable);
   c: TJsonSaveContext; // dedicated context used for fields/properties
 begin
   c.W := Ctxt.W;
   c.Options := Ctxt.Options;
+  flags := [noDefault, noHook, noVoidDetect];
   nfo := TRttiJson(Ctxt.Info);
   if nfo.Kind = rkClass then
   begin
@@ -5823,19 +5831,21 @@ begin
     t := PClass(Data)^; // actual class of this instance
     if t <> nfo.ValueClass then
       nfo := TRttiJson(Rtti.RegisterClass(t)); // work on proper inherited class
-    flags := [];
     if (woStoreStoredFalse in c.Options) or
        (rcfDisableStored in nfo.Flags) then
       include(flags, noStored);
-    if not (woDontStoreDefault in c.Options) then
-      include(flags, noDefault);
-    if not (rcfHookWriteProperty in nfo.Flags) then
-      include(flags, noHook);
+    if woDontStoreDefault in c.Options then
+      exclude(flags, noDefault);
+    if woDontStoreVoid in c.Options then
+      exclude(flags, noVoidDetect);
+    if rcfHookWriteProperty in nfo.Flags then
+      exclude(flags, noHook);
   end
   else
   begin
     exclude(c.Options, woFullExpand); // not available for null or records
-    flags := [noStored, noDefault, noHook];
+    if twoIgnoreDefaultInRecord in c.W.CustomOptions then
+      exclude(flags, noVoidDetect);
   end;
   if nfo.fJsonWriter.Code <> nil then // TRttiJson.RegisterCustomSerializer()
   begin // e.g. TOrm.RttiJsonWrite
@@ -5846,9 +5856,6 @@ begin
      not TORHook(Data).RttiBeforeWriteObject(c.W, c.Options) then
   begin
     // regular JSON serialization using nested fields/properties
-    if not ((woDontStoreVoid in c.Options) or
-            (twoIgnoreDefaultInRecord in c.W.CustomOptions)) then
-      include(flags, noVoid);
     if woHumanReadable in c.Options then
     begin
       include(flags, isHumanReadable);
@@ -5913,7 +5920,7 @@ begin
             (p^.OrdinalDefault = NO_DEFAULT) or
             not p^.ValueIsDefault(Data)) and
            // detect 0 numeric values and empty strings
-           ((noVoid in flags) or
+           ((noVoidDetect in flags) or
             not p^.ValueIsVoid(Data)) then
         begin
           // if we reached here, we should serialize this property
@@ -6446,7 +6453,7 @@ begin
     n := Len div 3;
     trailing := Len - n * 3;
     dec(Len, trailing);
-    if BEnd - B > integer(n + 1) shl 2 then
+    if PtrInt(BEnd - B) > PtrInt(n + 1) shl 2 then // BEnd - B could be < 0
     begin
       // will fit in available space in Buf -> fast in-buffer Base64 encoding
       n := Base64EncodeMain(@B[1], P, Len); // may use AVX2 on FPC x86_64
@@ -7026,7 +7033,8 @@ end;
 
 procedure TJsonWriter.AddJsonEscape(P: pointer; Len: PtrInt);
 var
-  i, start: PtrInt;
+  c: PByte;
+  l: PtrInt;
   {$ifdef CPUX86NOTPIC}
   tab: TNormTableByte absolute JSON_ESCAPE;
   {$else}
@@ -7035,67 +7043,68 @@ var
 label
   noesc;
 begin
-  if P = nil then
+  c := P;
+  if (c = nil) or
+     (c^ = 0) then
     exit;
-  if Len = 0 then
-    dec(Len); // -1 = no end = AddJsonEscape(P, 0)
-  i := 0;
+  if Len <> 0 then
+    inc(Len, PtrUInt(c)); // pointer(Len)=nil if no end, or pointer(Len)=P[Len]
   {$ifndef CPUX86NOTPIC}
   tab := @JSON_ESCAPE;
   {$endif CPUX86NOTPIC}
-  if tab[PByteArray(P)[i]] = JSON_ESCAPE_NONE then
+  if tab[c^] = JSON_ESCAPE_NONE then
   begin
 noesc:
-    start := i;
-    if Len < 0 then  // fastest loop is with AddJsonEscape(P, 0)
+    P := c;
+    if Len = 0 then  // fastest loop is with AddJsonEscape(P, 0)
       repeat
-        inc(i);
-      until tab[PByteArray(P)[i]] <> JSON_ESCAPE_NONE
+        inc(c);
+      until tab[c^] <> JSON_ESCAPE_NONE
     else
       repeat
-        inc(i);
-      until (i >= Len) or
-            (tab[PByteArray(P)[i]] <> JSON_ESCAPE_NONE);
-    inc(PByte(P), start);
-    dec(i, start);
-    if Len >= 0 then
-      dec(Len, start);
-    if BEnd - B <= i then
-      AddNoJsonEscapeBig(P, i)
+        inc(c);
+      until (PtrUInt(c) >= PtrUInt(Len)) or
+            (tab[c^] <> JSON_ESCAPE_NONE);
+    l := PUtf8Char(c) - P;
+    if PtrInt(BEnd - B) < l then // note: PtrInt(BEnd - B) could be < 0
+      AddNoJsonEscapeBig(P, l)
     else
     begin
-      MoveFast(P^, B[1], i);
-      inc(B, i);
+      MoveFast(P^, B[1], l);
+      inc(B, l);
     end;
-    if (Len >= 0) and
-       (i >= Len) then
+    if Len = 0 then
+    begin
+      if c^ = 0 then
+        exit; // optimize most common path
+    end
+    else if PtrUInt(c) >= PtrUInt(Len) then
       exit;
   end;
   repeat
     if B >= BEnd then
       FlushToStream;
-    case tab[PByteArray(P)[i]] of // better codegen with no temp var
+    case tab[c^] of // better codegen with no temp var
       JSON_ESCAPE_NONE:
         goto noesc;
       JSON_ESCAPE_ENDINGZERO:
-        // #0
-        exit;
+        exit; // #0
       JSON_ESCAPE_UNICODEHEX:
         begin
           // characters below ' ', #7 e.g. -> // 'u0007'
           PCardinal(B + 1)^ :=
             ord('\') + ord('u') shl 8 + ord('0') shl 16 + ord('0') shl 24;
           inc(B, 4);
-          PWord(B + 1)^ := TwoDigitsHexWB[PByteArray(P)[i]];
+          PWord(B + 1)^ := TwoDigitsHexWB[c^];
         end;
     else
       // escaped as \ + b,t,n,f,r,\,"
-      PWord(B + 1)^ := (integer(tab[PByteArray(P)[i]]) shl 8) or ord('\');
+      PWord(B + 1)^ := (integer(tab[c^]) shl 8) or ord('\');
     end;
-    inc(i);
+    inc(c);
     inc(B, 2);
-  until (Len >= 0) and
-        (i >= Len);
+  until (Len <> 0) and
+        (PtrUInt(c) >= PtrUInt(Len));
 end;
 
 procedure TJsonWriter.AddJsonEscapeString(const s: string);
@@ -7815,6 +7824,19 @@ begin
   result := Valid;
 end;
 
+procedure TJsonParserContext.ValueEnumNotString(Data: PByte);
+var
+  v, err: integer;
+begin // caller ensured Ctxt.WasString is false
+  v := GetInteger({$ifdef USERECORDWITHMETHODS}Get.{$endif}Value, err);
+  if (err = 0) and
+     (cardinal(v) <= Info.Cache.EnumMax) then // assume EnumMin=0
+    Data^ := v
+  else
+    Valid := jpoIgnoreUnknownEnum in Options; // keep existing Data^
+end;
+
+
 procedure _JL_Boolean(Data: PBoolean; var Ctxt: TJsonParserContext);
 begin
   if Ctxt.ParseNext then
@@ -7966,7 +7988,7 @@ begin
     if Ctxt.WasString then
       Iso8601ToDateTimePUtf8CharVar(Ctxt.Value, Ctxt.ValueLen, Data^)
     else
-      Data^ := GetExtended(Ctxt.Value); // was propbably stored as double
+      UnixTimeOrDoubleToDateTime(Ctxt.Value, Ctxt.ValueLen, Data^);
 end;
 
 procedure _JL_Guid(Data: PGuid; var Ctxt: TJsonParserContext);
@@ -7975,7 +7997,7 @@ begin
     if (Ctxt.ValueLen = 0) or
        (Ctxt.Value = nil) then  // "" or null fill TGuid with zeros
       FillZero(Data^)
-    else
+    else // no Ctxt.WasString check: 30250400408911039000030508203301 is a GUID
       Ctxt.Valid := RawUtf8ToGuid(Ctxt.Value, Ctxt.ValueLen, Data^);
 end;
 
@@ -7983,7 +8005,7 @@ procedure _JL_Hash(Data: PByte; var Ctxt: TJsonParserContext);
 begin
   if Ctxt.ParseNext then
     Ctxt.Valid := (Ctxt.ValueLen = Ctxt.Info.Size * 2) and
-      HexDisplayToBin(PAnsiChar(Ctxt.Value), Data, Ctxt.Info.Size);
+                  HexDisplayToBin(PAnsiChar(Ctxt.Value), Data, Ctxt.Info.Size);
 end;
 
 procedure _JL_Binary(Data: PByte; var Ctxt: TJsonParserContext);
@@ -8076,28 +8098,27 @@ procedure _JL_Enumeration(Data: pointer; var Ctxt: TJsonParserContext);
 var
   v, err: integer;
 begin
-  if Ctxt.ParseNext then
+  if not Ctxt.ParseNext then
+    exit;
+  if Ctxt.WasString then
+    v := TRttiJson(Ctxt.Info).GetEnumNameValue(Ctxt.Value, Ctxt.ValueLen)
+  else
   begin
-    if Ctxt.WasString then
-      v := TRttiJson(Ctxt.Info).GetEnumNameValue(Ctxt.Value, Ctxt.ValueLen)
-    else
-    begin
-      v := GetInteger(Ctxt.Value, err);
-      if (err <> 0) or
-         (cardinal(v) > Ctxt.Info.Cache.EnumMax) or
-         (cardinal(v) < Ctxt.Info.Cache.EnumMin) then
-        v := -1;
-    end;
-    if v < 0 then
-      if jpoIgnoreUnknownEnum in Ctxt.Options then
-        v := 0
-      else
-        Ctxt.Valid := false;
-    if Ctxt.Info.Size = 1 then
-      PByte(Data)^ := v
-    else
-      PWord(Data)^ := v;
+    v := GetInteger(Ctxt.Value, err);
+    if (err <> 0) or
+       (cardinal(v) > Ctxt.Info.Cache.EnumMax) or
+       (cardinal(v) < Ctxt.Info.Cache.EnumMin) then
+      v := -1;
   end;
+  if v < 0 then
+    if jpoIgnoreUnknownEnum in Ctxt.Options then
+      v := 0
+    else
+      Ctxt.Valid := false;
+  if Ctxt.Info.Size = 1 then
+    PByte(Data)^ := v
+  else
+    PWord(Data)^ := v;
 end;
 
 function EnumFind(List: PPUtf8Char; Max: PtrInt;
@@ -8931,7 +8952,7 @@ begin
     v := pointer(Values);
     for i := 0 to NamesCount do
       if (v^.Text = nil) and
-         IdemPropNameU(Names[i], name, namelen) then
+         (StrIComp(Names[i], name) = 0) then // properly inlined
       begin
         v^.Text := info.Value;
         v^.Len := info.ValueLen;
