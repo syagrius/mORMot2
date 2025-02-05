@@ -2472,10 +2472,12 @@ type
   /// Low-level access to the ICU library installed on this system
   // - "International Components for Unicode" (ICU) is an open-source set of
   // libraries for Unicode support, internationalization and globalization
+  // - ICU seems more complete and standard than FPC RTL iconv/cwstrings
   // - used by Unicode_CompareString, Unicode_AnsiToWide, Unicode_WideToAnsi,
   // Unicode_InPlaceUpper and Unicode_InPlaceLower function from this unit
-  // - can maintain a thread-safe cache of up to 16 code page converters,
+  // - can maintain a thread-safe cache of up to 32 code page converters,
   // via SharedUcnv() and SharedUcnvUnLock()
+  // - ICU is loaded only when needed outside of mORMot needs
   TIcuLibrary = record
   private
     icu, icudata, icui18n: pointer;
@@ -2541,13 +2543,11 @@ type
     /// release the SharedUcnv() instance
     procedure SharedUcnvUnLock(ndx: PtrInt);
   private
-    // implement a thread-safe cache of up to 16 shared ICU text converters
-    fSharedLock: PtrUInt; // = TLightLock
-    fSharedCP: array[0 .. 15] of word; // CPU cache friendly lookup
-    fShared: array[0 .. 15] of record
-      Lock: PtrUInt; // = TLightLock
-      Cnv: pointer;
-    end;
+    // implement a thread-safe cache of up to 32 shared ICU text converters
+    fSharedMainLock: PtrUInt; // = TLightLock
+    fSharedCP:   array[0 .. 31] of word;    // CPU cache-friendly lookup
+    fSharedLock: array[0 .. 31] of PtrUInt; // = TLightLock
+    fSharedCnv:  array[0 .. 31] of pointer; // = ICU converter instance
     fSharedCount, fSharedLast: integer;
   end;
 
@@ -3029,7 +3029,10 @@ function Unicode_InPlaceLower(W: PWideChar; WLen: integer): integer;
 function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
   var Dest: TSynTempBuffer): PWideChar;
 
-/// return a code page number into human-friendly (or ICU) text
+/// return a code page number into ICU-compatible charset name
+// - Unicode_CodePageName(932) returns e.g. 'SHIFT_JIS'
+// - Unicode_CodePageName(1251) returns 'MS1251' since 'CP####' is used
+// for IBM code pages by ICU - which do not match Windows code pages
 procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
 
 /// returns a system-wide current monotonic timestamp as milliseconds
@@ -4730,8 +4733,8 @@ type
     // - you may store up to 7 variables, using an 0..6 index, shared with
     // Locked and LockedUtf8 array properties
     // - Int64s will be stored internally as a varInt64 variant
-    // - returns the newly stored value
-    // - if the internal value is not defined yet, would use 0 as default value
+    // - returns the previously stored value
+    // - if the internal value is not defined yet, would return 0 as default
     function LockedInt64Increment(Index: integer; const Increment: Int64): Int64;
     /// safe locked in-place exchange of a Variant value
     // - you may store up to 7 variables, using an 0..6 index, shared with
@@ -6486,25 +6489,37 @@ begin
 end;
 
 procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
-begin
+begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
   case codepage of
+    932:
+      Name  := 'SHIFT_JIS';
+    936:
+      Name := 'GBK';
+    949:
+      Name := 'KS-C5601'; // Unified Hangul Code
     950:
       Name := 'BIG5';
-    951:
+    951: // not standard: will fallback to 950 in mormot.core.os.windows.inc
       Name := 'BIG5-HKSCS';
-    CP_UTF16:
+    CP_UTF16: // = 1200
       Name := 'UTF16LE';
     1201:
       Name := 'UTF16BE';
+    1361:
+      Name := 'JOHAB';
+    12000:
+      Name := 'UTF32LE';
     20932:
-      Name := 'EUC-JP';
-    28591 .. 28605:
+      Name := 'EUC-JP'; // Japanese (JIS 0208-1990 and 0121-1990)
+    28591 .. 28606:
       begin
         Name := 'ISO-8859-';
         AppendShortCardinal(codepage - 28590, Name);
       end;
-    50220 .. 50222:
-      Name := 'ISO-2022-JP-2';
+    50220, 50222:
+      Name := 'ISO-2022-JP';
+    50221:
+      Name := 'CDISO2022JP';
     50225:
       Name := 'ISO-2022-KR';
     50227:
@@ -6513,17 +6528,17 @@ begin
       Name := 'EUC-CN';  // EUC Simplified Chinese
     51949:
       Name := 'EUC-KR';  // EUC Korean
-    CP_HZ:
+    CP_HZ: // = 52936
       Name := 'HZ';      // HZ-GB2312 Simplified Chinese
     54936:
       Name := 'GB18030'; // GB18030 Simplified Chinese
-    CP_UTF8:
+    CP_UTF8: // = 65001
       Name := 'UTF8';
   else
-    begin  // 'CP####' is enough for most code pages
-      Name := 'CP';
+    begin  // 'MS####' is enough for most code pages
+      Name := 'MS';
       AppendShortCardinal(codepage, Name);
-    end;
+    end; // ICU expects 'CP####' for IBM codepages which are not Windows'
   end;
   Name[ord(Name[0]) + 1] := #0; // ensure is ASCIIZ - e.g. for ucnv_open()
 end;

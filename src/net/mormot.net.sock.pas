@@ -10,6 +10,7 @@ unit mormot.net.sock;
    - Socket Process High-Level Encapsulation
    - MAC and IP Addresses Support
    - TLS / HTTPS Encryption Abstract Layer
+   - TSocketStream Socket Wrapper
    - Efficient Multiple Sockets Polling
    - Windows IOCP sockets support
    - TUri parsing/generating URL wrapper
@@ -1029,6 +1030,46 @@ function NewSChannelNetTls: INetTls;
 {$endif OSWINDOWS}
 
 
+{ ******************** TSocketStream Socket Wrapper }
+
+type
+  /// abstract parent class of both TSocketStream and TCrtSocketStream
+  TSocketStreamAbstract = class(TStreamWithNoSeek)
+  protected
+    fLastResult: TNetResult;
+  public
+    /// the low-level result code of the last Read() or Write() method call
+    property LastResult: TNetResult
+      read fLastResult;
+  end;
+
+  /// encapsulate a raw (TLS-encrypted) Socket to a TStream class
+  // - directly redirect Read/Write to socket's recv/send methods
+  // - this class will always report Size = 0 and Position = 0
+  TSocketStream = class(TSocketStreamAbstract)
+  protected
+    fSocket: TNetSocket;
+    fSecure: INetTls;
+  public
+    /// initialize this TStream for a given Socket handle
+    // - this class instance won't own nor release this Socket once done
+    constructor Create(aSocket: TNetSocket); overload; reintroduce;
+    /// initialize this TStream for a given TLS encryption instance
+    constructor Create(const aSecure: INetTls); overload; reintroduce;
+    /// receive some bytes from the associated Socket
+    // - returns the number of bytes filled into Buffer (<=Count)
+    function Read(var Buffer; Count: Longint): Longint; override;
+    /// send some data to the associated Socket
+    function Write(const Buffer; Count: Longint): Longint; override;
+    /// access to the underlying Socket instance
+    property Socket: TNetSocket
+      read fSocket;
+    /// access to the underlying INetTls instance
+    property Secure: INetTls
+      read fSecure;
+  end;
+
+
 { ******************** Efficient Multiple Sockets Polling }
 
 type
@@ -1890,6 +1931,12 @@ type
     function PeerAddress(LocalAsVoid: boolean = false): RawUtf8;
     /// remote IP port of the last packet received (SocketLayer=slUDP only)
     function PeerPort: TNetPort;
+    /// compute a TStream compatible class instance from this (secured) socket
+    // - return nil if SockIsDefined is false, or a new TSocketStream instance
+    // which should be owned and released by the caller, while keeping this
+    // TCrtSocket instance available
+    // - see TCrtSocketStream if you just want to encapsulate TCrtSocket calls
+    function AsSocketStream: TSocketStream;
     /// set the TCP_NODELAY option for the connection
     // - default true will disable the Nagle buffering algorithm; it should
     // only be set for applications that send frequent small bursts of information
@@ -1975,6 +2022,27 @@ type
       read fBytesOut write fBytesOut;
   end;
   {$M-}
+
+  /// encapsulate TCrtSocket process as a TStream class
+  // - directly redirect Read/Write to TCrtSocket.SockRecv/SockSend methods
+  // - this class will always report Size = 0 and Position = 0
+  // - see TSocketStream if you prefer raw TNetSocket/INetTls support
+  TCrtSocketStream = class(TSocketStreamAbstract)
+  protected
+    fSocket: TCrtSocket;
+  public
+    /// initialize this TStream for a given TCrtSocket instance
+    // - this class instance won't own nor release this TCrtSocket once done
+    constructor Create(aSocket: TCrtSocket); reintroduce;
+    /// receive some bytes calling the associated TCrtSocket.SockRecv()
+    // - returns the number of bytes filled into Buffer (<=Count)
+    function Read(var Buffer; Count: Longint): Longint; override;
+    /// send some data calling the associated TCrtSocket.SockSend()
+    function Write(const Buffer; Count: Longint): Longint; override;
+    /// access to the underlying TCrtSocket instance
+    property Socket: TCrtSocket
+      read fSocket;
+  end;
 
 
 /// create a TCrtSocket instance, returning nil on error
@@ -3918,6 +3986,55 @@ begin
               (tls1.PrivatePassword         = tls2.PrivatePassword) and
               (tls1.PrivateKeyRaw           = tls2.PrivateKeyRaw) and
               (tls1.HostNamesCsv            = tls2.HostNamesCsv)));
+end;
+
+
+{ ******************** TSocketStream Socket Wrapper }
+
+{ TSocketStream }
+
+constructor TSocketStream.Create(aSocket: TNetSocket);
+begin
+  fSocket := aSocket;
+end;
+
+constructor TSocketStream.Create(const aSecure: INetTls);
+begin
+  fSecure := aSecure;
+end;
+
+function TSocketStream.Read(var Buffer; Count: Longint): Longint;
+begin
+  if Assigned(fSecure) then
+    fLastResult := fSecure.Receive(@Buffer, Count)
+  else
+    fLastResult := fSocket.Recv(@Buffer, Count);
+  case fLastResult of
+    nrOk:
+      result := Count;
+    nrRetry:
+      result := 0; // no data available yet
+  else
+    result := -1;  // fatal error - e.g. nrClosed for recv()=0
+  end;
+  // fSize and fPosition are left untouched to keep both always equal 0
+end;
+
+function TSocketStream.Write(const Buffer; Count: Longint): Longint;
+begin
+  if Assigned(fSecure) then
+    fLastResult := fSecure.Send(@Buffer, Count)
+  else
+    fLastResult := fSocket.Send(@Buffer, Count);
+  case fLastResult of
+    nrOk:
+      result := Count;
+    nrRetry:
+      result := 0; // no data available yet
+  else
+    result := -1;  // fatal error
+  end;
+  // fSize and fPosition are left untouched to keep both always equal 0
 end;
 
 
@@ -6258,6 +6375,45 @@ begin
     result := 0
   else
     result := fPeerAddr^.Port;
+end;
+
+function TCrtSocket.AsSocketStream: TSocketStream;
+begin
+  if SockIsDefined then
+    if Assigned(fSecure) then
+      result := TSocketStream.Create(fSecure)
+    else
+      result := TSocketStream.Create(fSock)
+  else
+    result := nil;
+end;
+
+
+{ TCrtSocketStream }
+
+constructor TCrtSocketStream.Create(aSocket: TCrtSocket);
+begin
+  fSocket := aSocket;
+end;
+
+function TCrtSocketStream.Read(var Buffer; Count: Longint): Longint;
+begin
+  if fSocket.TrySockRecv(@Buffer, Count, {stopbeforeCount=}true, @fLastResult) then
+    result := Count
+  else if fLastResult = nrRetry then
+    result := 0
+  else
+    result := -1; // fatal error
+end;
+
+function TCrtSocketStream.Write(const Buffer; Count: Longint): Longint;
+begin
+  if fSocket.TrySndLow(@Buffer, Count, @fLastResult) then
+    result := Count
+  else if fLastResult = nrRetry then
+    result := 0
+  else
+    result := -1; // fatal error, e.g. timeout
 end;
 
 

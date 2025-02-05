@@ -3877,13 +3877,13 @@ const
   /// unsigned 64bit integer variant type
   // - currently called varUInt64 in Delphi (not defined in older versions),
   // and varQWord in FPC
-  varWord64 = 21;
+  varWord64       = 21;
   /// map the Windows VT_INT extended VARENUM, i.e. a 32-bit signed integer
   // - also detected and handled by VariantToInteger/VariantToInt64
-  varOleInt = 22;
+  varOleInt       = 22;
   /// map the Windows VT_UINT extended VARENUM, i.e. a 32-bit unsigned integer
   // - also detected and handled by VariantToInteger/VariantToInt64
-  varOleUInt = 23;
+  varOleUInt      = 23;
   /// map the Windows VT_LPSTR extended VARENUM, i.e. a PAnsiChar
   // - also detected and handled by VariantToUtf8
   varOlePAnsiChar = 30;
@@ -3892,9 +3892,9 @@ const
   varOlePWideChar = 31;
   /// map the Windows VT_FILETIME extended VARENUM, i.e. a 64-bit TFileTime
   // - also detected and handled by VariantToDateTime
-  varOleFileTime = 64;
+  varOleFileTime  = 64;
   /// map the Windows VT_CLSID extended VARENUM, i.e. a by-reference PGuid
-  varOleClsid = 72;
+  varOleClsid     = 72;
 
   varVariantByRef = varVariant or varByRef;
   varStringByRef  = varString  or varByRef;
@@ -3918,7 +3918,7 @@ const
   {$endif UNICODE}
 
   {$ifdef ISDELPHI}
-  CFirstUserType = $10F;
+  CFirstUserType  = $10F;
   {$endif ISDELPHI}
 
   /// those TVarData.VType values are meant to be direct values
@@ -4225,7 +4225,7 @@ type
   TStreamDynArray = array of TStream;
 
   {$M+}
-  /// TStream with a protected fPosition field
+  /// TStream with an internal Position field
   TStreamWithPosition = class(TStream)
   protected
     fPosition: Int64;
@@ -4235,16 +4235,23 @@ type
   public
     /// change the current Read/Write position, within current GetSize
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-    /// call the 64-bit Seek() overload
+    /// generic override calling the 64-bit Seek() overload
     function Seek(Offset: Longint; Origin: Word): Longint; override;
   end;
   {$M-}
 
-  /// TStream with two protected fPosition/fSize fields
+  /// TStream with internal Position/Size fields
   TStreamWithPositionAndSize = class(TStreamWithPosition)
   protected
     fSize: Int64;
     function GetSize: Int64; override;
+  end;
+
+  /// TStream with internal Position/Size fields but allowing no Seek() change
+  TStreamWithNoSeek = class(TStreamWithPositionAndSize)
+  public
+    /// allow to retrieve but not change the current Read/Write position
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
   end;
 
   /// TStream using a RawByteString as internal storage
@@ -12801,7 +12808,7 @@ begin
     fPosition := result;
   end
   else
-    // optimize on Delphi when retrieving TStream.Position as Seek(0,soCurrent)
+    // optimize for Delphi when retrieving TStream.Position as Seek(0,soCurrent)
     result := fPosition;
 end;
 
@@ -12816,6 +12823,19 @@ end;
 function TStreamWithPositionAndSize.GetSize: Int64;
 begin
   result := fSize;
+end;
+
+
+{ TStreamWithNoSeek }
+
+function TStreamWithNoSeek.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+var
+  prev: Int64;
+begin
+  prev := fPosition;
+  result := inherited Seek(Offset, Origin);
+  if prev <> fPosition then
+    RaiseStreamError(self, 'Seek');
 end;
 
 
