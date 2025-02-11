@@ -7568,8 +7568,8 @@ end;
 function TAesPrngAbstract.RandomPassword(Len: integer): SpiUtf8;
 const
   CHARS: array[0..127] of AnsiChar =
-    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' +
-    ':bcd.fgh(jklmn)pqrst?vwx-z+BCD%FGH!JKLMN/PQRST@VWX#Z$.:()?%!-+*/@#';
+    'abcdefghijklmnopqrstuvwxyzABCDEFGH[JKLMN0PQRSTUVWXYZ0123456789' +
+    ':bcd.fgh(jklmn)pqrst?vwx_z+BCD%FGH!JKLMN/PQRST@VWX#Z$.:()?%!,;*/]#';
 var
   i: integer;
   haspunct: boolean;
@@ -7763,8 +7763,11 @@ begin
     sha3.Update(@Executable.Hash.b, SizeOf(Executable.Hash.b));
     sha3.Update(OSVersionText);
     sha3.Update(@SystemInfo, SizeOf(SystemInfo));
-    sha3.Update(RawSmbios.Data); // may be ''
+    sha3.Update(RawSmbios.Data); // may be '' if has not been retrieved yet
     sha3.Update(@CpuCache, SizeOf(CpuCache));
+    {$ifdef CPUINTELARM}
+    sha3.Update(@CpuFeatures, SizeOf(CpuFeatures));
+    {$endif CPUINTELARM}
     // 512-bit randomness and entropy from mormot.core.base
     RandomBytes(@data, SizeOf(data)); // XOR stack data from gsl_rng_taus2
     sha3.Update(@data, SizeOf(data));

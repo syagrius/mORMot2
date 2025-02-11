@@ -878,8 +878,8 @@ type
   /// a PDF object, storing a textual value
   // - the value is specified as a PdfString
   // - this object is stored as '(escapedValue)'
-  // - in case of MBCS, conversion is made into Unicode before writing, and
-  // stored as '<FEFFHexUnicodeEncodedValue>'
+  // - in case of MBCS, conversion is made into UTF-16 before writing, and
+  // stored as '<FEFFHexUnicodeEncodedValue>' with an initial BOM_UTF16LE
   TPdfText = class(TPdfObject)
   private
     fValue: RawByteString;
@@ -896,7 +896,8 @@ type
   // - the value is specified as an UTF-8 encoded string
   // - this object is stored as '(escapedValue)'
   // - in case characters with ANSI code higher than 8 Bits, conversion is made
-  // into Unicode before writing, and '<FEFFHexUnicodeEncodedValue>'
+  // into UTF-16 before writing, and '<FEFFHexUnicodeEncodedValue>'  with an
+  // initial BOM_UTF16LE
   TPdfTextUtf8 = class(TPdfObject)
   private
     fValue: RawUtf8;
@@ -9018,7 +9019,7 @@ begin
   if PW <> nil then
     if fPage.fFont.FTrueTypeFontsIndex = 0 then
     begin
-      s := fDoc.Engine.UnicodeBufferToAnsi(PW, StrLenW(PW));
+      fDoc.Engine.UnicodeBufferToAnsiVar(PW, StrLenW(PW), s);
       i := 1;
       while i <= length(s) do
       begin // loop is MBCS ready

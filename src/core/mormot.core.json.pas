@@ -743,6 +743,7 @@ type
     // - if CodePage is defined to a >= 0 value, the encoding will take place
     procedure AddAnyAnsiString(const s: RawByteString; Escape: TTextWriterKind;
       CodePage: integer = -1);
+      {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 encoded chars to the buffer, from any Ansi buffer
     // - the codepage should be specified, e.g. CP_UTF8, CP_RAWBYTESTRING,
     // CP_WINANSI, or any version supported by the Operating System
@@ -870,6 +871,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 encoded chars to the buffer, from the main AnsiString type
     // - escapes chars according to the JSON RFC
+    // - on FPC and Delphi Unicode, uses the codepage to do any needed conversion
     procedure AddJsonEscapeAnsiString(const s: AnsiString);
     /// append an open array constant value to the buffer
     // - "" will be added if necessary
@@ -4374,7 +4376,7 @@ var
     while (ending > start) and
           (ending[-1] <= ' ') do
       dec(ending); // trim right
-    WR.AddNoJsonEscape(start, ending - start);
+    WR.AddNoJsonEscapeBig(start, ending - start);
   end;
 
 begin
@@ -6341,24 +6343,24 @@ end;
 procedure TJsonWriter.AddAnyAnsiString(const s: RawByteString;
   Escape: TTextWriterKind; CodePage: integer);
 var
-  L: integer;
+  sr: PStrRec;
 begin
-  L := length(s);
-  if L = 0 then
+  if s = '' then
     exit;
-  if (L > 2) and
-     (PInteger(s)^ and $ffffff = JSON_BASE64_MAGIC_C) then
+  sr := PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE);
+  if (sr^.length > 2) and
+     (PInteger(s)^ and $00ffffff = JSON_BASE64_MAGIC_C) then
   begin
-    AddNoJsonEscape(pointer(s), L); // was marked as a BLOB content
+    AddNoJsonEscapeBig(pointer(s), sr^.length); // already encoded as BLOB
     exit;
   end;
   if CodePage < 0 then
     {$ifdef HASCODEPAGE}
-    CodePage := GetCodePage(s);
+    CodePage := sr^.codePage; // is very likely to be CP_UTF8
     {$else}
     CodePage := CP_ACP; // TSynAnsiConvert.Engine(0)=CurrentAnsiConvert
     {$endif HASCODEPAGE}
-  AddAnyAnsiBuffer(pointer(s), L, Escape, CodePage);
+  AddAnyAnsiBuffer(pointer(s), sr^.length, Escape, CodePage);
 end;
 
 procedure EngineAppendUtf8(W: TJsonWriter; Engine: TSynAnsiConvert;
@@ -6746,7 +6748,7 @@ begin
     Add('"');
   {$ifdef HASCODEPAGE}
   AddAnyAnsiString(Text, Escape);
-  {$else}
+  {$else} // Delphi 7/2007 assume CP_UTF8/RawUtf8
   Add(pointer(Text), length(Text), Escape);
   {$endif HASCODEPAGE}
   if Escape = twJsonEscape then
@@ -7257,7 +7259,7 @@ end;
 procedure TJsonWriter.AddNoJsonEscape(Source: TJsonWriter);
 begin
   if Source.fTotalFileSize = 0 then
-    AddNoJsonEscape(Source.fTempBuf, Source.B - Source.fTempBuf + 1)
+    AddNoJsonEscapeBig(Source.fTempBuf, Source.B - Source.fTempBuf + 1)
   else
     AddNoJsonEscapeUtf8(Source.Text);
 end;

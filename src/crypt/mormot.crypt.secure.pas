@@ -528,7 +528,7 @@ type
 const
   /// the standard text of a TSignAlgo
   SIGNER_TXT: array[TSignAlgo] of RawUtf8 = (
-    'SHA-1', 'SHA-256', 'SHA-384', 'SHA-512',
+    'SHA-1',    'SHA-256',  'SHA-384',  'SHA-512',
     'SHA3-224', 'SHA3-256', 'SHA3-384', 'SHA3-512', 'SHAKE128', 'SHAKE256');
   SIGNER_DEFAULT_SALT = 'I6sWioAidNnhXO9BK';
   SIGNER_DEFAULT_ALGO = saSha3S128;
@@ -633,6 +633,19 @@ type
   /// set of algorithms available for HashFile/HashFull functions and TSynHasher object
   THashAlgos = set of THashAlgo;
 
+  /// store a hash value and its algorithm, e.g. for THttpPeerCacheMessage.Hash
+  // - we store and compare in our implementation the algorithm in addition to
+  // the hash, to avoid any potential attack about (unlikely) hash collisions
+  // between algorithms, and allow any change of algo restrictions in the future
+  THashDigest = packed record
+    /// the algorithm used for Hash
+    Algo: THashAlgo;
+    /// up to 512-bit of raw binary hash, according to Algo
+    Bin: THash512Rec;
+  end;
+  /// store a dynamic array of hash value and its algorithm
+  THashDigests = array of THashDigest;
+
   /// convenient multi-algorithm hashing wrapper
   // - as used e.g. by HashFile/HashFull functions
   // - we defined a record instead of a class, to allow stack allocation and
@@ -683,7 +696,7 @@ type
   end;
 
   /// TStreamRedirect with TSynHasher cryptographic hashing
-  // - do not use this abstract class but inherited with overloaded GetAlgo
+  // - do not use this abstract class but inherited types with overriden GetAlgo
   TStreamRedirectSynHasher = class(TStreamRedirect)
   protected
     fHash, fHashAppend: TSynHasher;
@@ -691,10 +704,17 @@ type
     procedure AfterAppend; override;
     procedure ResetHash; override;
   public
+    // proper implement TStreamRedirect (abstract) virtual methods
     constructor Create(aDestination: TStream; aRead: boolean = false); override;
     function GetHash: RawUtf8; override;
-    class function GetAlgo: THashAlgo; virtual; abstract;
     class function GetHashFileExt: RawUtf8; override;
+    /// return the current state of the hash as its raw binary and algorithm
+    function GetHashDigest(out Digest: THashDigest): boolean; overload;
+    /// will decode an hexadecimal hash into its raw binary and algorithm
+    class function GetHashDigest(const HexaHash: RawUtf8;
+      out Digest: THashDigest): boolean; overload;
+    /// inherited classes will properly return the hash algorithm
+    class function GetAlgo: THashAlgo; virtual; abstract;
   end;
 
   /// meta-class of TStreamRedirectSynHasher
@@ -800,6 +820,7 @@ function ToUtf8(algo: TSignAlgo): RawUtf8; overload; {$ifdef HASINLINE} inline; 
 function ToText(algo: THashAlgo): PShortString; overload;
 function ToUtf8(algo: THashAlgo): RawUtf8; overload; {$ifdef HASINLINE} inline; {$endif}
 function ToText(algo: TCrc32Algo): PShortString; overload;
+function ToText(const Digest: THashDigest): RawUtf8; overload;
 
 /// recognize a TSignAlgo from a text, e.g. 'SHAKE-128', 'saSha256' or 'SHA-3/256'
 function TextToSignAlgo(const Text: RawUtf8; out Algo: TSignAlgo): boolean; overload;
@@ -808,6 +829,13 @@ function TextToSignAlgo(P: PUtf8Char; Len: PtrInt; out Algo: TSignAlgo): boolean
 /// recognize a THashAlgo from a text, e.g. 'SHA1', 'hfSHA3_256' or 'SHA-512/256'
 function TextToHashAlgo(const Text: RawUtf8; out Algo: THashAlgo): boolean; overload;
 function TextToHashAlgo(P: PUtf8Char; Len: PtrInt; out Algo: THashAlgo): boolean; overload;
+
+/// decode and recognize an hexadecimal hash from its size - but not SHA-3
+function HashDetect(const Hash: RawUtf8; out Digest: THashDigest): boolean;
+
+/// fast compare two hash digest and their associated algorithm
+function HashDigestEqual(const a, b: THashDigest): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// compute the hexadecimal hash of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
@@ -983,7 +1011,6 @@ type
 
   /// callback event able to return the HA0 binary from a username
   // - called by DigestServerAuth() e.g. to lookup from a local .htdigest file
-  // - should return the hash size in bytes, or 0 if User is unknown
   // - is typically implemented via DigestHA0() wrapper function
   TOnDigestServerAuthGetUserHash = function(
     const User, Realm: RawUtf8; out HA0: THash512Rec): TAuthServerResult of object;
@@ -1126,6 +1153,7 @@ type
     // this is the main abstract virtual method to override for DIGEST auth
     function GetUserHash(const aUser, aRealm: RawUtf8;
       out aDigest: THash512Rec): TAuthServerResult; virtual; abstract;
+    // TOnDigestServerAuthGetUserHash signature
     function GetUserHashWithCallback(const aUser, aRealm: RawUtf8;
       out aDigest: THash512Rec): TAuthServerResult;
     procedure ComputeDigest(const aUser: RawUtf8; const aPassword: SpiUtf8;
@@ -1164,7 +1192,7 @@ type
     fUsers: TSynDictionary; // UserName:RawUtf8 / HA0:TDigestAuthHash
     fModified: boolean;
     function GetUserHash(const aUser, aRealm: RawUtf8;
-      out aDigest: THash512Rec): TAuthServerResult; override;
+      out aDigest: THash512Rec): TAuthServerResult; override; // main method
     function GetCount: integer;
   public
     /// initialize the Digest access authentication engine
@@ -3871,8 +3899,11 @@ begin
 end;
 
 function TStreamRedirectSynHasher.GetHash: RawUtf8;
+var
+  tmp: TSynHasher; // local copy to return current state but continue processing
 begin
-  fHash.Final(result);
+  tmp := fHash;
+  tmp.Final(result);
 end;
 
 class function TStreamRedirectSynHasher.GetHashFileExt: RawUtf8;
@@ -3880,6 +3911,22 @@ begin
   result := HASH_EXT[GetAlgo];
 end;
 
+function TStreamRedirectSynHasher.GetHashDigest(out Digest: THashDigest): boolean;
+var
+  tmp: TSynHasher;
+begin
+  Digest.Algo := GetAlgo;
+  tmp := fHash;
+  tmp.Final(Digest.Bin); // hash the current state
+  result := true;
+end;
+
+class function TStreamRedirectSynHasher.GetHashDigest(const HexaHash: RawUtf8;
+  out Digest: THashDigest): boolean;
+begin
+  Digest.Algo := GetAlgo;
+  result := mormot.core.text.HexToBin(pointer(HexaHash), @Digest.Bin, HASH_SIZE[Digest.Algo]);
+end;
 
 { TStreamRedirectSha3_512 }
 
@@ -4421,6 +4468,14 @@ begin
   result := GetEnumName(TypeInfo(TCrc32Algo), ord(algo));
 end;
 
+function ToText(const Digest: THashDigest): RawUtf8;
+begin
+  if Digest.Algo <= high(THashAlgo) then
+    BinToHexLower(PAnsiChar(@Digest.Bin), HASH_SIZE[Digest.Algo], result)
+  else
+    FastAssignNew(result);
+end;
+
 function SanitizeAlgo(P: PUtf8Char; L: PtrInt; var tmp: TShort15;
   trimprefix: cardinal; onlyalphanum: boolean): boolean;
 begin
@@ -4500,6 +4555,30 @@ begin
   result := true;
 end;
 
+function HashDetect(const Hash: RawUtf8; out Digest: THashDigest): boolean;
+var
+  s: byte;
+  a: THashAlgo;
+begin
+  result := false;
+  FillCharFast(Digest, SizeOf(Digest), 0);
+  s := length(Hash) shr 1;
+  if (s >= SizeOf(TMd5Digest)) and
+     (s <= SizeOf(Digest.Bin)) then
+    for a := low(a) to hfSHA512 do
+      if HASH_SIZE[a] = s then
+      begin
+        Digest.Algo := a;
+        result := mormot.core.text.HexToBin(pointer(Hash), @Digest.Bin, s);
+        break;
+      end;
+end;
+
+function HashDigestEqual(const a, b: THashDigest): boolean;
+begin
+  result := CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
+end;
+
 
 { **************** Client and Server HTTP Access Authentication }
 
@@ -4534,7 +4613,7 @@ type
     HA2: RawUtf8;
     Response: RawUtf8;
     tmp: RawByteString;
-    Hasher: TSynHasher;
+    Hasher: TSynHasher; // instance used internally by methods
     HA0: THash512Rec;
     procedure Init(DigestAlgo: TDigestAlgo); {$ifdef HASINLINE} inline; {$endif}
     function Parse(var p: PUtf8Char): boolean;
@@ -4646,7 +4725,7 @@ begin
     Hasher.Update(Method);
   Hasher.Update([':', Url]);
   Hasher.Final(HA2);
-  hasher.Full(Hash,
+  Hasher.Full(Hash,
     [HA1, ':', nonce, ':', nc, ':', cnonce, ':', qop, ':', HA2], Response);
 end;
 

@@ -64,6 +64,9 @@ const
   /// TUtf8Table.Lookup[] value for a 7-bit ASCII character
   UTF8_ASCII    = 0;
   /// maximum TUtf8Table.Lookup[] value within UTF-16 accessible range
+  // - this unit support the full original UTF-8 range, but this constant could
+  // be used to ensure RFC 3629 expectations, as used e.g. by IsValidUtf8() and
+  // most UTF-16 software or language (e.g. Windows, Java, JavaScript...)
   UTF8_MAXUTF16 = 3;
   /// impossible TUtf8Table.Lookup[] value
   UTF8_INVALID  = 6;
@@ -336,25 +339,25 @@ type
   ESynUnicode = class(ExceptionWithProps);
 
   /// an abstract class to handle Ansi to/from Unicode translation
-  // - implementations of this class will handle efficiently all Code Pages
+  // - implementations of this class will handle efficiently all CharSets
   // - this default implementation will use the Operating System APIs
-  // - you should not create your own class instance by yourself, but should
-  // better retrieve an instance using TSynAnsiConvert.Engine(), which will
-  // initialize either a TSynAnsiFixedWidth or a TSynAnsiConvert instance on need
+  // - NEVER call Create() constructor directly: use the Engine() factory instead
   TSynAnsiConvert = class
   protected
     fCodePage: cardinal;
     fAnsiCharMbcs: boolean;
     fAnsiCharShift: byte;
   public
-    /// initialize the internal conversion engine
-    constructor Create(aCodePage: cardinal); reintroduce; virtual;
     /// returns the engine corresponding to a given code page
     // - a global list of TSynAnsiConvert instances is handled by the unit -
     // therefore, caller should not release the returned instance
     // - will return nil in case of unhandled code page
     // - is aCodePage is 0, will return CurrentAnsiConvert value
     class function Engine(aCodePage: cardinal): TSynAnsiConvert;
+      {$ifdef HASINLINE} static; {$endif}
+    /// initialize the internal conversion engine
+    // - NEVER call this constructor directly: use the Engine() factory instead
+    constructor Create(aCodePage: cardinal); reintroduce; virtual;
     /// direct conversion of a PAnsiChar buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
     // - this default implementation will use the Operating System APIs
@@ -380,11 +383,12 @@ type
     {$endif PUREMORMOT2}
     /// convert any Ansi buffer into an Unicode String
     // - returns a SynUnicode, i.e. Delphi 2009+ UnicodeString or a WideString
-    function AnsiToUnicodeString(
-      Source: PAnsiChar; SourceChars: cardinal): SynUnicode; overload;
+    procedure AnsiToUnicodeStringVar(
+      Source: PAnsiChar; SourceChars: cardinal; var Result: SynUnicode);
     /// convert any Ansi buffer into an Unicode String
     // - returns a SynUnicode, i.e. Delphi 2009+ UnicodeString or a WideString
-    function AnsiToUnicodeString(const Source: RawByteString): SynUnicode; overload;
+    function AnsiToUnicodeString(const Source: RawByteString): SynUnicode;
+      {$ifdef HASINLINE} inline; {$endif}
     /// convert any Ansi Text into an UTF-8 encoded String
     // - internally calls AnsiBufferToUtf8 virtual method
     function AnsiToUtf8(const AnsiText: RawByteString): RawUtf8; virtual;
@@ -398,10 +402,10 @@ type
     // - this default implementation will rely on the Operating System for
     // all non ASCII-7 chars
     function UnicodeBufferToAnsi(Dest: PAnsiChar; Source: PWideChar;
-      SourceChars: cardinal): PAnsiChar; overload; virtual;
+      SourceChars: cardinal): PAnsiChar; virtual;
     /// direct conversion of an Unicode buffer into an Ansi Text
-    function UnicodeBufferToAnsi(Source: PWideChar;
-      SourceChars: cardinal): RawByteString; overload; virtual;
+    procedure UnicodeBufferToAnsiVar(Source: PWideChar;
+      SourceChars: cardinal; var Result: RawByteString); virtual;
     /// convert any Unicode-encoded String into Ansi Text
     // - internally calls UnicodeBufferToAnsi virtual method
     function UnicodeStringToAnsi(const Source: SynUnicode): RawByteString;
@@ -454,23 +458,20 @@ type
   end;
 
   /// a class to handle Ansi to/from Unicode translation of fixed width encoding
-  // (i.e. non MBCS)
   // - this class will handle efficiently all Code Page availables without MBCS
   // encoding - like WinAnsi (1252) or Russian (1251)
   // - it will use internal fast look-up tables for such encodings
-  // - this class could take some time to generate, and will consume more than
-  // 64 KB of memory: you should not create your own class instance by yourself,
-  // but should better retrieve an instance using TSynAnsiConvert.Engine(), which
-  // will initialize either a TSynAnsiFixedWidth or a TSynAnsiConvert instance
-  // on need
+  // - each instance will consume a bit more than 64 KB of memory
   // - this class has some additional methods (e.g. IsValid*) which take
   // advantage of the internal lookup tables to provide some fast process
+  // - NEVER call Create() constructor directly: use the Engine() factory instead
   TSynAnsiFixedWidth = class(TSynAnsiConvert)
   protected
     fAnsiToWide: TWordDynArray;
     fWideToAnsi: TByteDynArray;
   public
     /// initialize the internal conversion engine
+    // - NEVER call this constructor directly: use the Engine() factory instead
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
@@ -534,11 +535,12 @@ type
   end;
 
   /// a class to handle UTF-8 to/from Unicode translation
-  // - match the TSynAnsiConvert signature, for code page CP_UTF8
   // - this class is mostly a non-operation for conversion to/from UTF-8
+  // - NEVER call Create() constructor directly: use the Engine() factory instead
   TSynAnsiUtf8 = class(TSynAnsiConvert)
   public
     /// initialize the internal conversion engine
+    // - NEVER call this constructor directly: use the Engine() factory instead
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar UTF-8 buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
@@ -564,8 +566,8 @@ type
     function UnicodeBufferToAnsi(Dest: PAnsiChar; Source: PWideChar;
       SourceChars: cardinal): PAnsiChar; override;
     /// direct conversion of an Unicode buffer into an Ansi Text
-    function UnicodeBufferToAnsi(Source: PWideChar;
-      SourceChars: cardinal): RawByteString; override;
+    procedure UnicodeBufferToAnsiVar(Source: PWideChar;
+      SourceChars: cardinal; var Result: RawByteString); override;
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar UTF-8 buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
     // - no #0 terminator is appended to the buffer
@@ -586,13 +588,14 @@ type
   end;
 
   /// a class to handle UTF-16 to/from Unicode translation
-  // - match the TSynAnsiConvert signature, for code page CP_UTF16
   // - even if UTF-16 is not an Ansi format, code page CP_UTF16 may have been
   // used to store UTF-16 encoded binary content
   // - this class is mostly a non-operation for conversion to/from Unicode
+  // - NEVER call Create() constructor directly: use the Engine() factory instead
   TSynAnsiUtf16 = class(TSynAnsiConvert)
   public
     /// initialize the internal conversion engine
+    // - NEVER call this constructor directly: use the Engine() factory instead
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar UTF-16 buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
@@ -625,23 +628,24 @@ type
 
 var
   /// global TSynAnsiConvert instance to handle WinAnsi encoding (code page 1252)
-  // - this instance is global and instantied during the whole program life time
+  // - this instance is global and created during this unit's initialization
   // - it will be created from hard-coded values, and not using the system API,
   // since it appeared that some systems (e.g. in Russia) did tweak the registry
   // so that 1252 code page maps 1251 code page
   WinAnsiConvert: TSynAnsiFixedWidth;
 
   /// global TSynAnsiConvert instance to handle current system encoding
+  // - this instance is global and created during this unit's initialization
   // - this is the encoding as used by the AnsiString type, so will be used
   // before Delphi 2009 to speed-up RTL string handling (especially for UTF-8)
-  // - this instance is global and instantied during the whole program life time
   CurrentAnsiConvert: TSynAnsiConvert;
 
   /// global TSynAnsiConvert instance to handle UTF-8 encoding (code page CP_UTF8)
-  // - this instance is global and instantied during the whole program life time
+  // - this instance is global and created during this unit's initialization
   Utf8AnsiConvert: TSynAnsiUtf8;
 
   /// global TSynAnsiConvert instance with no encoding (RawByteString/RawBlob)
+  // - this instance is global and created during this unit's initialization
   RawByteStringConvert: TSynAnsiFixedWidth;
 
 
@@ -650,26 +654,33 @@ var
 type
   /// text file layout, as returned by BomFile() and StringFromBomFile()
   // - bomNone means there was no BOM recognized
-  // - bomUnicode stands for UTF-16 LE encoding (as on Windows products)
+  // - bomUtf16LE stands for UTF-16 Little-Endian encoding (as in Windows)
+  // - bomUtf16BE stands for UTF-16 Big-Endian encoding
   // - bomUtf8 stands for a UTF-8 BOM (as on Windows products)
   TBomFile = (
     bomNone,
-    bomUnicode,
+    bomUtf16LE,
+    bomUtf16BE,
     bomUtf8);
 
 const
+  /// UTF-8 BOM marker three bytes value (in little-endian)
+  BOM_UTF8 = $bfbbef;
   /// UTF-16LE BOM WideChar marker, as existing e.g. in some UTF-16 Windows files
-  BOM_UTF16LE = #$FEFF;
+  BOM_UTF16LE = #$feff;
+  /// UTF-16BE BOM WideChar marker, which is not supported
+  BOM_UTF16BE = #$fffe;
 
 /// check the file BOM at the beginning of a file buffer
 // - BOM is common only with Microsoft products
 // - returns bomNone if no BOM was recognized
-// - returns bomUnicode or bomUtf8 if UTF-16LE or UTF-8 BOM were recognized:
+// - returns bomUtf16LE or bomUtf8 if UTF-16LE or UTF-8 BOM were recognized:
 // and will adjust Buffer/BufferSize to ignore the leading 2 or 3 bytes
 function BomFile(var Buffer: pointer; var BufferSize: PtrInt): TBomFile;
 
 /// read a file into a temporary variable, check the BOM, and adjust the buffer
-function StringFromBomFile(const FileName: TFileName; out FileContent: RawByteString;
+// - for bomUtf16LE and bomUtf16BE, returns BufferSize as WideChar count (not bytes)
+function StringFromBomFile(const FileName: TFileName; var FileContent: RawByteString;
   out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
 
 /// read a File content into a RawUtf8, detecting any leading BOM
@@ -690,6 +701,7 @@ function AnyTextFileToRawUtf8(const FileName: TFileName;
 // - if ForceUtf8 is true, won't detect the BOM but assume whole file is UTF-8
 function AnyTextFileToString(const FileName: TFileName;
   ForceUtf8: boolean = false): string;
+  {$ifdef UNICODE} inline; {$endif}
 
 /// read a File content into SynUnicode string, detecting any leading BOM
 // - assume file with no BOM is encoded with the current Ansi code page, not UTF-8
@@ -752,17 +764,17 @@ function IsWinAnsiU8Bit(Utf8Text: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct conversion of an AnsiString with an unknown code page into an
-// UTF-8 encoded String
-// - will assume CurrentAnsiConvert.CodePage prior to Delphi 2009
-// - newer UNICODE versions of Delphi will retrieve the code page from string
-procedure AnyAnsiToUtf8(const s: RawByteString; var result: RawUtf8); overload;
+// UTF-8 encoded String, as mainly used by VariantToUtf8() or VarRecToUtf8()
+// - FPC and Unicode versions of Delphi will retrieve the code page from s
+// - Delphi 7/2007 calls IsValidUtf8() then assume CurrentAnsiConvert.CodePage
+procedure AnyAnsiToUtf8Var(const s: RawByteString; var result: RawUtf8);
 
 /// direct conversion of an AnsiString with an unknown code page into an
 // UTF-8 encoded String
-// - will assume CurrentAnsiConvert.CodePage prior to Delphi 2009
-// - newer UNICODE versions of Delphi will retrieve the code page from string
+// - FPC and Unicode versions of Delphi will retrieve the code page from s
+// - Delphi 7/2007 calls IsValidUtf8() then assume CurrentAnsiConvert.CodePage
 // - use AnsiToUtf8() if you want to specify the codepage
-function AnyAnsiToUtf8(const s: RawByteString): RawUtf8; overload;
+function AnyAnsiToUtf8(const s: RawByteString): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert an AnsiString (of a given code page) into a UTF-8 string
@@ -3190,7 +3202,7 @@ procedure DetectRawUtf8(var source: RawByteString);
 begin
   {$ifdef HASCODEPAGE} // do nothing on oldest Delphi
   if (source <> '') and
-     IsValidUtf8(source) then
+     IsValidUtf8Buffer(pointer(source), length(source)) then
     EnsureRawUtf8(source);
   {$endif HASCODEPAGE}
 end;
@@ -3524,14 +3536,6 @@ end;
 
 { **************** UTF-8 / Unicode / Ansi Conversion Classes }
 
-var
-  // internal list of TSynAnsiConvert instances
-  SynAnsiConvertList: array of TSynAnsiConvert;
-  SynAnsiConvertListLock: TRWLightLock;
-  SynAnsiConvertListCount: integer;
-  SynAnsiConvertListCodePage: TWordDynArray; // for fast lookup in CPU L1 cache
-
-
 { TSynAnsiConvert }
 
 function TSynAnsiConvert.AnsiBufferToUnicode(Dest: PWideChar;
@@ -3646,36 +3650,25 @@ end;
 
 {$endif PUREMORMOT2}
 
-function TSynAnsiConvert.AnsiToUnicodeString(Source: PAnsiChar;
-  SourceChars: cardinal): SynUnicode;
+procedure TSynAnsiConvert.AnsiToUnicodeStringVar(Source: PAnsiChar;
+  SourceChars: cardinal; var Result: SynUnicode);
 var
   tmp: TSynTempBuffer;
   u: PWideChar;
 begin
   if SourceChars = 0 then
-    result := ''
+    Result := ''
   else
   begin
     u := AnsiBufferToUnicode(tmp.Init(SourceChars * 2), Source, SourceChars);
-    FastSynUnicode(result, tmp.buf, (PtrUInt(u) - PtrUInt(tmp.buf)) shr 1);
+    FastSynUnicode(Result, tmp.buf, (PtrUInt(u) - PtrUInt(tmp.buf)) shr 1);
     tmp.Done;
   end;
 end;
 
 function TSynAnsiConvert.AnsiToUnicodeString(const Source: RawByteString): SynUnicode;
-var
-  tmp: TSynTempBuffer;
-  u: PWideChar;
 begin
-  if Source = '' then
-    result := ''
-  else
-  begin
-    tmp.Init(length(Source) * 2); // max dest size in bytes
-    u := AnsiBufferToUnicode(tmp.buf, pointer(Source), length(Source));
-    FastSynUnicode(result, tmp.buf, (PtrUInt(u) - PtrUInt(tmp.buf)) shr 1);
-    tmp.Done;
-  end;
+  AnsiToUnicodeStringVar(pointer(Source), length(Source), result);
 end;
 
 function TSynAnsiConvert.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
@@ -3706,63 +3699,74 @@ begin
     50220 .. 52000: // rough IEC-2022 detection with $1b ESC [I..] F
       fAnsiCharMbcs := true;
   end;
+  RegisterGlobalShutdownRelease(self);
 end;
 
-function GetEngine(aCodePage: cardinal): TSynAnsiConvert;
-  {$ifdef HASINLINE} inline; {$endif}
-var
-  i: PtrInt;
-begin
-  SynAnsiConvertListLock.ReadLock; // concurrent read lock
-  i := WordScanIndex(pointer(SynAnsiConvertListCodePage),
-    SynAnsiConvertListCount, aCodePage); // SSE2 asm on i386 and x86_64
-  if i >= 0 then
-    result := SynAnsiConvertList[i]
-  else
-    result := nil;
-  SynAnsiConvertListLock.ReadUnLock;
-end;
-
-function NewEngine(aCodePage: cardinal): TSynAnsiConvert;
-var
-  i: PtrInt;
-begin
-  SynAnsiConvertListLock.WriteLock;
-  try
-    i := WordScanIndex(pointer(SynAnsiConvertListCodePage),
-      SynAnsiConvertListCount, aCodePage); // search (again) for thread safety
-    if i >= 0 then
-    begin
-      result := SynAnsiConvertList[i]; // avoid any (unlikely) race condition
-      exit;
-    end;
-    if aCodePage = CP_UTF8 then
-      result := TSynAnsiUtf8.Create(CP_UTF8)
-    else if aCodePage = CP_UTF16 then
-      result := TSynAnsiUtf16.Create(CP_UTF16)
-    else if IsFixedWidthCodePage(aCodePage) then
-      result := TSynAnsiFixedWidth.Create(aCodePage)
-    else
-      result := TSynAnsiConvert.Create(aCodePage);
-    RegisterGlobalShutdownRelease(result);
-    ObjArrayAdd(SynAnsiConvertList, result);
-    AddWord(SynAnsiConvertListCodePage, SynAnsiConvertListCount, aCodePage);
-  finally
-    SynAnsiConvertListLock.WriteUnLock;
+type
+  // maintain the thread-safe internal list of TSynAnsiConvert instances
+  TSynAnsiConvertList = record
+    Last: TSynAnsiConvert;
+    Lock: TRWLightLock;
+    Count: integer;
+    CodePage: TWordDynArray; // for (SSE2) fast lookup in CPU L1 cache
+    Engine: array of TSynAnsiConvert;
   end;
+var
+  SynAnsiConvertList: TSynAnsiConvertList;
+
+function GetEngine(var List: TSynAnsiConvertList; CodePage: cardinal): TSynAnsiConvert;
+var
+  i: PtrInt;
+begin
+  result := List.Last; // atomic cache
+  if result <> nil then
+    if result.CodePage = CodePage then
+      exit // very common case
+    else
+      result := nil;
+  List.Lock.ReadLock; // concurrent read lock
+  i := WordScanIndex(pointer(List.CodePage), List.Count, CodePage);
+  if i >= 0 then
+    result := List.Engine[i];
+  List.Lock.ReadUnLock;
+  if result = nil then // thread-safe register a new TSynAnsiConvert instance
+  begin
+    List.Lock.WriteLock;
+    try
+      i := WordScanIndex(pointer(List.CodePage), List.Count, CodePage);
+      if i < 0 then // really need to create
+      begin
+        if CodePage = CP_UTF16 then // seldom used: no global variable
+          result := TSynAnsiUtf16.Create(CP_UTF16)
+        else if IsFixedWidthCodePage(CodePage) then
+          result := TSynAnsiFixedWidth.Create(CodePage) // use lookup table
+        else
+          result := TSynAnsiConvert.Create(CodePage); // use system API
+        ObjArrayAdd(List.Engine, result);
+        AddWord(List.CodePage, List.Count, CodePage);
+      end
+      else
+        result := List.Engine[i];
+    finally
+      List.Lock.WriteUnLock;
+    end;
+  end;
+  List.Last := result;
 end;
 
 class function TSynAnsiConvert.Engine(aCodePage: cardinal): TSynAnsiConvert;
 begin
   if aCodePage <> CP_ACP then
-  begin
-    result := GetEngine(aCodePage);
-    if result = nil then
-      if aCodePage = CP_RAWBLOB then
-        result := RawByteStringConvert // CP_RAWBLOB is internal -> no engine
+    if aCodePage < CP_RAWBLOB then
+      if aCodePage <> CP_UTF8 then
+        if aCodePage <> CP_WINANSI then
+          result := GetEngine(SynAnsiConvertList, aCodePage) // from list
+        else
+          result := WinAnsiConvert
       else
-        result := NewEngine(aCodePage)
-  end
+        result := Utf8AnsiConvert
+    else
+      result := RawByteStringConvert // CP_RAWBLOB is internal -> no engine
   else
     result := CurrentAnsiConvert;
 end;
@@ -3891,18 +3895,18 @@ begin
   Dest[result] := #0;
 end;
 
-function TSynAnsiConvert.UnicodeBufferToAnsi(Source: PWideChar;
-  SourceChars: cardinal): RawByteString;
+procedure TSynAnsiConvert.UnicodeBufferToAnsiVar(Source: PWideChar;
+  SourceChars: cardinal; var Result: RawByteString);
 var
   tmp: TSynTempBuffer;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
-    result := ''
+    Result := ''
   else
   begin
     tmp.Init(SourceChars * 3);
-    FastSetStringCP(result, tmp.buf, UnicodeBufferToAnsi(
+    FastSetStringCP(Result, tmp.buf, UnicodeBufferToAnsi(
       tmp.buf, Source, SourceChars) - PAnsiChar(tmp.buf), fCodePage);
     tmp.Done;
   end;
@@ -3910,13 +3914,13 @@ end;
 
 function TSynAnsiConvert.UnicodeStringToAnsi(const Source: SynUnicode): RawByteString;
 begin
-  result := UnicodeBufferToAnsi(pointer(Source), length(Source));
+  UnicodeBufferToAnsiVar(pointer(Source), length(Source), result);
 end;
 
 {$ifndef PUREMORMOT2}
 function TSynAnsiConvert.RawUnicodeToAnsi(const Source: RawUnicode): RawByteString;
 begin
-  result := UnicodeBufferToAnsi(pointer(Source), length(Source) shr 1);
+  UnicodeBufferToAnsiVar(pointer(Source), length(Source) shr 1, result);
 end;
 {$endif PUREMORMOT2}
 
@@ -3943,8 +3947,8 @@ begin
   else
   begin
     u := tmp.Init(SourceChars * 2);
-    result := UnicodeBufferToAnsi(u,
-      From.AnsiBufferToUnicode(u, Source, SourceChars) - u);
+    UnicodeBufferToAnsiVar(u,
+      From.AnsiBufferToUnicode(u, Source, SourceChars) - u, result);
     tmp.Done;
   end;
 end;
@@ -4499,18 +4503,18 @@ begin
     Source, SourceChars, [ccfNoTrailingZero]);
 end;
 
-function TSynAnsiUtf8.UnicodeBufferToAnsi(Source: PWideChar;
-  SourceChars: cardinal): RawByteString;
+procedure TSynAnsiUtf8.UnicodeBufferToAnsiVar(Source: PWideChar;
+  SourceChars: cardinal; var Result: RawByteString);
 var
   tmp: TSynTempBuffer;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
-    result := ''
+    Result := ''
   else
   begin
     tmp.Init(SourceChars * 3);
-    FastSetStringCP(result, tmp.buf, RawUnicodeToUtf8(tmp.buf,
+    FastSetStringCP(Result, tmp.buf, RawUnicodeToUtf8(tmp.buf,
       SourceChars * 3, Source, SourceChars, [ccfNoTrailingZero]), fCodePage);
     tmp.Done;
   end;
@@ -4613,11 +4617,17 @@ begin
         begin
           inc(PByte(Buffer), 2);
           dec(BufferSize, 2);
-          result := bomUnicode; // UTF-16 LE
+          result := bomUtf16LE; // UTF-16 LE
         end;
-      $bbef:
+      ord(BOM_UTF16BE):
+        begin
+          inc(PByte(Buffer), 2);
+          dec(BufferSize, 2);
+          result := bomUtf16BE; // UTF-16 BE
+        end;
+      BOM_UTF8 and $ffff:
         if (BufferSize >= 3) and
-           (PByteArray(Buffer)[2] = $bf) then
+           (PByteArray(Buffer)[2] = (BOM_UTF8 shr 16)) then // UTF-8
         begin
           inc(PByte(Buffer), 3);
           dec(BufferSize, 3);
@@ -4626,18 +4636,31 @@ begin
     end;
 end;
 
-function StringFromBomFile(const FileName: TFileName; out FileContent: RawByteString;
+function StringFromBomFile(const FileName: TFileName; var FileContent: RawByteString;
   out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
 begin
   FileContent := StringFromFile(FileName);
   Buffer := pointer(FileContent);
   BufferSize := length(FileContent);
-  result := BomFile(Buffer, BufferSize);
+  result := BomFile(Buffer, BufferSize); // recognize most BOMs
+  if BufferSize = 0 then
+    result := bomNone
+  else if result in [bomUtf16LE, bomUtf16BE] then
+    BufferSize := BufferSize shr 1; // UTF-16 BOMs return size in WideChar
 end;
 
 function RawUtf8FromFile(const FileName: TFileName): RawUtf8;
 begin
   result := AnyTextFileToRawUtf8(FileName, {AssumeUtf8IfNoBom=}true);
+end;
+
+procedure RawUnicodeSwapEndian(buf: PWord; len: PtrInt);
+begin // internal function used with len > 0
+  repeat
+    buf^ := bswap16(buf^); // fast enough for our purpose (seldom used)
+    inc(buf);
+    dec(len)
+  until len = 0;
 end;
 
 function AnyTextFileToRawUtf8(const FileName: TFileName; AssumeUtf8IfNoBom: boolean): RawUtf8;
@@ -4648,20 +4671,25 @@ var
 begin
   case StringFromBomFile(FileName, tmp, buf, len) of
     bomNone:
-      if AssumeUtf8IfNoBom then
-        FastAssignUtf8(result, tmp)
+      if len = 0 then
+        FastAssignNew(result)
+      else if AssumeUtf8IfNoBom or
+              IsValidUtf8Buffer(buf, len) then
+        FastAssignUtf8(result, tmp) // force CP_UTF8
       else
         CurrentAnsiConvert.AnsiBufferToRawUtf8(buf, len, result);
-    bomUnicode:
-      RawUnicodeToUtf8(PWideChar(buf), len shr 1, result);
+    bomUtf16LE:
+      RawUnicodeToUtf8(PWideChar(buf), len, result);
+    bomUtf16BE:
+      begin
+        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
+        RawUnicodeToUtf8(PWideChar(buf), len, result);
+      end;
     bomUtf8:
-      if len = 0 then
-        result := ''
-      else
       begin
         MoveFast(buf^, pointer(tmp)^, len); // fast in-place delete(bom)
         FakeLength(tmp, len);
-        FastAssignUtf8(result, tmp)
+        FastAssignUtf8(result, tmp); // force CP_UTF8
       end;
   end;
 end;
@@ -4672,100 +4700,114 @@ var
   buf: pointer;
   len: PtrInt;
 begin
-  if ForceUtf8 then
-    Utf8ToSynUnicode(StringFromFile(FileName), result)
-  else
-    case StringFromBomFile(FileName, tmp, buf, len) of
-      bomNone:
-        result := CurrentAnsiConvert.AnsiToUnicodeString(buf, len);
-      bomUnicode:
-        FastSynUnicode(result, buf, len shr 1);
-      bomUtf8:
-        Utf8ToSynUnicode(buf, len, result);
-    end;
+  case StringFromBomFile(FileName, tmp, buf, len) of
+    bomNone:
+      if (len = 0) or
+         ForceUtf8 or
+         IsValidUtf8Buffer(buf, len) then
+        Utf8ToSynUnicode(buf, len, result)
+      else
+        CurrentAnsiConvert.AnsiToUnicodeStringVar(buf, len, result);
+    bomUtf16LE:
+      FastSynUnicode(result, buf, len);
+    bomUtf16BE:
+      begin
+        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
+        FastSynUnicode(result, buf, len);
+      end;
+    bomUtf8:
+      Utf8ToSynUnicode(buf, len, result);
+  end;
 end;
 
+{$ifdef UNICODE}
+function AnyTextFileToString(const FileName: TFileName; ForceUtf8: boolean): string;
+begin
+  result := AnyTextFileToSynUnicode(FileName, ForceUtf8);
+end;
+{$else}
 function AnyTextFileToString(const FileName: TFileName; ForceUtf8: boolean): string;
 var
   tmp: RawByteString;
   buf: pointer;
   len: PtrInt;
 begin
-
-  {$ifdef UNICODE}
-  if ForceUtf8 then
-    Utf8ToStringVar(StringFromFile(FileName), result)
-  else
-    case StringFromBomFile(FileName, tmp, buf, len) of
-      bomNone:
-        result := CurrentAnsiConvert.AnsiToUnicodeString(buf, len);
-      bomUnicode:
-        FastSynUnicode(result, buf, len shr 1);
-      bomUtf8:
-        Utf8DecodeToString(buf, len, result);
-    end;
-  {$else}
-  if ForceUtf8 then
-    result := CurrentAnsiConvert.Utf8ToAnsi(StringFromFile(FileName))
-  else
-    case StringFromBomFile(FileName, tmp, buf, len) of
-      bomNone:
-        SetString(result, PAnsiChar(buf), len);
-      bomUnicode:
-        result := CurrentAnsiConvert.UnicodeBufferToAnsi(buf, len shr 1);
-      bomUtf8:
-        result := CurrentAnsiConvert.Utf8BufferToAnsi(buf, len);
-    end;
-  {$endif UNICODE}
+  case StringFromBomFile(FileName, tmp, buf, len) of
+    bomNone:
+      if len = 0 then
+        result := ''
+      else if IsAnsiCompatible(buf, len) or
+              not (ForceUtf8 or IsValidUtf8Buffer(buf, len)) then
+      begin
+        FakeCodePage(tmp, Unicode_CodePage); // StringFromFile() forced CP_UTF8
+        result := tmp; // no need to convert anything
+      end
+      else // need a full charset conversion
+        CurrentAnsiConvert.Utf8BufferToAnsi(buf, len, RawByteString(result));
+    bomUtf16LE:
+      CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, len, RawByteString(result));
+    bomUtf16BE:
+      begin
+        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
+        CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, len, RawByteString(result));
+      end;
+    bomUtf8:
+      CurrentAnsiConvert.Utf8BufferToAnsi(buf, len, RawByteString(result));
+  end;
 end;
+{$endif UNICODE}
 
 
 { *************** Low-Level String Conversion Functions }
 
-procedure AnyAnsiToUtf8(const s: RawByteString; var result: RawUtf8);
 {$ifdef HASCODEPAGE}
+procedure AnyAnsiToUtf8Var(const s: RawByteString; var result: RawUtf8);
 var
+  sr: PStrRec;
   cp: cardinal;
-{$endif HASCODEPAGE}
 begin
+  if result <> '' then
+    FastAssignNew(result);
   if s = '' then
-    result := ''
-  else
-  {$ifdef HASCODEPAGE}
+    exit;
+  sr := PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE);
+  cp := sr^.codePage;
+  if cp = CP_UTF8 then
   begin
-    cp := GetCodePage(s);
-    if cp = CP_ACP then
-    begin
-      cp := Unicode_CodePage;
-      {$ifdef FPC}
-      if cp = CP_UTF8 then // happens on POSIX and with Lazarus - so FPC only
-      begin
-        if PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE)^.refCnt >= 0 then
-        begin
-          result := s; // not a read-only constant: assign by ref
-          FakeCodePage(RawByteString(result), cp); // override 0 by CP_UTF8
-        end
-        else
-          FastSetString(result, pointer(s), length(s)); // realloc constant
-        exit;
-      end;
-      {$endif FPC}
-    end;
-    if cp = CP_UTF8 then
-      result := s
-    else if cp >= CP_RAWBLOB then
-      FastSetString(result, pointer(s), length(s)) // no convert, just copy
-    else
-      TSynAnsiConvert.Engine(cp).AnsiBufferToRawUtf8(pointer(s), length(s), result);
+    if sr^.refCnt >= 0 then // inlined result := s of this RawUtf8 string
+      StrCntAdd(sr^.refCnt);
+    pointer(result) := pointer(s);
+    exit;
   end;
-  {$else}
-  CurrentAnsiConvert.AnsiBufferToRawUtf8(pointer(s), length(s), result);
-  {$endif HASCODEPAGE}
+  if cp = CP_ACP then
+    cp := Unicode_CodePage; // most likely on FPC
+  if (cp >= CP_RAWBLOB) or
+     (cp = CP_UTF8) then
+      if sr^.refCnt >= 0 then
+      begin
+        sr^.codePage := cp; // fix CP_ACP code page of s in-place
+        StrCntAdd(sr^.refCnt);
+        pointer(result) := pointer(s);
+      end
+      else // constant string: no convert, just copy as new CP_UTF8
+        FastSetString(result, pointer(s), sr^.length)
+  else // need a full charset conversion
+    TSynAnsiConvert.Engine(cp).AnsiBufferToRawUtf8(pointer(s), sr^.length, result);
 end;
+{$else}
+procedure AnyAnsiToUtf8Var(const s: RawByteString; var result: RawUtf8);
+begin
+  if (s = '') or
+     IsValidUtf8Buffer(pointer(s), length(s)) then // slower but safe
+    result := s
+  else
+    CurrentAnsiConvert.AnsiBufferToRawUtf8(pointer(s), length(s), result);
+end;
+{$endif HASCODEPAGE}
 
 function AnyAnsiToUtf8(const s: RawByteString): RawUtf8;
 begin
-  AnyAnsiToUtf8(s, result);
+  AnyAnsiToUtf8Var(s, result);
 end;
 
 function WinAnsiBufferToUtf8(Dest: PUtf8Char;
@@ -4926,7 +4968,8 @@ end;
 
 function RawUnicodeToWinAnsi(const Unicode: RawUnicode): WinAnsiString;
 begin
-  result := WinAnsiConvert.UnicodeBufferToAnsi(pointer(Unicode), Length(Unicode) shr 1);
+  WinAnsiConvert.UnicodeBufferToAnsiVar(pointer(Unicode), Length(Unicode) shr 1,
+    RawByteString(result));
 end;
 
 {$endif PUREMORMOT2}
@@ -4948,12 +4991,12 @@ end;
 
 function RawUnicodeToWinAnsi(WideChar: PWideChar; WideCharCount: integer): WinAnsiString;
 begin
-  result := WinAnsiConvert.UnicodeBufferToAnsi(WideChar, WideCharCount);
+  WinAnsiConvert.UnicodeBufferToAnsiVar(WideChar, WideCharCount, RawByteString(result));
 end;
 
 function WideStringToWinAnsi(const Wide: WideString): WinAnsiString;
 begin
-  result := WinAnsiConvert.UnicodeBufferToAnsi(pointer(Wide), Length(Wide));
+  WinAnsiConvert.UnicodeBufferToAnsiVar(pointer(Wide), Length(Wide), RawByteString(result));
 end;
 
 procedure UnicodeBufferToWinAnsi(source: PWideChar; out Dest: WinAnsiString);
@@ -4993,7 +5036,7 @@ begin
   if Txt <> '' then
     {$ifndef UNICODE}
     if (Unicode_CodePage = CP_UTF8) or
-       IsAnsiCompatible(Txt) then
+       IsValidUtf8Buffer(pointer(Txt), length(Txt)) then
     begin
       RawByteString(TVarData(result).VAny) := Txt;
       EnsureRawUtf8(RawByteString(TVarData(result).VAny));
@@ -5023,7 +5066,8 @@ begin
     result := ''
   else
     {$ifdef UNICODE}
-    result := TSynAnsiConvert.Engine(CodePage).AnsiToUnicodeString(Ansi);
+    TSynAnsiConvert.Engine(CodePage).AnsiToUnicodeStringVar(
+      pointer(Ansi), length(Ansi), result);
     {$else}
     result := CurrentAnsiConvert.AnsiToAnsi(TSynAnsiConvert.Engine(CodePage), Ansi);
     {$endif UNICODE}
@@ -5287,34 +5331,35 @@ end;
 function RawUnicodeToString(const U: RawUnicode): string;
 begin
   // uses StrLenW() and not length(U) to handle case when was used as buffer
-  result := CurrentAnsiConvert.UnicodeBufferToAnsi(pointer(U), StrLenW(pointer(U)));
+  CurrentAnsiConvert.UnicodeBufferToAnsiVar(pointer(U), StrLenW(pointer(U)),
+    RawByteString(result));
 end;
 
 {$endif PUREMORMOT2}
 
 function StringToSynUnicode(const S: string): SynUnicode;
 begin
-  result := CurrentAnsiConvert.AnsiToUnicodeString(pointer(S), length(S));
+  CurrentAnsiConvert.AnsiToUnicodeStringVar(pointer(S), length(S), result);
 end;
 
 procedure StringToSynUnicode(const S: string; var result: SynUnicode);
 begin
-  result := CurrentAnsiConvert.AnsiToUnicodeString(pointer(S), length(S));
+  CurrentAnsiConvert.AnsiToUnicodeStringVar(pointer(S), length(S), result);
 end;
 
 function RawUnicodeToString(P: PWideChar; L: integer): string;
 begin
-  result := CurrentAnsiConvert.UnicodeBufferToAnsi(P, L);
+  CurrentAnsiConvert.UnicodeBufferToAnsiVar(P, L, RawByteString(result));
 end;
 
 procedure RawUnicodeToString(P: PWideChar; L: integer; var result: string);
 begin
-  result := CurrentAnsiConvert.UnicodeBufferToAnsi(P, L);
+  CurrentAnsiConvert.UnicodeBufferToAnsiVar(P, L, RawByteString(result));
 end;
 
 function SynUnicodeToString(const U: SynUnicode): string;
 begin
-  result := CurrentAnsiConvert.UnicodeBufferToAnsi(pointer(U), length(U));
+  CurrentAnsiConvert.UnicodeBufferToAnsiVar(pointer(U), length(U), RawByteString(result));
 end;
 
 function Utf8DecodeToString(P: PUtf8Char; L: integer): string;
@@ -5378,7 +5423,7 @@ end;
 
 function UnicodeStringToWinAnsi(const S: UnicodeString): WinAnsiString;
 begin
-  result := WinAnsiConvert.UnicodeBufferToAnsi(pointer(S), Length(S));
+  WinAnsiConvert.UnicodeBufferToAnsiVar(pointer(S), Length(S), RawByteString(result));
 end;
 
 function Utf8DecodeToUnicodeString(P: PUtf8Char; L: integer): UnicodeString;
@@ -9460,6 +9505,7 @@ function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char
         test    Value, Value
         jz      @void
         mov     cl, byte ptr [Value]  // to check first char (likely diverse)
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @s:     lea     rax, qword ptr [r9 + R]
         shr     rax, 1
         lea     r12, qword ptr [rax - 1]  // branchless main loop
@@ -9480,6 +9526,10 @@ function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char
         pop     rdi
         {$endif win64}
         ret
+@void:  mov     rax, -1
+        cmp     qword ptr [P], 0
+        cmove   rax, Value
+        jmp     @found
 @lt:    mov     r9, r13 // very unlikely P[rax]=nil
         jmp     @nxt
 @eq:    mov     r11, Value // first char equal -> check others
@@ -9497,10 +9547,6 @@ function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char
         cmp     r9, R
         jle     @s
         jmp     @err
-@void:  mov     rax, -1
-        cmp     qword ptr [P], 0
-        cmove   rax, Value
-        jmp     @found
 end;
 
 {$else}
@@ -11050,12 +11096,11 @@ begin
   SortDynArrayAnsiStringByCase[true]  := @SortDynArrayAnsiStringI;
   IdemPropNameUSameLen[false] := @IdemPropNameUSameLenNotNull;
   IdemPropNameUSameLen[true]  := @mormot.core.base.CompareMem;
-  // setup basic Unicode conversion engines
-  SetLength(SynAnsiConvertListCodePage, 16); // no resize -> more thread safe
-  WinAnsiConvert       := NewEngine(CP_WINANSI) as TSynAnsiFixedWidth;
-  Utf8AnsiConvert      := NewEngine(CP_UTF8) as TSynAnsiUtf8;
-  CurrentAnsiConvert   := NewEngine(Unicode_CodePage);
-  RawByteStringConvert := NewEngine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
+  // setup basic/global Unicode conversion engines
+  WinAnsiConvert       := TSynAnsiFixedWidth.Create(CP_WINANSI);
+  Utf8AnsiConvert      := TSynAnsiUtf8.Create(CP_UTF8);
+  RawByteStringConvert := TSynAnsiFixedWidth.Create(CP_RAWBYTESTRING);
+  CurrentAnsiConvert   := TSynAnsiConvert.Engine(Unicode_CodePage);
   // setup optimized ASM functions
   IsValidUtf8Buffer := @IsValidUtf8Pas;
   {$ifdef ASMX64AVXNOCONST}
