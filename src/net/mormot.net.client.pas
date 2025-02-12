@@ -2506,21 +2506,21 @@ end;
 
 procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
 
-  procedure DoRetry(FatalError: integer;
-    const Fmt: RawUtf8; const Args: array of const);
+  procedure DoRetry(const Fmt: RawUtf8; const Args: array of const;
+    FatalErrorCode: integer = HTTP_CLIENTERROR);
   var
     msg: RawUtf8;
   begin
     FormatUtf8(Fmt, Args, msg);
-    //writeln('DoRetry ',byte(ctxt.Retry), ' ', FatalError, ' / ', msg);
+    //writeln('DoRetry ',byte(ctxt.Retry), ' ', FatalErrorCode, ' / ', msg);
     if Assigned(OnLog) then
        OnLog(sllTrace, 'DoRetry % socket=% fatal=% retry=%',
-         [msg, fSock.Socket, FatalError, BOOL_STR[rMain in ctxt.Retry]], self);
+         [msg, fSock.Socket, FatalErrorCode, BOOL_STR[rMain in ctxt.Retry]], self);
     if fAborted then
       ctxt.Status := HTTP_CLIENTERROR
     else if rMain in ctxt.Retry then
       // we should retry once -> return error only if failed twice
-      ctxt.Status := FatalError
+      ctxt.Status := FatalErrorCode
     else
       try
         // recreate the connection and try again
@@ -2531,7 +2531,7 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
         RequestInternal(ctxt); // retry once
       except
         on Exception do
-          ctxt.Status := FatalError;
+          ctxt.Status := FatalErrorCode;
       end;
   end;
 
@@ -2539,7 +2539,7 @@ var
   cmd: PUtf8Char;
   pending: TCrtSocketPending;
   bodystream: TStream;
-  loerr: integer;
+  loerr, buflen: integer;
   dat: RawByteString;
   start: Int64;
 begin
@@ -2549,24 +2549,23 @@ begin
     OnLog(sllTrace, 'RequestInternal % %:%/% flags=% retry=%', [ctxt.Method,
       fServer, fPort, ctxt.Url, ToText(Http.HeaderFlags), byte(ctxt.Retry)], self);
   end;
-  if SockIn = nil then // done once
-    CreateSockIn; // use SockIn by default if not already initialized: 2x faster
   Http.Content := '';
   if fAborted then
     ctxt.Status := HTTP_CLIENTERROR
   else if (hfConnectionClose in Http.HeaderFlags) or
           not SockIsDefined then
-    DoRetry(HTTP_CLIENTERROR, 'connection closed (keepalive timeout or max)', [])
+    DoRetry('connection closed (keepalive timeout or max)', [])
   else if not fSock.Available(@loerr) then
-    DoRetry(HTTP_CLIENTERROR, 'connection broken (socketerror=%)', [loerr])
+    DoRetry('connection broken (socketerror=%)', [loerr])
   else if not SockConnected then
-    DoRetry(HTTP_CLIENTERROR, 'getpeername() failed', [])
+    DoRetry('getpeername() failed', [])
   else
   try
     // send request - we use SockSend because writeln() is calling flush()
     try
       // prepare headers
       RequestSendHeader(ctxt.Url, ctxt.Method);
+      buflen := fSndBufLen;
       if ctxt.KeepAliveSec <> 0 then
         SockSend(['Connection: Keep-Alive'#13#10 +
                   'Keep-Alive: timeout=', ctxt.KeepAliveSec]) // as seconds
@@ -2584,6 +2583,8 @@ begin
       SockSendCRLF;
       // flush headers and Data/InStream body
       SockSendFlush(dat);
+      if fExtendedOptions.Auth.Scheme in [wraBasic, wraBearer] then
+        FillCharFast(pointer(fSndBuf)^, buflen, 0); // hide SPI bearer
       if ctxt.InStream <> nil then
       begin
         // InStream may be a THttpMultiPartStream -> Seek(0) calls Flush
@@ -2619,12 +2620,12 @@ begin
           end
           else
           begin
-            DoRetry(HTTP_CLIENTERROR, 'NoData waiting %ms for headers', [TimeOut]);
+            DoRetry('NoData waiting %ms for headers', [TimeOut]);
             exit;
           end;
       else // cspSocketError, cspSocketClosed
         begin
-          DoRetry(HTTP_CLIENTERROR, '% % waiting %ms for headers',
+          DoRetry('% % waiting %ms for headers',
             [ToText(pending)^, CardinalToHexShort(loerr), TimeOut]);
           exit;
         end;
@@ -2634,6 +2635,8 @@ begin
       if IdemPChar(cmd, 'HTTP/1.') and
          (cmd[7] in ['0', '1']) then
       begin
+        if cmd[7] = '0' then
+          include(Http.ResponseFlags, rfHttp10);
         // get http numeric status code (200,404...) from 'HTTP/1.x ###'
         ctxt.Status := GetCardinal(cmd + 9);
         if (ctxt.Status < 200) or
@@ -2644,23 +2647,25 @@ begin
       begin
         // error on reading answer -> 505=wrong format
         if Http.CommandResp = '' then
-          DoRetry(HTTP_CLIENTERROR, 'Broken Link - timeout=%ms', [TimeOut])
+          DoRetry('Broken Link - timeout=%ms', [TimeOut])
         else
-          DoRetry(HTTP_HTTPVERSIONNONSUPPORTED, 'Command=%', [Http.CommandResp]);
+          DoRetry('Command=%', [Http.CommandResp], HTTP_HTTPVERSIONNONSUPPORTED);
         exit;
       end;
       // retrieve all HTTP headers
       GetHeader({unfiltered=}false);
-      if (cmd[7] = '0') and  // plain HTTP/1.0 should force connection close
+      if (rfHttp10 in Http.ResponseFlags) and // implicit keepalive in HTTP/1.1
          not (hfConnectionKeepAlive in Http.HeaderFlags) then
         include(Http.HeaderFlags, hfConnectionClose);
-      // retrieve Body content (if any)
+      // retrieve Body content (if any) - see RFC 7230 #3.3.3
       if (ctxt.Status >= HTTP_SUCCESS) and
-         // HEAD/OPTIONS or status 100..109,204,304 -> no body (RFC 2616 #4.3)
-         ((Http.ContentLength <> 0) or // server bug of 204,304 with body
-          ((ctxt.Status <> HTTP_NOCONTENT) and
-           (ctxt.Status <> HTTP_NOTMODIFIED))) and
-         not HttpMethodWithNoBody(ctxt.Method) then // HEAD/OPTIONS
+         // status 100..109,204,304 -> no body (RFC 2616 #4.3)
+         (((ctxt.Status <> HTTP_NOCONTENT) and
+           (ctxt.Status <> HTTP_NOTMODIFIED)) or
+          (Http.ContentLength > 0) or // server bug of 204,304 with body
+          (hfTransferChunked in Http.HeaderFlags)) and
+         // HEAD/OPTIONS
+         not HttpMethodWithNoBody(ctxt.Method) then
       begin
         // specific TStreamRedirect expectations
         bodystream := ctxt.OutStream;
@@ -2685,7 +2690,7 @@ begin
         if E.InheritsFrom(ENetSock) or
            E.InheritsFrom(EHttpSocket) then
           // network layer problem - typically EHttpSocket
-          DoRetry(HTTP_CLIENTERROR, '% raised after % [%]',
+          DoRetry('% raised after % [%]',
             [E, ToText(ENetSock(E).LastError)^, E.Message])
         else
           // propagate custom exceptions to the caller (e.g. from progression)
@@ -2701,25 +2706,28 @@ begin
 end;
 
 procedure THttpClientSocket.RequestSendHeader(const url, method: RawUtf8);
+var
+  secret: SpiUtf8;
 begin
   if not SockIsDefined then
     exit;
   if SockIn = nil then // done once
     CreateSockIn; // use SockIn by default if not already initialized: 2x faster
+  fSndBufLen := 0;
   if (url = '') or
      (url[1] <> '/') then
-    SockSend([method, ' /', url, ' HTTP/1.1'])
+    SockSendLine([method, ' /', url, ' HTTP/1.1']) // should always start with /
   else
-    SockSend([method, ' ', url, ' HTTP/1.1']);
+    SockSendLine([method, ' ', url, ' HTTP/1.1']);
   {$ifdef OSPOSIX}
   if SocketLayer = nlUnix then
     SockSend('Host: unix')
   else
   {$endif OSPOSIX}
   if Port = DEFAULT_PORT[TLS.Enabled] then
-    SockSend(['Host: ', Server])
+    SockSendLine(['Host: ', Server])
   else
-    SockSend(['Host: ', Server, ':', Port]);
+    SockSendLine(['Host: ', Server, ':', Port]);
   if (fRangeStart > 0) or
      (fRangeEnd > 0) then
     if fRangeEnd > fRangeStart then
@@ -2729,16 +2737,19 @@ begin
   with fExtendedOptions.Auth do
     case Scheme of
       wraBasic:
-        SockSend(['Authorization: Basic ',
-          mormot.core.buffers.BinToBase64(Make([UserName, ':', Password]))]);
+        begin
+          BasicClient(UserName, Password, secret);
+          SockSend(secret);
+          FillZero(secret);
+        end;
       wraBearer:
-        SockSend(['Authorization: Bearer ', Token]);
+        SockSendLine(['Authorization: Bearer ', Token]);
     end; // other Scheme values would have set OnAuthorize
   if fReferer <> '' then
-    SockSend(['Referer: ', fReferer]);
+    SockSendLine(['Referer: ', fReferer]);
   if fAccept <> '' then
-    SockSend(['Accept: ', fAccept]);
-  SockSend(['User-Agent: ', fExtendedOptions.UserAgent]);
+    SockSendLine(['Accept: ', fAccept]);
+  SockSendLine(['User-Agent: ', fExtendedOptions.UserAgent]);
 end;
 
 procedure THttpClientSocket.RequestClear;
@@ -5360,7 +5371,8 @@ var
 
   procedure Exec(const Command, answer: RawUtf8);
   begin
-    sock.SockSendFlush(NetConcat([Command, #13#10]));
+    sock.SockSend(Command);
+    sock.SockSendFlush;
     if ioresult <> 0 then
       ESendEmail.RaiseUtf8('Write error for %', [Command]);
     Expect(answer)
@@ -5389,7 +5401,7 @@ begin
     end
     else
       Exec('HELO ' + Server, '25');
-    sock.SockSend(['MAIL FROM:<', From, '>']);
+    sock.SockSendLine(['MAIL FROM:<', From, '>']);
     sock.SockSendFlush;
     Expect('250');
     repeat
@@ -5406,7 +5418,7 @@ begin
         Append(ToList, ', ', rec);
     until P = nil;
     Exec('DATA', '354');
-    sock.SockSend([
+    sock.SockSendLine([
       'Subject: ', Subject, #13#10 +
       'From: ', From, ToList]);
     head := trimU(Headers);
@@ -5416,8 +5428,8 @@ begin
         'Content-Type: text/plain; charset=', TextCharSet, #13#10 +
         'Content-Transfer-Encoding: 8bit']);
     if head <> '' then
-      sock.SockSendHeaders(pointer(head));
-    sock.SockSendCRLF; // end of headers
+      sock.SockSendHeaders(pointer(head)); // normalizing CRLF
+    sock.SockSendCRLF;                     // end of headers
     sock.SockSend(Text);
     Exec('.', '25');
     Exec('QUIT', '22');

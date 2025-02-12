@@ -556,7 +556,7 @@ type
     ctxt: packed array[1..SHA3_CONTEXT_SIZE] of byte; // enough space for all
   public
     /// the size, in bytes, of the digital signature of this algorithm
-    // - potential values are 20, 28, 32, 48 and 64
+    // - potential values are 20 (for SHA-1), 28, 32, 48 and 64 (for SHA-512)
     SignatureSize: integer;
     /// the algorithm used for digitial signature
     Algo: TSignAlgo;
@@ -952,9 +952,11 @@ function DigestClient(Algo: TDigestAlgo;
 // - could be proposed to the user interation UI to specify the auth context
 function DigestRealm(const FromServer: RawUtf8): RawUtf8;
 
-/// compute the Basic access authentication client code
+/// compute the Basic access authentication client header
 // - as defined in https://en.wikipedia.org/wiki/Basic_access_authentication
-function BasicClient(const UserName: RawUtf8; const Password: SpiUtf8): RawUtf8;
+// - for safety, caller should better call FillZero(Result) once done
+procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
+  out Result: SpiUtf8; const Prefix: RawUtf8 = 'Authorization: Basic ');
 
 /// extract the Basic access authentication realm on client side
 // - FromServer is the 'xxx' encoded value from 'WWW-Authenticate: Basic xxx'
@@ -2594,7 +2596,7 @@ type
         virtual; abstract;
     function Count: integer; virtual; abstract;
     function CrlCount: integer; virtual; abstract;
-    function DefaultCertAlgo: TCryptCertAlgo; virtual; abstract;
+    function DefaultCertAlgo: TCryptCertAlgo; virtual;
   end;
 
   /// meta-class of the abstract parent to implement ICryptStore interface
@@ -2607,6 +2609,9 @@ type
     function New: ICryptStore; virtual; abstract;
     /// main factory to create a new Store instance from saved Binary
     function NewFrom(const Binary: RawByteString): ICryptStore; virtual;
+    /// return the prefered algo to be used with this store
+    // - should be the same class as ICryptStore.DefaultCertAlgo
+    function DefaultCertAlgo: TCryptCertAlgo; virtual; abstract;
   end;
 
   /// abstract parent of TCryptCertList and TCryptCertCache storage classes
@@ -4799,12 +4804,13 @@ begin
   result := dp.ClientResponse(DigestUriName);
 end;
 
-function BasicClient(const UserName: RawUtf8; const Password: SpiUtf8): RawUtf8;
+procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
+  out Result: SpiUtf8; const Prefix: RawUtf8);
 var
   ha: RawUtf8;
 begin
-  FormatUtf8('%:%', [UserName, Password], ha);
-  result := BinToBase64(ha);
+  Make([UserName, ':', Password], ha);
+  Result := BinToBase64(ha, Prefix, '', false);
   FillZero(ha);
 end;
 
@@ -7552,7 +7558,7 @@ begin
   if (Csr = '') or
      (fCryptAlgo = nil) then
     exit;
-  x := (fCryptAlgo as TCryptCertAlgo).Load(Csr);
+  x := CertAlgo.Load(Csr);
   if (x <> nil) and
      (x.Verify(x) = cvValidSelfSigned) then
     result := Generate(x.GetUsage, RawUtf8ArrayToCsv(x.GetSubjects),
@@ -7723,9 +7729,8 @@ begin
   if payload.Count = 0 then
     exit; // we need something to sign
   // see TJwtAbstract.Compute
-  headpayload := BinToBase64Uri(FormatUtf8('{"alg":"%"}',
-                   [(fCryptAlgo as TCryptCertAlgo).JwtName])) + '.' +
-                 BinToBase64Uri(payload.ToJson);
+  headpayload := BinToBase64Uri(FormatUtf8('{"alg":"%"}', [CertAlgo.JwtName])) +
+           '.' + BinToBase64Uri(payload.ToJson);
   sig := self.Sign(headpayload);
   if sig = '' then
     exit;
@@ -7754,7 +7759,7 @@ begin
   if S = nil then
     exit;
   head := Base64UriToBin(pointer(Jwt), P - pointer(Jwt));
-  if JsonDecode(head, 'alg') <> (fCryptAlgo as TCryptCertAlgo).JwtName then
+  if JsonDecode(head, 'alg') <> CertAlgo.JwtName then
     exit;
   inc(P);
   payl := Base64UriToBin(pointer(P), S - P);
@@ -7985,6 +7990,10 @@ begin
   result := IsValid(c[n - 1], date);
 end;
 
+function TCryptStore.DefaultCertAlgo: TCryptCertAlgo;
+begin
+  result := (fCryptAlgo as TCryptStoreAlgo).DefaultCertAlgo;
+end;
 
 
 { TCryptStoreAlgo }

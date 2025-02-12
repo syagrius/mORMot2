@@ -1683,14 +1683,15 @@ type
     // - default is 5000, ie. 5 seconds
     property Timeout: integer
       read fTimeout write fTimeout;
-    /// if protocol needs user authorization, then fill here user name
-    // - if you can, use instead password-less Kerberos authentication, or
-    // at least ensure the connection is secured via TLS
-    // - with BindSaslKerberos, on Linux or Windows it should be 'username'
-    // but on MacOS it should be 'username@ad.mycompany.tld'
+    /// the user identifier for non-anonymous Bind/BindSaslKerberos
+    // - with Bind, should be a DN like 'CN=John,CN=Users,DC=mycompany,DC=tld',
+    // as stated by the official LDAP specification - but note that some servers
+    // (like Active Directory) allow displayName or even 'john@mycompany.tld'
+    // - with BindSaslKerberos, on Linux or Windows it could be plain 'logonname'
+    // but on MacOS it seems to be the fully qualified 'logonname@mycompany.tld'
     property UserName: RawUtf8
       read fUserName write fUserName;
-    /// if protocol needs user authorization, then fill here its password
+    /// the user password for non-anonymous Bind/BindSaslKerberos
     // - if you can, use instead password-less Kerberos authentication, or
     // at least ensure the connection is secured via TLS
     property Password: SpiUtf8
@@ -5700,8 +5701,8 @@ begin
   if not (fSecContextEncrypt in fFlags) then
     exit;
   result := SecEncrypt(fSecContext, result);
-  insert('0000', result, 1);
-  PCardinal(result)^ := bswap32(length(result) - 4); // SASL Buffer Length
+  insert('0000', result, 1); // SASL Buffer Length prefix
+  PCardinal(result)^ := bswap32(length(result) - 4);
 end;
 
 procedure TLdapClient.SendPacket(const Asn1Data: TAsnObject);
@@ -5711,8 +5712,7 @@ begin
   if fSecContextEncrypt in fFlags then writeln('(encrypted) =') else writeln('=');
   writeln(AsnDump(Asn1Data));
   {$endif ASNDEBUG}
-  if fSock <> nil then
-    fSock.SockSendFlush(BuildPacket(Asn1Data));
+  fSock.SndLow(BuildPacket(Asn1Data));
 end;
 
 procedure TLdapClient.ReceivePacketFillSockBuffer;
@@ -5725,7 +5725,7 @@ begin
   begin
     // through Kerberos encryption (sealing)
     saslLen := 0;
-    fSock.SockRecv(@saslLen, 4);
+    fSock.SockRecv(@saslLen, 4); // SASL Buffer Length prefix
     ciphered := fSock.SockRecv(bswap32(saslLen));
     fSockBuffer := SecDecrypt(fSecContext, ciphered);
   end

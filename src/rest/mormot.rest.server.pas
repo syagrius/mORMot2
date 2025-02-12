@@ -1198,6 +1198,9 @@ type
   // - do not use this abstract class, but e.g. TRestServerAuthenticationHttpBasic
   // - this class will transmit the session_signature as HTTP cookie, not at
   // URI level, so is expected to be used only from browsers or old clients
+  // - security level is very low for this kind of authentication: consider
+  // the other more secure algorithms
+  // - note that such sessions can not be persisted on disk
   TRestServerAuthenticationHttpAbstract = class(TRestServerAuthentication)
   protected
     /// should be overriden according to the HTTP authentication scheme
@@ -2844,7 +2847,7 @@ const
   HTTPONLY: array[boolean] of string[15] = (
     '; HttpOnly', '');
 begin
-  // https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
+// https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
   inherited SetOutSetCookie(aOutSetCookie);
   if StrPosI('; PATH=', pointer(fOutSetCookie)) = nil then
     fOutSetCookie := FormatUtf8('%; Path=/%%', [fOutSetCookie, Server.fModel.Root,
@@ -5439,7 +5442,7 @@ end;
 class function TRestServerAuthenticationHttpBasic.ComputeAuthenticateHeader(
   const aUserName, aPasswordClear: RawUtf8): RawUtf8;
 begin
-  result := 'Authorization: Basic ' + BinToBase64(aUserName + ':' + aPasswordClear);
+  BasicClient(aUserName, aPasswordClear, SpiUtf8(result));
 end;
 
 function TRestServerAuthenticationHttpBasic.CheckPassword(

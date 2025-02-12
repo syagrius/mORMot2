@@ -1679,6 +1679,8 @@ type
     procedure SetReceiveTimeout(aReceiveTimeout: integer); virtual;
     procedure SetSendTimeout(aSendTimeout: integer); virtual;
     procedure SetTcpNoDelay(aTcpNoDelay: boolean); virtual;
+    function EnsureSockSend(Len: integer): pointer;
+      {$ifdef HASINLINE}inline;{$endif}
     function GetRawSocket: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
   public
@@ -1805,10 +1807,11 @@ type
     function SockConnected: boolean;
     /// simulate writeln() with direct use of Send(Sock, ..) - includes trailing #13#10
     // - useful on multi-treaded environnement (as in THttpServer.Process)
-    // - no temp buffer is used
-    // - handle RawByteString, ShortString, Char, integer parameters
-    // - raise ENetSock exception on socket error
+    // - handle RawByteString, ShortString, Char, integer/Int64 parameters
     procedure SockSend(const Values: array of const); overload;
+    /// simulate writeln() with direct use of Send(Sock, ..) - includes trailing #13#10
+    // - slightly faster than SockSend([]) if all appended items are RawUtf8
+    procedure SockSendLine(const Values: array of RawUtf8);
     /// simulate writeln() with a single line - includes trailing #13#10
     procedure SockSend(const Line: RawByteString; NoCrLf: boolean = false); overload;
     /// append P^ data into SndBuf (used by SockSend(), e.g.) - no trailing #13#10
@@ -5371,9 +5374,9 @@ begin
           addr.IP(fRemoteIP, true);
           fSocketFamily := addr.Family;
           res := nrRefused;
-          SockSend(['CONNECT ', fServer, ':', fPort, ' HTTP/1.0']);
+          SockSendLine(['CONNECT ', fServer, ':', fPort, ' HTTP/1.0']);
           if Tunnel.User <> '' then
-            SockSend(['Proxy-Authorization: Basic ', Tunnel.UserPasswordBase64]);
+            SockSendLine(['Proxy-Authorization: Basic ', Tunnel.UserPasswordBase64]);
           SockSendFlush(#13#10);
           repeat
             SockRecvLn(head);
@@ -5681,7 +5684,7 @@ var // closesocket() or shutdown() are slow e.g. on Windows with wrong Linger
 {$endif SYNCRTDEBUGLOW2}
 begin
   // reset internal state
-  fSndBufLen := 0; // always reset (e.g. in case of further Open)
+  fSndBufLen := 0; // always reset (e.g. in case of further Open after error)
   fSockInEofError := 0;
   ioresult; // reset readln/writeln value
   if fSockIn <> nil then
@@ -5852,33 +5855,35 @@ begin
             (fSock.GetPeer(addr) = nrOK); // OS may return ENOTCONN/WSAENOTCONN
 end;
 
-procedure TCrtSocket.SockSend(P: pointer; Len: integer);
+function TCrtSocket.EnsureSockSend(Len: integer): pointer;
 var
   cap: integer;
 begin
-  if Len <= 0 then
-    exit;
   cap := Length(fSndBuf);
-  if Len + fSndBufLen > cap then
-    SetLength(fSndBuf, Len + cap + cap shr 3 + 2048);
-  MoveFast(P^, PByteArray(fSndBuf)[fSndBufLen], Len);
+  if fSndBufLen + Len > cap then
+    SetLength(fSndBuf, Len + cap + cap shr 3 + 2048); // generous 2K provision
+  result := @PByteArray(fSndBuf)[fSndBufLen];
   inc(fSndBufLen, Len);
 end;
 
-procedure TCrtSocket.SockSendCRLF;
-var
-  cap: integer;
+procedure TCrtSocket.SockSend(P: pointer; Len: integer);
 begin
-  cap := Length(fSndBuf);
-  if fSndBufLen + 2 > cap then
-    SetLength(fSndBuf, cap + cap shr 3 + 2048);
-  PWord(@PByteArray(fSndBuf)[fSndBufLen])^ := $0a0d;
-  inc(fSndBufLen, 2);
+  if Len > 0 then
+    MoveFast(P^, EnsureSockSend(Len)^, Len);
+end;
+
+procedure TCrtSocket.SockSendCRLF;
+begin
+  PWord(EnsureSockSend(2))^ := CRLFW;
 end;
 
 procedure TCrtSocket.SockSend(const Values: array of const);
 var
   i: PtrInt;
+  {$ifdef HASVARUSTRING}
+  j, l: PtrInt;
+  p: PByteArray;
+  {$endif HASVARUSTRING}
   tmp: ShortString;
 begin
   for i := 0 to high(Values) do
@@ -5890,10 +5895,11 @@ begin
           SockSend(VAnsiString, Length(RawByteString(VAnsiString)));
         {$ifdef HASVARUSTRING}
         vtUnicodeString:
-          begin // truncating to 255 bytes of shortstring is good enough
-            Unicode_WideToShort(VUnicodeString, // assume WinAnsi encoding
-              length(UnicodeString(VUnicodeString)), CP_WINANSI, tmp);
-            SockSend(@tmp[1], Length(tmp));
+          begin // constant text is expected to be pure ASCII-7
+            l := length(UnicodeString(VUnicodeString));
+            p := EnsureSockSend(l);
+            for j := 0 to l - 1 do
+              p[j] := PWordArray(VUnicodeString)[j];
           end;
         {$endif HASVARUSTRING}
         vtPChar:
@@ -5905,13 +5911,13 @@ begin
         vtInteger:
           begin
             Str(VInteger, tmp);
-            SockSend(@tmp[1], Length(tmp));
+            SockSend(@tmp[1], ord(tmp[0]));
           end;
         {$ifdef FPC} vtQWord, {$endif}
         vtInt64: // e.g. for "Content-Length:" or  "Range:" sizes
           begin
             Str(VInt64^, tmp);
-            SockSend(@tmp[1], Length(tmp));
+            SockSend(@tmp[1], ord(tmp[0]));
           end;
       else
         raise ENetSock.CreateFmt('%s.SockSend: unsupported VType=%d',
@@ -5920,30 +5926,55 @@ begin
   SockSendCRLF;
 end;
 
-procedure TCrtSocket.SockSend(const Line: RawByteString; NoCrLf: boolean);
+procedure TCrtSocket.SockSendLine(const Values: array of RawUtf8);
+var
+  i, len: PtrInt;
+  p: PUtf8Char;
 begin
-  if Line <> '' then
-    SockSend(pointer(Line), Length(Line));
+  len := 2; // for trailing CRLFW
+  for i := 0 to high(Values) do
+    inc(len, length(Values[i]));
+  p := EnsureSockSend(len); // reserve all needed memory at once
+  for i := 0 to high(Values) do
+  begin
+    len := length(Values[i]);
+    MoveFast(pointer(Values[i])^, p^, len);
+    inc(p, len);
+  end;
+  PWord(p)^ := CRLFW;
+end;
+
+procedure TCrtSocket.SockSend(const Line: RawByteString; NoCrLf: boolean);
+var
+  len: PtrInt;
+  p: PUtf8Char;
+begin
+  len := length(Line);
+  p := EnsureSockSend(len + 2);
+  MoveFast(pointer(Line)^, p^, len);
   if not NoCrLf then
-    SockSendCRLF;
+    PWord(p + len)^ := CRLFW;
 end;
 
 procedure TCrtSocket.SockSendHeaders(P: PUtf8Char);
 var
-  S: PUtf8Char;
+  s, d: PUtf8Char;
+  len: PtrInt;
 begin
   if P <> nil then
     repeat
-      S := P;
-      while P^ >= ' ' do  // go to end of header line
+      s := P;
+      while P^ >= ' ' do  // quickly go to end of header line
         inc(P);
-      SockSend(S, P - S); // append line content
-      SockSendCRLF;       // normalize line end
+      len := P - s;
+      d := EnsureSockSend(len + 2); // reserve enough space at once
+      MoveFast(s^, d^, len);        // append line content
+      PWord(d + len)^ := CRLFW;     // normalize line end
       while P^ < ' ' do
         if P^ = #0 then
-          exit            // end of input
+          exit    // end of input
         else
-          inc(P);         // ignore any control char, e.g. #10 or #13
+          inc(P); // ignore any control char, e.g. #10 or #13
     until false;
 end;
 
@@ -5955,39 +5986,40 @@ end;
 function TCrtSocket.SockSendFlush(const aBody: RawByteString;
   aNoRaise: boolean): TNetResult;
 var
-  bodylen: integer;
+  bodylen, buflen: integer;
 begin
-  // try to send a small bodylen with the headers
+  buflen := fSndBufLen;
+  fSndBufLen := 0; // always reset the output buffer position
+  result := nrOK;
+  // check if we can send smallest body with the headers in a single syscall
   bodylen := Length(aBody);
   if (bodylen > 0) and
-     (SockSendRemainingSize >= bodylen) then // around 1800 bytes
+     (buflen + bodylen <= length(fSndBuf)) then // around 1800 bytes
   begin
-    MoveFast(pointer(aBody)^, PByteArray(fSndBuf)[fSndBufLen], bodylen);
-    inc(fSndBufLen, bodylen); // append to buffer as single TCP packet
+    MoveFast(pointer(aBody)^, PByteArray(fSndBuf)[buflen], bodylen);
+    inc(buflen, bodylen); // append to buffer as single TCP packet
     bodylen := 0;
   end;
   {$ifdef SYNCRTDEBUGLOW}
   if Assigned(OnLog) then
   begin
     OnLog(sllCustom2, 'SockSend sock=% flush len=% bodylen=% %',
-      [fSock.Socket, fSndBufLen, Length(aBody),
-       LogEscapeFull(pointer(fSndBuf), fSndBufLen)], self);
+      [fSock.Socket, buflen, Length(aBody),
+       LogEscapeFull(pointer(fSndBuf), buflen)], self);
     if bodylen > 0 then
       OnLog(sllCustom2, 'SockSend sock=% bodylen len=% %',
         [fSock.Socket, bodylen, LogEscapeFull(pointer(aBody), bodylen)], self);
   end;
   {$endif SYNCRTDEBUGLOW}
   // actually send the internal buffer (headers + maybe body)
-  result := nrOK;
-  if fSndBufLen > 0 then
-    if TrySndLow(pointer(fSndBuf), fSndBufLen, @result) then
-      fSndBufLen := 0
-    else if aNoRaise then
-      exit
-    else
-      raise ENetSock.CreateLastError('%s.SockSendFlush(%s) len=%d',
-        [ClassNameShort(self)^, fServer, fSndBufLen], result);
-  // direct sending of the bodylen is needed
+  if buflen > 0 then
+    if not TrySndLow(pointer(fSndBuf), buflen, @result) then
+      if aNoRaise then
+        exit
+      else
+        raise ENetSock.CreateLastError('%s.SockSendFlush(%s) len=%d',
+          [ClassNameShort(self)^, fServer, buflen], result);
+  // direct sending of the remaining bodylen bytes (if needed)
   if bodylen > 0 then
     if not TrySndLow(pointer(aBody), bodylen, @result) then
       if not aNoRaise then
@@ -6274,7 +6306,8 @@ end;
 
 procedure TCrtSocket.SndLow(const Data: RawByteString);
 begin
-  SndLow(pointer(Data), Length(Data));
+  if self <> nil then
+    SndLow(pointer(Data), Length(Data));
 end;
 
 function TCrtSocket.TrySndLow(P: pointer; Len: integer; NetResult: PNetResult): boolean;

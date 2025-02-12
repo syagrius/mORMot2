@@ -13,6 +13,7 @@ unit mormot.core.text;
     - Text Formatting functions
     - Resource and Time Functions
     - ESynException class
+    - HTTP/REST Common Headers Parsing (e.g. cookies)
     - Hexadecimal Text And Binary Conversion
 
   *****************************************************************************
@@ -30,7 +31,6 @@ uses
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode;
-
 
 
 { ************ CSV-like Iterations over Text Buffers }
@@ -66,6 +66,11 @@ function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
 /// return trimmed next CSV string from P
 // - P=nil after call when end of text is reached
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar;
+  var result: RawUtf8);
+
+/// return trimmed next CSV string from P, ending value at #0 .. #13
+// - P=nil after call when P^ = #0 end of text is reached, or return P^ = #10
+procedure GetNextItemTrimedLine(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8);
 
 /// return trimmed next CSV string from P, ignoring any Escaped char
@@ -2091,9 +2096,130 @@ type
   /// meta-class of the ESynException hierarchy
   ESynExceptionClass = class of ESynException;
 
+
+{ **************** HTTP/REST Common Headers Parsing (e.g. cookies) }
+
+type
+  /// the available HTTP methods transmitted between client and server
+  // - remote ORM supports non-standard mLOCK/mUNLOCK/mABORT/mSTATE verbs
+  // - not all IANA verbs are available, because our TRestRouter will only
+  // support mGET .. mOPTIONS verbs anyway
+  // - for basic CRUD operations, we consider Create=mPOST, Read=mGET,
+  // Update=mPUT and Delete=mDELETE - even if it is not fully RESTful
+  TUriMethod = (
+    mNone,
+    mGET,
+    mPOST,
+    mPUT,
+    mDELETE,
+    mHEAD,
+    mBEGIN,
+    mEND,
+    mABORT,
+    mLOCK,
+    mUNLOCK,
+    mSTATE,
+    mPATCH,
+    mOPTIONS);
+
+  /// set of available HTTP methods transmitted between client and server
+  TUriMethods = set of TUriMethod;
+
+/// convert a string HTTP verb into its TUriMethod enumerate
+// - conversion is case-insensitive
+function ToMethod(const method: RawUtf8): TUriMethod;
+
+/// convert a TUriMethod enumerate to its #0 terminated uppercase text
+function ToText(m: TUriMethod): PUtf8Char; overload;
+
+type
+  /// store one HTTP input cookie name/value pair
+  THttpCookie = record
+    /// the cookie name
+    // - e.g. 'sessionId' for
+    // $ Set-Cookie: sessionId=e8bb43229de9; Domain=foo.example.com
+    Name: RawUtf8;
+    /// the actual cookie value, excluding its attributes
+    // - e.g. 'e8bb43229de9' for
+    // $ Set-Cookie: sessionId=e8bb43229de9; Domain=foo.example.com
+    Value: RawUtf8;
+  end;
+  /// referes to one HTTP input cookie
+  PHttpCookie = ^THttpCookie;
+  /// a dynamic array of THttpCookie name/value pairs
+  THttpCookieDynArray = array of THttpCookie;
+
+  /// parse and manage HTTP input cookies
+  {$ifdef USERECORDWITHMETHODS}
+  THttpCookies = record
+  {$else}
+  THttpCookies = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    fParsed: boolean;
+    fCookies: THttpCookieDynArray; // only if InCookie[] is used
+  public
+    /// reset the internal list and Parsed status
+    procedure Clear;
+    /// detect and parse the cookies from HTTP headers on server side
+    // - e.g. 'Cookie: name=value; name2=value2; name3=value3'
+    procedure ParseServer(const InHead: RawUtf8);
+    /// retrieve a cookie name/value pair in the internal storage
+    function FindCookie(var CookieName: RawUtf8): PHttpCookie;
+    /// retrieve a cookie value from its name
+    // - should always previously check "if not Parsed then Parse()"
+    function GetCookie(CookieName: RawUtf8): RawUtf8;
+    /// set or change a cookie value from its name
+    // - should always previously check "if not Parsed then Parse()"
+    procedure SetCookie(CookieName: RawUtf8; const CookieValue: RawUtf8);
+    /// false if ParseServer() should be called with the HTTP header
+    property Parsed: boolean
+      read fParsed;
+    /// retrieve an incoming HTTP cookie value
+    // - cookie name are case-sensitive
+    // - should always previously check "if not Parsed then Parse()"
+    property Cookie[CookieName: RawUtf8]: RawUtf8
+      read GetCookie write SetCookie; default;
+    /// direct access to the internal name/value pairs list
+    property Cookies: THttpCookieDynArray
+      read fCookies;
+  end;
+  PHttpCookies = ^THttpCookies;
+
+const
+  /// server can use this cookie value to delete a cookie on the browser side
+  COOKIE_EXPIRED = '; Expires=Sat, 01 Jan 2010 00:00:01 GMT';
+
+
+/// retrieve the HTTP reason text from its integer code as PRawUtf8
+// - e.g. StatusCodeToText(200)^='OK'
+// - as defined in http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
+// - returns the generic 'Invalid Request' for any unknown Code
+function StatusCodeToText(Code: cardinal): PRawUtf8;
+
+/// retrieve the HTTP reason text from its integer code
+// - as defined in http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
+procedure StatusCodeToReason(Code: cardinal; var Reason: RawUtf8);
+
+/// convert any HTTP_* constant to an integer status code and its English text
+// - returns e.g. '200 OK' or '404 Not Found', calling StatusCodeToText()
+function StatusCodeToShort(Code: cardinal): TShort47;
+
 /// convert any HTTP_* constant to an integer error code and its English text
 // - returns e.g. 'HTTP Error 404 - Not Found', calling StatusCodeToText()
 function StatusCodeToErrorMsg(Code: integer): RawUtf8;
+
+/// returns true for successful HTTP status codes, i.e. in 200..399 range
+// - will map mainly SUCCESS (200), CREATED (201), NOCONTENT (204),
+// PARTIALCONTENT (206), NOTMODIFIED (304) or TEMPORARYREDIRECT (307) codes
+// - any HTTP status not part of this range will be identified as erronous
+// request e.g. in the web server statistics
+function StatusCodeIsSuccess(Code: integer): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// check the supplied HTTP header to not contain more than one EOL
+// - to avoid unexpected HTTP body injection, e.g. from unsafe business code
+function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
 
 
 { **************** Hexadecimal Text And Binary Conversion }
@@ -2621,7 +2747,7 @@ begin
     S := P;
     while (S^ <> #0) and
           (S^ <> Sep) do
-      inc(S);
+      inc(S); // go to end of value
     E := S;
     while (E > P) and
           (E[-1] in [#1..' ']) do
@@ -2631,6 +2757,37 @@ begin
       P := S + 1
     else
       P := nil;
+  end;
+end;
+
+procedure GetNextItemTrimedLine(var P: PUtf8Char; Sep: AnsiChar;
+  var result: RawUtf8);
+var
+  S, E: PUtf8Char;
+begin
+  if (P = nil) or
+     (Sep <= ' ') then
+    result := ''
+  else
+  begin
+    while P^ in [#14 .. ' '] do
+      inc(P); // trim left
+    S := P;
+    while (S^ > #13) and
+          (S^ <> Sep) do
+      inc(S); // go to end of value
+    E := S;
+    while (E > P) and
+          (E[-1] in [#14 .. ' ']) do
+      dec(E); // trim right
+    FastSetString(result, P, E - P);
+    if (PWord(S)^ = CRLFW) or
+       (S^ = Sep) then
+      P := S + 1
+    else if S^ = #10 then
+      P := S
+    else
+      P := nil; // end of text or malformatted
   end;
 end;
 
@@ -9740,9 +9897,309 @@ end;
 {$endif NOEXCEPTIONINTERCEPT}
 
 
+{ **************** HTTP/REST Common Headers Parsing (e.g. cookies) }
+
+const
+  // sorted by occurrence for in-order O(n) search via IntegerScanIndex()
+  METHODNAME: array[TUriMethod] of PUtf8Char = (
+    'GET',     // no mNone entry for efficient IntegerScanIndex()
+    'POST',
+    'PUT',
+    'DELETE',
+    'HEAD',
+    'BEGIN',
+    'END',
+    'ABORT',
+    'LOCK',
+    'UNLOCK',
+    'STATE',
+    'PATCH',
+    'OPTIONS',
+    '');
+var
+  // quick O(n) search of the first 4 characters within L1 cache (56 bytes)
+  METHODNAME32: array[TUriMethod] of cardinal;
+
+function ToMethod(const method: RawUtf8): TUriMethod;
+begin
+  case length(method) of
+    3 .. 7:
+      result := TUriMethod(IntegerScanIndex(@METHODNAME32, // may use SSE2
+        length(METHODNAME32) - 1, (PCardinal(method)^) and $dfdfdfdf) + 1);
+  else
+    result := mNone;
+  end;
+end;
+
+function ToText(m: TUriMethod): PUtf8Char;
+begin
+  dec(m); // METHODNAME[] has no mNone entry
+  if cardinal(m) < cardinal(ord(high(METHODNAME))) then
+    result := METHODNAME[m]
+  else
+    result := nil;
+end;
+
+const
+  // sorted by actual usage order for WordScanIndex() in matching HTTP_CODE[]
+  HTTP_REASON: array[0 .. 44] of RawUtf8 = (
+   'OK',                                // HTTP_SUCCESS - should be first
+   'No Content',                        // HTTP_NOCONTENT
+   'Temporary Redirect',                // HTTP_TEMPORARYREDIRECT
+   'Permanent Redirect',                // HTTP_PERMANENTREDIRECT
+   'Moved Permanently',                 // HTTP_MOVEDPERMANENTLY
+   'Bad Request',                       // HTTP_BADREQUEST
+   'Unauthorized',                      // HTTP_UNAUTHORIZED
+   'Forbidden',                         // HTTP_FORBIDDEN
+   'Not Found',                         // HTTP_NOTFOUND
+   'Method Not Allowed',                // HTTP_NOTALLOWED
+   'Not Modified',                      // HTTP_NOTMODIFIED
+   'Not Acceptable',                    // HTTP_NOTACCEPTABLE
+   'Partial Content',                   // HTTP_PARTIALCONTENT
+   'Payload Too Large',                 // HTTP_PAYLOADTOOLARGE
+   'Created',                           // HTTP_CREATED
+   'See Other',                         // HTTP_SEEOTHER
+   'Continue',                          // HTTP_CONTINUE
+   'Switching Protocols',               // HTTP_SWITCHINGPROTOCOLS
+   'Accepted',                          // HTTP_ACCEPTED
+   'Non-Authoritative Information',     // HTTP_NONAUTHORIZEDINFO
+   'Reset Content',                     // HTTP_RESETCONTENT
+   'Multi-Status',                      // 207
+   'Multiple Choices',                  // HTTP_MULTIPLECHOICES
+   'Found',                             // HTTP_FOUND
+   'Use Proxy',                         // HTTP_USEPROXY
+   'Proxy Authentication Required',     // HTTP_PROXYAUTHREQUIRED
+   'Request Timeout',                   // HTTP_TIMEOUT
+   'Conflict',                          // HTTP_CONFLICT
+   'Gone',                              // 410
+   'Length Required',                   // 411
+   'Precondition Failed',               // 412
+   'URI Too Long',                      // 414
+   'Unsupported Media Type',            // 415
+   'Requested Range Not Satisfiable',   // HTTP_RANGENOTSATISFIABLE
+   'I''m a teapot',                     // HTTP_TEAPOT
+   'Upgrade Required',                  // 426
+   'Internal Server Error',             // HTTP_SERVERERROR
+   'Not Implemented',                   // HTTP_NOTIMPLEMENTED
+   'Bad Gateway',                       // HTTP_BADGATEWAY
+   'Service Unavailable',               // HTTP_UNAVAILABLE
+   'Gateway Timeout',                   // HTTP_GATEWAYTIMEOUT
+   'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
+   'Network Authentication Required',   // 511
+   'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
+   'Invalid Request');                  // 513 - should be last as fallback
+  HTTP_INVALID = high(HTTP_REASON);
+  HTTP_CODE: array[0 .. HTTP_INVALID] of word = ( // match HTTP_REASON[]
+    HTTP_SUCCESS,
+    HTTP_NOCONTENT,
+    HTTP_TEMPORARYREDIRECT,
+    HTTP_PERMANENTREDIRECT,
+    HTTP_MOVEDPERMANENTLY,
+    HTTP_BADREQUEST,
+    HTTP_UNAUTHORIZED,
+    HTTP_FORBIDDEN,
+    HTTP_NOTFOUND,
+    HTTP_NOTALLOWED,
+    HTTP_NOTMODIFIED,
+    HTTP_NOTACCEPTABLE,
+    HTTP_PARTIALCONTENT,
+    HTTP_PAYLOADTOOLARGE,
+    HTTP_CREATED,
+    HTTP_SEEOTHER,
+    HTTP_CONTINUE,
+    HTTP_SWITCHINGPROTOCOLS,
+    HTTP_ACCEPTED,
+    HTTP_NONAUTHORIZEDINFO,
+    HTTP_RESETCONTENT,
+    207,
+    HTTP_MULTIPLECHOICES,
+    HTTP_FOUND,
+    HTTP_USEPROXY,
+    HTTP_PROXYAUTHREQUIRED,
+    HTTP_TIMEOUT,
+    HTTP_CONFLICT,
+    410,
+    411,
+    412,
+    414,
+    415,
+    HTTP_RANGENOTSATISFIABLE,
+    HTTP_TEAPOT,
+    426,
+    HTTP_SERVERERROR,
+    HTTP_NOTIMPLEMENTED,
+    HTTP_BADGATEWAY,
+    HTTP_UNAVAILABLE,
+    HTTP_GATEWAYTIMEOUT,
+    HTTP_HTTPVERSIONNONSUPPORTED,
+    511,
+    HTTP_CLIENTERROR,
+    513); // HTTP_INVALID = 'Invalid Request' - should be last as fallback
+
+function StatusCodeToText(Code: cardinal): PRawUtf8;
+var
+  i: PtrInt;
+begin
+  if Code <> 200 then // optimistic approach :)
+    if (Code <= HTTP_CLIENTERROR) and  // 100..666
+       (Code >= 100) then
+    begin
+      i := WordScanIndex(@HTTP_CODE, length(HTTP_CODE), Code); // may use SSE2
+      if i < 0 then
+        i := HTTP_INVALID; // returns cached 513 'Invalid Request'
+    end
+    else
+      i := HTTP_INVALID
+  else
+    i := 0;
+  result := @HTTP_REASON[i];
+end;
+
+procedure StatusCodeToReason(Code: cardinal; var Reason: RawUtf8);
+begin
+  Reason := StatusCodeToText(Code)^;
+end;
+
+function StatusCodeToShort(Code: cardinal): TShort47;
+begin
+  result[0] := #0;
+  if Code <> HTTP_CLIENTERROR then // hide the number of the beast
+  begin
+    if Code > 999 then
+      Code := 999; // ensure stay in TShort47 within standard HTTP 3-digits range
+    AppendShortCardinal(Code, result);
+    AppendShortChar(' ', @result);
+  end;
+  AppendShortAnsi7String(StatusCodeToText(Code)^, result);
+end;
+
 function StatusCodeToErrorMsg(Code: integer): RawUtf8;
 begin
   FormatUtf8('HTTP Error % - %', [Code, StatusCodeToText(Code)^], result);
+end;
+
+function StatusCodeIsSuccess(Code: integer): boolean;
+begin
+  result := (Code >= HTTP_SUCCESS) and
+            (Code < HTTP_BADREQUEST); // 200..399
+end;
+
+function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
+var
+  i: PtrInt;
+  c: cardinal;
+begin
+  result := true;
+  for i := 0 to headlen - 3 do
+  begin
+    c := PCardinal(head + i)^;
+    if (c = $0a0d0a0d) or
+       (Word(c) = $0d0d) or
+       (Word(c) = $0a0a) then
+      exit;
+  end;
+  result := false;
+end;
+
+
+{ THttpCookies }
+
+const
+  // Deny-Of-Service (DOS) Attack detection threshold
+  COOKIE_MAXCOUNT_DOSATTACK = 128;
+
+procedure THttpCookies.Clear;
+begin
+  fParsed := false;
+  fCookies := nil;
+end;
+
+procedure THttpCookies.ParseServer(const InHead: RawUtf8);
+var
+  count, plen: PtrInt;
+  h, p: PUtf8Char;
+  name, value: RawUtf8;
+  new: PHttpCookie;
+begin
+  fParsed := true;
+  count := 0;
+  h := pointer(InHead);
+  while h <> nil do
+  begin
+    // find all 'Cookie: name=value; name2=value2; name3=value3' lines
+    p := FindNameValuePointer(h, 'COOKIE:', plen, #0);
+    if p = nil then
+      break;
+    h := GotoNextLine(p + plen);
+    // parse each line pairs
+    repeat
+      if IdemPChar(p, '__SECURE-') then
+        inc(p, 9); // e.g. if rsoCookieSecure is in Server.Options
+      GetNextItemTrimedLine(p, '=', name);
+      GetNextItemTrimedLine(p, ';', value);
+      if (name = '') and
+         (value = '') then
+        break;
+      if count = length(fCookies) then
+        SetLength(fCookies, NextGrow(count));
+      new := @fCookies[count];
+      new^.Name := name;
+      new^.Value := value;
+      inc(count);
+      if count > COOKIE_MAXCOUNT_DOSATTACK then
+        ESynException.RaiseUtf8('RetrieveCookies overflow (%): DOS attempt?',
+          [KB(InHead)]);
+    until p = nil; // next 'name2=value2; ...' pair
+  end;
+  if count <> 0 then
+    DynArrayFakeLength(fCookies, count);
+end;
+
+function THttpCookies.FindCookie(var CookieName: RawUtf8): PHttpCookie;
+var
+  i: integer;
+begin
+  result := nil;
+  TrimSelf(CookieName);
+  if CookieName = '' then
+    exit;
+  result := pointer(fCookies);
+  if result = nil then
+    exit;
+  for i := 1 to length(fCookies) do
+    if result^.Name = CookieName then // cookies are case-sensitive
+      exit
+    else
+      inc(result);
+  result := nil;
+end;
+
+procedure THttpCookies.SetCookie(CookieName: RawUtf8; const CookieValue: RawUtf8);
+var
+  n: PtrInt;
+  c: PHttpCookie;
+begin
+  c := FindCookie(CookieName);
+  if CookieName = '' then
+    exit;
+  if c = nil then // add a new cookie
+  begin
+    n := length(fCookies);
+    SetLength(fCookies, n + 1);
+    c := @fCookies[n];
+    c^.Name := CookieName;
+  end;
+  c^.Value := CookieValue; // may just replace an existing value
+end;
+
+function THttpCookies.GetCookie(CookieName: RawUtf8): RawUtf8;
+var
+  c: PHttpCookie;
+begin
+  result := '';
+  c := FindCookie(CookieName);
+  if c <> nil then
+    result := c^.Value;
 end;
 
 
@@ -10775,6 +11232,7 @@ var
   c: AnsiChar;
   P: PAnsiChar;
   B, B4: PByteArray;
+  m: TUriMethod;
   tmp: array[0..15] of AnsiChar;
 begin
   // initialize internal lookup tables for various text conversions
@@ -10858,6 +11316,8 @@ begin
     if c in [#0, '&', '"'] then
       HTML_ESC[hfWithinAttributes, c] := v;
   end;
+  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
+    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
   ShortToUuid := _ShortToUuid;
   AppendShortUuid := _AppendShortUuid;
   _VariantToUtf8DateTimeToIso8601 := __VariantToUtf8DateTimeToIso8601;

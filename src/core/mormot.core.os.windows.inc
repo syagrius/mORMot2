@@ -18,7 +18,7 @@ begin
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
   tmp.Done;
-end;
+end; // warning: Delphi 7/2007 UnicodeToUtf8() RTL doesn't handle surrogates
 
 function IsExtendedPathName(Name: PWideChar): boolean;
 begin
@@ -2634,7 +2634,7 @@ begin
   if not NoLineFeed then
   begin
     SetLength(txt, l + 2); // faster to reallocate than WriteFile() twice
-    PWord(@PByteArray(txt)[l])^ := $0a0d; // CRLF
+    PWord(@PByteArray(txt)[l])^ := CRLFW;
     inc(l, 2);
   end;
   ConsoleCriticalSection.Lock;

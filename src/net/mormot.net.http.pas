@@ -232,7 +232,8 @@ type
     hrsGetBodyChunkedData,
     hrsGetBodyChunkedDataVoidLine,
     hrsGetBodyChunkedDataLastLine,
-    hrsGetBodyContentLength,
+    hrsGetBodyContentLengthFirst,
+    hrsGetBodyContentLengthNext,
     hrsWaitProcessing,
     hrsWaitAsyncProcessing,
     hrsSendBody,
@@ -243,7 +244,6 @@ type
     hrsErrorPayloadTooLarge,
     hrsErrorRejected,
     hrsErrorMisuse,
-    hrsErrorUnsupportedFormat,
     hrsErrorUnsupportedRange,
     hrsErrorAborted,
     hrsErrorShutdownInProgress);
@@ -496,7 +496,8 @@ const
      hrsGetBodyChunkedHexNext,
      hrsGetBodyChunkedData,
      hrsGetBodyChunkedDataVoidLine,
-     hrsGetBodyContentLength,
+     hrsGetBodyContentLengthFirst,
+     hrsGetBodyContentLengthNext,
      hrsConnect];
 
   /// when THttpRequestContext.State is expected some ProcessWrite() data
@@ -1556,6 +1557,7 @@ type
   // - hlvSent is the response size sent back to the client, as KBNoSpace() text
   // - hlvServer_Protocol is either "HTTP/1.0" or "HTTP/1.1"
   // - hlvStatus is the response status code (e.g. "200" or "404")
+  // - hlvStatus_Text is human friendly "404 Not Found" text
   // - hlvTime_Epoch is the UTC time as seconds since the Unix Epoch
   // - hlvTime_EpochMSec is the UTC time as milliseconds since the Unix Epoch
   // - hlvTime_Iso8601 is the UTC (not local) time in the ISO 8601 standard format
@@ -3527,14 +3529,14 @@ begin
               State := hrsGetBodyChunkedHexFirst
             else if ContentLength > 0 then // -1 = no Content-Length: header
               // regular process with explicit content-length
-              State := hrsGetBodyContentLength
+              State := hrsGetBodyContentLengthFirst
               // note: old HTTP/1.0 format with no Content-Length is unsupported
               // because officially not defined in HTTP/1.1 RFC2616 4.3
             else
-              // no body
+              // ContentLength<=0 and not chunked = no body
               State := hrsWaitProcessing
         else
-          exit;
+          exit; // not enough input
       hrsGetBodyChunkedHexFirst,
       hrsGetBodyChunkedHexNext:
         if ProcessParseLine(st) then
@@ -3555,7 +3557,7 @@ begin
             State := hrsGetBodyChunkedDataLastLine;
         end
         else
-          exit;
+          exit; // not enough input
       hrsGetBodyChunkedData:
         begin
           if st.Len < fContentLeft then
@@ -3573,22 +3575,20 @@ begin
           if fContentLeft = 0 then
             State := hrsGetBodyChunkedDataVoidLine
           else
-            exit;
+            exit; // not enough input
         end;
       hrsGetBodyChunkedDataVoidLine:
         if ProcessParseLine(st) then // chunks end with a void line
           State := hrsGetBodyChunkedHexNext
         else
-          exit;
+          exit; // not enough input
       hrsGetBodyChunkedDataLastLine:
-        if ProcessParseLine(st) then // last chunk
-          if st.Len <> 0 then
-            State := hrsErrorUnsupportedFormat // should be no further input
-          else
-            State := hrsWaitProcessing
+        if ProcessParseLine(st) then // last chunk void line
+          State := hrsWaitProcessing // notice: st.Len<>0 if pipelining
         else
-          exit;
-      hrsGetBodyContentLength:
+          exit; // not enough input
+      hrsGetBodyContentLengthFirst,
+      hrsGetBodyContentLengthNext:
         begin
           if fContentLeft = 0 then
             fContentLeft := ContentLength;
@@ -3603,8 +3603,7 @@ begin
               if ContentLength > 1 shl 30 then // 1 GB mem chunk is fair enough
               begin
                 State := hrsErrorPayloadTooLarge; // avoid memory overflow
-                result := true;
-                exit;
+                break;
               end;
               FastSetString(RawUtf8(Content), ContentLength); // CP_UTF8 for FPC
               fContentPos := pointer(Content);
@@ -3614,24 +3613,22 @@ begin
           end
           else
             ContentStream.WriteBuffer(st.P^, st.LineLen);
+          State := hrsGetBodyContentLengthNext;
           dec(st.Len, st.LineLen);
           dec(fContentLeft, st.LineLen);
-          if fContentLeft = 0 then
-            if st.Len <> 0 then
-              State := hrsErrorUnsupportedFormat // should be no further input
-            else
-              State := hrsWaitProcessing
+          if fContentLeft = 0 then     // reached end of Content-Length body
+            State := hrsWaitProcessing // notice: st.Len<>0 if pipelining
           else
-            exit;
+            exit; // not enough input
         end;
     else
       State := hrsErrorMisuse; // out of context State for input
     end;
   until (State <> previous) and
         (returnOnStateChange or
-         (State = hrsGetBodyChunkedHexFirst) or
-         (State = hrsGetBodyContentLength) or
-         (State >= hrsWaitProcessing));
+         (State = hrsGetBodyChunkedHexFirst) or     // start chunked body
+         (State = hrsGetBodyContentLengthFirst) or  // start Content-Length body
+         (State >= hrsWaitProcessing));             // done or error
   result := true; // notify the next main state change
 end;
 
@@ -4008,22 +4005,23 @@ begin
     CompressContent(Http.CompressAcceptHeader, Http.Compress, OutContentType,
       OutContent, OutContentEncoding);
     if OutContentEncoding <> '' then
-      SockSend(['Content-Encoding: ', OutContentEncoding]);
+      SockSendLine(['Content-Encoding: ', OutContentEncoding]);
   end;
   if OutStream = nil then
     len := length(OutContent)
   else
     len := OutStream.Size;
-  SockSend(['Content-Length: ', len]); // needed even 0
+  SockSend(['Content-Length: ', len]); // even if 0 (unless chunked)
   if (OutContentType <> '') and
      (OutContentType[1] <> '!') then
-    SockSend(['Content-Type: ', OutContentType]);
+    SockSendLine(['Content-Type: ', OutContentType]);
 end;
 
 procedure THttpSocket.HttpStateReset;
 begin
   Http.Reset;
   fBodyRetrieved := false;
+  fSndBufLen := 0;
 end;
 
 const
@@ -4107,10 +4105,10 @@ begin
       EHttpSocket.RaiseUtf8('%.GetBody(%) does not support compression',
         [self, DestStream]);
   {$I-}
-  // direct read bytes, as indicated by Content-Length or Chunked
+  // direct read bytes, as indicated by Content-Length or Chunked (RFC2616 #4.3)
   if hfTransferChunked in Http.HeaderFlags then
   begin
-    // Content-Length header should be ignored when chunked by RFC 2616 #4.4.3
+    // Content-Length header should be ignored when chunked (RFC2616 #4.4.3)
     Http.ContentLength := 0;
     repeat // chunks decoding loop
       if SockIn <> nil then
@@ -4148,7 +4146,7 @@ begin
     until false;
   end
   else if Http.ContentLength > 0 then
-    // read Content-Length header bytes
+    // read Content-Length: header bytes
     if DestStream <> nil then
     begin
       len32 := 256 shl 10; // not chunked: use a 256 KB temp buffer
@@ -4169,13 +4167,13 @@ begin
       SetLength(Http.Content, Http.ContentLength); // not chuncked: direct read
       SockInRead(pointer(Http.Content), Http.ContentLength);
     end
-  else if Http.ContentLength < 0 then // -1 means no Content-Length header
+  else if (Http.ContentLength < 0) and // -1 means no Content-Length header
+          (hfConnectionClose in Http.HeaderFlags) then
   begin
     // no Content-Length neither chunk -> read until the connection is closed
-    // also for HTTP/1.1: https://www.rfc-editor.org/rfc/rfc7230#section-3.3.3
+    // mainly for HTTP/1.0: https://www.rfc-editor.org/rfc/rfc7230#section-3.3.3
     if Assigned(OnLog) then
       OnLog(sllTrace, 'GetBody deprecated loop', [], self);
-    // body = either Content-Length or Transfer-Encoding (HTTP/1.1 RFC2616 4.3)
     if SockIn <> nil then // client loop for compatibility with oldest servers
       while not eof(SockIn^) do
       begin

@@ -70,6 +70,8 @@ type
     procedure _SocketIO;
     /// validate mormot.net.openapi unit
     procedure OpenAPI;
+    /// some HTTP shared/low-level process
+    procedure HTTP;
     /// validate THttpProxyCache process
     procedure _THttpProxyCache;
     /// validate TUriTree high-level structure
@@ -856,9 +858,14 @@ begin
     until GetTickCount64 > endtix;
     rev := '62.210.254.173';
     CheckEqual(ip, rev, 'dns1');
-    ip := DnsLookup('blog.synopse.info');
+    repeat
+      inc(fAssertions);
+      ip := DnsLookup('blog.synopse.info');
+      if ip <> '' then
+        break;
+      Sleep(100); // some DNS servers may fail at first: wait a little
+    until GetTickCount64 > endtix;
     CheckEqual(ip, rev, 'dns2');
-    endtix := GetTickCount64 + 2000;
     repeat
       inc(fAssertions);
       rev := DnsReverseLookup(ip);
@@ -1677,6 +1684,129 @@ begin
   finally
     hps.Free;
   end;
+end;
+
+procedure TNetworkProtocols.HTTP;
+var
+  met: TUriMethod;
+  s: RawUtf8;
+  c: THttpCookies;
+  U: TUri;
+begin
+  // validate method names and HTTP status codes or schemes
+  Check(ToMethod('') = mNone);
+  Check(ToMethod('toto') = mNone);
+  Check(ToMethod('get') = mGET);
+  Check(ToMethod('Patch') = mPATCH);
+  Check(ToMethod('OPTIONS') = mOPTIONS);
+  Check(not IsGet('get'));
+  Check(IsGet('GET'));
+  Check(not IsPost('Post'));
+  Check(IsPost('POST'));
+  for met := low(met) to high(met) do
+  begin
+    s := RawUtf8(ToText(met));
+    Check(ToMethod(s) = met);
+    LowerCaseSelf(s);
+    Check(ToMethod(s) = met);
+  end;
+  Check(IsOptions('OPTIONS'));
+  Check(not IsOptions('opTIONS'));
+  Check(IsUrlFavIcon('/favicon.ico'));
+  Check(not IsUrlFavIcon('/favicon.ice'));
+  Check(not IsHttp('http:'));
+  Check(IsHttp('https:'));
+  Check(IsHttp('http://toto'));
+  Check(IsHttp('https://titi'));
+  Check(not IsHttp('c:\'));
+  Check(not IsHttp('c:\toto'));
+  Check(not IsHttp('file://toto'));
+  CheckEqual(StatusCodeToText(100)^, 'Continue');
+  CheckEqual(StatusCodeToText(200)^, 'OK');
+  CheckEqual(StatusCodeToText(206)^, 'Partial Content');
+  CheckEqual(StatusCodeToText(300)^, 'Multiple Choices');
+  CheckEqual(StatusCodeToText(503)^, 'Service Unavailable');
+  CheckEqual(StatusCodeToText(513)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(514)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
+  // validate TUri data structure
+  Check(U.From('toto.com'));
+  CheckEqual(U.Uri, 'http://toto.com/');
+  Check(not U.Https);
+  Check(U.From('toto.com:123'));
+  CheckEqual(U.Uri, 'http://toto.com:123/');
+  Check(not U.Https);
+  Check(U.From('https://toto.com:123/tata/titi'));
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
+  Check(U.Https);
+  CheckEqual(U.Address, 'tata/titi');
+  Check(U.From('https://toto.com:123/tata/tutu:tete'));
+  CheckEqual(U.Address, 'tata/tutu:tete');
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
+  Check(U.From('http://user:password@server:port/address'));
+  Check(not U.Https);
+  CheckEqual(U.Uri, 'http://server:port/address');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'address');
+  Check(U.From('https://user@server:port/address'));
+  Check(U.Https);
+  CheckEqual(U.Uri, 'https://server:port/address');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, '');
+  Check(U.From('toto.com/tata/tutu:tete'));
+  CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
+  CheckEqual(U.User, '');
+  CheckEqual(U.Password, '');
+  Check(U.From('file://server/path/to%20image.jpg'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'path/to%20image.jpg');
+  Check(not U.From('file:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, '');
+  CheckEqual(U.Address, 'path/to%20image.jpg');
+  // validate THttpCookies
+  c.Clear;
+  c.ParseServer('');
+  CheckEqual(length(c.Cookies), 0);
+  c.Clear;
+  c.ParseServer('one: value'#13#10'cookie: name=value');
+  CheckEqual(length(c.Cookies), 1);
+  CheckEqual(c.Cookies[0].Name, 'name');
+  CheckEqual(c.Cookies[0].Value, 'value');
+  c.Clear;
+  c.ParseServer('one: value'#13#10'cookie: name = value ');
+  CheckEqual(length(c.Cookies), 1);
+  CheckEqual(c.Cookies[0].Name, 'name');
+  CheckEqual(c.Cookies[0].Value, 'value');
+  c.Clear;
+  c.ParseServer('cookie: name=value'#13#10 +
+    'Cookie: name 1=value1; name 2 = value 2; name3=value3'#13#10 +
+    'cookone: value'#13#10);
+  CheckEqual(length(c.Cookies), 4);
+  CheckEqual(c.Cookies[0].Name, 'name');
+  CheckEqual(c.Cookies[0].Value, 'value');
+  CheckEqual(c.Cookies[1].Name, 'name 1');
+  CheckEqual(c.Cookies[1].Value, 'value1');
+  CheckEqual(c.Cookies[2].Name, 'name 2');
+  CheckEqual(c.Cookies[2].Value, 'value 2');
+  CheckEqual(c.Cookies[3].Name, 'name3');
+  CheckEqual(c.Cookies[3].Value, 'value3');
+  c.Clear;
+  c.ParseServer('cookie: name=value'#10'toto: titi'#10#10 +
+    'Cookie: name 1=value1; name 2 = value 2; name3=value3'#13#10 +
+    'cookone: value'#13#10#13#10);
+  CheckEqual(length(c.Cookies), 4, 'malformatted CRLF');
+  CheckEqual(c.Cookies[0].Name, 'name');
+  CheckEqual(c.Cookies[0].Value, 'value');
+  CheckEqual(c.Cookies[1].Name, 'name 1');
+  CheckEqual(c.Cookies[1].Value, 'value1');
+  CheckEqual(c.Cookies[2].Name, 'name 2');
+  CheckEqual(c.Cookies[2].Value, 'value 2');
+  CheckEqual(c.Cookies[3].Name, 'name3');
+  CheckEqual(c.Cookies[3].Value, 'value3');
 end;
 
 procedure TNetworkProtocols._THttpProxyCache;
