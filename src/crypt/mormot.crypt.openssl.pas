@@ -1254,7 +1254,7 @@ var
 begin
   if (_HashAlgoMd[hfSHA256] = nil) and
      OpenSslIsAvailable then
-    for h := low(h) to high(h) do
+    for h := low(h) to high(h) do // populate once
       _HashAlgoMd[h] := EVP_get_digestbyname(HF_MD[h]);
   result := _HashAlgoMd[Algorithm];
 end;
@@ -1312,7 +1312,7 @@ begin
 end;
 
 var
-  EvpOk, EvpKo: TIntegerDynArray; // creating a context has a cost
+  EvpOk, EvpKo: TIntegerDynArray; // cache to avoid creating ctx each time
 
 function OpenSslSupports(EvpType: integer): boolean;
 var
@@ -1399,7 +1399,7 @@ begin
           EOpenSsl.Check(EVP_PKEY_keygen(ctx, @result));
         end
       else
-        exit; // unsupported type
+        exit; // unsupported type (yet)
     end;
   finally
     EVP_PKEY_CTX_free(ctx);
@@ -1867,6 +1867,7 @@ type
   public
     constructor Create(const name: RawUtf8); overload; override;
     constructor Create(caa: TCryptAsymAlgo); reintroduce; overload;
+    function KeyAlgo: TCryptKeyAlgo; override;
     procedure GeneratePem(out pub, priv: RawUtf8; const privpwd: RawUtf8); override;
     function Sign(hasher: TCryptHasher; msg: pointer; msglen: PtrInt;
       const priv: RawByteString; out sig: RawByteString;
@@ -1884,6 +1885,11 @@ begin
     result := fDefaultHashAlgorithm
   else
     result := hasher.AlgoName; // let OpenSSL resolve the algorithm by name
+end;
+
+function TCryptAsymOsl.KeyAlgo: TCryptKeyAlgo;
+begin
+  result := CAA_CKA[fCaa];
 end;
 
 constructor TCryptAsymOsl.Create(const name: RawUtf8);

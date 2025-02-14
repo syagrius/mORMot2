@@ -151,6 +151,8 @@ const
   HTTP_TIMEOUT = 408;
   /// HTTP Status Code for "Conflict"
   HTTP_CONFLICT = 409;
+  /// HTTP Status Code for "Length Required"
+  HTTP_LENGTHREQUIRED = 411;
   /// HTTP Status Code for "Payload Too Large"
   HTTP_PAYLOADTOOLARGE = 413;
   /// HTTP Status Code for "Range Not Satisfiable"
@@ -4871,11 +4873,10 @@ var
 // - using millisecond resolution
 // - SleepHiRes(0) calls ThreadSwitch on Windows, but POSIX version will
 // wait 10 microsecond unless SleepHiRes0Yield is forced to true (bad idea)
-// - in respect to RTL's Sleep() function, it will return on ESysEINTR if was
-// interrupted by any OS signal
-// - warning: wait typically for the next system timer interrupt on Windows,
-// which is every 16ms by default; as a consequence, never rely on the ms
-// supplied value to guess the elapsed time, but call GetTickCount64
+// - warning: wait typically for the next system timer interrupt (on Windows,
+// 16ms by default); as a consequence, never rely on the relative ms delay
+// to guess the elapsed time, but compare with on absolute GetTickCount64; for
+// the very same reason, it won't retry on any ESysEINTR (not as RTL's Sleep)
 procedure SleepHiRes(ms: cardinal); overload;
 
 /// similar to Windows sleep() API call, but truly cross-platform and checking

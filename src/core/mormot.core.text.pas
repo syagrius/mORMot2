@@ -614,11 +614,12 @@ type
     /// append two chars to the buffer
     procedure Add(const c1, c2: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
-    {$ifdef CPU32} // already implemented by Add(Value: PtrInt) method on CPU64
+    {$ifdef CPU32}
     /// append a 64-bit signed integer Value as text
+    // - already implemented by Add(Value: PtrInt) method on CPU64
     procedure Add(Value: Int64); overload;
     {$endif CPU32}
-    /// append a 32-bit signed integer Value as text
+    /// append a PtrInt signed integer Value as text
     procedure Add(Value: PtrInt); overload;
       {$ifdef FPC_OR_DELPHIXE4}{$ifdef ASMINTEL}inline;{$endif}{$endif} // URW1111
     /// append a boolean Value as text
@@ -2149,7 +2150,8 @@ type
   /// a dynamic array of THttpCookie name/value pairs
   THttpCookieDynArray = array of THttpCookie;
 
-  /// parse and manage HTTP input cookies
+  /// parse and store HTTP cookies received on server side
+  // - shared by framework server classes, both at HTTP or REST levels
   {$ifdef USERECORDWITHMETHODS}
   THttpCookies = record
   {$else}
@@ -2161,24 +2163,26 @@ type
   public
     /// reset the internal list and Parsed status
     procedure Clear;
-    /// detect and parse the cookies from HTTP headers on server side
+    /// parse the cookies from request HTTP headers on server side
     // - e.g. 'Cookie: name=value; name2=value2; name3=value3'
+    // - will first clear all existing cookies, then decode from headers
     procedure ParseServer(const InHead: RawUtf8);
     /// retrieve a cookie name/value pair in the internal storage
-    function FindCookie(var CookieName: RawUtf8): PHttpCookie;
+    function FindCookie(const CookieName: RawUtf8): PHttpCookie;
     /// retrieve a cookie value from its name
     // - should always previously check "if not Parsed then Parse()"
-    function GetCookie(CookieName: RawUtf8): RawUtf8;
+    function GetCookie(const CookieName: RawUtf8): RawUtf8;
+      {$ifdef HASINLINE} inline; {$endif}
     /// set or change a cookie value from its name
     // - should always previously check "if not Parsed then Parse()"
-    procedure SetCookie(CookieName: RawUtf8; const CookieValue: RawUtf8);
+    procedure SetCookie(const CookieName, CookieValue: RawUtf8);
     /// false if ParseServer() should be called with the HTTP header
     property Parsed: boolean
       read fParsed;
     /// retrieve an incoming HTTP cookie value
     // - cookie name are case-sensitive
     // - should always previously check "if not Parsed then Parse()"
-    property Cookie[CookieName: RawUtf8]: RawUtf8
+    property Cookie[const CookieName: RawUtf8]: RawUtf8
       read GetCookie write SetCookie; default;
     /// direct access to the internal name/value pairs list
     property Cookies: THttpCookieDynArray
@@ -8742,11 +8746,7 @@ begin
         DoubleToTempUtf8(V.VExtended^, Res);
       end;
     vtPointer, vtInterface:
-      begin
-        Res.Text := @Res.Temp;
-        Res.Len := DisplayMinChars(@V.VPointer, SizeOf(pointer)) * 2;
-        BinToHexDisplayLower(@V.VPointer, @Res.Temp, Res.Len shr 1);
-      end;
+      PtrIntToTempUtf8(PtrInt(V.VPointer), Res);
     vtClass:
       if V.VClass = nil then
         Res.Len := 0
@@ -8845,17 +8845,14 @@ begin
       vtExtended:
         DoubleToStr(VExtended^,result);
       vtPointer:
-        begin
-          isString := true;
-          PointerToHex(VPointer, result);
-        end;
+        Int32ToUtf8(PtrInt(VPointer), result);
       vtClass:
         begin
           isString := true;
           if VClass <> nil then
             ClassToText(VClass, result)
           else
-none:       result := '';
+none:       FastAssignNew(result);
         end;
       vtObject:
         if VObject <> nil then
@@ -9972,7 +9969,7 @@ const
    'Request Timeout',                   // HTTP_TIMEOUT
    'Conflict',                          // HTTP_CONFLICT
    'Gone',                              // 410
-   'Length Required',                   // 411
+   'Length Required',                   // HTTP_LENGTHREQUIRED
    'Precondition Failed',               // 412
    'URI Too Long',                      // 414
    'Unsupported Media Type',            // 415
@@ -9987,9 +9984,9 @@ const
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
    'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
-   'Invalid Request');                  // 513 - should be last as fallback
-  HTTP_INVALID = high(HTTP_REASON);
-  HTTP_CODE: array[0 .. HTTP_INVALID] of word = ( // match HTTP_REASON[]
+   'Invalid Request');                  // 513 should be last INDEX_HTTP_INVALID
+  INDEX_HTTP_INVALID = high(HTTP_REASON);
+  HTTP_CODE: array[0 .. INDEX_HTTP_INVALID] of word = ( // match HTTP_REASON[]
     HTTP_SUCCESS,
     HTTP_NOCONTENT,
     HTTP_TEMPORARYREDIRECT,
@@ -10019,7 +10016,7 @@ const
     HTTP_TIMEOUT,
     HTTP_CONFLICT,
     410,
-    411,
+    HTTP_LENGTHREQUIRED,
     412,
     414,
     415,
@@ -10034,7 +10031,7 @@ const
     HTTP_HTTPVERSIONNONSUPPORTED,
     511,
     HTTP_CLIENTERROR,
-    513); // HTTP_INVALID = 'Invalid Request' - should be last as fallback
+    513); // INDEX_HTTP_INVALID = 'Invalid Request' - should be last
 
 function StatusCodeToText(Code: cardinal): PRawUtf8;
 var
@@ -10046,10 +10043,10 @@ begin
     begin
       i := WordScanIndex(@HTTP_CODE, length(HTTP_CODE), Code); // may use SSE2
       if i < 0 then
-        i := HTTP_INVALID; // returns cached 513 'Invalid Request'
+        i := INDEX_HTTP_INVALID; // returns cached 513 'Invalid Request'
     end
     else
-      i := HTTP_INVALID
+      i := INDEX_HTTP_INVALID
   else
     i := 0;
   result := @HTTP_REASON[i];
@@ -10122,6 +10119,7 @@ var
   new: PHttpCookie;
 begin
   fParsed := true;
+  fCookies := nil; // first Clear any previous cookie
   count := 0;
   h := pointer(InHead);
   while h <> nil do
@@ -10155,12 +10153,11 @@ begin
     DynArrayFakeLength(fCookies, count);
 end;
 
-function THttpCookies.FindCookie(var CookieName: RawUtf8): PHttpCookie;
+function THttpCookies.FindCookie(const CookieName: RawUtf8): PHttpCookie;
 var
   i: integer;
 begin
   result := nil;
-  TrimSelf(CookieName);
   if CookieName = '' then
     exit;
   result := pointer(fCookies);
@@ -10174,7 +10171,7 @@ begin
   result := nil;
 end;
 
-procedure THttpCookies.SetCookie(CookieName: RawUtf8; const CookieValue: RawUtf8);
+procedure THttpCookies.SetCookie(const CookieName, CookieValue: RawUtf8);
 var
   n: PtrInt;
   c: PHttpCookie;
@@ -10192,7 +10189,7 @@ begin
   c^.Value := CookieValue; // may just replace an existing value
 end;
 
-function THttpCookies.GetCookie(CookieName: RawUtf8): RawUtf8;
+function THttpCookies.GetCookie(const CookieName: RawUtf8): RawUtf8;
 var
   c: PHttpCookie;
 begin
