@@ -409,6 +409,9 @@ type
     // use the InputAsMultiPart() method instead when working with binary
     function GetInputAsTDocVariant(const Options: TDocVariantOptions;
       InterfaceMethod: PInterfaceMethod): variant;
+    /// could be used to trim a sensitive parameter from Call^.Uri buffer itself
+    // - typical UpperParamName is e.g. 'PASSWORD='
+    procedure InputRemoveFromUri(const UpperParamName: RawUtf8);
     /// low-level access to the input parameters, stored as pairs of UTF-8
     // - even items are parameter names, odd are values
     // - Input*[] properties should have been called previously to fill the
@@ -509,11 +512,6 @@ type
     /// same as Call^.Uri, after the 'root/' prefix, including '?' params
     // - will compute it from Call^.Url and Server.Model.RootLen
     function UriWithoutRoot: RawUtf8;
-    /// same as Call^.Uri, but without the ?... ending
-    // - will compute it from Call^.Url and fParameters
-    // - since used for logging, return a shortstring and not a RawUtf8 to
-    // avoid memory allocation
-    function UriWithoutInlinedParams: shortstring;
     /// the URI after the method service name, excluding the '?' parameters
     // - as set by TRestTreeNode.LookupParam from <path:fulluri> place holder
     property UriMethodPath: RawUtf8
@@ -2897,21 +2895,6 @@ begin
   result := copy(Call^.Url, pos, maxInt);
 end;
 
-function TRestServerUriContext.UriWithoutInlinedParams: shortstring;
-var
-  urllen, len: PtrUInt;
-begin
-  urllen := length(Call^.Url);
-  len := urllen;
-  if fParameters <> nil then
-  begin
-    len := fParameters - pointer(Call^.Url) - 1;
-    if len > urllen then // from InBody CONTENT_TYPE_WEBFORM, not from Url
-      len := urllen;
-  end;
-  SetString(result, PAnsiChar(pointer(Call^.Url)), len);
-end;
-
 procedure TRestServerUriContext.SessionAssign(AuthSession: TAuthSession);
 begin
   // touch the TAuthSession deprecation timestamp
@@ -3181,13 +3164,13 @@ begin
   if sllServer in fServer.LogLevel then
     fLog.Log(sllServer, '% % % % %=% out=% in %', [SessionUserName,
       RemoteIPNotLocal, COMMANDTEXT[fCommand], fCall.Method,
-      UriWithoutInlinedParams, fCall.OutStatus, KB(fCall.OutBody),
+      fCall.Url, fCall.OutStatus, KB(fCall.OutBody),
       MicroSecToString(fMicroSecondsElapsed)]);
-  if (fCall.OutBody <> '') and
+  if (sllServiceReturn in fServer.LogLevel) and
+     (fCall.OutBody <> '') and
      not (optNoLogOutput in fServiceExecutionOptions) and
-     (sllServiceReturn in fServer.LogLevel) and
-     (fCall.OutHead = '') or
-      IsHtmlContentTypeTextual(pointer(fCall.OutHead)) then
+     ((fCall.OutHead = '') or
+      IsHtmlContentTypeTextual(pointer(fCall.OutHead))) then
     fLog.Log(sllServiceReturn, fCall.OutBody, self, MAX_SIZE_RESPONSE_LOG);
 end;
 
@@ -4404,6 +4387,22 @@ begin
     MultiPartToDocVariant(multipart, res, @Options);
 end;
 
+procedure TRestServerUriContext.InputRemoveFromUri(const UpperParamName: RawUtf8);
+var
+  p: PUtf8Char;
+begin
+  p := StrPosI(pointer(UpperParamName), pointer(fCall^.Url));
+  if (p = nil) or
+     not (p[-1] in ['?', '&']) then
+    exit;
+  inc(p, length(UpperParamName));
+  while not (p^ in [#0, '&']) do
+  begin
+    p^ := 'x'; // in-place obfuscate
+    inc(p);
+  end;
+end;
+
 function TRestServerUriContext.IsRemoteIPBanned: boolean;
 begin
   if Server.fIPBan.Exists(fCall^.LowLevelRemoteIP) then
@@ -5319,9 +5318,12 @@ begin
       // check if match TRestClientUri.SetUser() algorithm
       pwd := Ctxt.InputUtf8OrVoid['Password'];
       if CheckPassword(Ctxt, usr, nonce, pwd) then
+      begin
+        Ctxt.InputRemoveFromUri('PASSWORD='); // anti-forensic
         // setup a new TAuthSession
         // SessionCreate would call Ctxt.AuthenticationFailed on error
-        SessionCreate(Ctxt, usr)
+        SessionCreate(Ctxt, usr);
+      end
       else
         Ctxt.AuthenticationFailed(afInvalidPassword);
     finally
@@ -6055,7 +6057,7 @@ begin
     exit;
   p := pointer(Ctxt.Call^.Url);
   if p^ = '/' then
-    inc(p);
+    inc(p); // normalize
   result := pointer(TRestTreeNode(fTree[Ctxt.Method].Root).Lookup(p, Ctxt));
   if result = nil then
     exit;
@@ -7689,6 +7691,8 @@ begin
     // 7. return expected result to the client
     if StatusCodeIsSuccess(Call.OutStatus) then
     begin
+      if ctxt.fUriSessionSignaturePos > 0 then // remove session_signature=...
+        FakeLength(Call.Url, ctxt.fUriSessionSignaturePos - 1);
       outcomingfile := false;
       if Call.OutBody <> '' then
         // detect 'Content-type: !STATICFILE' as first header

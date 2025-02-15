@@ -271,7 +271,6 @@ type
     procedure ClientTest(aClient: TRestClientDBNamed; aRouting: TRestServerUriContextClass;
       aAsJsonObject: boolean; aRunInOtherThread: boolean = false;
       aOptions: TInterfaceMethodOptions = []);
-    procedure ClientAlgo(aClient: TRestClientDBNamed; algo: TRestAuthenticationSignedUriAlgo);
     class procedure CustomReader(var Context: TJsonParserContext; Data: pointer);
     class procedure CustomWriter(W: TJsonWriter; Data: pointer;
       Options: TTextWriterWriteObjectOptions);
@@ -280,48 +279,24 @@ type
     procedure IntSubtractVariantVoid(Ctxt: TOnInterfaceStubExecuteParamsVariant);
   public
     { all threaded callbacks for validating all client side modes }
-    /// test the custom record Json serialization - could NOT be parallelized
-    procedure ClientSideRESTCustomRecord(Sender: TObject);
     /// test the client-side in RESTful mode with values transmitted as Json objects
     procedure ClientSideRESTAsJsonObject(Sender: TObject);
-    /// test the client-side in RESTful mode with full session statistics
+    /// test the client-side in RESTful mode with full SQlite3 session statistics
     procedure ClientSideRESTSessionsStats(Sender: TObject);
-    /// test the client-side implementation of optExecLockedPerInterface
-    procedure ClientSideRESTLocked(Sender: TObject);
-    /// test the client-side implementation of opt*InMainThread option
-    // - warning: should be executed in a background thread
-    procedure ClientSideRESTMainThread(Sender: TObject);
-    /// test the client-side implementation of opt*InPerInterfaceThread option
-    // - warning: should be executed in a background thread
-    procedure ClientSideRESTBackgroundThread(Sender: TObject);
-    /// test the client-side implementation with default crc32 URI signature
-    procedure ClientSideRESTSignWithCrc32(Sender: TObject);
-    /// test the client-side implementation with crc32c URI signature
-    procedure ClientSideRESTSignWithCrc32c(Sender: TObject);
-    /// test the client-side implementation with xxHash32 URI signature
-    procedure ClientSideRESTSignWithXxhash(Sender: TObject);
-    /// test the client-side implementation with MD5 URI signature
-    procedure ClientSideRESTSignWithMd5(Sender: TObject);
-    /// test the client-side implementation with SHA-1 URI signature
-    procedure ClientSideRESTSignWithSha1(Sender: TObject);
-    /// test the client-side implementation with SHA-256 URI signature
-    procedure ClientSideRESTSignWithSha256(Sender: TObject);
-    /// test the client-side implementation with SHA-512 URI signature
-    procedure ClientSideRESTSignWithSha512(Sender: TObject);
-    /// test the client-side implementation with SHA3-256 URI signature
-    procedure ClientSideRESTSignWithSha3(Sender: TObject);
-    /// test the client-side implementation using TRestServerAuthenticationNone
-    procedure ClientSideRESTWeakAuth(Sender: TObject);
-    /// test the client-side implementation using TRestServerAuthenticationHttpBasic
-    procedure ClientSideRESTBasicAuth(Sender: TObject);
+    /// test the client-side implementation with threading options
+    procedure ClientSideRESTThread(Sender: TObject);
+    /// test the client-side implementation with any hash URI signature
+    procedure ClientSideRESTSign(Sender: TObject);
+    /// test the client-side implementation using TRestServerAuthentication*
+    procedure ClientSideRESTAuth(Sender: TObject);
     /// test the client-side in RESTful mode with all calls logged in a table
     procedure ClientSideRESTServiceLogToDB(Sender: TObject);
     /// test the client-side implementation in Json-RPC mode
     procedure ClientSideJsonRPC(Sender: TObject);
     /// test REStful mode using HTTP client/server communication
     procedure ClientSideOverHTTP(Sender: TObject);
-    /// test REStful mode using HTTP client/server communication and logs
-    procedure ClientSideOverHTTPWithLogs(Sender: TObject);
+    /// test the custom record Json serialization - could NOT be parallelized
+    procedure ClientSideRESTCustomRecord(Client: TRestClientDBNamed);
     /// initialize a new REST server + REST client with SOA implementation
     function NewClient(aClientSide: TClientSide): TRestClientDBNamed;
   published
@@ -1750,27 +1725,29 @@ procedure TTestServiceOrientedArchitecture.ClientSide;
 
 begin
   // most client test cases would be run in their own thread (if possible)
-  One(ClientSideRESTMainThread,       csMainThread);
-  One(ClientSideRESTBackgroundThread, csBackground); // start with slowest
+  {$ifndef OSANDROID} // no "main" thread on Android?
+  One(ClientSideRESTThread,           csMainThread); // should be threaded
+  {$endif OSANDROID}
+  One(ClientSideRESTThread,           csBackground); // (slowest first)
   One(ClientSideRESTAsJsonObject,     csJsonObject);
   One(ClientSideRESTSessionsStats,    csSessions);
-  One(ClientSideRESTLocked,           csLocked);
-  One(ClientSideRESTSignWithCrc32,    csCrc32);
-  One(ClientSideRESTSignWithCrc32c,   csCrc32c);
-  One(ClientSideRESTSignWithXxhash,   csXxhash);
-  One(ClientSideRESTSignWithMd5,      csMd5);
-  One(ClientSideRESTSignWithSha1,     csSha1);
-  One(ClientSideRESTSignWithSha256,   csSha256);
-  One(ClientSideRESTSignWithSha512,   csSha512);
-  One(ClientSideRESTSignWithSha3,     csSha3);
-  One(ClientSideRESTWeakAuth,         csWeak);
-  One(ClientSideRESTBasicAuth,        csBasic);
+  One(ClientSideRESTThread,           csLocked);
+  One(ClientSideRESTSign,             csCrc32);
+  One(ClientSideRESTSign,             csCrc32c);
+  One(ClientSideRESTSign,             csXxhash);
+  One(ClientSideRESTSign,             csMd5);
+  One(ClientSideRESTSign,             csSha1);
+  One(ClientSideRESTSign,             csSha256);
+  One(ClientSideRESTSign,             csSha512);
+  One(ClientSideRESTSign,             csSha3);
+  One(ClientSideRESTAuth,             csWeak);
+  One(ClientSideRESTAuth,             csBasic);
   One(ClientSideRESTServiceLogToDB,   csDblog);
   One(ClientSideJsonRPC,              csJsonrpc);
   One(ClientSideOverHTTP,             csHttp);
-  One(ClientSideOverHTTPWithLogs,     csHttplog);
+  One(ClientSideOverHTTP,             csHttplog);
   // wait for all multi-threaded background process to finish
-  RunWait({notifyThreadCount=}false, {timeoutSec=}120);
+  RunWait({notifyThreadCount=}false, {timeoutSec=}120, {callSynchronize=}true);
   // RTTI override could NOT be parallelized
   ClientSideRESTCustomRecord(NewClient(csCustomRtti));
 end;
@@ -1842,23 +1819,19 @@ begin
 end;
 
 procedure TTestServiceOrientedArchitecture.ClientSideOverHTTP(Sender: TObject);
+var
+  c: TRestClientDBNamed absolute Sender;
 begin
-  TestHttp(Sender as TRestClientDBNamed, {withlog=}false, HTTP_DEFAULTPORT);
-  Sender.Free;
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideOverHttpWithLogs(Sender: TObject);
-begin
-  TestHttp(Sender as TRestClientDBNamed, {withlog=}true,
-    UInt32ToUtf8(GetInteger(HTTP_DEFAULTPORT) + 1));
-  Sender.Free;
+  TestHttp(c, c.ClientSide = csHttpLog,
+    UInt32ToUtf8(GetInteger(HTTP_DEFAULTPORT) + ord(c.ClientSide = csHttpLog)));
+  c.Free;
 end;
 
 procedure TTestServiceOrientedArchitecture.TestHttp(
   aClient: TRestClientDBNamed; withlog: boolean; const port: RawUtf8);
 var
-  HTTPServer: TRestHttpServer;
-  HTTPClient: TRestHttpClient;
+  srv: TRestHttpServer;
+  clt: TRestHttpClient;
   Inst: TTestServiceInstances;
   Json: RawUtf8;
   i: integer;
@@ -1878,132 +1851,103 @@ begin
   //opt := opt + [rsoLogVerbose];
   if withlog then
     opt := opt + [rsoEnableLogging, rsoTelemetryCsv, rsoTelemetryJson];
-  HTTPServer := TRestHttpServer.Create(port, [aClient.Server], '+',
+  srv := TRestHttpServer.Create(port, [aClient.Server], '+',
     useBidirAsync, // HTTP_DEFAULT_MODE,
     8, secNone, '', '', opt);
   try
     timer.Start;
+    Check(srv.HttpServer <> nil);
     if withlog then
-      HTTPServer.HttpServer.Logger.Settings.DefaultRotate := hrtAfter1MB;
+    begin
+      Check(srv.HttpServer.Logger <> nil);
+      Check(srv.HttpServer.Logger.Settings <> nil);
+      srv.HttpServer.Logger.Settings.DefaultRotate := hrtAfter1MB;
+    end
+    else
+      Check(srv.HttpServer.Logger = nil);
     FillCharFast(Inst, SizeOf(Inst), 0); // all Expected..ID=0
     Inst.ClientSide := aClient.ClientSide;
-    HTTPClient := TRestHttpClient.Create('127.0.0.1', port, aClient.Model);
+    clt := TRestHttpClient.Create('127.0.0.1', port, aClient.Model);
     try
-      HTTPClient.ServicePublishOwnInterfaces :=
+      clt.ServicePublishOwnInterfaces :=
         aClient.Server.ServicesPublishedInterfaces;
-      //HTTPClient.OnIdle := TLoginForm.OnIdleProcess; // from mORMotUILogin
-      // HTTPClient.Compression := [hcSynShaAes]; // 350ms (300ms for [])
-      Check(HTTPClient.SetUser('User', 'synopse'));
+      //clt.OnIdle := TLoginForm.OnIdleProcess; // from mORMotUILogin
+      // clt.Compression := [hcSynShaAes]; // 350ms (300ms for [])
+      Check(clt.SetUser('User', 'synopse'));
       // register services on the client side
-      Check(HTTPClient.ServiceRegister([TypeInfo(ICalculator)], sicShared));
-      Check(HTTPClient.ServiceRegister([TypeInfo(IComplexCalculator)], sicSingle));
-      Check(HTTPClient.ServiceRegister([TypeInfo(ITestSession)], sicPerSession));
-      Check(HTTPClient.ServiceRegister([TypeInfo(ITestUser)], sicPerUser));
-      Check(HTTPClient.ServiceRegister([TypeInfo(ITestGroup)], sicPerGroup));
-      Check(HTTPClient.ServiceRegister([TypeInfo(ITestPerThread)], sicPerThread));
+      Check(clt.ServiceRegister([TypeInfo(ICalculator)], sicShared));
+      Check(clt.ServiceRegister([TypeInfo(IComplexCalculator)], sicSingle));
+      Check(clt.ServiceRegister([TypeInfo(ITestSession)], sicPerSession));
+      Check(clt.ServiceRegister([TypeInfo(ITestUser)], sicPerUser));
+      Check(clt.ServiceRegister([TypeInfo(ITestGroup)], sicPerGroup));
+      Check(clt.ServiceRegister([TypeInfo(ITestPerThread)], sicPerThread));
       // retrieve service instances
-      if CheckFailed(HTTPClient.Services.Info(TypeInfo(ICalculator)).
+      if CheckFailed(clt.Services.Info(TypeInfo(ICalculator)).
            Get(Inst.I)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(IComplexCalculator)).
+         CheckFailed(clt.Services.Info(TypeInfo(IComplexCalculator)).
            Get(Inst.CC)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(IComplexNumber)).
+         CheckFailed(clt.Services.Info(TypeInfo(IComplexNumber)).
            Get(Inst.CN)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(ITestUser)).
+         CheckFailed(clt.Services.Info(TypeInfo(ITestUser)).
            Get(Inst.CU)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(ITestSession)).
+         CheckFailed(clt.Services.Info(TypeInfo(ITestSession)).
            Get(Inst.CS)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(ITestGroup)).
+         CheckFailed(clt.Services.Info(TypeInfo(ITestGroup)).
            Get(Inst.CG)) or
-         CheckFailed(HTTPClient.Services.Info(TypeInfo(ITestPerThread)).
+         CheckFailed(clt.Services.Info(TypeInfo(ITestPerThread)).
            Get(Inst.CT)) then
         exit;
-      Inst.ExpectedSessionID := HTTPClient.SessionID;
-      HTTPClient.Orm.Retrieve('LogonName=?', [],
-        [HTTPClient.SessionUser.LogonName], HTTPClient.SessionUser);
-      Inst.ExpectedUserID := HTTPClient.SessionUser.ID;
-      Inst.ExpectedGroupID := HTTPClient.SessionUser.GroupRights.ID;
+      Inst.ExpectedSessionID := clt.SessionID;
+      clt.Orm.Retrieve('LogonName=?', [],
+        [clt.SessionUser.LogonName], clt.SessionUser);
+      Inst.ExpectedUserID := clt.SessionUser.ID;
+      Inst.ExpectedGroupID := clt.SessionUser.GroupRights.ID;
       CheckEqual(
-        HTTPClient.CallBackGet('stat', ['findservice', 'toto'], Json),
+        clt.CallBackGet('stat', ['findservice', 'toto'], Json),
         HTTP_SUCCESS);
       CheckEqual(Json, '[]');
       for i := 0 to High(SERVICES) do
       begin
-        CheckEqual(HTTPClient.CallBackGet(
+        CheckEqual(clt.CallBackGet(
           'stat', ['findservice', SERVICES[i]], Json), HTTP_SUCCESS, 'stat');
         Check(Json <> '[]');
-        Check(HTTPClient.ServiceRetrieveAssociated(SERVICES[i], URI));
+        Check(clt.ServiceRetrieveAssociated(SERVICES[i], URI));
         Check(length(URI) = 1);
         Check(URI[0].Port = port);
         Check(URI[0].Root = aClient.Model.Root);
       end;
-      Check(HTTPClient.ServiceRetrieveAssociated(IComplexNumber, URI));
+      Check(clt.ServiceRetrieveAssociated(IComplexNumber, URI));
       Check(length(URI) = 1);
-      Check(HTTPClient.ServiceRetrieveAssociated(ITestSession, URI));
+      Check(clt.ServiceRetrieveAssociated(ITestSession, URI));
       Check(length(URI) = 1);
       Test(Inst, 100);
       if aClient.Name <> '' then
         NotifyProgress([aClient.Name, '=', timer.StopInMicroSec div 1000, 'ms']);
     finally
       Finalize(Inst);
-      HTTPClient.Free;
+      clt.Free;
     end;
   finally
-    HTTPServer.Free;
+    srv.Free;
   end;
 end;
 
-procedure TTestServiceOrientedArchitecture.ClientAlgo(aClient: TRestClientDBNamed;
-  algo: TRestAuthenticationSignedUriAlgo);
+const
+  CS_ALGO: array[csCrc32 .. csSha3] of TRestAuthenticationSignedUriAlgo = (
+    suaCrc32, suaCrc32c, suaXxHash, suaMd5, suaSha1, suaSha256, suaSha512, suaSha3);
+
+procedure TTestServiceOrientedArchitecture.ClientSideRESTSign(Sender: TObject);
+var
+  c: TRestClientDBNamed absolute Sender;
 begin
-  (aClient.Server.AuthenticationRegister(TRestServerAuthenticationDefault) as
-    TRestServerAuthenticationDefault).Algorithm := algo;
-  aClient.SetUser('User', 'synopse');
-  ClientTest(aClient, TRestServerRoutingRest, false);
-  aClient.Free;
+  (c.Server.AuthenticationRegister(TRestServerAuthenticationDefault) as
+    TRestServerAuthenticationDefault).Algorithm := CS_ALGO[c.ClientSide];
+  c.SetUser('User', 'synopse');
+  ClientTest(c, TRestServerRoutingRest, false);
+  c.Free;
 end;
 
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithCrc32(Sender: TObject);
-begin
-  ClientTest(Sender as TRestClientDBNamed, TRestServerRoutingRest, false);
-  Sender.Free;
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithCRC32C(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaCRC32C)
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithXXHASH(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaXXHASH);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithMD5(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaMD5);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA1(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaSHA1);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA256(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaSHA256);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA512(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaSHA512);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA3(Sender: TObject);
-begin
-  ClientAlgo(Sender as TRestClientDBNamed, suaSHA3);
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTWeakAuth(Sender: TObject);
+procedure TTestServiceOrientedArchitecture.ClientSideRESTAuth(Sender: TObject);
 var
   c: TRestClientDBNamed absolute Sender;
 begin
@@ -2012,35 +1956,34 @@ begin
     TRestServerAuthenticationSspi,
     {$endif OSWINDOWS}
     TRestServerAuthenticationDefault]);
-  c.Server.AuthenticationRegister(TRestServerAuthenticationNone);
-  TRestClientAuthenticationNone.ClientSetUser(c, 'User', '');
-  ClientTest(c, TRestServerRoutingRest, false);
-  c.Free;
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTBasicAuth(Sender: TObject);
-var
-  c: TRestClientDBNamed absolute Sender;
-begin
-  c.SessionClose;
-  c.Server.AuthenticationRegister(TRestServerAuthenticationHttpBasic);
-  TRestClientAuthenticationHttpBasic.ClientSetUser(c, 'User', 'synopse');
+  case c.ClientSide of
+    csWeak:
+      begin
+        c.Server.AuthenticationRegister(TRestServerAuthenticationNone);
+        TRestClientAuthenticationNone.ClientSetUser(c, 'User', '');
+      end;
+    csBasic:
+      begin
+        c.Server.AuthenticationRegister(TRestServerAuthenticationHttpBasic);
+        TRestClientAuthenticationHttpBasic.ClientSetUser(c, 'User', 'synopse');
+      end;
+  end;
   ClientTest(c, TRestServerRoutingRest, false);
   c.Free;
 end;
 
 procedure TTestServiceOrientedArchitecture.ClientSideRESTCustomRecord(
-  Sender: TObject);
+  Client: TRestClientDBNamed);
 begin
   // warning: could NOT be parallelized before RTTI override is global
   TRttiJson.RegisterCustomSerializer(TypeInfo(TEntry),
     TTestServiceOrientedArchitecture.CustomReader,
     TTestServiceOrientedArchitecture.CustomWriter);
   try
-    ClientTest(Sender as TRestClientDBNamed, TRestServerRoutingRest, false);
+    ClientTest(Client, TRestServerRoutingRest, false);
   finally
     TRttiJson.UnRegisterCustomSerializer(TypeInfo(TEntry));
-    Sender.Free;
+    Client.Free;
   end;
 end;
 
@@ -2084,32 +2027,23 @@ begin
     'withsessions',   true], stats);
   FileFromString(JsonReformat(stats), WorkDir + 'stats.Json');
   FreeAndNil(fClient);
-end;
-}
+end;}
 
-procedure TTestServiceOrientedArchitecture.ClientSideRESTMainThread(Sender: TObject);
+procedure TTestServiceOrientedArchitecture.ClientSideRESTThread(Sender: TObject);
+var
+  c: TRestClientDBNamed absolute Sender;
+  opt: TInterfaceMethodOptions;
 begin
-  {$ifndef OSANDROID}
-  // processes on Android seem to never run on main Thread
-  ClientTest(Sender as TRestClientDBNamed, TRestServerRoutingRest, false, true,
-    [optExecInMainThread, optFreeInMainThread]);
-  {$endif OSANDROID}
-  Sender.Free;
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTBackgroundThread(
-  Sender: TObject);
-begin
-  ClientTest(Sender as TRestClientDBNamed, TRestServerRoutingRest, false, true,
-    [optExecInPerInterfaceThread, optFreeInPerInterfaceThread]);
-  Sender.Free;
-end;
-
-procedure TTestServiceOrientedArchitecture.ClientSideRESTLocked(Sender: TObject);
-begin
-  ClientTest(Sender as TRestClientDBNamed, TRestServerRoutingRest, false, true,
-    [optExecLockedPerInterface]);
-  Sender.Free;
+  case c.ClientSide of
+    csMainThread:
+      opt := [optExecInMainThread, optFreeInMainThread];
+    csBackground:
+      opt := [optExecInPerInterfaceThread, optFreeInPerInterfaceThread];
+    csLocked:
+      opt := [optExecLockedPerInterface];
+  end;
+  ClientTest(c, TRestServerRoutingRest, false, true, opt);
+  c.Free;
 end;
 
 type

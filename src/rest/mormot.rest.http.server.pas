@@ -1187,13 +1187,12 @@ begin
   else
     // no AdjustHostUrl() below
     Ctxt.Host := '';
-  if call.Url = '' then
-  begin
-    call.Url := Ctxt.Url;
-    if (call.Url <> '') and
-       (call.Url[1] = '/') then
-      delete(call.Url, 1, 1); // normalize URI
-  end;
+  if (call.Url = '') and
+     (Ctxt.Url <> '') then
+    if Ctxt.Url[1] = '/' then // trim any initial '/'
+      FastSetString(call.Url, @PByteArray(Ctxt.Url)[1], length(Ctxt.Url) - 1)
+    else
+      call.Url := Ctxt.Url;
   call.Method := Ctxt.Method;
   call.InHead := Ctxt.InHeaders;
   call.InBody := Ctxt.InContent;
@@ -1264,17 +1263,23 @@ begin
   end;
   // set output content
   result := call.OutStatus;
+  Ctxt.Url := call.Url;
   Ctxt.OutContent := call.OutBody;
   P := pointer(call.OutHead);
-  if IdemPChar(P, 'CONTENT-TYPE: ') then
-  begin
-    // TRestServer.Uri is expected to customize the content-type
-    // as FIRST header (e.g. when returning GET blob fields)
-    Ctxt.OutContentType := GetNextLine(P + 14, P);
-    FastSetString(call.OutHead, P, StrLen(P));
-  end
-  else
-    // default content type is JSON
+  if P <> nil then
+    if P = pointer(JSON_CONTENT_TYPE_HEADER_VAR) then
+      FastAssignNew(call.OutHead) // most common case (e.g. mormot.soa.server)
+    else if IdemPChar(P, 'CONTENT-TYPE: ') then
+    begin
+      // TRestServer.Uri is expected to customize the content-type
+      // as FIRST header (e.g. when returning GET blob fields)
+      Ctxt.OutContentType := GetNextLine(P + 14, P, {trim=}true);
+      if P = nil then
+        FastAssignNew(call.OutHead)
+      else
+        FastSetString(call.OutHead, P, StrLen(P));
+    end;
+  if Ctxt.OutContentType = '' then // set JSON by default
     Ctxt.OutContentType := JSON_CONTENT_TYPE_VAR;
   // handle HTTP redirection and cookies over virtual hosts
   if Ctxt.Host <> '' then

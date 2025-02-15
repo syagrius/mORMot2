@@ -801,6 +801,7 @@ type
       TextMaxLen: PtrInt = 0);
     /// append an URI-decoded domain name, also normalizing dual // into /
     // - only parameters - i.e. after '?' - may have ' ' replaced by '+'
+    // - will also ensure start with a '/' as requested in HTTP common log format
     procedure AddUrlNameNormalize(U: PUtf8Char; L: PtrInt);
     /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat = hfAnyWhere); overload;
@@ -5532,8 +5533,14 @@ end;
 
 procedure TTextWriter.AddUrlNameNormalize(U: PUtf8Char; L: PtrInt);
 begin
-  if L <= 0 then
-    exit;
+  if (L <= 0) or
+     (U^ <> '/') then
+  begin
+    inc(B);
+    B^ := '/'; // a normalized URI should start with '/'
+    if L <= 0 then
+      exit;
+  end;
   repeat
     if B >= BEnd then
       FlushToStream; // inlined Add() in the loop
