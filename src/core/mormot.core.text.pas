@@ -9014,11 +9014,10 @@ begin
       repeat
         inc(L, VarRecToTempUtf8(Arg^, c^)); // add param
         inc(Arg);
-        if (EndWithDelim and
-            (ArgCount = 1)) or
-           ((ArgCount <> 1) and
-            (c^.Len <> 0) and
-            (c^.Text[c^.Len - 1] <> Delim)) then // append delimiter
+        if (c^.Len <> 0) and
+           (c^.Text[c^.Len - 1] <> Delim) and
+           (EndWithDelim or
+            (ArgCount <> 1)) then // append delimiter
         begin
           inc(c);
           c^.Len := 1;
@@ -9946,7 +9945,7 @@ end;
 
 const
   // sorted by actual usage order for WordScanIndex() in matching HTTP_CODE[]
-  HTTP_REASON: array[0 .. 44] of RawUtf8 = (
+  HTTP_REASON: array[0 .. 45] of RawUtf8 = (
    'OK',                                // HTTP_SUCCESS - should be first
    'No Content',                        // HTTP_NOCONTENT
    'Temporary Redirect',                // HTTP_TEMPORARYREDIRECT
@@ -9982,6 +9981,7 @@ const
    'Unsupported Media Type',            // 415
    'Requested Range Not Satisfiable',   // HTTP_RANGENOTSATISFIABLE
    'I''m a teapot',                     // HTTP_TEAPOT
+   'Unprocessable Content',             // HTTP_UNPROCESSABLE_CONTENT
    'Upgrade Required',                  // 426
    'Internal Server Error',             // HTTP_SERVERERROR
    'Not Implemented',                   // HTTP_NOTIMPLEMENTED
@@ -10029,6 +10029,7 @@ const
     415,
     HTTP_RANGENOTSATISFIABLE,
     HTTP_TEAPOT,
+    HTTP_UNPROCESSABLE_CONTENT,
     426,
     HTTP_SERVERERROR,
     HTTP_NOTIMPLEMENTED,

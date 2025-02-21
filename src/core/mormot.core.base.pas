@@ -365,11 +365,12 @@ type
   TExtendedDynArray = array of Extended;
   TWordDynArray = array of word;
   PWordDynArray = ^TWordDynArray;
-  TByteDynArray = array of byte;
-  PByteDynArray = ^TByteDynArray;
-  {$ifndef ISDELPHI2007ANDUP}
+  {$ifndef FPC_OR_UNICODE}
   TBytes = array of byte;
   {$endif ISDELPHI2007ANDUP}
+  PBytes = ^TBytes;
+  TByteDynArray = array of byte; // can't reuse TBytes (Delphi XE internal error)
+  PByteDynArray = ^TByteDynArray;
   TBytesDynArray = array of TBytes;
   PBytesDynArray = ^TBytesDynArray;
   TObjectDynArray = array of TObject;
@@ -1796,6 +1797,10 @@ function AddInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
 /// add a 16-bit integer value at the end of a dynamic array of integers
 function AddWord(var Values: TWordDynArray; var ValuesCount: integer;
   Value: Word): PtrInt;
+
+/// add a 8-bit integer value at the end of a dynamic array of integers
+function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
+  Value: byte): PtrInt;
 
 /// add a 64-bit integer value at the end of a dynamic array of integers
 function AddInt64(var Values: TInt64DynArray; var ValuesCount: integer;
@@ -6980,6 +6985,16 @@ begin
 end;
 
 function AddWord(var Values: TWordDynArray; var ValuesCount: integer; Value: Word): PtrInt;
+begin
+  result := ValuesCount;
+  if result = Length(Values) then
+    SetLength(Values, NextGrow(result));
+  Values[result] := Value;
+  inc(ValuesCount);
+end;
+
+function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
+  Value: byte): PtrInt;
 begin
   result := ValuesCount;
   if result = Length(Values) then

@@ -5550,30 +5550,42 @@ begin
   Check(MakePath([1], false, '/') = '1');
   Check(MakePath([1], true, '/') = '1/');
   Check(MakePath([1, 2, '3'], false, '/') = '1/2/3');
+  Check(MakePath([1, '2/', 3], false, '/') = '1/2/3');
+  Check(MakePath(['1/', 2, 3], false, '/') = '1/2/3');
+  Check(MakePath([1, 2, '3/'], false, '/') = '1/2/3/');
+  Check(MakePath([1, '', 2, '3/'], false, '/') = '1/2/3/');
   Check(MakePath([1, 2, 3], true, '/') = '1/2/3/');
+  Check(MakePath([1, 2, '3'], true, '/') = '1/2/3/');
+  Check(MakePath([1, '2/', 3], true, '/') = '1/2/3/');
+  Check(MakePath(['1/', 2, 3], true, '/') = '1/2/3/');
+  Check(MakePath([1, 2, '3/'], true, '/') = '1/2/3/');
+  Check(MakePath([1, '', 2, '3/'], true, '/') = '1/2/3/');
   Check(MakeFileName([]) = '');
   Check(MakeFileName(['toto', 'doc']) = 'toto.doc');
   {$ifdef OSWINDOWS}
   Check(MakeFileName([1, 2, 'doc'], false) = '1\2\doc');
   Check(MakeFileName([1, 2, 'doc'], true) = '1\2.doc');
-  Check(MakeFileName([1, 2, '.doc'], true) = '1\2.doc');
+  Check(MakeFileName([1, '', 2, '.doc'], true) = '1\2.doc');
   {$else}
   Check(MakeFileName([1, 2, 'doc'], false) = '1/2/doc');
   Check(MakeFileName([1, 2, 'doc'], true) = '1/2.doc');
-  Check(MakeFileName([1, 2, '.doc'], true) = '1/2.doc');
+  Check(MakeFileName([1, '', 2, '.doc'], true) = '1/2.doc');
   {$endif OSWINDOWS}
-  Check(MakeCsv([]) = '');
-  Check(MakeCsv([], true) = '');
-  Check(MakeCsv([1]) = '1');
-  Check(MakeCsv([1], true, '+') = '1+');
-  Check(MakeCsv([1, 2, 3]) = '1,2,3');
-  Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
-  Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
-  Check(Make([]) = '');
-  Check(Make([1]) = '1');
-  Check(Make([1, 2, 3]) = '123');
-  Check(Make([1, '2', 3]) = '123');
-  Check(Make([1, '2 ,', 3]) = '12 ,3');
+  CheckEqual(MakeCsv([]), '');
+  CheckEqual(MakeCsv([], true), '');
+  CheckEqual(MakeCsv([1]), '1');
+  CheckEqual(MakeCsv([1], true, '+'), '1+');
+  CheckEqual(MakeCsv([1, 2, 3]), '1,2,3');
+  CheckEqual(MakeCsv([1, '2', 3], true), '1,2,3,');
+  CheckEqual(MakeCsv([1, '2,', 3]), '1,2,3');
+  CheckEqual(MakeCsv([1, '2,', 3], true), '1,2,3,');
+  CheckEqual(MakeCsv([1, '2 ,', 3]), '1,2 ,3');
+  CheckEqual(Make([]), '');
+  CheckEqual(Make([1]), '1');
+  CheckEqual(Make([1, 2, 3]), '123');
+  CheckEqual(Make([1, '', 2, 3]), '123');
+  CheckEqual(Make([1, '2', 3]), '123');
+  CheckEqual(Make([1, '2 ,', 3]), '12 ,3');
   Check(MakeString([]) = '');
   Check(MakeString([1]) = '1');
   Check(MakeString([1, 2, 3]) = '123');
@@ -8362,6 +8374,8 @@ begin
     '605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1'));
   Check(not IsHttpUserAgentBot(
     'Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko'));
+  Check(not IsHttpUserAgentBot(DefaultUserAgent(self)),
+    'Mozilla/5.0 (Linux x64; mORMot) TCB/2 mormot2tests');
   Check(IsHttpUserAgentBot(
     'Googlebot/2.1 (+http://www.google.com/bot.html)'));
   Check(IsHttpUserAgentBot(

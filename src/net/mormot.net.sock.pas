@@ -1025,15 +1025,19 @@ type
   TSocketStreamAbstract = class(TStreamWithNoSeek)
   protected
     fLastResult: TNetResult;
+    fOwned: TObject;
   public
     /// the low-level result code of the last Read() or Write() method call
     property LastResult: TNetResult
       read fLastResult;
+    /// optional class instance for which Destroy will call Owned.Free
+    property Owned: TObject
+      read fOwned write fOwned;
   end;
 
   /// encapsulate a raw (TLS-encrypted) Socket to a TStream class
   // - directly redirect Read/Write to socket's recv/send methods
-  // - this class will always report Size = 0 and Position = 0
+  // - this class will report fake increasing Size = Position after Read/Write
   TSocketStream = class(TSocketStreamAbstract)
   protected
     fSocket: TNetSocket;
@@ -1044,6 +1048,8 @@ type
     constructor Create(aSocket: TNetSocket); reintroduce; overload;
     /// initialize this TStream for a given TLS encryption instance
     constructor Create(const aSecure: INetTls); reintroduce; overload;
+    /// finalize this TStream instance, eventually calling Owned.Free
+    destructor Destroy; override;
     /// receive some bytes from the associated Socket
     // - returns the number of bytes filled into Buffer (<=Count)
     function Read(var Buffer; Count: Longint): Longint; override;
@@ -2016,7 +2022,7 @@ type
 
   /// encapsulate TCrtSocket process as a TStream class
   // - directly redirect Read/Write to TCrtSocket.SockRecv/SockSend methods
-  // - this class will always report Size = 0 and Position = 0
+    // - this class will report fake increasing Size = Position after Read/Write
   // - see TSocketStream if you prefer raw TNetSocket/INetTls support
   TCrtSocketStream = class(TSocketStreamAbstract)
   protected
@@ -2025,6 +2031,8 @@ type
     /// initialize this TStream for a given TCrtSocket instance
     // - this class instance won't own nor release this TCrtSocket once done
     constructor Create(aSocket: TCrtSocket); reintroduce;
+    /// finalize this TStream instance, eventually calling Owned.Free
+    destructor Destroy; override;
     /// receive some bytes calling the associated TCrtSocket.SockRecv()
     // - returns the number of bytes filled into Buffer (<=Count)
     function Read(var Buffer; Count: Longint): Longint; override;
@@ -3992,6 +4000,14 @@ begin
   fSecure := aSecure;
 end;
 
+destructor TSocketStream.Destroy;
+begin
+  inherited Destroy;
+  fSocket := nil;
+  fSecure := nil; // before fOwned.Free e.g. if fOwned is matching TCrtSocket
+  fOwned.Free;
+end;
+
 function TSocketStream.Read(var Buffer; Count: Longint): Longint;
 begin
   if Assigned(fSecure) then
@@ -4000,13 +4016,16 @@ begin
     fLastResult := fSocket.Recv(@Buffer, Count);
   case fLastResult of
     nrOk:
-      result := Count;
+      begin
+        result := Count;
+        inc(fSize, Count);
+        fPosition := fSize;
+      end;
     nrRetry:
       result := 0; // no data available yet
   else
     result := -1;  // fatal error - e.g. nrClosed for recv()=0
   end;
-  // fSize and fPosition are left untouched to keep both always equal 0
 end;
 
 function TSocketStream.Write(const Buffer; Count: Longint): Longint;
@@ -4017,13 +4036,16 @@ begin
     fLastResult := fSocket.Send(@Buffer, Count);
   case fLastResult of
     nrOk:
-      result := Count;
+      begin
+        result := Count;
+        inc(fSize, Count);
+        fPosition := fSize;
+      end;
     nrRetry:
       result := 0; // no data available yet
   else
     result := -1;  // fatal error
   end;
-  // fSize and fPosition are left untouched to keep both always equal 0
 end;
 
 
@@ -6412,10 +6434,21 @@ begin
   fSocket := aSocket;
 end;
 
+destructor TCrtSocketStream.Destroy;
+begin
+  inherited Destroy;
+  fSocket := nil; // before fOwned.Free e.g. if fOwned=fSocket
+  fOwned.Free;
+end;
+
 function TCrtSocketStream.Read(var Buffer; Count: Longint): Longint;
 begin
   if fSocket.TrySockRecv(@Buffer, Count, {stopbeforeCount=}true, @fLastResult) then
-    result := Count
+  begin
+    result := Count;
+    inc(fSize, Count);
+    fPosition := fSize;
+  end
   else if fLastResult = nrRetry then
     result := 0
   else
@@ -6425,7 +6458,11 @@ end;
 function TCrtSocketStream.Write(const Buffer; Count: Longint): Longint;
 begin
   if fSocket.TrySndLow(@Buffer, Count, @fLastResult) then
-    result := Count
+  begin
+    result := Count;
+    inc(fSize, Count);
+    fPosition := fSize;
+  end
   else if fLastResult = nrRetry then
     result := 0
   else

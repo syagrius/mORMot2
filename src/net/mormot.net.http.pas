@@ -166,6 +166,7 @@ function IsUrlFavIcon(P: PUtf8Char): boolean;
 function IsHttp(const text: RawUtf8): boolean;
 
 /// true if the supplied text is case-insensitive 'none'
+// - as in THttpRequestExtendedOptions.Proxy field
 function IsNone(const text: RawUtf8): boolean;
 
 /// naive detection of most used bots from a HTTP User-Agent string
@@ -1773,9 +1774,9 @@ type
     fUnknownPosLen: TIntegerDynArray; // matching hlvUnknown occurrence
     fFlags: set of (ffHadDefineHost, ffOwnWriterSingle);
     fVariables: THttpLogVariables;
-    fTimeLastTix: array[hlvTime_Iso8601 .. hlvTime_Http] of cardinal;
-    fTimeLastTxt: array[hlvTime_Iso8601 .. hlvTime_Http] of THttpDateNowUtc;
-    procedure SetTimeLast(t: THttpLogVariable; Tix64: Int64);
+    fTimeTix10: cardinal;
+    fTimeText: array[hlvTime_Iso8601 .. hlvTime_Http] of THttpDateNowUtc;
+    procedure SetTimeText(Tix64: Int64);
     procedure SetSettings(aSettings: THttpLoggerSettings);
     function GetWriterFileName(const aHost: RawUtf8; aError: boolean): TFileName; virtual;
     procedure CreateMainWriters;
@@ -1916,7 +1917,8 @@ type
     // so should be considered as a somewhat good approximation of the reality
     // - for periods longer than hapMinute, this field is the mean of numbers
     // of unique IPs per minute for the number of measures within this period
-    // - it should always considered as a relative number, not an absolute number
+    // - it should always considered as a relative number / order of magnitude
+    // guess, not an absolute number
     UniqueIP: cardinal;
     /// number of bytes received from the client for this counter requests
     Read: THttpAnalyzerBytes;
@@ -5202,7 +5204,7 @@ end;
 function THttpLogger.Parse(const aFormat: RawUtf8): RawUtf8;
 var
   p, start: PUtf8Char;
-  v: integer;
+  v, vn, un: integer;
 begin
   // check the state
   result := 'Impossible once started';
@@ -5217,7 +5219,8 @@ begin
   if length(aFormat) shr 16 <> 0 then
     exit; // fUnknownPosLen[] are encoded as two 16-bit values
   // reset any previous format
-  result := '';
+  vn := 0;
+  un := 0;
   fVariable := nil;
   fVariables := [];
   fUnknownPosLen := nil;
@@ -5230,12 +5233,12 @@ begin
       inc(p);
     if p <> start then
     begin
-      SetLength(fVariable, length(fVariable) + 1); // append 0 = hlvUnknown
-      AddInteger(fUnknownPosLen, (start - pointer(aFormat)) +  // 16-bit pos
-                                 ((p - start) shl 16))         // 16-bit len
+      AddByte(TByteDynArray(fVariable), vn, ord(hlvUnknown));
+      AddInteger(fUnknownPosLen, un, (start - pointer(aFormat)) + // 16-bit pos
+                                     ((p - start) shl 16));       // 16-bit len
     end;
     if p^ = #0 then // success
-      exit;
+      break;
     inc(p); // ignore '$'
     start := p;
     while tcIdentifier in TEXT_CHARS[p^] do
@@ -5243,39 +5246,36 @@ begin
     v := GetEnumNameValueTrimmed(TypeInfo(THttpLogVariable), start, p - start);
     if v <= 0 then
     begin
+      // reset internal state on error parsing
+      fSettings.Format := '';
+      fVariable := nil;
+      fVariables := [];
+      fUnknownPosLen := nil;
       FormatUtf8('Unknown $% variable', [start], result);
-      break;
+      exit;
     end;
-    SetLength(fVariable, length(fVariable) + 1);
-    fVariable[high(fVariable)] := THttpLogVariable(v);
+    AddByte(TByteDynArray(fVariable), vn, v);
     include(fVariables, THttpLogVariable(v));
   until false;
-  // reset internal state on error parsing
-  fSettings.Format := '';
-  fVariable := nil;
-  fVariables := [];
-  fUnknownPosLen := nil;
+  result := ''; // success
+  if vn <> 0 then
+    DynArrayFakeLength(fVariable, vn);
+  if un <> 0 then
+    DynArrayFakeLength(fUnknownPosLen, un);
 end;
 
-procedure THttpLogger.SetTimeLast(t: THttpLogVariable; Tix64: Int64);
+procedure THttpLogger.SetTimeText(Tix64: Int64);
 var
   now: TSynSystemTime;
 begin
+  fTimeTix10 := Tix64 shr MilliSecsPerSecShl; // acquire it asap
   // dates are all in UTC/GMT as it should on any serious server design
-  fTimeLastTix[t] := Tix64 shr MilliSecsPerSecShl;
   FromGlobalTime(now, {local=}false, Tix64); // call OS outside of the lock
-  fSafe.Lock; // update the cached text in an atomic way
-  case t of
-    hlvTime_Iso8601:
-      begin
-        now.ToIsoDateTimeShort(fTimeLastTxt[hlvTime_Iso8601]);
-        AppendShortChar('Z', @fTimeLastTxt[hlvTime_Iso8601]);
-      end;
-    hlvTime_Local:
-      now.ToNcsaShort(fTimeLastTxt[hlvTime_Local], '+0000');
-    hlvTime_Http:
-      now.ToHttpDateShort(fTimeLastTxt[hlvTime_Http], 'GMT');
-  end;
+  fSafe.Lock; // update all cached text in an atomic way
+  now.ToIsoDateTimeShort(fTimeText[hlvTime_Iso8601]);
+  AppendShortChar('Z', @fTimeText[hlvTime_Iso8601]);
+  now.ToNcsaShort(fTimeText[hlvTime_Local], '+0000');
+  now.ToHttpDateShort(fTimeText[hlvTime_Http], 'GMT');
   fSafe.UnLock;
 end;
 
@@ -5283,7 +5283,6 @@ procedure THttpLogger.Append(var Context: TOnHttpServerAfterResponseContext);
 var
   n, urllen: integer;
   tix10, crc, reqcrc, uricrc: cardinal;
-  t: THttpLogVariable;
   v: ^THttpLogVariable;
   poslen: PWordArray; // pos1,len1, pos2,len2, ... 16-bit pairs
   wr: TTextDateWriter;
@@ -5313,10 +5312,8 @@ begin
     if urllen < 0 then
       urllen := length(RawUtf8(Context.Url));
   end;
-  for t := low(fTimeLastTix) to high(fTimeLastTix) do
-    if (t in fVariables) and
-       (fTimeLastTix[t] <> tix10) then
-      SetTimeLast(t, Context.Tix64); // update each cache every second
+  if fTimeTix10 <> tix10 then
+    SetTimeText(Context.Tix64); // update cached time texts every second
   reqcrc := 0;
   uricrc := 0;
   if (hlvRequest_Hash in fVariables) or
@@ -5454,7 +5451,7 @@ begin
         hlvTime_Iso8601,
         hlvTime_Local,
         hlvTime_Http:
-          wr.AddShort(fTimeLastTxt[v^]); // per-second cached timestamp
+          wr.AddShort(fTimeText[v^]); // per-second cached timestamp
         hlvUri_Hash:
           wr.AddUHex(uricrc, #0);
       end;

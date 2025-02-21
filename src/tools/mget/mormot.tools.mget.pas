@@ -53,13 +53,14 @@ type
     fPeerSecret, fPeerSecretHexa: SpiUtf8;
     fClient: THttpClientSocket;
     fOnProgress: TOnStreamProgress;
+    fOnPeerCacheDirectOptions: TOnHttpPeerCacheDirectOptions;
     fOnStep: TOnWGetStep;
     fOutSteps: TWGetSteps;
     fPeerCache: IWGetAlternate;
     function GetTcpTimeoutSec: integer;
     procedure SetTcpTimeoutSec(Seconds: integer);
     // could be overriden to change the behavior of this class
-    procedure PeerCacheStarted; virtual;
+    procedure PeerCacheStarted(PeerInstance: THttpPeerCache); virtual;
     procedure PeerCacheStopping; virtual;
     procedure BeforeClientConnect(var Uri: TUri); virtual;
     procedure AfterClientConnect; virtual;
@@ -89,7 +90,8 @@ type
     // - returns aDirectUri e.g. as 'http://1.2.3.4:8099/https/microsoft.com/...'
     // (if peer cache runs on 1.2.3.4:8099) and its associated aDirectHeaderBearer
     function HttpDirectUri(const aRemoteUri, aRemoteHash: RawUtf8;
-      out aDirectUri, aDirectHeaderBearer: RawUtf8): boolean;
+      out aDirectUri, aDirectHeaderBearer: RawUtf8;
+      aPermanent: boolean = false): boolean;
     /// access to the associated THttpPeerCache instance
     // - a single peer-cache run in the background between Execute() calls
     property PeerCache: IWGetAlternate
@@ -97,6 +99,9 @@ type
     /// optional callback event called during download process
     property OnProgress: TOnStreamProgress
       read fOnProgress write fOnProgress;
+    /// optional event to customize the access of a given URI in pcoHttpDirect mode
+    property OnPeerCacheDirectOptions: TOnHttpPeerCacheDirectOptions
+      read fOnPeerCacheDirectOptions write fOnPeerCacheDirectOptions;
     /// optional callback event raised during WGet() process
     // - if OutSteps: TWGetSteps field and LogSteps boolean flag are not enough
     // - alternative for business logic tracking: the OnProgress callback is
@@ -191,6 +196,7 @@ end;
 procedure TMGetProcess.StartPeerCache;
 var
   l: ISynLog;
+  peerinstance: THttpPeerCache;
 begin
   if not Peer then
     exit;
@@ -211,10 +217,12 @@ begin
        (fPeerSecretHexa <> '') then
       fPeerSecret := HexToBin(fPeerSecretHexa);
     try
-      fPeerCache := THttpPeerCache.Create(fPeerSettings, fPeerSecret,
+      peerinstance := THttpPeerCache.Create(fPeerSettings, fPeerSecret,
         nil, 2, self.Log, @ServerTls, @ClientTls);
+      fPeerCache := peerinstance;
+      peerinstance.OnDirectOptions := fOnPeerCacheDirectOptions;
       // THttpAsyncServer could also be tried with rfProgressiveStatic
-      PeerCacheStarted; // may be overriden
+      PeerCacheStarted(peerinstance); // may be overriden
     except
       // don't disable Peer: we would try on next Execute()
       on E: Exception do
@@ -225,7 +233,7 @@ begin
   end;
 end;
 
-procedure TMGetProcess.PeerCacheStarted;
+procedure TMGetProcess.PeerCacheStarted(PeerInstance: THttpPeerCache);
 begin
   // do nothing
 end;
@@ -347,7 +355,7 @@ begin
 end;
 
 function TMGetProcess.HttpDirectUri(const aRemoteUri, aRemoteHash: RawUtf8;
-  out aDirectUri, aDirectHeaderBearer: RawUtf8): boolean;
+  out aDirectUri, aDirectHeaderBearer: RawUtf8; aPermanent: boolean): boolean;
 var
   secret: RawUtf8;
 begin
@@ -361,7 +369,7 @@ begin
     else
       secret := HexToBin(fPeerSecretHexa);
   result := fPeerSettings.HttpDirectUri(secret, aRemoteUri, aRemoteHash,
-              aDirectUri, aDirectHeaderBearer, ServerTls.Enabled);
+              aDirectUri, aDirectHeaderBearer, ServerTls.Enabled, aPermanent);
   FillZero(secret);
 end;
 

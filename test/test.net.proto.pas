@@ -53,6 +53,8 @@ type
     options: TTunnelOptions;
     tunnelexecutedone: boolean;
     tunnelexecuteremote, tunnelexecutelocal: TNetPort;
+    function OnPeerCacheDirect(var aUri: TUri; var aHeader: RawUtf8;
+      var aOptions: THttpRequestExtendedOptions): integer;
     procedure TunnelExecute(Sender: TObject);
     procedure TunnelExecuted(Sender: TObject);
     procedure TunnelTest(const clientcert, servercert: ICryptCert);
@@ -1565,6 +1567,14 @@ type
   THttpPeerCacheHook = class(THttpPeerCache); // to test protected methods
   THttpPeerCryptHook = class(THttpPeerCrypt);
 
+const
+  HTTP_LINK: array[0 .. 1] of RawUtf8 = ( // some constant images on our website
+    'http://bouchez.info/_wp_generated/wpacaa94d5.gif',
+    'http://bouchez.info/_wp_generated/wp5e714672.jpg');
+  HTTP_HASH: array[0 .. high(HTTP_LINK)] of RawUtf8 = (
+    'af33fb8c84461b3e0893b88ef6a2fdecc79fe7de4170f13566edaf4d190d8a9d',
+    '4d950e49fe18379a2b81fc531794ecedfa0f10fa21a2fc5fe2ba2e33ac660c99');
+
 procedure TNetworkProtocols._THttpPeerCache;
 var
   hpc: THttpPeerCacheHook;
@@ -1573,8 +1583,9 @@ var
   msg, msg2: THttpPeerCacheMessage;
   m, m2: RawUtf8;
   res: THttpPeerCryptMessageDecode;
-  i, n, alter: integer;
+  i, n, alter, status: integer;
   tmp: RawByteString;
+  cache: TFileName;
   dUri, dBearer, dTok: RawUtf8;
   decoded: TUri;
   timer: TPrecisionTimer;
@@ -1585,8 +1596,10 @@ begin
   try
     hps.CacheTempPath := Executable.ProgramFilePath + 'peercachetemp';
     hps.CachePermPath := Executable.ProgramFilePath + 'peercacheperm';
+    hps.CacheTempMinBytes := 100;
     hps.Port := 8008; // don't use default 8099
-    hps.Options := [pcoVerboseLog {,pcoSelfSignedHttps}];
+    hps.Options := [pcoHttpDirect, pcoCacheTempNoCheckSize,
+                    pcoVerboseLog {,pcoSelfSignedHttps}];
     try
       hpc := THttpPeerCacheHook.Create(hps, 'secret');
       try
@@ -1675,15 +1688,52 @@ begin
         finally
           hpc2.Free;
         end;
+        // validate pcoHttpDirect proxy mode with some constant web resources
+        hpc.OnDirectOptions := OnPeerCacheDirect;
+        // ensure we can access the reference resources over Internet
+        status := 0;
+        tmp := HttpGet(HTTP_LINK[0], '', nil, false, @status, 1000);
+        if status = HTTP_SUCCESS then
+          // validate all resources
+          for i := 0 to high(HTTP_LINK) do
+          begin
+            // test according to local cache status
+            cache := MakeString([hpc.TempFilesPath, '02', HTTP_HASH[i], '.cache']);
+            DeleteFile(cache);
+            // compute the direct proxy URI and bearer
+            Check(hps.HttpDirectUri('secret', HTTP_LINK[i], HTTP_HASH[i], dUri, dBearer));
+            Check(PosEx(':8008', dUri) <> 0);
+            Check(dBearer <> '');
+            Check(IdemPChar(pointer(dBearer), HEADER_BEARER_UPPER));
+            // first request with download from reference website
+            status := 0;
+            tmp := HttpGet(dUri, dBearer, nil, false, @status, 100000, true);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(Sha256(tmp), HTTP_HASH[i]);
+            CheckEqual(StringFromFile(cache), tmp);
+            // twice to retrieve from cache
+            status := 0;
+            tmp := HttpGet(dUri, dBearer, nil, false, @status, 100000, true);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(Sha256(tmp), HTTP_HASH[i]);
+            Check(DeleteFile(cache));
+          end;
       finally
         hpc.Free;
       end;
     except
-      // exception here is likely to be port 8099 already used -> continue
+      // exception here is likely to be port 8008 already used -> continue
     end;
   finally
     hps.Free;
   end;
+end;
+
+function TNetworkProtocols.OnPeerCacheDirect(var aUri: TUri;
+  var aHeader: RawUtf8; var aOptions: THttpRequestExtendedOptions): integer;
+begin
+  //aOptions.TLS.IgnoreCertificateErrors := true; // needed e.g. with https
+  result := HTTP_SUCCESS;
 end;
 
 procedure TNetworkProtocols.HTTP;
