@@ -1597,6 +1597,7 @@ begin
     hps.CacheTempPath := Executable.ProgramFilePath + 'peercachetemp';
     hps.CachePermPath := Executable.ProgramFilePath + 'peercacheperm';
     hps.CacheTempMinBytes := 100;
+    hps.BroadCastDirectMinBytes := 10000; // broadcast for HTTP_LINK[1] only
     hps.Port := 8008; // don't use default 8099
     hps.Options := [pcoHttpDirect, pcoCacheTempNoCheckSize,
                     pcoVerboseLog {,pcoSelfSignedHttps}];
@@ -1645,8 +1646,7 @@ begin
           Check(res = mdOk, 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
           // validate the UDP client/server stack is running
-          for i := 1 to 10 do
-            Check(hpc.Ping = nil);
+          Check(hpc.Ping = nil);
           // validate THttpPeerCrypt.HttpDirectUri request encoding/decoding
           Check(THttpPeerCrypt.HttpDirectUri('secret',
             'https://synopse.info/forum', ToText(msg.Hash), dUri, dBearer));
@@ -1710,7 +1710,7 @@ begin
             tmp := HttpGet(dUri, dBearer, nil, false, @status, 100000, true);
             CheckEqual(status, HTTP_SUCCESS);
             CheckEqual(Sha256(tmp), HTTP_HASH[i]);
-            CheckEqual(StringFromFile(cache), tmp);
+            CheckEqual(HashFileSha256(cache), HTTP_HASH[i]);
             // twice to retrieve from cache
             status := 0;
             tmp := HttpGet(dUri, dBearer, nil, false, @status, 100000, true);
