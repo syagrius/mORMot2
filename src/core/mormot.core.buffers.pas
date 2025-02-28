@@ -1220,12 +1220,12 @@ function IsBase64(sp: PAnsiChar; len: PtrInt): boolean; overload;
 function BinToBase64Length(len: PtrUInt): PtrUInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// retrieve the expected undecoded length of a Base64 encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64 encoded buffer
+// - here len is the number of chars in the input sp buffer
 function Base64ToBinLength(sp: PAnsiChar; len: PtrInt): PtrInt;
 
-/// retrieve the expected undecoded length of a Base64 encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64 encoded buffer
+// - here len is the number of chars in the input sp buffer
 // - will check supplied text is a valid Base64 encoded stream
 function Base64ToBinLengthSafe(sp: PAnsiChar; len: PtrInt): PtrInt;
 
@@ -1266,8 +1266,8 @@ procedure Base64uriEncode(rp, sp: PAnsiChar; len: cardinal);
 function BinToBase64uriLength(len: PtrUInt): PtrUInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// retrieve the expected undecoded length of a Base64-URI encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64-URI encoded buffer
+// - here len is the number of chars in the encoded buffer
 // - in comparison to Base64 standard encoding, will trim any right-sided '='
 // unsignificant characters, and replace '+' or '/' by '_' or '-'
 function Base64uriToBinLength(len: PtrInt): PtrInt;
@@ -1684,8 +1684,7 @@ function UrlDecodeNeedParameters(U, CsvNames: PUtf8Char): boolean;
 // - if a pair is decoded, return a PUtf8Char pointer to the next pair in
 // the input buffer, or points to #0 if all content has been processed
 // - if a pair is not decoded, return nil
-function UrlDecodeNextNameValue(U: PUtf8Char;
-  var Name, Value: RawUtf8): PUtf8Char;
+function UrlDecodeNextNameValue(U: PUtf8Char; var Name, Value: RawUtf8): PUtf8Char;
 
 /// decode a URI-encoded Value from an input buffer
 // - decoded value is set in Value out variable
@@ -5352,19 +5351,17 @@ var
   crc: cardinal;
   tmp: array[0..16383] of AnsiChar;  // big enough to resize result in-place
 begin
+  result := '';
   if (PlainLen = 0) or
      (Plain = nil) then
-  begin
-    result := '';
     exit;
-  end;
   EnsureAlgoHasNoForcedFormat('Compress');
   crc := AlgoHash(0, Plain, PlainLen);
   if (PlainLen < CompressionSizeTrigger) or
      (CheckMagicForCompressed and
       IsContentCompressed(Plain, PlainLen)) then
   begin
-    FastNewRawByteString(result, PlainLen + BufferOffset + 9);
+    pointer(result) := FastNewString(PlainLen + BufferOffset + 9);
     R := pointer(result);
     inc(R, BufferOffset);
     PCardinal(R)^ := crc;
@@ -5377,7 +5374,7 @@ begin
     len := CompressDestLen(PlainLen) + BufferOffset;
     if len > SizeOf(tmp) then
     begin
-      FastNewRawByteString(result, len);
+      pointer(result) := FastNewString(len);
       R := pointer(result);
     end
     else
@@ -5647,11 +5644,11 @@ begin
       head.UnCompressedSize := count;
     if S = nil then
     begin
-      FastNewRawByteString(tmps, head.UnCompressedSize);
-      S := pointer(tmps); // here S is a temporary buffer
+      S := FastNewString(head.UnCompressedSize);
+      pointer(tmps) := S; // here S is a temporary buffer
     end;
     if {%H-}tmpd = '' then
-      FastNewRawByteString(tmpd, AlgoCompressDestLen(head.UnCompressedSize));
+      pointer(tmpd) := FastNewString(AlgoCompressDestLen(head.UnCompressedSize));
     dec(count, head.UnCompressedSize); // supports premature end of input
     if S = pointer(tmps) then
       head.UnCompressedSize := Source.Read(S^, head.UnCompressedSize);
@@ -7008,7 +7005,7 @@ begin
     result := (len shr 2) * 3;
     case len and 3 of
       1:
-        result := 0;
+        result := 0; // invalid
       2:
         inc(result, 1);
       3:
@@ -7551,7 +7548,7 @@ begin
       // BLOB literals are string literals containing hexadecimal data and
       // preceded by a single "x" or "X" character. For example: X'53514C697465'
       LenHex := (Len - 3) shr 1;
-      pointer(result) := FastNewString(LenHex, CP_RAWBYTESTRING);
+      pointer(result) := FastNewString(LenHex);
       if mormot.core.text.HexToBin(@P[2], pointer(result), LenHex) then
         exit; // valid hexa data
     end
@@ -7580,7 +7577,7 @@ begin
       // BLOB literals are string literals containing hexadecimal data and
       // preceded by a single "x" or "X" character. For example: X'53514C697465'
       LenHex := (Len - 3) shr 1;
-      pointer(result) := FastNewString(LenHex, CP_RAWBYTESTRING);
+      pointer(result) := FastNewString(LenHex);
       if mormot.core.text.HexToBin(@P[2], pointer(result), LenHex) then
         exit; // valid hexa data
     end
@@ -8216,7 +8213,7 @@ begin
       for a := 0 to n shr 1 do
       begin
         p := @NameValuePairs[a * 2];
-        VarRecToUtf8(p^, name);
+        VarRecToUtf8(p, name);
         if name = '' then
           continue;
         flags := flags - [valueDirect, valueIsCsv];
@@ -8237,13 +8234,13 @@ begin
            (byte(p^.VType) in vtNotString) then
           include(flags, valuedirect);
         if (ueSkipVoidValue in Options) and
-           VarRecIsVoid(p^) then
+           VarRecIsVoid(p) then
           continue // skip e.g. '' or 0
         else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
           value := ObjectToJson(p^.VObject, [])
         else if not (valueDirect in flags) then
         begin
-          VarRecToUtf8(p^, value);
+          VarRecToUtf8(p, value);
           if (ueSkipVoidString in Options) and
              (value = '') then
             continue; // skip ''
@@ -8276,7 +8273,7 @@ begin
         w.AddString(name);
         w.AddDirect('=');
         if valueDirect in flags then
-          w.Add(p^) // requires TJsonWriter
+          w.AddVarRec(p) // requires TJsonWriter
         else
           _UrlEncodeW(w, pointer(value), length(value), 32); // = UrlEncode(W)
       end;
@@ -9926,7 +9923,7 @@ begin
   else
   begin
     // compute the hash of the existing partial content
-    FastNewRawByteString(buf, 1 shl 20); // 1MB temporary buffer
+    pointer(buf) := FastNewString(1 shl 20); // 1MB temporary buffer
     repeat
       read := fRedirected.Read(pointer(buf)^, length(buf));
       if read <= 0 then
@@ -10264,7 +10261,7 @@ end;
 
 constructor TBufferedStreamReader.Create(aSource: TStream; aBufSize: integer);
 begin
-  FastNewRawByteString(fBuffer, aBufSize);
+  pointer(fBuffer) := FastNewString(aBufSize);
   fSource := aSource;
   fSize := fSource.Size; // get it once
   fSource.Seek(0, soBeginning);
@@ -11493,8 +11490,12 @@ begin
 end;
 
 procedure TRawByteStringBuffer.AppendCRLF;
+var
+  p: PByteArray; // faster than PWord() on Intel
 begin
-  PWord(@PByteArray(fBuffer)[fLen])^ := CRLFW;
+  p := @PByteArray(fBuffer)[fLen];
+  p[0] := 13;
+  p[1] := 10;
   inc(fLen, 2);
 end;
 

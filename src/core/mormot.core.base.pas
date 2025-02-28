@@ -332,6 +332,8 @@ type
 
   /// a dynamic array of TVarRec, i.e. could match an "array of const" parameter
   TTVarRecDynArray = array of TVarRec;
+  TVarRecArray = array[ 0 .. MaxInt div SizeOf(TVarRec) - 1 ] of TVarRec;
+  PVarRecArray = ^TVarRecArray;
 
   /// a TVarData values array
   // - is not called TVarDataArray to avoid confusion with the corresponding
@@ -839,7 +841,7 @@ procedure FastAssignNewNotVoid(var d; s: pointer); overload;
   {$ifndef FPC_CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// internal function used by FastSetString/FastSetStringCP
-function FastNewString(len, codepage: PtrInt): PAnsiChar;
+function FastNewString(len: PtrInt; codepage: PtrInt = CP_RAWBYTESTRING): pointer;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// ensure the supplied variable will have a CP_UTF8 code page
@@ -861,6 +863,7 @@ procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// internal function which could be used instead of SetLength() if RefCnt = 1
+// - FakeLength() don't handle len = 0, whereas FakeSetLength() will
 procedure FakeLength(var s: RawByteString; len: PtrInt); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -3197,7 +3200,7 @@ type
     function RawNext: cardinal;
     /// compute the next 32-bit generated value
     // - will automatically reseed after around 2^32 generated values, which is
-    // huge but very conservative since this generator has a period of 2^88
+    // huge but conservative since this generator has a known period of 2^88
     function Next: cardinal; overload;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute the next 32-bit generated value, in range [0..max-1]
@@ -4827,32 +4830,31 @@ end;
 
 {$endif FPC_CPUX64}
 
-function FastNewString(len, codepage: PtrInt): PAnsiChar;
+function FastNewString(len, codepage: PtrInt): pointer;
 var
   rec: PStrRec;
 begin
   result := nil;
-  if len > 0 then
-  begin
-    {$ifdef FPC}
-    rec := GetMem(len + (_STRRECSIZE + 4));
-    result := PAnsiChar(rec) + _STRRECSIZE;
-    {$else}
-    GetMem(result, len + (_STRRECSIZE + 4));
-    rec := pointer(result);
-    inc(PStrRec(result));
-    {$endif FPC}
-    {$ifdef HASCODEPAGE} // also set elemSize := 1
-    {$ifdef FPC}
-    rec^.codePageElemSize := codepage + (1 shl 16);
-    {$else}
-    PCardinal(@rec^.codePage)^ := codepage + (1 shl 16);
-    {$endif FPC}
-    {$endif HASCODEPAGE}
-    rec^.refCnt := 1;
-    rec^.length := len;
-    PCardinal(PAnsiChar(rec) + len + _STRRECSIZE)^ := 0; // ends with four #0
-  end;
+  if len <= 0 then
+    exit;
+  {$ifdef FPC}
+  rec := GetMem(len + (_STRRECSIZE + 4));
+  result := PAnsiChar(rec) + _STRRECSIZE;
+  {$else}
+  GetMem(result, len + (_STRRECSIZE + 4));
+  rec := result;
+  inc(PStrRec(result));
+  {$endif FPC}
+  {$ifdef HASCODEPAGE} // also set elemSize := 1
+  {$ifdef FPC}
+  rec^.codePageElemSize := codepage + (1 shl 16);
+  {$else}
+  PCardinal(@rec^.codePage)^ := codepage + (1 shl 16);
+  {$endif FPC}
+  {$endif HASCODEPAGE}
+  rec^.refCnt := 1;
+  rec^.length := len;
+  PCardinal(PAnsiChar(rec) + len + _STRRECSIZE)^ := 0; // ends with four #0
 end;
 
 {$ifdef HASCODEPAGE}
@@ -5010,7 +5012,7 @@ procedure FastSetRawByteString(var s: RawByteString; p: pointer; len: PtrInt);
 var
   r: pointer;
 begin
-  r := FastNewString(len, CP_RAWBYTESTRING); // FPC does constant propagation
+  r := FastNewString(len); // FPC does constant propagation
   if (p <> nil) and
      (r <> nil) then
     MoveFast(p^, r^, len);
@@ -5024,7 +5026,7 @@ procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
 var
   r: pointer;
 begin
-  r := FastNewString(len, CP_RAWBYTESTRING);
+  r := FastNewString(len);
   if pointer(s) = nil then
     pointer(s) := r
   else
@@ -9544,7 +9546,7 @@ end;
 function mach_absolute_time: Int64;   cdecl external 'c';
 function mach_continuous_time: Int64; cdecl external 'c';
 
-procedure CreateGuid(var guid: TGuid); // sysutils version is slow
+procedure CreateGuid(var guid: TGuid); // sysutils MacOS version is sloooow
 begin
   PInt64Array(@guid)^[0] := mach_absolute_time;  // monotonic time (in ns)
   PInt64Array(@guid)^[1] := mach_continuous_time;
@@ -11733,8 +11735,7 @@ procedure crc128c(buf: PAnsiChar; len: cardinal; out crc: THash128);
 var
   h: THash128Rec absolute crc;
   h1, h2: cardinal;
-begin
-  // see https://goo.gl/Pls5wi
+begin // see https://goo.gl/Pls5wi
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;
@@ -11750,8 +11751,7 @@ procedure crc256c(buf: PAnsiChar; len: cardinal; out crc: THash256);
 var
   h: THash256Rec absolute crc;
   h1, h2: cardinal;
-begin
-  // see https://goo.gl/Pls5wi
+begin // see https://goo.gl/Pls5wi
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;

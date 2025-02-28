@@ -93,17 +93,23 @@ type
 { ************** AES Cypher/Uncypher in various Modes }
 
 type
+  PAesOsl = ^TAesOsl;
+
   /// reusable wrapper around OpenSSL Cipher process
+  {$ifdef USERECORDWITHMETHODS}
+  TAesOsl = record
+  {$else}
   TAesOsl = object
+  {$endif USERECORDWITHMETHODS}
   public
     Owner: TAesAbstract;
     Cipher: PEVP_CIPHER; // computed from TAesAbstractOsl.AlgoName
     Ctx: array[boolean] of PEVP_CIPHER_CTX; // set and reused in CallEvp()
     procedure Init(aOwner: TAesAbstract; aCipherName: PUtf8Char);
     procedure Done;
+    procedure Clone(another: PAesOsl);
     procedure SetEvp(DoEncrypt: boolean; const method: shortstring);
     procedure UpdEvp(DoEncrypt: boolean; BufIn, BufOut: pointer; Count: cardinal);
-    procedure Clone(ToOwner: TAesAbstract; out ToAesOsl: TAesOsl);
   end;
 
   /// handle AES cypher/uncypher with chaining with OpenSSL 1.1
@@ -199,15 +205,11 @@ type
   protected
     fAes: TAesOsl;
     function AesGcmInit: boolean; override; // from fKey/fKeySize
+    procedure AesGcmClone(another: TAesGcmAbstract); override;
     procedure AesGcmDone; override;
     procedure AesGcmReset; override; // from fIV/CTR_POS
     function AesGcmProcess(BufIn, BufOut: pointer; Count: cardinal): boolean; override;
   public
-    /// creates a new instance with the very same values
-    // - by design, our classes will use TAesGcmEngine stateless context, so
-    // this method will just copy the current fields to a new instance,
-    // by-passing the key creation step
-    function Clone: TAesAbstract; override;
     /// compute a class instance similar to this one, for performing the
     // reverse encryption/decryption process
     // - will return self to avoid creating two instances
@@ -755,6 +757,20 @@ begin
     EVP_CIPHER_CTX_free(Ctx[true]);
 end;
 
+procedure TAesOsl.Clone(another: PAesOsl);
+var
+  enc: boolean;
+begin // another^.Owned is set by the caller
+  another^.Cipher := Cipher;
+  for enc := false to true do
+    if Ctx[enc] <> nil then
+    begin
+      // efficient Ctx[] copy
+      another^.Ctx[enc] := EVP_CIPHER_CTX_new;
+      EVP_CIPHER_CTX_copy(another^.Ctx[enc], Ctx[enc]);
+    end;
+end;
+
 procedure TAesOsl.SetEvp(DoEncrypt: boolean; const method: shortstring);
 var
   c: PEVP_CIPHER_CTX;
@@ -802,29 +818,6 @@ begin
   Owner.IV := PAesBlock(EVP_CIPHER_CTX_iv(c))^; // for fIVUpdated := true
   // no need to call EVP_CipherFinal_ex() since we expect no padding
 end;
-
-procedure TAesOsl.Clone(ToOwner: TAesAbstract; out ToAesOsl: TAesOsl);
-var
-  enc: boolean;
-  s, d: TAesAbstractOsl;
-begin
-  s := TAesAbstractOsl(Owner);
-  d := TAesAbstractOsl(ToOwner);
-  d.fKeySize := s.fKeySize;
-  d.fKeySizeBytes := s.fKeySizeBytes;
-  d.fAlgoMode := s.fAlgoMode;
-  d.fKey := s.fKey;
-  ToAesOsl.Owner := ToOwner;
-  ToAesOsl.Cipher := Cipher;
-  for enc := false to true do
-    if Ctx[enc] <> nil then
-    begin
-      // efficient Ctx[] copy
-      ToAesOsl.Ctx[enc] := EVP_CIPHER_CTX_new;
-      EVP_CIPHER_CTX_copy(ToAesOsl.Ctx[enc], Ctx[enc]);
-    end;
-end;
-
 
 
 { ************** OpenSSL Cryptographic Pseudorandom Number Generator (CSPRNG) }
@@ -906,8 +899,9 @@ end;
 
 function TAesAbstractOsl.Clone: TAesAbstract;
 begin
-  result := TAesAbstractOsl(NewInstance);
-  fAes.Clone(result, TAesAbstractOsl(result).fAes); // efficient Ctx[] copy
+  result := InternalCopy; // copy main properties
+  TAesAbstractOsl(result).fAes.Owner := result;
+  fAes.Clone(@TAesAbstractOsl(result).fAes); // efficient Ctx[] copy
 end;
 
 function TAesAbstractOsl.CloneEncryptDecrypt: TAesAbstract;
@@ -968,6 +962,12 @@ begin
   result := nam[0] <> #0;
 end;
 
+procedure TAesGcmOsl.AesGcmClone(another: TAesGcmAbstract);
+begin
+  TAesGcmOsl(another).fAes.Owner := another;
+  fAes.Clone(@TAesGcmOsl(another).fAes); // efficient Ctx[] copy
+end;
+
 procedure TAesGcmOsl.AesGcmDone;
 begin
   fAes.Done;
@@ -1018,12 +1018,6 @@ begin
       end
   end;
   fStarted := stNone; // allow reuse of this fAes instance
-end;
-
-function TAesGcmOsl.Clone: TAesAbstract;
-begin
-  result := TAesGcmOsl(NewInstance);
-  fAes.Clone(result, TAesGcmOsl(result).fAes); // efficient Ctx[] copy
 end;
 
 function TAesGcmOsl.CloneEncryptDecrypt: TAesAbstract;

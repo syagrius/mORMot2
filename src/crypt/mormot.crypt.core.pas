@@ -335,11 +335,12 @@ type
   TAesKey = THash256;
 
 type
-  /// handle AES cypher/uncypher
+  /// internal low-level static engine to handle raw AES cypher/uncypher
   // - this is the default Electronic codebook (ECB) mode
-  // - this class will use AES-NI hardware instructions, if available
+  // - will use AES-NI hardware instructions, if available
   // - we defined a record instead of a class, to allow stack allocation and
-  // thread-safe reuse of one initialized instance
+  // thread-safe reuse of one initialized instance as a static memory copy
+  // - do not use this raw data structure, but TAesFast[] high-level classes
   {$ifdef USERECORDWITHMETHODS}
   TAes = record
   {$else}
@@ -415,11 +416,14 @@ type
   /// points to a TAes encryption/decryption instance
   PAes = ^TAes;
 
+  /// points to a TAesGcmEngine encryption/decryption instance
+  PAesGcmEngine = ^TAesGcmEngine;
 
-  /// low-level AES-GCM processing
+  /// internal low-level static engine to handle raw AES-GCM processing
   // - implements standard AEAD (authenticated-encryption with associated-data)
   // algorithm, as defined by NIST Special Publication 800-38D
   // - will use AES-NI and CLMUL Intel/AMD opcodes if available on x86_64/i386
+  // - do not use this raw data structure, but TAesFast[mGCM] with proper padding
   {$ifdef USERECORDWITHMETHODS}
   TAesGcmEngine = record
   {$else}
@@ -428,26 +432,30 @@ type
   private
     /// standard AES encryption context
     aes: TAes;
-    /// ghash value of the Authentication Data
-    aad_ghv: TAesBlock;
-    /// ghash value of the Ciphertext
-    txt_ghv: TAesBlock;
-    /// ghash H current value
-    ghash_h: TAesBlock;
-    /// number of Authentication Data bytes processed
-    aad_cnt: TQWordRec;
-    /// number of bytes of the Ciphertext
-    atx_cnt: TQWordRec;
-    /// initial 32-bit ctr val - to be reused in Final()
-    y0_val: integer;
-    /// current 0..15 position in encryption block
-    blen: byte;
-    /// the state of this context
-    flags: set of (flagFinalComputed, flagFlushed, flagCLMUL, flagAVX);
+    /// internal AES-GCM state structure
+    state: record
+      /// ghash value of the Authentication Data
+      aad_ghv: TAesBlock;
+      /// ghash value of the Ciphertext
+      txt_ghv: TAesBlock;
+      /// ghash H current value
+      ghash_h: TAesBlock;
+      /// number of Authentication Data bytes processed
+      aad_cnt: TQWordRec;
+      /// number of bytes of the Ciphertext
+      atx_cnt: TQWordRec;
+      /// initial 32-bit ctr val - to be reused in Final()
+      y0_val: integer;
+      /// current 0..15 position in encryption block
+      blen: byte;
+      /// the state of this context
+      flags: set of (flagFinalComputed, flagFlushed, flagCLMUL, flagAVX);
+    end;
     /// 4KB lookup table for fast Galois Finite Field multiplication
     // - is defined as last field of the object for better code generation
+    // - only first 256 bytes are used in flagAVX mode
     gf_t4k: array[byte] of THash128Rec;
-    /// build the gf_t4k[] internal table - assuming set to zero by caller
+    /// build the gf_t4k[] internal table from current state.ghash_h
     procedure Make4K_Table;
     /// compute a * ghash_h in Galois Finite Field 2^128 using gf_t4k[]
     procedure gf_mul_h_pas(var a: TAesBlock);
@@ -456,13 +464,19 @@ type
     /// low-level GCM authentication
     procedure internal_auth(ctp: PByte; ILen: PtrUInt;
       var ghv: TAesBlock; var gcnt: TQWordRec);
+    {$ifdef USEGCMAVX}
+    /// redirected from Encrypt() and Decrypt() in flagAVX mode
+    procedure AvxProcess(BufIn, BufOut: PByte; Count: cardinal; Encrypt: boolean);
+    {$endif USEGCMAVX}
   public
     /// initialize the AES-GCM structure for the supplied Key
-    function Init(const Key; KeyBits: PtrInt): boolean;
+    function Init(const Key; KeyBits: PtrInt; AllowAvx: boolean): boolean;
     /// start AES-GCM encryption with a given Initialization Vector
     // - IV_len is in bytes use 12 for exact IV setting, otherwise the
     // supplied buffer will be hashed using gf_mul_h()
     function Reset(pIV: pointer; IV_len: PtrInt): boolean;
+    /// copy this AES-GCM engine key and state into another instance
+    procedure Clone(another: PAesGcmEngine);
     /// encrypt a buffer with AES-GCM, updating the associated authentication data
     function Encrypt(ptp, ctp: pointer; ILen: PtrInt): boolean;
     /// decrypt a buffer with AES-GCM, updating the associated authentication data
@@ -480,13 +494,15 @@ type
     // - do nothing if Final() has been already called
     procedure Done;
     /// single call AES-GCM encryption and authentication process
+    // - mostly used for testing purpose with reference vectors
     function FullEncryptAndAuthenticate(const Key; KeyBits: PtrInt;
-      pIV: pointer; IV_len: PtrInt; pAAD: pointer; aLen: PtrInt;
-      ptp, ctp: pointer; pLen: PtrInt; out tag: TAesBlock): boolean;
+      pIV, pAAD, ptp, ctp: pointer; IV_len, aLen, pLen: PtrInt;
+      out tag: TAesBlock; allowavx: boolean = true): boolean;
     /// single call AES-GCM decryption and verification process
+    // - mostly used for testing purpose with reference vectors
     function FullDecryptAndVerify(const Key; KeyBits: PtrInt;
-      pIV: pointer; IV_len: PtrInt; pAAD: pointer; aLen: PtrInt;
-      ctp, ptp: pointer; pLen: PtrInt; ptag: pointer; tLen: PtrInt): boolean;
+      pIV, pAAD, ctp, ptp, ptag: pointer; IV_len, aLen, pLen, tLen: PtrInt;
+      allowavx: boolean = true): boolean;
   end;
 
   /// the AES chaining modes implemented by this unit
@@ -525,6 +541,7 @@ type
     fAlgoMode: TAesMode;
     fIVUpdated: boolean; // so you can chain Encrypt/Decrypt() calls
     procedure AfterCreate; virtual; // circumvent Delphi bug about const aKey
+    function InternalCopy: TAesAbstract; // copy main properties for Clone()
     function DecryptPkcs7Len(var InputLen, ivsize: PtrInt; Input: pointer;
       IVAtBeginning, RaiseESynCryptoOnError: boolean): boolean;
   public
@@ -655,6 +672,11 @@ type
     // - if RaiseESynCryptoOnError=false, returns '' on any decryption error
     function DecryptPkcs7Buffer(Input: pointer; InputLen: PtrInt;
       IVAtBeginning: boolean; RaiseESynCryptoOnError: boolean = true): RawByteString;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// decrypt a memory buffer using a PKCS7 padding pattern
+    // - as called by DecryptPkcs7Buffer()
+    function DecryptPkcs7Var(Input: pointer; InputLen: PtrInt;
+      IVAtBeginning: boolean; var Plain: RawByteString): boolean;
 
     /// initialize AEAD (authenticated-encryption with associated-data) nonce
     // - i.e. setup 256-bit MAC computation before next Encrypt/Decrypt call
@@ -698,7 +720,7 @@ type
     // AES/MAC process - for TAesGcm, authentication requires decryption
     // - EndingSize can be used if some custom info is stored at the end of Data
     function MacAndCrypt(const Data: RawByteString; Encrypt, IVAtBeginning: boolean;
-      const Associated: RawByteString = ''; EndingSize: cardinal = 0): RawByteString;
+      const Associated: RawByteString = ''; EndingSize: cardinal = 0): RawByteString; virtual;
 
     {$ifndef PUREMORMOT2}
     /// deprecated wrapper able to cypher/decypher any in-memory content
@@ -777,8 +799,8 @@ type
   public
     /// creates a new instance with the very same values
     // - by design, our classes will use TAes stateless context, so this method
-    // will just copy the current fields to a new instance, by-passing
-    // the key creation step
+    // will just copy all current static fields to a new instance, by-passing
+    // the key creation step and reuse the current state of this instance
     function Clone: TAesAbstract; override;
     /// release the used instance memory and resources
     // - also fill the TAes instance with zeros, for safety
@@ -1127,6 +1149,7 @@ type
     procedure AfterCreate; override;
     // abstract methods which should be overriden with the AES-GCM engine
     function AesGcmInit: boolean; virtual; abstract; // from fKey/fKeySize
+    procedure AesGcmClone(another: TAesGcmAbstract); virtual; abstract;
     procedure AesGcmDone; virtual; abstract;
     procedure AesGcmReset; virtual; abstract; // from fIV/CTR_POS
     function AesGcmProcess(BufIn, BufOut: pointer; Count: cardinal): boolean; virtual; abstract;
@@ -1134,6 +1157,8 @@ type
     /// release the used instance memory and resources
     // - also fill the internal TAes instance with zeros, for safety
     destructor Destroy; override;
+    /// creates a new instance with the very same values using AesGcmClone()
+    function Clone: TAesAbstract; override;
     /// perform the AES-GCM cypher and authentication
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
     /// perform the AES un-cypher and authentication
@@ -1159,6 +1184,12 @@ type
     // - always return true, since AES-GCM is a one pass process, and perform
     // the authentication during the decryption process
     function MacCheckError(Encrypted: pointer; Count: cardinal): boolean; override;
+    /// perform one step PKCS7 encryption/decryption and authentication with
+    // the curent AES instance over a small memory block
+    // - overriden to generate the standard AES-GCM output, which does not match
+    // our TAesAbstract.MacAndCrypt() layout with dual 256-bit signatures
+    function MacAndCrypt(const Data: RawByteString; Encrypt, IVAtBeginning: boolean;
+      const Associated: RawByteString = ''; EndingSize: cardinal = 0): RawByteString; override;
     /// AES-GCM pure alternative to MacSetNonce()
     // - if the MacEncrypt pattern is not convenient for your purpose
     // - set the IV as usual (only the first 12 bytes will be used for GCM),
@@ -1173,6 +1204,11 @@ type
     // - warning: by design, you should always call AesGcmFinal() after
     // Encrypt/Decrypt before reusing this instance
     function AesGcmFinal(var Tag: TAesBlock; TagLen: integer = 16): boolean; virtual; abstract;
+    /// AES-GCM pure alternative to MacAndCrypt() over memory buffers
+    // - returns -1 on error, or the number of bytes written to Output (which
+    // may be 0 with a 16-byte input padding)
+    function AesGcmBuffer(Input, Output: pointer; InputLen, OutputMax: PtrInt;
+      Encrypt, IVAtBeginning: boolean; const Associated: RawByteString = ''): PtrInt;
   end;
 
   /// meta-class of TAesGcmAbstract types
@@ -1201,15 +1237,11 @@ type
   protected
     fGcm: TAesGcmEngine;
     function AesGcmInit: boolean; override; // from fKey/fKeySize
+    procedure AesGcmClone(another: TAesGcmAbstract); override;
     procedure AesGcmDone; override;
     procedure AesGcmReset; override; // from fIV/CTR_POS
     function AesGcmProcess(BufIn, BufOut: pointer; Count: cardinal): boolean; override;
   public
-    /// creates a new instance with the very same values
-    // - by design, our classes will use TAesGcmEngine stateless context, so
-    // this method will just copy the current fields to a new instance,
-    // by-passing the key creation step
-    function Clone: TAesAbstract; override;
     /// AES-GCM pure alternative to MacSetNonce()
     // - set the IV as usual (only the first 12 bytes will be used for GCM),
     // then optionally append any AEAD data with this method; warning: you need
@@ -4787,13 +4819,13 @@ procedure gf_mul_h(const engine: TAesGcmEngine; var a: TAesBlock);
   {$ifdef HASINLINE} inline; {$endif}
 begin
   {$ifdef USECLMUL}
-  if flagCLMUL in engine.flags then
-    gf_mul_pclmulqdq(@a, @engine.ghash_h)
+  if flagCLMUL in engine.state.flags then
+    gf_mul_pclmulqdq(@a, @engine.state.ghash_h)
   else
   {$endif USECLMUL}
   {$ifdef USEARMCRYPTO}
-  if PmullArmAvailable then
-    gf_mul_h_arm(@a, @engine.ghash_h)
+  if flagCLMUL in engine.state.flags then
+    gf_mul_h_arm(@a, @engine.state.ghash_h)
   else
   {$endif USEARMCRYPTO}
     // use pure pascal efficient code with 4KB pre-computed table
@@ -4807,7 +4839,8 @@ procedure TAesGcmEngine.Make4K_Table;
 var
   j, k: PtrInt;
 begin
-  gf_t4k[128].b := ghash_h;
+  FillCharFast(gf_t4k, SizeOf(gf_t4k), 0); 
+  gf_t4k[128].b := state.ghash_h;
   j := 64;
   while j > 0 do
   begin
@@ -4858,7 +4891,7 @@ end;
 procedure GCM_IncCtr(var x: TAesBlock);
   {$ifdef HASINLINE} inline; {$endif}
 begin
-  // in AES-GCM, CTR covers only 32 LSB Big-Endian bits, i.e. x[15]..x[12]
+  // in AES-GCM, CTR covers only lowest Big-Endian 32-bit, i.e. x[15]..x[12]
   inc(x[15]);
   if x[15] <> 0 then
     exit;
@@ -4876,9 +4909,9 @@ var
   {$ifdef USEAESNI64} ctr, {$endif USEAESNI64}
   blocks: cardinal;
 begin
-  b_pos := blen;
-  inc(blen, ILen);
-  blen := blen and AesBlockMod;
+  b_pos := state.blen;
+  inc(state.blen, ILen);
+  state.blen := state.blen and AesBlockMod;
   if b_pos = 0 then
     b_pos := SizeOf(TAesBlock)
   else
@@ -4971,116 +5004,192 @@ begin
   end;
 end;
 
-function TAesGcmEngine.Init(const Key; KeyBits: PtrInt): boolean;
+{$ifdef USEGCMAVX}
+procedure TAesGcmEngine.AvxProcess(BufIn, BufOut: PByte; Count: cardinal;
+  Encrypt: boolean);
+var
+  blocks, ctr, onepass: cardinal;
 begin
-  FillcharFast(self,SizeOf(self), 0);
+  // 8x interleaved aesni + pclmulqdq x86_64 asm
+  if Count and AesBlockMod <> 0 then
+    raise ESynCrypto.Create('TAesGcm.Encrypt/Decrypt should use PKCS7');
+  inc(state.atx_cnt.V, Count);
+  repeat
+    // regroup GMAC + AES-CTR per 1MB chunks to fit in L2/L3 CPU cache
+    onepass := 1 shl 20;
+    if Count < onepass then
+      onepass := Count;
+    // GMAC done before decryption
+    if not Encrypt then
+      GcmAvxAuth(@gf_t4k, BufIn, onepass, @state.txt_ghv);
+    // AES-CTR using AES-NI and SSE4.1 over a 32-bit counter
+    blocks := onepass shr AesBlockShift;
+    ctr := bswap32(TAesContext(aes).iv.c3) + blocks;
+    GCM_IncCtr(TAesContext(aes).iv.b); // should be done before
+    AesNiEncryptCtrNist32(BufIn, BufOut, blocks, @aes, @TAesContext(aes).iv);
+    TAesContext(aes).iv.c3 := bswap32(ctr);
+    // GMAC done after encryption
+    if Encrypt then
+      GcmAvxAuth(@gf_t4k, BufOut, onepass, @state.txt_ghv);
+    dec(Count, onepass);
+    if Count = 0 then
+      exit;
+    inc(BufIn, onepass);
+    inc(BufOut, onepass);
+  until false;
+end;
+{$endif USEGCMAVX}
+
+function TAesGcmEngine.Init(const Key; KeyBits: PtrInt; AllowAvx: boolean): boolean;
+{$ifdef USEGCMAVX}
+var
+  cf: ^TIntelCpuFeatures;
+{$endif USEGCMAVX}
+begin
+  FillCharFast(state, SizeOf(state), 0);
   result := aes.EncryptInit(Key, KeyBits);
   if not result then
     exit;
-  aes.Encrypt(ghash_h, ghash_h);
+  aes.Encrypt(state.ghash_h, state.ghash_h);
+  {$ifdef USEGCMAVX}
+  cf := @CpuFeatures;
+  if AllowAvx and
+     (cfCLMUL in cf^) and
+     (cfSSE41 in cf^) and
+     (cfAESNI in cf^) and
+     not (daAesGcmAvx in DisabledAsm) then
+  begin
+    // 8x interleaved aesni + pclmulqdq x86_64 asm - using 256 bytes in gf_t4k[]
+    state.flags := [flagAVX, flagCLMUL];
+    GcmAvxInit(@gf_t4k, @aes, TAesContext(aes).Rounds);
+  end
+  else
+  {$endif USEGCMAVX}
+  // regular TAesGcmEngine
   {$ifdef USECLMUL}
   if cfCLMUL in CpuFeatures then
-    include(flags, flagCLMUL)
+    include(state.flags, flagCLMUL) // no gf_t4k[] use
   else
   {$endif USECLMUL}
+  {$ifdef USEARMCRYPTO}
+  if PmullArmAvailable then
+    include(state.flags, flagCLMUL) // no gf_t4k[] use
+  else
+  {$endif USEARMCRYPTO}
     Make4K_Table;
 end;
 
 const
-  CTR_POS  = 12;
+  CTR_POS = 12; // "perfect" size of IV in AES-GCM mode
 
 function TAesGcmEngine.Reset(pIV: pointer; IV_len: PtrInt): boolean;
 var
   i, n_pos: PtrInt;
+  iv: PHash128Rec;
 begin
+  result := false;
   if (pIV = nil) or
      (IV_len = 0) then
-  begin
-    result := false;
     exit;
-  end;
+  iv := @TAesContext(aes).iv;
   if IV_len = CTR_POS then
   begin
-    // Initialization Vector size matches perfect size of 12 bytes
-    MoveFast(pIV^, TAesContext(aes).iv, CTR_POS);
-    TAesContext(aes).iv.c3 := $01000000;
+    // IV has perfect size of 12 bytes - as forced by TAesGcm.AesGcmReset
+    MoveFast(pIV^, iv^, CTR_POS);
+    iv^.c3 := $01000000;
   end
   else
   begin
-    // Initialization Vector is otherwise computed from GHASH(IV,H)
+    // IV is otherwise computed from GHASH(IV,H) - also used for USEGCMAVX
     n_pos := IV_len;
-    FillZero(TAesContext(aes).iv.b);
+    FillZero(iv^.b);
     while n_pos >= SizeOf(TAesBlock) do
     begin
-      XorBlock16(@TAesContext(aes).iv, pIV);
+      XorBlock16(pointer(iv), pIV);
       inc(PAesBlock(pIV));
       dec(n_pos, SizeOf(TAesBlock));
-      gf_mul_h(self, TAesContext(aes).iv.b); // maybe CLMUL
+      gf_mul_h(self, iv^.b); // maybe CLMUL
     end;
     if n_pos > 0 then
     begin
       for i := 0 to n_pos - 1 do
-        TAesContext(aes).iv.b[i] := TAesContext(aes).iv.b[i] xor PAesBlock(pIV)^[i];
-      gf_mul_h(self, TAesContext(aes).iv.b); // maybe CLMUL
+        iv^.b[i] := iv^.b[i] xor PAesBlock(pIV)^[i];
+      gf_mul_h(self, iv^.b); // maybe CLMUL
     end;
     n_pos := IV_len shl 3;
     i := 15;
     while n_pos > 0 do
     begin
-      TAesContext(aes).iv.b[i] := TAesContext(aes).iv.b[i] xor byte(n_pos);
+      iv^.b[i] := iv^.b[i] xor byte(n_pos);
       n_pos := n_pos shr 8;
       dec(i);
     end;
-    gf_mul_h(self, TAesContext(aes).iv.b); // maybe CLMUL
+    gf_mul_h(self, iv^.b); // maybe CLMUL
   end;
   // reset internal state and counters
-  y0_val := TAesContext(aes).iv.c3;
-  FillZero(aad_ghv);
-  FillZero(txt_ghv);
-  aad_cnt.V := 0;
-  atx_cnt.V := 0;
-  flags := flags - [flagFinalComputed, flagFlushed];
+  state.y0_val := iv^.c3;
+  FillZero(state.aad_ghv);
+  FillZero(state.txt_ghv);
+  state.aad_cnt.V := 0;
+  state.atx_cnt.V := 0;
+  state.flags := state.flags - [flagFinalComputed, flagFlushed];
   result := true;
+end;
+
+procedure TAesGcmEngine.Clone(another: PAesGcmEngine);
+begin // only copy what is really needed
+  {$ifdef USEGCMAVX}
+  if flagAVX in state.flags then // x86_64 asm uses 256 bytes in gf_t4k[]
+    MoveFast(self, another^, PtrInt(@PAesGcmEngine(nil)^.gf_t4k[256 div 16]))
+  else
+  {$endif USEGCMAVX}
+  if flagCLMUL in state.flags then // USECLMUL or USEARMCRYPTO: no gf_t4k[] use
+    MoveFast(self, another^, PtrInt(@PAesGcmEngine(nil)^.gf_t4k))
+  else
+    MoveFast(self, another^, SizeOf(self));
 end;
 
 function TAesGcmEngine.Encrypt(ptp, ctp: pointer; ILen: PtrInt): boolean;
 begin
-  if ILen > 0 then
+  result := true;
+  if ILen <= 0 then
+    exit;
+  result := false;
+  if (ptp = nil) or
+     (ctp = nil) or
+     (flagFinalComputed in state.flags) then
+    exit;
+  {$ifdef USEGCMAVX}
+  if flagAVX in state.flags then
+    AvxProcess(ptp, ctp, ILen, {encrypt=}true)
+  else
+  {$endif USEGCMAVX}
+  if (ILen and AesBlockMod = 0) and
+     {$ifdef USEAESNI64} // faster with 8x interleaved internal_crypt()
+     not (aesNiSse41 in TAesContext(aes).Flags) and
+     {$endif USEAESNI64}
+     (state.blen = 0) then
   begin
-    if (ptp = nil) or
-       (ctp = nil) or
-       (flagFinalComputed in flags) then
-    begin
-      result := false;
-      exit;
-    end;
-    if (ILen and AesBlockMod = 0) and
-       {$ifdef USEAESNI64} // faster with 8x interleaved internal_crypt()
-       not (aesNiSse41 in TAesContext(aes).Flags) and
-       {$endif USEAESNI64}
-       (blen = 0) then
-    begin
-      inc(atx_cnt.V, ILen);
-      ILen := ILen shr AesBlockShift;
-      repeat
-        // single-pass loop optimized e.g. for PKCS7 padding
-        {%H-}GCM_IncCtr(TAesContext(aes).iv.b);
-        TAesContext(aes).DoBlock(aes, TAesContext(aes).iv,
-          TAesContext(aes).buf); // buf=AES(iv) maybe AES-NI
-        XorBlock16(ptp, ctp, @TAesContext(aes).buf);
-        gf_mul_h(self, txt_ghv);  // maybe CLMUL
-        XorBlock16(@txt_ghv, ctp);
-        inc(PAesBlock(ptp));
-        inc(PAesBlock(ctp));
-        dec(ILen);
-      until ILen = 0;
-    end
-    else
-    begin
-      // generic process in dual pass
-      internal_crypt(ptp, ctp,iLen);
-      internal_auth(ctp, ILen, txt_ghv, atx_cnt);
-    end;
+    inc(state.atx_cnt.V, ILen);
+    ILen := ILen shr AesBlockShift;
+    repeat
+      // single-pass loop optimized e.g. for PKCS7 padding without SSE4.1
+      {%H-}GCM_IncCtr(TAesContext(aes).iv.b);
+      TAesContext(aes).DoBlock(aes, TAesContext(aes).iv,
+        TAesContext(aes).buf); // buf=AES(iv) maybe AES-NI
+      XorBlock16(ptp, ctp, @TAesContext(aes).buf);
+      gf_mul_h(self, state.txt_ghv);  // maybe CLMUL
+      XorBlock16(@state.txt_ghv, ctp);
+      inc(PAesBlock(ptp));
+      inc(PAesBlock(ctp));
+      dec(ILen);
+    until ILen = 0;
+  end
+  else
+  begin
+    // dual pass generic process, supporting GCM truncation (ILen and 15 <> 0)
+    internal_crypt(ptp, ctp,iLen);
+    internal_auth(ctp, ILen, state.txt_ghv, state.atx_cnt);
   end;
   result := true;
 end;
@@ -5090,55 +5199,60 @@ function TAesGcmEngine.Decrypt(ctp, ptp: pointer; ILen: PtrInt;
 var
   tag: TAesBlock;
 begin
+  result := true;
+  if ILen <= 0 then
+    exit;
   result := false;
-  if ILen > 0 then
+  if (ptp = nil) or
+     (ctp = nil) or
+     (flagFinalComputed in state.flags) then
+    exit;
+  {$ifdef USEGCMAVX}
+  if flagAVX in state.flags then
+    AvxProcess(ctp, ptp, ILen, {encrypt=}false)
+  else
+  {$endif USEGCMAVX}
+  if (ILen and AesBlockMod = 0) and
+     {$ifdef USEAESNI64} // faster with 8x interleaved internal_crypt()
+     not (aesNiSse41 in TAesContext(aes).Flags) and
+     {$endif USEAESNI64}
+     (state.blen = 0) then
   begin
-    if (ptp = nil) or
-       (ctp = nil) or
-       (flagFinalComputed in flags) then
-      exit;
-    if (ILen and AesBlockMod = 0) and
-       {$ifdef USEAESNI64} // faster with 8x interleaved internal_crypt()
-       not (aesNiSse41 in TAesContext(aes).Flags) and
-       {$endif USEAESNI64}
-       (blen = 0) then
+    inc(state.atx_cnt.V, ILen);
+    ILen := ILen shr AesBlockShift;
+    repeat
+      // single-pass loop optimized e.g. for PKCS7 padding without SSE4.1
+      gf_mul_h(self, state.txt_ghv); // maybe CLMUL
+      XorBlock16(@state.txt_ghv, ctp);
+      GCM_IncCtr(TAesContext(aes).iv.b);
+      aes.Encrypt(TAesContext(aes).iv.b, TAesContext(aes).buf); // maybe AES-NI
+      XorBlock16(ctp, ptp, @TAesContext(aes).buf);
+      inc(PAesBlock(ptp));
+      inc(PAesBlock(ctp));
+      dec(ILen);
+    until ILen = 0;
+    if (ptag <> nil) and
+       (tlen > 0) then
     begin
-      inc(atx_cnt.V, ILen);
-      ILen := ILen shr AesBlockShift;
-      repeat
-        // single-pass loop optimized e.g. for PKCS7 padding
-        gf_mul_h(self, txt_ghv); // maybe CLMUL
-        XorBlock16(@txt_ghv, ctp);
-        GCM_IncCtr(TAesContext(aes).iv.b);
-        aes.Encrypt(TAesContext(aes).iv.b, TAesContext(aes).buf); // maybe AES-NI
-        XorBlock16(ctp, ptp, @TAesContext(aes).buf);
-        inc(PAesBlock(ptp));
-        inc(PAesBlock(ctp));
-        dec(ILen);
-      until ILen = 0;
-      if (ptag <> nil) and
-         (tlen > 0) then
-      begin
-        Final(tag, {anddone=}false);
-        if not IsEqual(tag, ptag^, tlen) then
-          // check authentication after single pass encryption + auth
-          exit;
-      end;
-    end
-    else
-    begin
-      // generic process in dual steps
-      internal_auth(ctp, ILen, txt_ghv, atx_cnt);
-      if (ptag <> nil) and
-         (tlen > 0) then
-      begin
-        Final(tag, {anddone=}false);
-        if not IsEqual(tag, ptag^, tlen) then
-          // check authentication before decryption
-          exit;
-      end;
-      internal_crypt(ctp, ptp, iLen);
+      Final(tag, {anddone=}false);
+      if not IsEqual(tag, ptag^, tlen) then
+        // check authentication after single pass encryption + auth
+        exit;
     end;
+  end
+  else
+  begin
+    // generic process in dual steps
+    internal_auth(ctp, ILen, state.txt_ghv, state.atx_cnt);
+    if (ptag <> nil) and
+       (tlen > 0) then
+    begin
+      Final(tag, {anddone=}false);
+      if not IsEqual(tag, ptag^, tlen) then
+        // check authentication before decryption
+        exit;
+    end;
+    internal_crypt(ctp, ptp, iLen);
   end;
   result := true;
 end;
@@ -5147,80 +5261,93 @@ function TAesGcmEngine.Add_AAD(pAAD: pointer; aLen: PtrInt): boolean;
 begin
   if aLen > 0 then
   begin
+    result := false;
     if (pAAD = nil) or
-       (flagFinalComputed in flags) then
-    begin
-      result := false;
+       (flagFinalComputed in state.flags) then
       exit;
-    end;
-    internal_auth(pAAD, aLen, aad_ghv, aad_cnt);
+    {$ifdef USEGCMAVX}
+    if flagAVX in state.flags then
+    begin
+      inc(state.aad_cnt.V, aLen);
+      GcmAvxAuth(@gf_t4k, pAAD, aLen, @state.txt_ghv); // use txt_ghv for both
+    end
+    else
+    {$endif USEGCMAVX}
+    internal_auth(pAAD, aLen, state.aad_ghv, state.aad_cnt);
   end;
   result := true;
 end;
 
 function TAesGcmEngine.Final(out tag: TAesBlock; andDone: boolean): boolean;
 var
-  tbuf: TAesBlock;
+  e, t: THash128Rec;
   ln: cardinal;
 begin
-  if not (flagFinalComputed in flags) then
+  // validate current state - Final() should be called once
+  result := not (flagFinalComputed in state.flags);
+  if not result then
+    exit;
+  include(state.flags, flagFinalComputed);
+  // compute E(K,Y0)
+  e := TAesContext(aes).iv;
+  e.c3 := state.y0_val; // restore initial CTR
+  aes.Encrypt(e.b);
+  // compute GMAC = GHASH(H, AAD, ctp) xor E(K,Y0)
+  {$ifdef USEGCMAVX}
+  if flagAVX in state.flags then // x86_64 asm uses 256 bytes in gf_t4k[]
   begin
-    include(flags, flagFinalComputed);
-    // compute GHASH(H, AAD, ctp)
-    gf_mul_h(self, aad_ghv); // maybe CLMUL
-    gf_mul_h(self, txt_ghv);
-    // compute len(AAD) || len(ctp) with each len as 64-bit big-endian
-    ln := (atx_cnt.V + AesBlockMod) shr AesBlockShift;
-    if (aad_cnt.V > 0) and
-       (ln <> 0) then
-    begin
-      tbuf := ghash_h;
-      while ln <> 0 do
-      begin
-        if odd(ln) then
-          gf_mul(aad_ghv, tbuf);
-        ln := ln shr 1;
-        if ln <> 0 then
-          gf_mul(tbuf, tbuf);
-      end;
-    end;
-    TWA4(tbuf)[0] := bswap32((aad_cnt.L shr 29) or (aad_cnt.H shl 3));
-    TWA4(tbuf)[1] := bswap32((aad_cnt.L shl  3));
-    TWA4(tbuf)[2] := bswap32((atx_cnt.L shr 29) or (atx_cnt.H shl 3));
-    TWA4(tbuf)[3] := bswap32((atx_cnt.L shl  3));
-    XorBlock16(@tbuf, @txt_ghv);
-    XorBlock16(@aad_ghv, @tbuf);
-    gf_mul_h(self, aad_ghv); // maybe CLMUL
-    // compute E(K,Y0)
-    tbuf := TAesContext(aes).iv.b;
-    TWA4(tbuf)[3] := y0_val;
-    aes.Encrypt(tbuf);
-    // GMAC = GHASH(H, AAD, ctp) xor E(K,Y0)
-    XorBlock16(@aad_ghv, @tag, @tbuf);
-    if andDone then
-      Done;
-    result := true;
+    GcmAvxGetTag(@gf_t4k, @e, @state.txt_ghv, state.atx_cnt.V, state.aad_cnt.V);
+    tag := state.txt_ghv;
   end
   else
+  {$endif USEGCMAVX}
   begin
-    Done;
-    result := false;
+    // compute GHASH(H, AAD, ctp)
+    gf_mul_h(self, state.aad_ghv); // maybe CLMUL
+    gf_mul_h(self, state.txt_ghv);
+    // compute len(AAD) || len(ctp) with each len as 64-bit big-endian
+    ln := (state.atx_cnt.V + AesBlockMod) shr AesBlockShift;
+    if (state.aad_cnt.V > 0) and
+       (ln <> 0) then
+    begin
+      t.b := state.ghash_h;
+      while ln <> 0 do
+      begin
+        if ln and 1 <> 0 then
+          gf_mul(state.aad_ghv, t.b); // maybe CLMUL
+        ln := ln shr 1;
+        if ln <> 0 then
+          gf_mul(t.b, t.b);
+      end;
+    end;
+    t.c0 := bswap32((state.aad_cnt.L shr 29) or (state.aad_cnt.H shl 3));
+    t.c1 := bswap32((state.aad_cnt.L shl  3));
+    t.c2 := bswap32((state.atx_cnt.L shr 29) or (state.atx_cnt.H shl 3));
+    t.c3 := bswap32((state.atx_cnt.L shl  3));
+    XorBlock16(@t, @state.txt_ghv);
+    XorBlock16(@state.aad_ghv, @t);
+    gf_mul_h(self, state.aad_ghv); // maybe CLMUL
+    // GMAC = GHASH(H, AAD, ctp) xor E(K,Y0)
+    XorBlock16(@e, @tag, @state.aad_ghv);
   end;
+  if andDone then
+    Done;
+  result := true;
 end;
 
 procedure TAesGcmEngine.Done;
 begin
-  if flagFlushed in flags then
+  if flagFlushed in state.flags then
     exit;
   aes.Done;
-  include(flags, flagFlushed);
+  include(state.flags, flagFlushed);
 end;
 
 function TAesGcmEngine.FullEncryptAndAuthenticate(const Key; KeyBits: PtrInt;
-  pIV: pointer; IV_len: PtrInt; pAAD: pointer; aLen: PtrInt; ptp, ctp: pointer;
-  pLen: PtrInt; out tag: TAesBlock): boolean;
-begin
-  result := Init(Key, KeyBits) and
+  pIV, pAAD, ptp, ctp: pointer; IV_len, aLen, pLen: PtrInt;
+  out tag: TAesBlock; allowavx: boolean): boolean;
+begin // allowavx is set to false in test.core.crypt for testing purpose
+  result := Init(Key, KeyBits, allowavx and (pLen and AesBlockMod = 0)) and
             Reset(pIV, IV_len) and
             Add_AAD(pAAD, aLen) and
             Encrypt(ptp, ctp, pLen) and
@@ -5229,13 +5356,13 @@ begin
 end;
 
 function TAesGcmEngine.FullDecryptAndVerify(const Key; KeyBits: PtrInt;
-  pIV: pointer; IV_len: PtrInt; pAAD: pointer; aLen: PtrInt; ctp, ptp: pointer;
-  pLen: PtrInt; ptag: pointer; tLen: PtrInt): boolean;
+  pIV, pAAD, ctp, ptp, ptag: pointer; IV_len, aLen, pLen, tLen: PtrInt;
+  allowavx: boolean): boolean;
 begin
-  result := Init(Key, KeyBits) and
+  result := Init(Key, KeyBits, allowavx and (pLen and AesBlockMod = 0)) and
             Reset(pIV, IV_len) and
             Add_AAD(pAAD, aLen) and
-            Decrypt(ctp,ptp, pLen, ptag, tlen);
+            Decrypt(ctp, ptp, pLen, ptag, tlen);
   Done;
 end;
 
@@ -5317,6 +5444,16 @@ begin
   FillZero(fKey);
 end;
 
+function TAesAbstract.InternalCopy: TAesAbstract;
+begin
+  result := TAesAbstract(NewInstance); // new instance with same main properties
+  result.fKey := fKey;
+  result.fKeySize := fKeySize;
+  result.fKeySizeBytes := fKeySizeBytes;
+  result.fAlgoMode := fAlgoMode;
+  result.fIVUpdated := fIVUpdated;
+end;
+
 class function TAesAbstract.IsAvailable: boolean;
 begin
   result := true;
@@ -5376,22 +5513,19 @@ begin
     ivsize := SizeOf(TAesBlock)
   else
     ivsize := 0;
+  result := false;
   if OutputLen <> ivsize + InputLen + padding then
-  begin
-    result := false;
     exit;
-  end;
   if IVAtBeginning then
   begin
-    RandomBytes(@fIV, SizeOf(fIV)); // Lecuyer is enough for public random
+    RandomBytes(@fIV, SizeOf(fIV)); // Lecuyer is enough for public randomness
     PAesBlock(Output)^ := fIV;
     inc(PAesBlock(Output));
   end;
-  if fIVUpdated then
+  if fIVUpdated then // this class update the IV/MAC so we can call Encrypt() twice
   begin
-    // we know that our classes update the IV/MAC so we can call Encrypt() twice
     by16 := InputLen + padding - 16;
-    Encrypt(Input, Output, by16); // avoid a (potentially huge) MoveFast()
+    Encrypt(Input, Output, by16); // and avoid a (potentially huge) MoveFast()
     inc(PByte(Input), by16);
     inc(PByte(Output), by16);
     dec(InputLen, by16);
@@ -5407,6 +5541,7 @@ function TAesAbstract.DecryptPkcs7Len(var InputLen, ivsize: PtrInt;
 var
   needed: integer;
 begin
+  result := false;
   needed := SizeOf(TAesBlock);
   if IVAtBeginning then
     inc(needed, SizeOf(TAesBlock));
@@ -5416,10 +5551,7 @@ begin
       ESynCrypto.RaiseUtf8('%.DecryptPkcs7: Invalid InputLen=%',
         [self, InputLen])
     else
-    begin
-      result := false;
       exit;
-    end;
   if IVAtBeginning then
   begin
     fIV := PAesBlock(Input)^;
@@ -5447,41 +5579,46 @@ begin
     if n = 0 then
       break;
     if P^ <> padding then
-      exit; // all padded bytes should equal the padding length
+      exit; // all PKCS-7 padded bytes should equal the padding length
   until false;
   result := padding;
 end;
 
 function TAesAbstract.DecryptPkcs7Buffer(Input: pointer; InputLen: PtrInt;
   IVAtBeginning, RaiseESynCryptoOnError: boolean): RawByteString;
+begin
+  if not DecryptPkcs7Var(Input, InputLen, IVAtBeginning, result) and
+     RaiseESynCryptoOnError then
+    ESynCrypto.RaiseUtf8('%.DecryptPkcs7Buffer: Invalid Input', [self]);
+end;
+
+function TAesAbstract.DecryptPkcs7Var(Input: pointer; InputLen: PtrInt;
+  IVAtBeginning: boolean; var Plain: RawByteString): boolean;
 var
   ivsize, padding: PtrInt;
 begin
-  result := '';
-  if not DecryptPkcs7Len(InputLen, ivsize, Input,
-      IVAtBeginning, RaiseESynCryptoOnError) then
+  Plain := '';
+  result := false;
+  if not DecryptPkcs7Len(InputLen, ivsize, Input, IVAtBeginning, false) then
     exit;
-  FastSetString(RawUtf8(result), InputLen); // assume CP_UTF8 for FPC RTL bug
-  Decrypt(@PByteArray(Input)^[ivsize], pointer(result), InputLen);
-  padding := CheckPadding(@PByteArray(result)^[InputLen - 1]);
+  pointer(Plain) := FastNewString(InputLen, CP_UTF8); // CP_UTF8 for FPC RTL bug
+  Decrypt(@PByteArray(Input)^[ivsize], pointer(Plain), InputLen);
+  padding := CheckPadding(@PByteArray(Plain)^[InputLen - 1]);
   if padding = 0 then
-    if RaiseESynCryptoOnError then
-      ESynCrypto.RaiseUtf8('%.DecryptPkcs7: Invalid Input', [self])
-    else
-      result := ''
+    Plain := ''
   else
   begin
-    // fast in-place set result length without any memory resize
-    dec(InputLen, padding);
-    FakeSetLength(result, InputLen);
+    FakeSetLength(Plain, InputLen - padding); // no memory realloc, but maybe ''
+    result := true;
   end;
 end;
 
 function TAesAbstract.DecryptPkcs7(const Input: RawByteString;
   IVAtBeginning, RaiseESynCryptoOnError: boolean; TrailerLen: PtrInt): RawByteString;
 begin
-  result := DecryptPkcs7Buffer(pointer(Input), length(Input) - TrailerLen,
-    IVAtBeginning, RaiseESynCryptoOnError);
+  if not DecryptPkcs7Var(pointer(Input), length(Input) - TrailerLen, IVAtBeginning, result) and
+     RaiseESynCryptoOnError then
+    ESynCrypto.RaiseUtf8('%.DecryptPkcs7: Invalid Input', [self]);
 end;
 
 function TAesAbstract.DecryptPkcs7(const Input: TBytes;
@@ -5585,35 +5722,6 @@ var
   P: PByteArray;
 begin
   result := ''; // e.g. MacSetNonce not supported
-  if (fAlgoMode = mGCM) and
-     InheritsFrom(TAesGcmAbstract) then
-  begin
-    // for AES-GCM, no nonce needed: use standard encrypted + tag layout
-    if not MacSetNonce(encrypt, nonce{%H-}, Associated) then
-      exit; // AEAD data is assigned to fAssociated before cipher blocks
-    if Encrypt then
-    begin
-      len := length(Data);
-      enclen := EncryptPkcs7Length(len, IVAtBeginning);
-      SetLength(result, enclen + SizeOf(TAesBlock) + EndingSize);
-      P := pointer(result);
-      if not EncryptPkcs7Buffer(pointer(Data), P, len, enclen, IVAtBeginning) then
-        result := '';
-    end
-    else
-    begin
-      enclen := cardinal(length(Data)) - EndingSize;
-      if enclen < SizeOf(TAesBlock) * 2 then
-        exit;
-      dec(enclen, SizeOf(TAesBlock));
-      P := pointer(Data);
-      result := DecryptPkcs7Buffer(P, enclen, IVAtBeginning, {raiseexc=}false);
-    end;
-    if result <> '' then
-      if not TAesGcmAbstract(self).AesGcmFinal(PAesBlock(@P[enclen])^) then
-        result := '';
-  end
-  else
   // our non-standard mCfc/mOfc/mCtc modes with 256-bit crc32c
   if Encrypt then
   begin
@@ -5624,7 +5732,7 @@ begin
     // inlined EncryptPkcs7() + RecordSave()
     len := length(Data);
     enclen := EncryptPkcs7Length(len, IVAtBeginning);
-    SetLength(result, SIZ + ToVarUInt32Length(enclen) + enclen + EndingSize);
+    rcd := FastNewString(SIZ + ToVarUInt32Length(enclen) + enclen + EndingSize);
     P := pointer(ToVarUInt32(enclen, @rcd^.data));
     if EncryptPkcs7Buffer(pointer(Data), P, len, enclen, IVAtBeginning) and
        MacEncryptGetTag(rcd.mac) then
@@ -5650,7 +5758,7 @@ begin
       exit;
     // decrypt and check MAC
     if MacSetNonce({encrypt=}false, pcd^.nonce, Associated) then
-      result := DecryptPkcs7Buffer(P, len, IVAtBeginning, {raiseexc=}false);
+      DecryptPkcs7Var(P, len, IVAtBeginning, result);
     if result <> '' then
       if not MacDecryptCheckTag(pcd^.mac) then
       begin
@@ -5782,7 +5890,7 @@ end;
 function TAesAbstractSyn.Clone: TAesAbstract;
 begin
   result := NewInstance as TAesAbstractSyn;
-  MoveFast(pointer(self)^, pointer(result)^, InstanceSize);
+  MoveFast(pointer(self)^, pointer(result)^, InstanceSize); // copy all fields
 end;
 
 procedure TAesAbstractSyn.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
@@ -5993,7 +6101,7 @@ begin
   len := length(Input);
   if IVAtBeginning then
     inc(len, SizeOf(TAesBlock));
-  FastNewRawByteString(result, len);
+  pointer(result) := FastNewString(len);
   p := pointer(result);
   if IVAtBeginning then
   begin
@@ -6595,6 +6703,13 @@ begin
   FillZero(fIV);
 end;
 
+function TAesGcmAbstract.Clone: TAesAbstract;
+begin
+  // we can just copy the main properties
+  result := InternalCopy;
+  AesGcmClone(TAesGcmAbstract(result));
+end;
+
 procedure TAesGcmAbstract.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 begin
   if fStarted <> stEnc then
@@ -6664,127 +6779,91 @@ begin
   result := true; // AES-GCM is a one-pass algorithm -> GMAC is checked later
 end;
 
+function TAesGcmAbstract.MacAndCrypt(const Data: RawByteString;
+  Encrypt, IVAtBeginning: boolean; const Associated: RawByteString;
+  EndingSize: cardinal): RawByteString;
+var
+  l: PtrInt;
+begin
+  l := length(Data);
+  FastNewRawByteString(result, l + SizeOf(TAesBlock) * 3 + PtrInt(EndingSize));
+  l := AesGcmBuffer(pointer(Data), pointer(result), l, length(result),
+    Encrypt, IVAtBeginning, Associated);
+  if l < 0 then
+    FastAssignNew(result) // error
+  else
+    FakeSetLength(result, l + PtrInt(EndingSize));
+end;
+
+function TAesGcmAbstract.AesGcmBuffer(Input, Output: pointer;
+  InputLen, OutputMax: PtrInt; Encrypt, IVAtBeginning: boolean;
+  const Associated: RawByteString): PtrInt;
+var
+  enclen, ivsize, padding: PtrInt;
+begin
+  result := -1; // indicates error
+  if (fStarted <> stNone) or
+     ((Input = nil) and (InputLen <> 0)) or
+     (Output = nil) then
+    exit;
+  fAssociated := Associated; // see TAesGcmAbstract.MacAndCrypt()
+  if Encrypt then
+  begin
+    enclen := EncryptPkcs7Length(InputLen, IVAtBeginning);
+    if (enclen + SizeOf(TAesBlock) <= OutputMax) and
+       EncryptPkcs7Buffer(Input, Output, InputLen, enclen, IVAtBeginning) and
+       AesGcmFinal(PAesBlock(@PByteArray(Output)^[enclen])^) then
+      result := enclen + SizeOf(TAesBlock);
+  end
+  else
+  begin
+    dec(InputLen, SizeOf(TAesBlock));
+    enclen := InputLen;
+    if not DecryptPkcs7Len(InputLen, ivsize, Input, IVAtBeginning, false) or
+       (InputLen > OutputMax) then
+      exit;
+    Decrypt(@PByteArray(Input)[ivsize], Output, InputLen);
+    padding := CheckPadding(@PByteArray(Output)^[InputLen - 1]);
+    if AesGcmFinal(PAesBlock(@PByteArray(Input)^[enclen])^) and
+       (padding <> 0) then
+      result := InputLen - padding; // may be 0
+  end;
+end;
+
 
 { TAesGcm }
 
 function TAesGcm.AesGcmInit: boolean;
-{$ifdef USEGCMAVX}
-var
-  cf: ^TIntelCpuFeatures;
-{$endif USEGCMAVX}
 begin
-  {$ifdef USEGCMAVX}
-  cf := @CpuFeatures;
-  if (cfCLMUL in cf^) and
-     (cfSSE41 in cf^) and
-     (cfAESNI in cf^) and
-     not (daAesGcmAvx in DisabledAsm) then
-  begin
-    // 8x interleaved aesni + pclmulqdq x86_64 asm
-    include(fGcm.flags, flagAVX);
-    result := fGcm.aes.EncryptInit(fKey, fKeySize);
-    if result then
-      GcmAvxInit(@fGcm.gf_t4k, @fGcm.aes, TAesContext(fGcm.aes).Rounds);
-  end
-  else
-  {$endif USEGCMAVX}
-    // regular TAesGcmEngine
-    result := fGcm.Init(fKey, fKeySize);
+  result := fGcm.Init(fKey, fKeySize, true);
 end;
 
-function TAesGcm.Clone: TAesAbstract;
+procedure TAesGcm.AesGcmClone(another: TAesGcmAbstract);
 begin
-  result := NewInstance as TAesGcm;
-  result.fKey := fKey;
-  result.fKeySize := fKeySize;
-  result.fKeySizeBytes := fKeySizeBytes;
-  result.fAlgoMode := mGcm;
-  {$ifdef USEGCMAVX}
-  if flagAVX in fGcm.flags then
-  begin
-    TAesGcm(result).fGcm.aes := fGcm.aes;
-    TAesGcm(result).fGcm.flags := fGcm.flags;
-    MoveFast(fGcm.gf_t4k, TAesGcm(result).fGcm.gf_t4k, 256);
-  end
-  else
-  {$endif USEGCMAVX}
-    TAesGcm(result).fGcm := fGcm; // reuse the very same TAesGcmEngine memory
+  fGcm.Clone(@(another as TAesGcm).fGcm);
 end;
 
 procedure TAesGcm.AesGcmDone;
 begin
-  {$ifdef USEGCMAVX}
-  if flagAVX in fGcm.flags then
-    fGcm.aes.Done
-  else
-  {$endif USEGCMAVX}
-    fGcm.Done;
+  fGcm.Done;
 end;
 
 procedure TAesGcm.AesGcmReset;
 begin
-  fGcm.Reset(@fIV, CTR_POS); // reused for USEGCMAVX since CTR_POS computes nothing
+  fGcm.Reset(@fIV, CTR_POS);
 end;
 
 function TAesGcm.AesGcmProcess(BufIn, BufOut: pointer; Count: cardinal): boolean;
-{$ifdef USEGCMAVX}
-var
-  blocks, ctr, onepass: cardinal;
-{$endif USEGCMAVX}
 begin
-  {$ifdef USEGCMAVX}
-  if flagAVX in fGcm.flags then
-  begin
-    // 8x interleaved aesni + pclmulqdq x86_64 asm
-    result := true;
-    if Count and AesBlockMod <> 0 then
-      ESynCrypto.RaiseUtf8('%.Encrypt/Decrypt should use PKCS7', [self]);
-    inc(fGcm.atx_cnt.V, Count);
-    repeat
-      // regroup GMAC + AES-CTR per 1MB chunks to fit in CPU cache
-      onepass := 1 shl 20;
-      if Count < onepass then
-        onepass := Count;
-      // GMAC done before decryption
-      if fStarted = stDec then
-        GcmAvxAuth(@fGcm.gf_t4k, BufIn, onepass, @fGcm.txt_ghv);
-      // AES-CTR using AES-NI and SSE4.1 over a 32-bit counter
-      blocks := onepass shr AesBlockShift;
-      ctr := bswap32(TAesContext(fGcm.aes).iv.c3) + blocks;
-      GCM_IncCtr(TAesContext(fGcm.aes).iv.b); // should be done before
-      AesNiEncryptCtrNist32(
-        BufIn, BufOut, blocks, @fGcm.aes, @TAesContext(fGcm.aes).iv);
-      TAesContext(fGcm.aes).iv.c3 := bswap32(ctr);
-      // GMAC done after encryption
-      if fStarted = stEnc then
-        GcmAvxAuth(@fGcm.gf_t4k, BufOut, onepass, @fGcm.txt_ghv);
-      dec(Count, onepass);
-      if Count = 0 then
-        exit;
-      inc(PByte(BufIn), onepass);
-      inc(PByte(BufOut), onepass);
-    until false;
-  end
+  if fStarted = stEnc then
+    result := fGcm.Encrypt(BufIn, BufOut, Count)
   else
-  {$endif USEGCMAVX}
-    // regular TAesGcmEngine process (allowing non-16-bytes Count)
-    if fStarted = stEnc then
-      result := fGcm.Encrypt(BufIn, BufOut, Count)
-    else
-      result := fGcm.Decrypt(BufIn, BufOut, Count);
+    result := fGcm.Decrypt(BufIn, BufOut, Count);
 end;
 
 procedure TAesGcm.AesGcmAad(Buf: pointer; Len: integer);
 begin
-  {$ifdef USEGCMAVX}
-  if flagAVX in fGcm.flags then
-  begin
-    inc(fGcm.aad_cnt.V, Len);
-    GcmAvxAuth(@fGcm.gf_t4k, Buf, Len, @fGcm.txt_ghv); // use txt_ghv for both
-  end
-  else
-  {$endif USEGCMAVX}
-    fGcm.Add_AAD(Buf, Len);
+  fGcm.Add_AAD(Buf, Len);
 end;
 
 function TAesGcm.AesGcmFinal(var Tag: TAesBlock; TagLen: integer): boolean;
@@ -6795,18 +6874,7 @@ begin
   if (fStarted = stNone) or
      (cardinal(TagLen) > 16) then
     exit;
-  {$ifdef USEGCMAVX}
-  if flagAVX in fGcm.flags then
-  begin
-    decoded := TAesContext(fGcm.aes).iv;
-    decoded.c3 := fGcm.y0_val; // restore initial counter (always 1 for CTR_POS)
-    fGcm.aes.Encrypt(decoded.b);  // compute E(K,Y0)
-    GcmAvxGetTag(@fGcm.gf_t4k, @decoded, @fGcm.txt_ghv, fGcm.atx_cnt.V, fGcm.aad_cnt.V);
-    decoded.b := fGcm.txt_ghv;
-  end
-  else
-  {$endif USEGCMAVX}
-    fGcm.Final(decoded.b, {andDone=}false);
+  fGcm.Final(decoded.b, {andDone=}false);
   case fStarted of
     stEnc:
       begin
@@ -7746,7 +7814,7 @@ begin
   else
   try
     // retrieve some initial entropy from OS (but for gesUserOnly)
-    FastNewRawByteString(fromos, Len);
+    pointer(fromos) := FastNewString(Len);
     if Source <> gesUserOnly then
       FillSystemRandom(pointer(fromos), Len, Source = gesSystemOnlyMayBlock);
     if Source in [gesSystemOnly, gesSystemOnlyMayBlock] then

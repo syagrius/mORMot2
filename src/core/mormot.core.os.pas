@@ -75,11 +75,11 @@ const
   /// convert a TLineFeed value into its UTF-8 text representation
   LINE_FEED: array[TLineFeed] of string[3] = (CRLF, #10, #13#10);
 
-  /// human-friendly alias to open a file for exclusive writing
+  /// human-friendly alias to open a file for exclusive writing ($20)
   fmShareRead      = fmShareDenyWrite;
-  /// human-friendly alias to open a file for exclusive reading
+  /// human-friendly alias to open a file for exclusive reading ($30)
   fmShareWrite     = fmShareDenyRead;
-  /// human-friendly alias to open a file with no read/write exclusion
+  /// human-friendly alias to open a file with no read/write exclusion ($40)
   fmShareReadWrite = fmShareDenyNone;
 
   /// a convenient constant to open a file for reading without exclusion
@@ -89,6 +89,8 @@ const
   fmOpenWriteShared = fmOpenReadWrite or fmShareReadWrite;
 
   /// a convenient constant to create a file without exclusion
+  // - warning: on Delphi 7..2009, fmCreate is defined as $ffff so can't be
+  // associated with file sharing attributes: we will force fmShareReadWrite
   fmCreateShared = fmCreate or fmShareReadWrite;
 
   /// a convenient array constant to open a file for writing without exclusion
@@ -2914,8 +2916,8 @@ function GetDesktopWindow: PtrInt;
 /// returns the curent system code page for AnsiString types
 // - as used to initialize CurrentAnsiConvert in mormot.core.unicode unit
 // - calls GetACP() Win32 API value on Delphi, or DefaultSystemCodePage on FPC -
-// i.e. GetSystemCodePage() on POSIX (likely to be UTF-8) or the value used
-// by the LCL for its "string" types (also typically UTF-8 even on Windows)
+// i.e. GetSystemCodePage() on POSIX (likely to be CP_UTF8) or the value used
+// by the LCL for its "string" types (also typically be CP_UTF8 even on Windows)
 function Unicode_CodePage: integer;
   {$ifdef FPC} inline; {$endif}
 
@@ -6161,7 +6163,7 @@ end;
 function Unicode_CodePage: integer;
 begin
   {$ifdef FPC}
-  // = GetSystemCodePage on POSIX, Lazarus may override to UTF-8 on Windows
+  // = GetSystemCodePage on POSIX, Lazarus may override to be CP_UTF8 on Windows
   result := DefaultSystemCodePage;
   {$else}
   // Delphi always uses the main Windows System Code Page
@@ -6545,7 +6547,7 @@ var
   h: THandle;
 begin
   if Mode and fmCreate = fmCreate then
-    h := FileCreate(aFileName, Mode and (not fmCreate))
+    h := FileCreate(aFileName, Mode and $00ff) // fmCreate=$ffff on oldest Delphi
   else
     h := FileOpen(aFileName, Mode);
   CreateFromHandle(h, aFileName);

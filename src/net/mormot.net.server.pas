@@ -503,7 +503,7 @@ type
     fCompress: THttpSocketCompressRecDynArray;
     fCompressAcceptEncoding: RawUtf8;
     fServerName: RawUtf8;
-    fRequestHeaders: RawUtf8; // pre-computed headers with ServerName
+    fRequestHeaders: RawUtf8; // pre-computed headers with 'Server: xxxx'
     fCallbackSendDelay: PCardinal;
     fCallbackOutgoingCount: PCardinal; //TODO
     fRemoteIPHeader, fRemoteIPHeaderUpper: RawUtf8;
@@ -1457,7 +1457,17 @@ type
     // - using random enhances AES-GCM obfuscation by making it unpredictable
     Padding: array[0 .. 41] of byte;
   end;
+  PHttpPeerCacheMessage = ^THttpPeerCacheMessage;
   THttpPeerCacheMessageDynArray = array of THttpPeerCacheMessage;
+
+  /// AES-GCM encoded binary frame of THttpPeerCacheMessage
+  THttpPeerCacheMessageEncoded = packed record
+    iv: THash128;
+    msg: THttpPeerCacheMessage;
+    padding, mac: THash128;
+    crc: cardinal;
+  end;
+  PHttpPeerCacheMessageEncoded = ^THttpPeerCacheMessageEncoded;
 
   /// each THttpPeerCacheSettings.Options item
   // - pcoCacheTempSubFolders will create 16 sub-folders (from first 0-9/a-z
@@ -1484,6 +1494,7 @@ type
   // using a URI + Bearer returned by HttpDirectUri() overloaded methods
   // - pcoHttpDirectNoBroadcast would disable UDP peer search for pcoHttpDirect
   // - pcoHttpDirectTryLastPeer could make pcoTryLastPeer for pcoHttpDirect
+  // - pcoHttpReprDigest would include a 'Repr-Digest:' header as per RFC 9530
   THttpPeerCacheOption = (
     pcoCacheTempSubFolders,
     pcoCacheTempNoCheckSize,
@@ -1497,7 +1508,8 @@ type
     pcoVerboseLog,
     pcoHttpDirect,
     pcoHttpDirectNoBroadcast,
-    pcoHttpDirectTryLastPeer);
+    pcoHttpDirectTryLastPeer,
+    pcoHttpReprDigest);
 
   /// THttpPeerCacheSettings.Options values
   THttpPeerCacheOptions = set of THttpPeerCacheOption;
@@ -1534,7 +1546,8 @@ type
     function HttpDirectUri(const aSharedSecret: RawByteString;
       const aRemoteUri, aRemoteHash: RawUtf8;
       out aDirectUri, aDirectHeaderBearer: RawUtf8;
-      aForceTls: boolean = false; aPermanent: boolean = false): boolean;
+      aForceTls: boolean = false; aPermanent: boolean = false;
+      aOptions: PHttpRequestExtendedOptions = nil): boolean;
   published
     /// the local port used for UDP and TCP process
     // - value should match on all peers for proper discovery
@@ -1645,6 +1658,7 @@ type
   /// information about THttpPeerCrypt.MessageDecode() success
   THttpPeerCryptMessageDecode = (
     mdOk,
+    mdBParam,
     mdBLen,
     mdB64,
     mdBearer,
@@ -1671,18 +1685,22 @@ type
     fClient: THttpClientSocket;
     fInstable: THttpAcceptBan; // from Settings.RejectInstablePeersMin
     fMac: TMacAddress;
+    fSettingsOwned, fVerboseLog: boolean;
     fUuid: TGuid;
     fServerTls, fClientTls: TNetTlsContext;
     procedure AfterSettings; virtual;
     function CurrentConnections: integer; virtual;
     procedure MessageInit(aKind: THttpPeerCacheMessageKind; aSeq: cardinal;
       out aMsg: THttpPeerCacheMessage); virtual;
-    function MessageEncode(const aMsg: THttpPeerCacheMessage): RawByteString;
-    function MessageDecode(aFrame: PAnsiChar; aFrameLen: PtrInt;
+    procedure MessageEncode(const aMsg: THttpPeerCacheMessage;
+      out aEncoded: THttpPeerCacheMessageEncoded);
+    procedure MessageEncodeBearer(const aMsg: THttpPeerCacheMessage;
+      out aBearer: RawUtf8);
+    function MessageDecode(aFrame: PHttpPeerCacheMessageEncoded; aFrameLen: PtrInt;
       out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
-    function BearerDecode(
-      const aBearerToken: RawUtf8; aExpected: THttpPeerCacheMessageKind;
-      out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode; virtual;
+    function BearerDecode(const aBearerToken: RawUtf8;
+      aExpected: THttpPeerCacheMessageKind; out aMsg: THttpPeerCacheMessage;
+      aParams: PRawUtf8 = nil): THttpPeerCryptMessageDecode; virtual;
     procedure LocalPeerClientSetup(const aIp: RawUtf8;
       aClient: THttpClientSocket; aRecvTimeout: integer);
     function LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
@@ -1705,8 +1723,8 @@ type
     // - returns aDirectUri as '/https/microsoft.com/...' and aDirectHeaderBearer
     class function HttpDirectUri(const aSharedSecret: RawByteString;
       const aRemoteUri, aRemoteHash: RawUtf8;
-      out aDirectUri, aDirectHeaderBearer: RawUtf8;
-      aPermanent: boolean = false): boolean;
+      out aDirectUri, aDirectHeaderBearer: RawUtf8; aPermanent: boolean = false;
+      aOptions: PHttpRequestExtendedOptions = nil): boolean;
     /// decode a remote URI for pcoHttpDirect download at localhost
     // - as previously encoded by HttpDirectUri() class function
     class function HttpDirectUriReconstruct(P: PUtf8Char;
@@ -1756,7 +1774,7 @@ type
     fRespSafe: TLightLock;
     fResp: THttpPeerCacheMessageDynArray;
     fRespCount: integer;
-    fCurrentSeq: cardinal;
+    fBroadcastCurrentSeq: cardinal;
     fBroadcastEvent: TSynEvent;   // e.g. for pcoUseFirstResponse
     fBroadcastAddr: TNetAddr;     // from fBroadcastIP4 + fSettings.Port
     fBroadcastSafe: TOSLightLock; // non-reentrant, to serialize Broadcast()
@@ -1800,7 +1818,6 @@ type
     fTempFilesMaxSize: Int64; // from Settings.CacheTempMaxMB
     fTempCurrentSize: Int64;
     fTempFilesDeleteDeprecatedTix, fInstableTix, fBroadcastTix: cardinal;
-    fSettingsOwned, fVerboseLog: boolean;
     fFilesSafe: TOSLock; // concurrent cached files access
     fPartials: THttpPartials;
     fOnDirectOptions: TOnHttpPeerCacheDirectOptions;
@@ -1817,10 +1834,12 @@ type
     function CachedFileName(const aParams: THttpClientSocketWGet;
       aFlags: THttpPeerCacheLocalFileName;
       out aLocal: TFileName; out isTemp: boolean): boolean;
-    function DirectFileName(const aUrl: RawUtf8;
+    function DirectFileName(Ctxt: THttpServerRequestAbstract;
       const aMessage: THttpPeerCacheMessage; aHttp: PHttpRequestContext;
-      out aFileName: TFileName; out aSize: Int64): integer;
+      out aFileName: TFileName; out aSize: Int64; const aParams: RawUtf8): integer;
     procedure DirectFileNameBackgroundGet(Sender: TObject);
+    function DirectFileNameHead(Ctxt: THttpServerRequestAbstract;
+      const aHash: THashDigest; const aParams: RawUtf8): cardinal;
     function TooSmallFile(const aParams: THttpClientSocketWGet;
       aSize: Int64; const aCaller: shortstring): boolean;
     function PartialFileName(const aMessage: THttpPeerCacheMessage;
@@ -1854,7 +1873,7 @@ type
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - if a file has been downloaded from the main repository, this method
     // should be called to copy the content into this instance files cache
-    procedure OnDowloaded(var Params: THttpClientSocketWGet;
+    procedure OnDownloaded(var Params: THttpClientSocketWGet;
       const Partial: TFileName; PartialID: integer); virtual;
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - OnDownload() may have returned corrupted data: local cache file is
@@ -1923,6 +1942,11 @@ const
     pcfResponseFull];
 
   PEER_CACHE_PATTERN = '*.cache';
+
+  PEER_CACHE_MESSAGELEN = SizeOf(THttpPeerCacheMessageEncoded);
+  PEER_CACHE_AESLEN = PEER_CACHE_MESSAGELEN - SizeOf(cardinal);
+  /// base-64 HttpDirectUri() bearer size in chars, from PEER_CACHE_MESSAGELEN
+  PEER_CACHE_BEARERLEN = 326;
 
 function ToText(pcf: THttpPeerCacheMessageKind): PShortString; overload;
 function ToText(md: THttpPeerCryptMessageDecode): PShortString; overload;
@@ -3135,7 +3159,7 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
     h: THandle;
   begin
     ExtractOutContentType;
-    Utf8ToFileName(OutContent, fn);
+    fn := Utf8ToString(OutContent); // safer than Utf8ToFileName() here
     OutContent := '';
     ExtractHeader(fOutCustomHeaders, STATICFILE_PROGSIZE, progsizeHeader);
     SetInt64(pointer(progsizeHeader), Context.ContentLength);
@@ -3184,8 +3208,7 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
   end;
 
 var
-  P, PEnd: PUtf8Char;
-  len: PtrInt;
+  P: PUtf8Char;
   status: PtrUInt;
   h: PRawByteStringBuffer;
   // note: caller should have set hfConnectionClose in Context.HeaderFlags
@@ -3224,35 +3247,13 @@ begin
   // append (and sanitize CRLF) custom headers from Request() method
   P := pointer(OutCustomHeaders);
   if P <> nil then
-  begin
-    PEnd := P + length(OutCustomHeaders);
-    repeat
-      len := BufferLineLength(P, PEnd); // use fast SSE2 assembly on x86-64 CPU
-      if len > 0 then // no void line (means headers ending)
-      begin
-        if (PCardinal(P)^ or $20202020 =
-             ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('t') shl 24) and
-           (PCardinal(P + 4)^ or $20202020 =
-             ord('e') + ord('n') shl 8 + ord('t') shl 16 + ord('-') shl 24) and
-           (PCardinal(P + 8)^ or $20202020 =
-             ord('e') + ord('n') shl 8 + ord('c') shl 16 + ord('o') shl 24) and
-           (PCardinal(P + 12)^ or $20202020 =
-             ord('d') + ord('i') shl 8 + ord('n') shl 16 + ord('g') shl 24) and
-           (P[16] = ':') then
-          // custom CONTENT-ENCODING: disable any late compression
-          integer(Context.CompressAcceptHeader) := 0;
-        h^.Append(P, len);
-        h^.AppendCRLF; // normalize CR/LF endings
-        inc(P, len);
-      end;
-      while P^ in [#10, #13] do
-        inc(P);
-    until P^ = #0;
-  end;
-  if Context.ResponseHeaders <> '' then // e.g. 'WWW-Authenticate: #####'#13#10
-    h^.Append(Context.ResponseHeaders);
+    Context.HeadAddCustom(P, P + length(OutCustomHeaders));
+  P := pointer(Context.ResponseHeaders);
+  if P <> nil then // e.g. 'WWW-Authenticate: #####'#13#10
+    Context.HeadAddCustom(P, P + length(Context.ResponseHeaders));
   // generic headers
-  h^.Append(fServer.fRequestHeaders); // Server: and X-Powered-By:
+  if not (hhServer in Context.HeadCustom) then
+    h^.Append(fServer.fRequestHeaders); // Server: and X-Powered-By:
   if hsoIncludeDateHeader in fServer.Options then
     fServer.AppendHttpDate(h^);
   Context.Content := fOutContent;
@@ -4951,8 +4952,9 @@ begin
     GetNextItem(P, ' ', Http.CommandMethod); // 'GET'
     GetNextItem(P, ' ', Http.CommandUri);    // '/path'
     result := grRejected;
-    if PCardinal(P)^ <>
-         ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24 then
+    if (P = nil) or
+       (PCardinal(P)^ <>
+         ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) then
       exit;
     http10 := P[7] = '0';
     fKeepAliveClient := ((fServer = nil) or
@@ -5413,93 +5415,103 @@ end;
 
 // UDP frames are AES-GCM encrypted and signed, ending with a 32-bit crc, fixed
 // to crc32c(): md5/sha (without SHA-NI) are slower than AES-GCM-128 itself ;)
-// - on x86_64 THttpPeerCache: 14,003 assertions passed  17.39ms
-//   2000 messages in 413us i.e. 4.6M/s, aver. 206ns, 886.7 MB/s  = AES-GCM-128
-//   10000 altered in 135us i.e. 70.6M/s, aver. 13ns, 13.2 GB/s   = crc32c()
+// - on x86_64
+//    2000 messages in 275us i.e. 6.9M/s, aver. 137ns, 1.3 GB/s   = AES-GCM-128
+//    10000 altered in 126us i.e. 75.6M/s, aver. 12ns, 14.1 GB/s  = crc32c()
+// - on i386
+//    2000 messages in 673us i.e. 2.8M/s, aver. 336ns, 544.1 MB/s
+//    10000 altered in 310us i.e. 30.7M/s, aver. 31ns, 5.7 GB/s
 
-function THttpPeerCrypt.MessageEncode(const aMsg: THttpPeerCacheMessage): RawByteString;
-var
-  tmp: RawByteString;
-  p: PAnsiChar;
-  l: PtrInt;
+procedure THttpPeerCrypt.MessageEncode(const aMsg: THttpPeerCacheMessage;
+  out aEncoded: THttpPeerCacheMessageEncoded);
 begin
   // AES-GCM-128 encoding and authentication
-  FastSetRawByteString(tmp, @aMsg, SizeOf(aMsg));
   fAesSafe.Lock;
   try
-    result := fAesEnc.MacAndCrypt(tmp, {enc=}true, {iv=}true, '', {endsize=}4);
+    if fAesEnc.AesGcmBuffer(@aMsg, @aEncoded, SizeOf(aMsg), SizeOf(aEncoded),
+          true, true) <> PEER_CACHE_AESLEN then
+      exit;
   finally
     fAesSafe.UnLock;
   end;
   // append salted checksum to quickly reject any fuzzing attempt (endsize=4)
-  p := pointer(result);
-  l := length(result) - 4;
-  PCardinal(p + l)^ := crc32c(fSharedMagic, p, l);
+  aEncoded.crc := crc32c(fSharedMagic, @aEncoded, PEER_CACHE_AESLEN);
 end;
 
-function THttpPeerCrypt.MessageDecode(aFrame: PAnsiChar; aFrameLen: PtrInt;
-  out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
-
-  function DoDecode: THttpPeerCryptMessageDecode;
-  var // sub-function to avoid any hidden try..finally
-    encoded, plain: RawByteString;
-  begin
-    // AES-GCM-128 decoding and authentication
-    FastSetRawByteString(encoded, aFrame, aFrameLen);
-    fAesSafe.Lock;
-    try
-      plain := fAesDec.MacAndCrypt(encoded, {enc=}false, {iv=}true);
-    finally
-      fAesSafe.UnLock;
-    end;
-    // check consistency of the decoded THttpPeerCacheMessage value
-    result := mdAes;
-    if length(plain) <> SizeOf(aMsg) then
-      exit;
-    MoveFast(pointer(plain)^, aMsg, SizeOf(aMsg));
-    if (aMsg.Kind in PCF_RESPONSE) and // responses are broadcasted on POSIX
-       (aMsg.DestIP4 = fIP4) and     // only validate against the local sequence
-       ((aMsg.Seq < fFrameSeqLow) or
-         (aMsg.Seq > cardinal(fFrameSeq))) then // compare with local sequence
-      result := mdSeq
-    else if ord(aMsg.Kind) > ord(high(aMsg.Kind)) then
-      result := mdKind
-    else if ord(aMsg.Hardware) > ord(high(aMsg.Hardware)) then
-      result := mdHw
-    else if ord(aMsg.Hash.Algo) > ord(high(aMsg.Hash.Algo)) then
-      result := mdAlgo
-    else
-      result := mdOk;
-  end;
-
+procedure THttpPeerCrypt.MessageEncodeBearer(const aMsg: THttpPeerCacheMessage;
+  out aBearer: RawUtf8);
+var
+  bin: THttpPeerCacheMessageEncoded;
 begin
-  // quickly reject any naive fuzzing attempt
+  MessageEncode(aMsg, bin);
+  aBearer := AuthorizationBearer(BinToBase64uri(@bin, SizeOf(bin)));
+end;
+
+function THttpPeerCrypt.MessageDecode(
+  aFrame: PHttpPeerCacheMessageEncoded; aFrameLen: PtrInt;
+  out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
+var
+  tmp: THttpPeerCacheMessageEncoded; // need more space to decode the padding
+begin
+  // quickly reject any naive fuzzing attempt against length and 32-bit checksum
   result := mdLen;
-  dec(aFrameLen, 4);
-  if aFrameLen < SizeOf(aMsg) + SizeOf(TAesBlock) * 2 {iv+padding} then
+  if aFrameLen <> PEER_CACHE_MESSAGELEN then
     exit;
   result := mdCrc;
-  if PCardinal(aFrame + aFrameLen)^ = crc32c(fSharedMagic, aFrame, aFrameLen) then
-    // decode and verify the frame content
-    result := DoDecode;
+  if crc32c(fSharedMagic, pointer(aFrame), PEER_CACHE_AESLEN) <> aFrame^.crc then
+     exit;
+  // AES-GCM-128 decoding and authentication
+  result := mdAes;
+  fAesSafe.Lock;
+  try
+    if fAesDec.AesGcmBuffer(aFrame, @tmp, PEER_CACHE_AESLEN, SizeOf(tmp),
+         {enc=}false, {iv=}true) <> SizeOf(aMsg) then
+      exit;
+  finally
+    fAesSafe.UnLock;
+  end;
+  MoveFast(tmp, aMsg, SizeOf(aMsg));
+  // check consistency of the decoded THttpPeerCacheMessage value
+  if (aMsg.Kind in PCF_RESPONSE) and  // responses are broadcasted on POSIX
+     (aMsg.DestIP4 = fIP4) and // validate against local sequence
+     ((aMsg.Seq < fFrameSeqLow) or
+       (aMsg.Seq > cardinal(fFrameSeq))) then
+    result := mdSeq
+  else if ord(aMsg.Kind) > ord(high(aMsg.Kind)) then
+    result := mdKind
+  else if ord(aMsg.Hardware) > ord(high(aMsg.Hardware)) then
+    result := mdHw
+  else if ord(aMsg.Hash.Algo) > ord(high(aMsg.Hash.Algo)) then
+    result := mdAlgo
+  else
+    result := mdOk;
 end;
 
 function THttpPeerCrypt.BearerDecode(
   const aBearerToken: RawUtf8; aExpected: THttpPeerCacheMessageKind;
-  out aMsg: THttpPeerCacheMessage): THttpPeerCryptMessageDecode;
+  out aMsg: THttpPeerCacheMessage; aParams: PRawUtf8): THttpPeerCryptMessageDecode;
 var
-  tok: array[0.. 511] of AnsiChar; // no memory allocation
-  bearerlen, toklen: PtrInt;
+  tok: THttpPeerCacheMessageEncoded; // no memory allocation
+  bearerlen: PtrInt;
 begin
-  bearerlen := length(aBearerToken);
-  toklen := Base64uriToBinLength(bearerlen);
   result := mdBLen;
-  if toklen > SizeOf(tok) then
-    exit;
+  bearerlen := length(aBearerToken) - PEER_CACHE_BEARERLEN;
+  if bearerlen <> 0 then
+    if bearerlen > 0 then
+    begin
+      result := mdBParam;
+      if aBearerToken[PEER_CACHE_BEARERLEN + 1] <> '?' then
+        exit;
+      if aParams <> nil then // e.g. URI-encoded THttpRequestExtendedOptions
+        FastSetString(aParams^,
+          @PByteArray(aBearerToken)[PEER_CACHE_BEARERLEN + 1], bearerlen - 1);
+    end
+    else
+      exit; // not enough input
   result := mdB64;
-  if not Base64uriToBin(pointer(aBearerToken), @tok, bearerlen, toklen) then
+  if not Base64uriToBin(pointer(aBearerToken), @tok, PEER_CACHE_BEARERLEN, SizeOf(tok)) then
     exit;
-  result := MessageDecode(@tok, toklen, aMsg);
+  result := MessageDecode(@tok, SizeOf(tok), aMsg);
   if (result = mdOk) and
      (aExpected >= pcfBearer) and
      (aMsg.Kind <> aExpected) then
@@ -5511,6 +5523,9 @@ procedure THttpPeerCrypt.LocalPeerClientSetup(const aIp: RawUtf8;
 var
   tls: boolean;
 begin
+  aClient.ResetExtendedOptions;
+  if fVerboseLog then
+    aClient.OnLog := fLog.DoLog;
   tls := true;
   if fClientTls.Enabled then
     aClient.TLS := fClientTls
@@ -5520,19 +5535,18 @@ begin
     tls := false;
   aClient.OpenBind(aIp, fPort, {bind=}false, tls); // try to connect
   aClient.ReceiveTimeout := aRecvTimeout; // socket timeout once connected
-  aClient.OnLog := fLog.DoLog;
 end;
 
 function THttpPeerCrypt.LocalPeerRequest(const aRequest: THttpPeerCacheMessage;
   var aResp : THttpPeerCacheMessage; const aUrl: RawUtf8;
   aOutStream: TStreamRedirect; aRetry: boolean): integer;
 var
-  head, ip: RawUtf8;
+  head, ip, method: RawUtf8;
 
   procedure LocalPeerRequestFailed(E: TClass);
   begin
-    fLog.Add.Log(sllWarning, 'OnDownload: request %:% % failed as % %',
-      [ip, fPort, aUrl, StatusCodeToShort(result), E], self);
+    fLog.Add.Log(sllWarning, 'OnDownload: % %:% % failed as % %',
+      [method, ip, fPort, aUrl, StatusCodeToShort(result), E], self);
     if (fInstable <> nil) and // add to RejectInstablePeersMin list
        not aRetry then        // not from partial request before broadcast
       fInstable.BanIP(aResp.IP4); // this peer may have a HTTP firewall issue
@@ -5548,7 +5562,7 @@ begin
     IP4Text(@aResp.IP4, ip);
     fLog.Add.Log(sllDebug, 'OnDownload: request %:% %', [ip, fPort, aUrl], self);
     aResp.Kind := pcfBearer; // authorize OnBeforeBody with response message
-    head := AuthorizationBearer(BinToBase64uri(MessageEncode(aResp)));
+    MessageEncodeBearer(aResp, head);
     // ensure we have the right peer
     if (fClient <> nil) and
        (fClientIP4 <> aResp.IP4) then
@@ -5559,13 +5573,19 @@ begin
       fClient := THttpClientSocket.Create(fSettings.HttpTimeoutMS);
       LocalPeerClientSetup(ip, fClient, 5000);
     end;
-    // makes the GET request, optionally with the needed range bytes
+    // makes the HEAD/GET request, optionally with the needed range bytes
     fClient.RangeStart := aRequest.RangeStart;
     fClient.RangeEnd   := aRequest.RangeEnd;
-    if fSettings.LimitMBPerSec >= 0 then // -1 to keep original value
-      aOutStream.LimitPerSecond := fSettings.LimitMBPerSec shl 20; // bytes/sec
+    if aOutStream = nil then
+      method := 'HEAD'
+    else
+    begin
+      if fSettings.LimitMBPerSec >= 0 then // -1 to keep original value
+        aOutStream.LimitPerSecond := fSettings.LimitMBPerSec shl 20; // bytes/sec
+      method := 'GET';
+    end;
     result := fClient.Request(
-      aUrl, 'GET', 30000, head, '',  '', aRetry, nil, aOutStream);
+      aUrl, method, 30000, head, '',  '', aRetry, nil, aOutStream);
     fLog.Add.Log(sllTrace, 'OnDownload: request=%', [result], self);
     if result in HTTP_GET_OK then
       fClientIP4 := aResp.IP4 // success or not found (HTTP_NOCONTENT)
@@ -5589,7 +5609,8 @@ begin
   if aSharedSecret = '' then
     EHttpPeerCache.RaiseUtf8('%.Create without aSharedSecret', [self]);
   HmacSha256('4b0fb62af680447c9d0604fc74b908fa', aSharedSecret, key.b);
-  fAesEnc := TAesFast[mGCM].Create(key.Lo) as TAesGcmAbstract; // lower 128-bit
+  // favor our TAesGcm for small messages, instead of OpenSSL TAesFast[mGCM]
+  fAesEnc := TAesGcm.Create(key.Lo) as TAesGcmAbstract; // lower 128-bit
   fAesDec := fAesEnc.Clone as TAesGcmAbstract; // two AES-GCM-128 instances
   HmacSha256(key.b, '2b6f48c3ffe847b9beb6d8de602c9f25', key.b); // paranoid
   fSharedMagic := key.h.c3; // 32-bit derivation for anti-fuzzing checksum
@@ -5639,12 +5660,13 @@ begin
       [BOOL_STR[result], newmac.Name, newmac.IP, newmac.Broadcast, newmac.NetMask, err], self);
 end;
 
-const
+const // URI start for pcfBearerDirect/pcfBearerDirectPermanent peer requests
   DIRECTURI_32 = ord('/') + ord('h') shl 8 + ord('t') shl 16 + ord('t') shl 24;
 
 class function THttpPeerCrypt.HttpDirectUri(const aSharedSecret: RawByteString;
   const aRemoteUri, aRemoteHash: RawUtf8;
-  out aDirectUri, aDirectHeaderBearer: RawUtf8; aPermanent: boolean): boolean;
+  out aDirectUri, aDirectHeaderBearer: RawUtf8; aPermanent: boolean;
+  aOptions: PHttpRequestExtendedOptions): boolean;
 var
   c: THttpPeerCrypt;
   msg: THttpPeerCacheMessage;
@@ -5667,7 +5689,9 @@ begin
       p := NetConcat(['_', uri.Port]); // '_' is ok for URI, but not for domain
     FormatUtf8('/%/%%/%', [uri.Scheme, uri.Server, p, uri.Address], aDirectUri);
     msg.Opaque := crc63c(pointer(aDirectUri), length(aDirectUri)); // no replay
-    aDirectHeaderBearer := AuthorizationBearer(BinToBase64uri(c.MessageEncode(msg)));
+    c.MessageEncodeBearer(msg, aDirectHeaderBearer);
+    if aOptions <> nil then // extended options are URI-encoded to the bearer
+      aDirectHeaderBearer := aOptions^.ToUrlEncode(aDirectHeaderBearer);
     result := true;
   finally
     c.Free;
@@ -5731,7 +5755,8 @@ end;
 
 function THttpPeerCacheSettings.HttpDirectUri(
   const aSharedSecret: RawByteString; const aRemoteUri, aRemoteHash: RawUtf8;
-  out aDirectUri, aDirectHeaderBearer: RawUtf8; aForceTls, aPermanent: boolean): boolean;
+  out aDirectUri, aDirectHeaderBearer: RawUtf8; aForceTls, aPermanent: boolean;
+  aOptions: PHttpRequestExtendedOptions): boolean;
 var
   mac: TMacAddress;
 begin
@@ -5741,7 +5766,7 @@ begin
      (pcoNoServer in fOptions) or
      (GuessInterface(mac) <> '') or
      not THttpPeerCrypt.HttpDirectUri(aSharedSecret, aRemoteUri, aRemoteHash,
-           aDirectUri, aDirectHeaderBearer, aPermanent) then
+           aDirectUri, aDirectHeaderBearer, aPermanent, aOptions) then
     exit;
   aForceTls := aForceTls or (pcoSelfSignedHttps in fOptions);
   aDirectUri := Make([HTTPS_TEXT[aForceTls], mac.IP, ':', fPort, aDirectUri]);
@@ -5753,8 +5778,8 @@ end;
 
 constructor THttpPeerCacheThread.Create(Owner: THttpPeerCache);
 begin
-  fBroadcastSafe.Init;
   fOwner := Owner;
+  fBroadcastSafe.Init;
   fBroadcastAddr.SetIP4Port(fOwner.fBroadcastIP4, fOwner.Settings.Port);
   fBroadcastIpPort := fBroadcastAddr.IPWithPort;
   fBroadcastEvent := TSynEvent.Create;
@@ -5766,6 +5791,9 @@ end;
 
 destructor THttpPeerCacheThread.Destroy;
 begin
+  if Assigned(fBroadcastEvent) and
+     (fBroadcastCurrentSeq <> 0) then
+    fBroadcastEvent.SetEvent;
   inherited Destroy;
   fBroadcastEvent.Free;
   fBroadcastSafe.Done;
@@ -5790,20 +5818,20 @@ var
 
   procedure DoSendResponse;
   var
-    sock: TNetSocket;
-    frame: RawByteString;
     res: TNetResult;
+    sock: TNetSocket;
+    frame: THttpPeerCacheMessageEncoded;
   begin
     // compute PCF_RESPONSE frame
     resp.DestIP4 := remote.IP4; // notify actual source IP (over broadcast)
-    frame := fOwner.MessageEncode(resp);
+    fOwner.MessageEncode(resp, frame);
     // respond on main UDP port and on broadcast (POSIX) or local (Windows) IP
     if fMsg.Os.os = osWindows then
       remote.SetPort(fBroadcastAddr.Port) // local IP is good enough on Windows
     else
       remote.SetIP4Port(fOwner.fBroadcastIP4, fBroadcastAddr.Port); // need to broadcast
     sock := remote.NewSocket(nlUdp);
-    res := sock.SendTo(pointer(frame), length(frame), remote);
+    res := sock.SendTo(@frame, SizeOf(frame), remote);
     sock.Close;
     if fOwner.fVerboseLog then
       DoLog('send=% %', [ToText(res)^, ToText(resp)]);
@@ -5839,7 +5867,7 @@ begin
        exit;
      end;
   late := (fMsg.Kind in PCF_RESPONSE) and
-          (fMsg.Seq <> fCurrentSeq);
+          (fMsg.Seq <> fBroadcastCurrentSeq);
   if fOwner.fVerboseLog then
     if ok = mdOk then
       DoLog('%%', [_LATE[late], ToText(fMsg.Kind)^])
@@ -5878,7 +5906,7 @@ begin
           inc(fResponses);
           if AddResponseAndDone(fMsg) then
           begin
-            fCurrentSeq := 0;            // ignore next responses
+            fBroadcastCurrentSeq := 0;   // ignore next responses
             fBroadcastEvent.SetEvent;    // notify MessageBroadcast
           end;
         end;
@@ -5917,27 +5945,27 @@ function THttpPeerCacheThread.Broadcast(const aReq: THttpPeerCacheMessage;
 var
   sock: TNetSocket;
   res: TNetResult;
-  frame: RawByteString;
+  frame: THttpPeerCacheMessageEncoded;
   start, stop: Int64;
 begin
   result := nil;
   if self = nil then
     exit;
   QueryPerformanceMicroSeconds(start);
-  frame := fOwner.MessageEncode(aReq);
+  fOwner.MessageEncode(aReq, frame);
   fBroadcastSafe.Lock; // serialize OnDownload() or Ping() calls
   try
     // setup this broadcasting sequence
     fBroadcastEvent.ResetEvent;
-    fCurrentSeq := aReq.Seq; // ignore any other responses
-    fResponses := 0;         // reset counter for this fCurrentSeq (not late)
+    fBroadcastCurrentSeq := aReq.Seq; // ignore any other responses
+    fResponses := 0; // reset counter for this broadcast (not late)
     // broadcast request over the UDP sub-net of the selected network interface
     sock := fBroadcastAddr.NewSocket(nlUdp);
     if sock = nil then
       exit;
     try
       sock.SetBroadcast(true);
-      res := sock.SendTo(pointer(frame), length(frame), fBroadcastAddr);
+      res := sock.SendTo(@frame, SizeOf(frame), fBroadcastAddr);
       if fOwner.fVerboseLog then
         fOwner.fLog.Add.Log(sllTrace, 'Broadcast: % % = %',
           [fBroadcastIpPort, ToText(aReq), ToText(res)^], self);
@@ -5950,7 +5978,7 @@ begin
     fBroadcastEvent.WaitFor(fOwner.Settings.BroadcastTimeoutMS);
     result := GetResponses(aReq.Seq);
   finally
-    fCurrentSeq := 0; // ignore any late responses
+    fBroadcastCurrentSeq := 0; // ignore any late responses
     aAlone := (fResponses = 0);
     fBroadcastSafe.UnLock;
   end;
@@ -5989,7 +6017,7 @@ var
 begin
   result := nil;
   // retrieve the pending responses
-  fCurrentSeq := 0; // no more reponse from now on
+  fBroadcastCurrentSeq := 0; // no more reponse from now on
   fRespSafe.Lock;
   try
     if fRespCount = 0 then
@@ -6260,8 +6288,11 @@ begin
     fFilesSafe.UnLock;
   end;
   if fVerboseLog then
-    fLog.Add.Log(sllTrace, 'LocalFileName: % size=% msg: size=% start=% end=%',
-      [fn, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
+    if fn = '' then
+      fLog.Add.Log(sllTrace, 'LocalFileName: none', self)
+    else
+      fLog.Add.Log(sllTrace, 'LocalFileName: % size=% msg: size=% start=% end=%',
+        [fn, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
   result := HTTP_NOTFOUND;
   if size = 0 then
     exit; // not existing
@@ -6343,7 +6374,7 @@ begin
       if result < fTempFilesMaxSize then
         break; // we have deleted enough old files
     end;
-  fLog.Add.Log(sllTrace, 'OnDowloaded: deleted %', [KB(deleted)], self);
+  fLog.Add.Log(sllTrace, 'OnDownloaded: deleted %', [KB(deleted)], self);
   dec(fTempCurrentSize, deleted);
 end;
 
@@ -6386,7 +6417,8 @@ var
   function ResetOutStreamPosition: boolean;
   begin
     // not moved (e.g. first request, or connection issue) returns true
-    result := OutStream.Position = outStreamInitialPos;
+    result := (fSettings <> nil) and // nil at shutdown
+              (OutStream.Position = outStreamInitialPos);
     if not result then
       // TStreamRedirect requires full rewind for full content re-hash
       if outStreamInitialPos = 0 then
@@ -6398,7 +6430,7 @@ begin
   result := 0;
   // validate WGet caller context
   if (self = nil) or
-     (fSettings = nil) or
+     (fSettings = nil) or // nil at shutdown
      (Sender = nil) or
      (Params.Hash = '') or
      (Url = '') or
@@ -6457,7 +6489,7 @@ begin
      TooSmallFile(Params, ExpectedFullSize, 'OnDownload') then
     exit; // you are too small, buddy
   // try first the current/last HTTP peer client (if any)
-  FormatUtf8('?%=%', [Sender.Server, Url], u); // url used only for log/debugging
+  FormatUtf8('?%=%', [Sender.Server, Url], u); // just <> DIRECTURI_32 (for log)
   if (fClient <> nil) and
      (fClientIP4 <> 0) and
      ((pcoTryLastPeer in fSettings.Options) or
@@ -6538,7 +6570,7 @@ end;
 
 type
   TOnBeforeBodyErr = set of (
-    eBearer, eGet, eUrl, eIp1, eBanned, eDecode, eIp2, eUuid,
+    eShutdown, eBearer, eNoGetHead, eUrl, eIp1, eBanned, eDecode, eIp2, eUuid,
     eDirectIp, eDirectDecode, eDirectKind, eDirectOpaque, aDirectDisabled);
 
 function THttpPeerCache.OnBeforeBody(var aUrl, aMethod, aInHeaders,
@@ -6553,51 +6585,55 @@ begin
   // error code to reject the request immediately as a "TeaPot", close the
   // socket and ban this IP for a few seconds at accept() level
   err := [];
-  if length(aBearerToken) < (SizeOf(msg) div 3) * 4 then // base64uri length
+  if fSettings = nil then
+    include(err, eShutdown);
+  if length(aBearerToken) < PEER_CACHE_BEARERLEN then // base64uri length
     include(err, eBearer);
-  if not IsGet(aMethod) then
-    include(err, eGet);
+  if not (IsGet(aMethod) or
+          IsHead(aMethod)) then
+    include(err, eNoGetHead);
   if aUrl = '' then // URI is just ignored but something should be specified
     include(err, eUrl)
-  else if PCardinal(aUrl)^ = DIRECTURI_32 then // start with '/htt'
-  begin
-    // pcfBearerDirect* for pcoHttpDirect mode: /https/microsoft.com/...
-    if (aRemoteIp <> '') and
-       not (IsLocalHost(pointer(aRemoteIP)) or
-            (aRemoteIP = fMac.IP)) then
-      include(err, eDirectIp);
-    if not Check(BearerDecode(aBearerToken, pcfRequest, msg),
-             'OnBeforeBody Direct', msg) then
-      include(err, eDirectDecode)
+  else if err = [] then
+    if PCardinal(aUrl)^ = DIRECTURI_32 then // start with '/htt'
+    begin
+      // pcfBearerDirect* for pcoHttpDirect mode: /https/microsoft.com/...
+      if (aRemoteIp <> '') and
+         not (IsLocalHost(pointer(aRemoteIP)) or
+              (aRemoteIP = fMac.IP)) then
+        include(err, eDirectIp);
+      if not Check(BearerDecode(aBearerToken, pcfRequest, msg),
+               'OnBeforeBody Direct', msg) then
+        include(err, eDirectDecode)
+      else
+      begin
+        if not (msg.Kind in [pcfBearerDirect, pcfBearerDirectPermanent]) then
+          include(err, eDirectKind);
+        if Int64(msg.Opaque) <> crc63c(pointer(aUrl), length(aUrl)) then
+          include(err, eDirectOpaque); // see THttpPeerCrypt.HttpDirectUri()
+      end;
+      if not (pcoHttpDirect in fSettings.Options) then
+        include(err, aDirectDisabled);
+    end
     else
     begin
-      if not (msg.Kind in [pcfBearerDirect, pcfBearerDirectPermanent]) then
-        include(err, eDirectKind);
-      if Int64(msg.Opaque) <> crc63c(pointer(aUrl), length(aUrl)) then
-        include(err, eDirectOpaque); // see THttpPeerCrypt.HttpDirectUri()
+      // pcfBearer for regular request in broadcasting mode
+      if not IPToCardinal(aRemoteIP, ip4) then
+        include(err, eIp1)
+      else if fInstable.IsBanned(ip4) then // banned from RejectInstablePeersMin
+        include(err, eBanned);
+      if err = [] then
+        if Check(BearerDecode(aBearerToken, pcfBearer, msg), 'OnBeforeBody', msg) then
+        begin
+          if msg.IP4 <> fIP4 then
+            include(err, eIp2);
+          if not ((IsZero(THash128(msg.Uuid)) or // IsZero for "fake" response bearer
+                 IsEqualGuid(msg.Uuid, fUuid))) then
+            include(err, eUuid);
+        end
+        else
+          include(err, eDecode);
     end;
-    if not (pcoHttpDirect in fSettings.Options) then
-      include(err, aDirectDisabled);
-  end
-  else
-  begin
-    // pcfBearer for regular request in broadcasting mode
-    if not IPToCardinal(aRemoteIP, ip4) then
-      include(err, eIp1)
-    else if fInstable.IsBanned(ip4) then // banned from RejectInstablePeersMin
-      include(err, eBanned);
-    if err = [] then
-      if Check(BearerDecode(aBearerToken, pcfBearer, msg), 'OnBeforeBody', msg) then
-      begin
-        if msg.IP4 <> fIP4 then
-          include(err, eIp2);
-        if not ((IsZero(THash128(msg.Uuid)) or // IsZero for "fake" response bearer
-               IsEqualGuid(msg.Uuid, fUuid))) then
-          include(err, eUuid);
-      end
-      else
-        include(err, eDecode);
-  end;
   result := HTTP_SUCCESS;
   if err <> [] then
     result := HTTP_FORBIDDEN;
@@ -6647,78 +6683,81 @@ begin
   end;
 end;
 
-procedure THttpPeerCache.OnDowloaded(var Params: THttpClientSocketWGet;
+procedure THttpPeerCache.OnDownloaded(var Params: THttpClientSocketWGet;
   const Partial: TFileName; PartialID: integer);
 var
   local: TFileName;
   localsize, sourcesize, tot, start, stop: Int64;
   ok, istemp: boolean;
 begin
-  if pcoNoServer in fSettings.Options then
+  // avoid GPF at shutdown or in case of unexpected method call
+  if (fSettings = nil) or
+     (pcoNoServer in fSettings.Options) then
     exit;
-  // the supplied downloaded source file should be big enough
-  sourcesize := FileSize(Partial);
-  if (sourcesize = 0) or // paranoid
-     TooSmallFile(Params, sourcesize, 'OnDownloaded') then
-    exit;
-  // compute the local cache file name from the known file hash
-  if not CachedFileName(Params, [lfnEnsureDirectoryExists], local, istemp) then
-  begin
-    fLog.Add.Log(sllWarning,
-      'OnDowloaded: no hash specified for %', [Partial], self);
-    exit;
-  end;
-  // check if this file was not already in the cache folder
-  // - outside fFilesSafe.Lock because happens just after OnDownload from cache
-  localsize := FileSize(local);
-  if localsize <> 0 then
-  begin
-    fLog.Add.Log(LOG_TRACEWARNING[localsize <> sourcesize],
-      'OnDowloaded: % already in cache', [Partial], self);
-    // size mismatch may happen on race condition (hash collision is unlikely)
-    if PartialID <> 0 then
-      fPartials.ChangeFile(PartialID, local); // switch to the local file
-    if localsize = sourcesize then
-      Params.SetStep(wgsAlternateAlreadyInCache, [local])
-    else
-      Params.SetStep(wgsAlternateWrongSizeInCache,
-        [local, ' ', localsize, '<>', sourcesize]); // paranaoid
-    exit;
-  end;
-  QueryPerformanceMicroSeconds(start);
-  fFilesSafe.Lock; // disable any concurrent file access
+  ok := false; // for proper PartialID cleanup on abort
   try
-    // ensure adding this file won't trigger the maximum cache size limit
-    if (fTempFilesMaxSize > 0) and
-       istemp then
+    // the supplied downloaded source file should be big enough
+    sourcesize := FileSize(Partial);
+    if (sourcesize = 0) or // paranoid
+       TooSmallFile(Params, sourcesize, 'OnDownloaded') then
+      exit;
+    // compute the local cache file name from the known file hash
+    if not CachedFileName(Params, [lfnEnsureDirectoryExists], local, istemp) then
     begin
-      tot := TempFolderEstimateNewSize(sourcesize);
-      if tot >= fTempFilesMaxSize then
-      begin
-        fLog.Add.Log(sllDebug, 'OnDowloaded: % is too big (%) for tot=%',
-          [Partial, KBNoSpace(sourcesize), KBNoSpace(tot)], self);
-        if PartialID <> 0 then
-          OnDownloadingFailed(PartialID); // abort partial downloading
-        exit;
-      end;
+      fLog.Add.Log(sllWarning,
+        'OnDownloaded: no hash specified for %', [Partial], self);
+      exit;
     end;
-    // actually copy the source file into the local cache folder
-    ok := CopyFile(Partial, local, {failsifexists=}false);
-    Params.SetStep(wgsAlternateCopiedInCache, [local]);
-    if ok and istemp then
-      // force timestamp = now within the temporary folder
-      FileSetDateFromUnixUtc(local, UnixTimeUtc)
-  finally
-    fFilesSafe.UnLock;
-  end;
-  if PartialID <> 0 then
-    if ok then
-      fPartials.ChangeFile(PartialID, local) // switch to final local file
-    else
-      OnDownloadingFailed(PartialID); // abort
-  QueryPerformanceMicroSeconds(stop);
-  fLog.Add.Log(LOG_TRACEWARNING[not ok], 'OnDowloaded: copy % into % in %',
+    // check if this file was not already in the cache folder
+    // - outside fFilesSafe.Lock because happens just after OnDownload from cache
+    localsize := FileSize(local);
+    if localsize <> 0 then
+    begin
+      fLog.Add.Log(LOG_TRACEWARNING[localsize <> sourcesize],
+        'OnDownloaded: % already in cache', [Partial], self);
+      // size mismatch may happen on race condition (hash collision is unlikely)
+      if localsize = sourcesize then
+        Params.SetStep(wgsAlternateAlreadyInCache, [local])
+      else
+        Params.SetStep(wgsAlternateWrongSizeInCache,
+          [local, ' ', localsize, '<>', sourcesize]); // paranaoid
+      ok := true; // call fPartials.ChangeFile() to switch to the local file
+      exit;
+    end;
+    QueryPerformanceMicroSeconds(start);
+    fFilesSafe.Lock; // disable any concurrent file access
+    try
+      // ensure adding this file won't trigger the maximum cache size limit
+      if (fTempFilesMaxSize > 0) and
+         istemp then
+      begin
+        tot := TempFolderEstimateNewSize(sourcesize);
+        if tot >= fTempFilesMaxSize then
+        begin
+          fLog.Add.Log(sllDebug, 'OnDownloaded: % is too big (%) for tot=%',
+            [Partial, KBNoSpace(sourcesize), KBNoSpace(tot)], self);
+          exit;
+        end;
+      end;
+      // actually copy the source file into the local cache folder
+      ok := CopyFile(Partial, local, {failsifexists=}false);
+      Params.SetStep(wgsAlternateCopiedInCache, [local]);
+      if ok and istemp then
+        // force timestamp = now within the temporary folder
+        FileSetDateFromUnixUtc(local, UnixTimeUtc)
+    finally
+      fFilesSafe.UnLock;
+    end;
+    QueryPerformanceMicroSeconds(stop);
+    fLog.Add.Log(LOG_TRACEWARNING[not ok], 'OnDownloaded: copy % into % in %',
       [Partial, local, MicroSecToString(stop - start)], self);
+  finally
+    if PartialID <> 0 then // always eventually finalize any associated partial
+      if ok then
+        fPartials.ChangeFile(PartialID, local) // switch to final local file
+      else
+        OnDownloadingFailed(PartialID); // remove this partial on abort
+  end;
 end;
 
 procedure THttpPeerCache.OnDownloadFailed(const Params: THttpClientSocketWGet);
@@ -6762,8 +6801,11 @@ begin
     exit;
   fn := fPartials.Find(aMessage.Hash, size);
   if fVerboseLog then
-    fLog.Add.Log(sllTrace, 'PartialFileName: % size=% msg: size=% start=% end=%',
-      [fn, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
+    if fn = '' then
+      fLog.Add.Log(sllTrace, 'PartialFileName: none', self)
+    else
+      fLog.Add.Log(sllTrace, 'PartialFileName: % size=% msg: size=% start=% end=%',
+        [fn, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
   if size = 0 then
     exit; // not existing
   result := HTTP_NOTACCEPTABLE;
@@ -6800,12 +6842,12 @@ type
     RemoteHeaders: RawUtf8;
     ExpectedHash: RawUtf8;
     PartialID: THttpPartialID;
-    procedure ExpectedHashOrRaiseEHttpPeerCache;
+    function ExpectedHashOrRaiseEHttpPeerCache: Int64;
     procedure AbortDownload(Sender: THttpPeerCache; E: Exception);
     destructor Destroy; override;
   end;
 
-procedure THttpClientSocketPeerCache.ExpectedHashOrRaiseEHttpPeerCache;
+function THttpClientSocketPeerCache.ExpectedHashOrRaiseEHttpPeerCache: Int64;
 var
   done: RawUtf8;
 begin
@@ -6813,6 +6855,7 @@ begin
   if not PropNameEquals(done, ExpectedHash) then
     EHttpPeerCache.RaiseUtf8('GET % hash % failed: %<>%',
       [RemoteUri, DestStream, done, ExpectedHash]);
+  result := DestStream.Size;
 end;
 
 procedure THttpClientSocketPeerCache.AbortDownload(Sender: THttpPeerCache; E: Exception);
@@ -6835,55 +6878,102 @@ begin
   inherited Destroy;
 end;
 
-function THttpPeerCache.DirectFileName(const aUrl: RawUtf8;
+function DirectConnectAndHead(Sender: THttpPeerCache;
+  Ctxt: THttpServerRequestAbstract; redirmax: integer; const aParams: RawUtf8;
+  out cs: THttpClientSocketPeerCache): integer;
+var
+  cslog: TSynLogProc;
+  uri: TUri;
+  hdr: RawUtf8;
+  opt: THttpRequestExtendedOptions;
+begin
+  cs := nil;
+  // compute the remote URI and its associated options/header
+  result := HTTP_BADREQUEST;
+  if not Sender.HttpDirectUriReconstruct(pointer(Ctxt.Url), uri) then
+    exit;
+  if aParams = '' then
+    opt.Init
+  else if not opt.InitFromUrl(aParams) then // e.g. 'ti=1&as=3'
+    exit;
+  opt.CreateTimeoutMS := 1000;
+  opt.RedirectMax := redirmax;
+  if Assigned(Sender.fOnDirectOptions) then
+  begin
+    result := Sender.fOnDirectOptions(uri, hdr, opt); // customizable
+    if result <> HTTP_SUCCESS then
+      exit;
+  end;
+  // HEAD to the original server to connect, retrieving size and redirection
+  cslog := nil;
+  if Sender.fVerboseLog then
+    cslog := Sender.fLog.DoLog;
+  cs := THttpClientSocketPeerCache.OpenOptions(uri, opt, cslog);
+  if redirmax = 0 then // from DirectFileNameHead()
+    include(cs.Http.Options, hroHeadersUnfiltered);
+  result := cs.Head(uri.Address, 30000, hdr);
+  if not (result in HTTP_GET_OK) then
+  begin
+    FreeAndNil(cs);
+    exit;
+  end;
+  if cs.Redirected <> '' then
+    uri.Address := cs.Redirected; // follow 3xx redirection
+  cs.RemoteUri := uri.Address;
+  cs.RemoteHeaders := hdr;
+  Ctxt.OutCustomHeaders := cs.Headers; // to include e.g. Content-Type:
+end;
+
+function THttpPeerCache.DirectFileName(Ctxt: THttpServerRequestAbstract;
   const aMessage: THttpPeerCacheMessage; aHttp: PHttpRequestContext;
-  out aFileName: TFileName; out aSize: Int64): integer;
+  out aFileName: TFileName; out aSize: Int64; const aParams: RawUtf8): integer;
 var
   cs:  THttpClientSocketPeerCache;
-  uri: TUri;
-  opt: THttpRequestExtendedOptions;
-  hdr, err, ip: RawUtf8;
+  err, ip: RawUtf8;
   i: PtrInt;
+  localsize: Int64;
   alone: boolean;
   req: THttpPeerCacheMessage;
   peers: THttpPeerCacheMessageDynArray;
 begin
+  cs := nil;
   result := HTTP_BADREQUEST;
   try
-    cs := nil;
+    if aMessage.Kind in [pcfBearerDirect, pcfBearerDirectPermanent] then
     try
-      // compute the remote URI and its associated options/header
-      if not (aMessage.Kind in [pcfBearerDirect, pcfBearerDirectPermanent]) then
-        err := GetEnumNameTrimed(TypeInfo(THttpPeerCacheMessageKind), ord(aMessage.Kind))
-      else if not HttpDirectUriReconstruct(pointer(aUrl), uri) then
-        err := aUrl;
-      if err <> '' then
-        exit;
-      opt.Init;
-      opt.CreateTimeoutMS := 1000;
-      opt.RedirectMax := 3; // seems fair enough
-      if Assigned(fOnDirectOptions) then
-      begin
-        result := fOnDirectOptions(uri, hdr, opt); // customizable
-        err := 'callback';
-        if result <> HTTP_SUCCESS then
-          exit;
-      end;
-      // HEAD to the original server to connect, retrieving size and redirection
-      cs := THttpClientSocketPeerCache.OpenOptions(uri, opt);
-      result := cs.Head(uri.Address, 30000, hdr);
+      // HEAD to the original server to connect and retrieve size + redirection
       err := 'head';
+      result := DirectConnectAndHead(self, Ctxt, {redir=}3, aParams, cs);
       if not (result in HTTP_GET_OK) then
         exit;
       result := HTTP_LENGTHREQUIRED;
       aSize := cs.Http.ContentLength;
       Int32ToUtf8(aSize, err);
-      if aSize <= 0 then
-        exit; // progressive request requires a final size
-      if cs.Redirected <> '' then
-        uri.Address := cs.Redirected; // follow 3xx redirection
-      cs.RemoteUri := uri.Address;
-      cs.RemoteHeaders := hdr;
+      if (aSize <= 0) or  // progressive request requires a final size
+         (fSettings = nil) then // shutdown in progress
+        exit;
+      // try from cached files
+      err := 'from partial';
+      if fPartials <> nil then // check partial first (local may not be finished)
+        result := PartialFileName(aMessage, aHttp, @aFileName, @localsize);
+      if result <> HTTP_SUCCESS then
+      begin
+        err := 'from local';
+        result := LocalFileName(aMessage, [lfnSetDate], @aFileName, @localsize);
+      end;
+      if result = HTTP_SUCCESS then
+        if localsize <> aSize then // paranoid
+        begin
+          fLog.Add.Log(sllWarning, 'DirectFileName delete % size: %=% remote=%',
+            [aFileName, err, localsize, aSize], self);
+          DeleteFile(aFileName); // this file seems invalid: clean from cache
+        end
+        else
+        begin
+          if err = 'from local' then
+            aSize := 0; // not progressive
+          exit;
+        end;
       // prepare direct download into the final cache file as in LocalFileName()
       aFileName := ComputeFileName(aMessage.Hash);
       fFilesSafe.Lock; // disable any concurrent file access
@@ -6903,7 +6993,8 @@ begin
         // create the proper TStreamRedirect to store and hash
         err := 'file';
         result := HTTP_CONFLICT;
-        if FileSize(aFileName) > 0 then
+        if (FileSize(aFileName) > 0) or
+           (fSettings = nil) then // shutdown in progress
           exit; // paranoid: existing cached files should have been checked
         cs.DestStream := HASH_STREAMREDIRECT[aMessage.Hash.Algo].Create(
           TFileStreamEx.Create(aFileName, fmCreate or fmShareRead));
@@ -6925,49 +7016,50 @@ begin
         if (pcoHttpDirectTryLastPeer in fSettings.Options) and
            (fClient <> nil) and
            (fClientIP4 <> 0) and
-           (aSize < 256 shl 10) and // don't lock fClient/fClientSafe too long
            fClientSafe.TryLock then
         try
           SetLength(peers, 1);
           peers[0] := req;
-          FillZero(peers[0].Uuid); // "fake" request
-          result := LocalPeerRequest(req, peers[0], aUrl, cs.DestStream, {retry=}false);
-          if result = HTTP_SUCCESS then // returns HTTP_NOCONTENT if not found
-          begin
-            cs.ExpectedHashOrRaiseEHttpPeerCache;
-            FreeAndNil(cs); // has been downloaded from last peer into cache
-            // caller OnRequest() will return aFileName in progressive mode
-            exit;
-          end;
+          FillZero(peers[0].Uuid); // "fake" HEAD request to check this peer
+          result := LocalPeerRequest(req, peers[0], Ctxt.Url, nil, {retry=}false);
+          if fSettings = nil then
+            exit; // shutdown in progress
+          if result <> HTTP_SUCCESS then // returns HTTP_NOCONTENT if not found
+            peers := nil; // make full GET in background thread
         finally
           fClientSafe.UnLock;
         end;
         // make an actual UDP broadcast about this file hash
-        peers := fUdpServer.Broadcast(req, alone);
+        if peers = nil then
+          peers := fUdpServer.Broadcast(req, alone);
         if peers <> nil then
           for i := 0 to high(peers) do
             if peers[i].IP4 <> fIP4 then
             begin
               // switch to this best local peer instead of main server
-              cs.Close;
               IP4Text(@peers[i].IP4, ip);
               fLog.Add.Log(sllDebug, 'DirectFileName(%) switch to %:% peer',
-                [aUrl, ip, fPort], self);
-              LocalPeerClientSetup(ip, cs, 1000); // local cs, not fClient
+                [Ctxt.Url, ip, fPort], self);
+              cs.Close;
+              LocalPeerClientSetup(ip, cs, 5000); // local cs, not fClient
               // local peer requires a new bearer
               peers[i].Kind := pcfBearer;
-              cs.RemoteHeaders := AuthorizationBearer(
-                BinToBase64uri(MessageEncode(peers[i])));
-              cs.RemoteUri := aUrl;
-              break;
+              MessageEncodeBearer(peers[i], cs.RemoteHeaders);
+              FormatUtf8('?%', [Ctxt.Url], cs.RemoteUri); // <> DIRECTURI_32
+              // make a quick HEAD on this new socket to verify the peer
+              result := cs.Request(cs.RemoteUri, 'HEAD', 30000, cs.RemoteHeaders);
+              if fSettings = nil then
+                exit; // shutdown in progress
+              if result in HTTP_GET_OK then
+                break; // this peer seems just fine: background GET
             end;
       end;
       // start the GET request to the remote URI into aFileName via a sub-thread
-      Make(['partial', cs.PartialID], err);
+      Make(['direct', cs.PartialID], err);
       TLoggedWorkThread.Create(fLog, err, cs, DirectFileNameBackgroundGet);
       cs := nil; // will be owned by TLoggedWorkThread from now on
-      err :='';
       result := HTTP_SUCCESS;
+      // caller OnRequest() will return aFileName in progressive mode
     except
       on E: Exception do
       begin
@@ -6976,15 +7068,16 @@ begin
            (cs.DestStream <> nil) then
           cs.AbortDownload(self, E)
         else
-          fLog.Add.Log(sllDebug, 'DirectFileName(%)=%', [aUrl, PClass(E)^], self);
+          fLog.Add.Log(sllDebug, 'DirectFileName(% %)=%',
+            [Ctxt.Method, Ctxt.Url, PClass(E)^], self);
         result := HTTP_NOTFOUND;
-        cs.Free;
       end;
     end;
   finally
     if (err <> '') and
        fVerboseLog then
       fLog.Add.Log(sllTrace, 'DirectFileName=% % (%)', [result, aFileName, err], self);
+    cs.Free;
   end;
 end;
 
@@ -6992,6 +7085,7 @@ procedure THttpPeerCache.DirectFileNameBackgroundGet(Sender: TObject);
 var
   cs: THttpClientSocketPeerCache absolute Sender;
   res: integer;
+  endsize: Int64;
 begin
   // remote HTTP/HTTPS GET request executed in its own TLoggedWorkThread thread
   try
@@ -6999,11 +7093,13 @@ begin
       // make the actual blocking GET request in this background thread
       res := cs.Request(cs.RemoteUri, 'GET', 30000, cs.RemoteHeaders, '', '',
         {retry=}false, {instream=}nil, {outstream=}cs.DestStream);
+      if fSettings = nil then
+        exit; // shutdown
       if not (res in HTTP_GET_OK) then
         EHttpPeerCache.RaiseUtf8('GET % failed as %', [cs.RemoteUri, res]);
-      cs.ExpectedHashOrRaiseEHttpPeerCache;
-      fLog.Add.Log(sllTrace, 'DirectFileNameBackgroundGet(%)=%',
-        [cs.DestFileName, res], self);
+      endsize := cs.ExpectedHashOrRaiseEHttpPeerCache;
+      fLog.Add.Log(sllTrace, 'DirectFileNameBackgroundGet(%)=% size=%',
+        [cs.DestFileName, res, endsize], self);
     except
       on E: Exception do
         cs.AbortDownload(self, E);
@@ -7013,9 +7109,43 @@ begin
   end;
 end;
 
+procedure AddReprDigest(Ctxt: THttpServerRequestAbstract; const Hash: THashDigest);
+begin // implement pcoHttpReprDigest option
+  Ctxt.SetOutCustomHeader(['Repr-Digest: ', HASH_TXT_LOWER[Hash.Algo],
+    '=:', BinToBase64Short(@Hash.Bin, HASH_SIZE[Hash.Algo]), ':']);
+end;
+
+function THttpPeerCache.DirectFileNameHead(Ctxt: THttpServerRequestAbstract;
+  const aHash: THashDigest; const aParams: RawUtf8): cardinal;
+var
+  cs:  THttpClientSocketPeerCache;
+begin
+  try
+    cs := nil;
+    try
+      // direct HEAD to the remote server, with no redirection
+      result := DirectConnectAndHead(self, Ctxt, {redir=}0, aParams, cs);
+      if pcoHttpReprDigest in fSettings.Options then
+        AddReprDigest(Ctxt, aHash);
+    finally
+      cs.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      fLog.Add.Log(sllDebug, 'DirectFileNameHead(%)=%', [Ctxt.Url, PClass(E)^], self);
+      result := HTTP_BADGATEWAY;
+    end;
+  end;
+end;
+
 type
   TOnRequestError = (
-    oreOK, oreNoLocalFile, oreLocalFileNotAcceptable, oreDirectRemoteUriFailed);
+    oreOK,
+    oreNoLocalFile,
+    oreLocalFileNotAcceptable,
+    oreDirectRemoteUriFailed,
+    oreShutdown);
 
 function THttpPeerCache.OnRequest(Ctxt: THttpServerRequestAbstract): cardinal;
 var
@@ -7024,49 +7154,74 @@ var
   http: PHttpRequestContext;
   progsize: Int64; // expected progressive file size, to be supplied as header
   err: TOnRequestError;
-  errtxt: RawUtf8;
+  errtxt, opt: RawUtf8;
 begin
+  // avoid GPF at shutdown
+  result := HTTP_BADREQUEST;
+  if fSettings = nil then
+    exit;
   // retrieve context - already checked by OnBeforeBody
   err := oreOK;
-  result := HTTP_BADREQUEST;
-  if Check(BearerDecode(Ctxt.AuthBearer, pcfRequest, msg), 'OnRequest', msg) then
+  if Check(BearerDecode(Ctxt.AuthBearer, pcfRequest, msg, @opt), 'OnRequest', msg) then
   try
     // resource will always be identified by decoded bearer hash
     progsize := 0;
     http := (Ctxt as THttpServerRequest).fHttp;
-    // always first try from PartialFileName() then LocalFileName()
-    if fPartials <> nil then // check partial first (local may not be finished)
-      result := PartialFileName(msg, http, @fn, @progsize);
-    if result <> HTTP_SUCCESS then
-      result := LocalFileName(msg, [lfnSetDate], @fn, nil);
-    if result <> HTTP_SUCCESS then
-      // handle any currently unknown hash
-      if (result <> HTTP_NOTACCEPTABLE) and // abort on non acceptable message
-         (msg.Kind in [pcfBearerDirect, pcfBearerDirectPermanent]) then
-      begin
-        // try to start a remote download in a background thread
-        result := DirectFileName(Ctxt.Url, msg, http, fn, progsize);
-        if result <> HTTP_SUCCESS then
+    case msg.Kind of
+      pcfBearerDirect,
+      pcfBearerDirectPermanent:
+        if IsHead(Ctxt.Method) then
         begin
-          err := oreDirectRemoteUriFailed;
+          // proxy the HEAD request to the final server
+          result := DirectFileNameHead(Ctxt, msg.Hash, opt);
+          if not (result in HTTP_GET_OK) then
+            err := oreDirectRemoteUriFailed;
           exit;
-        end;
-      end
-      else // pcfBearer with no local/partial known file: nothing to return
-      begin
-        if result = HTTP_NOTACCEPTABLE then
-          err := oreLocalFileNotAcceptable
+        end
         else
-          err := oreNoLocalFile;
-        if IsZero(THash128(msg.Uuid)) then // from "fake" response bearer
-          result := HTTP_NOCONTENT; // OnDownload should make a broadcast
-        exit;
+        begin
+          // remote HEAD + GET new partial file in a background thread
+          result := DirectFileName(Ctxt, msg, http, fn, progsize, opt);
+          if result <> HTTP_SUCCESS then
+          begin
+            err := oreDirectRemoteUriFailed;
+            exit;
+          end;
+        end;
+    else // pcfBearer
+      begin
+        // try first from PartialFileName() then LocalFileName()
+        if fPartials <> nil then // check partial first (local may not be finished)
+          result := PartialFileName(msg, http, @fn, @progsize);
+        if result <> HTTP_SUCCESS then
+          result := LocalFileName(msg, [lfnSetDate], @fn, nil);
       end;
-    // HTTP_SUCCESS: return the (partial) file as requested
-    Ctxt.OutContent := StringToUtf8(fn);
-    Ctxt.OutContentType := STATICFILE_CONTENT_TYPE;
-    if progsize <> 0 then // header for rfProgressiveStatic mode
-      Ctxt.OutCustomHeaders := FormatUtf8(STATICFILE_PROGSIZE + ' %', [progsize]);
+    end;
+    if fSettings = nil then
+    begin
+      err := oreShutdown;
+      result := HTTP_BADGATEWAY;
+    end
+    else if result <> HTTP_SUCCESS then
+    begin
+      // no local/partial known file: nothing to return
+      if result = HTTP_NOTACCEPTABLE then
+        err := oreLocalFileNotAcceptable
+      else
+        err := oreNoLocalFile;
+      if IsZero(THash128(msg.Uuid)) then // from "fake" response bearer
+        result := HTTP_NOCONTENT; // OnDownload should make a broadcast
+    end
+    else
+    begin
+      // HTTP_SUCCESS: return the (partial) file as requested
+      Ctxt.OutContent := StringToUtf8(fn);
+      Ctxt.OutContentType := STATICFILE_CONTENT_TYPE;
+      if progsize <> 0 then // append header for rfProgressiveStatic mode
+        Ctxt.SetOutCustomHeader([STATICFILE_PROGSIZE + ' ', progsize]);
+      if pcoHttpReprDigest in fSettings.Options then
+        AddReprDigest(Ctxt, msg.Hash);
+    end;
   finally
     errtxt := GetEnumNameUnCamelCase(TypeInfo(TOnRequestError), ord(err));
     if not StatusCodeIsSuccess(result) then

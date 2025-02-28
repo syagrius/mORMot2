@@ -178,7 +178,7 @@ type
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
     UserAgent: RawUtf8;
-    /// may be used to initialize this record on stack
+    /// may be used to initialize this record on stack with zeroed values
     procedure Init;
     /// reset this record, calling FillZero() on Password/Token SpiUtf8 values
     procedure Clear;
@@ -194,9 +194,30 @@ type
     procedure AuthorizeBearer(const Value: SpiUtf8);
     /// compare the Auth fields, depending on their scheme
     function SameAuth(Another: PHttpRequestExtendedOptions): boolean;
+    /// persist all fields of this record as a TDocVariant
+    // - returns e.g. {"ti":1,"as":3} for TLS.IgnoreCertificateErrors = true
+    // and Auth.Scheme = wraNegotiate
+    function ToDocVariant: variant;
+    /// persist all fields of this record as a URI-encoded TDocVariant
+    // - returns e.g. '/root?ti=1&as=3' for TLS.IgnoreCertificateErrors = true
+    // and Auth.Scheme = wraNegotiate and UriRoot = '/root'
+    function ToUrlEncode(const UriRoot: RawUtf8): RawUtf8;
+    /// reset this record, then set all fields from a ToDocVariant() value
+    function InitFromDocVariant(const Value: variant): boolean;
+    /// reset this record, then set all fields from a URI-encoded ToDocVariant()
+    // - expects UrlParams to be just after the '?', e.g.  'ti=1&as=3' for
+    // TLS.IgnoreCertificateErrors = true and Auth.Scheme = wraNegotiate
+    function InitFromUrl(const UrlParams: RawUtf8): boolean;
   end;
 
 function ToText(wra: THttpRequestAuthentication): PShortString; overload;
+
+/// persist main TNetTlsContext input fields into a TDocVariant
+function SaveNetTlsContext(const TLS: TNetTlsContext): variant;
+
+/// fill TNetTlsContext input fields from a SaveNetTlsContext() TDocVariant
+procedure LoadTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData);
+
 
 var
   /// THttpRequest timeout default value for DNS resolution
@@ -251,6 +272,8 @@ type
     fSafe: TLightLock;
     /// 32-bit monotonic counter sequence to populate THttpPartial.ID
     fLastID: cardinal;
+    /// how many fDownload[] are actually non void (ID <> 0)
+    fUsed: cardinal;
     /// store (a few) partial download states
     fDownload: array of THttpPartial;
     /// retrieve a Partial[] for a given sequence ID
@@ -447,7 +470,7 @@ type
     // - e.g. THttpPeerCache will make this file available as pcfResponsePartial
     // - Params.Hasher/Hash are expected to be populated
     // - returns an integer OnDownloadingID > 0 sequence to be eventually
-    // supplied to OnDowloaded() or OnDownloadingFailed()
+    // supplied to OnDownloaded() or OnDownloadingFailed()
     function OnDownloading(const Params: THttpClientSocketWGet;
       const Partial: TFileName; ExpectedFullSize: Int64): THttpPartialID;
     /// put a downloaded file into the alternative source cache
@@ -455,7 +478,7 @@ type
     // pcfResponsePartial with the new file name
     // - this method is called after any file has been successfully downloaded
     // - Params.Hasher/Hash are expected to be populated
-    procedure OnDowloaded(var Params: THttpClientSocketWGet;
+    procedure OnDownloaded(var Params: THttpClientSocketWGet;
       const Partial: TFileName; OnDownloadingID: THttpPartialID);
     /// notify the alternate download implementation that the data supplied
     // by OnDownload() was incorrect
@@ -559,7 +582,7 @@ type
     // - raise an exception on connection error
     // - as used e.g. by TSimpleHttpClient
     constructor OpenOptions(const aUri: TUri;
-      var aOptions: THttpRequestExtendedOptions);
+      var aOptions: THttpRequestExtendedOptions; const aOnLog: TSynLogProc = nil);
     /// compare TUri and its options with the actual connection
     // - returns true if no new instance - i.e. Free + OpenOptions() - is needed
     // - only supports HTTP/HTTPS, not any custom RegisterNetClientProtocol()
@@ -618,6 +641,8 @@ type
     /// after an Open(server,port), return 200,202,204 if OK, http status error otherwise
     function Delete(const url: RawUtf8; KeepAlive: cardinal = 0;
       const header: RawUtf8 = ''): integer;
+    /// low-level method which could be used after Close to reset options
+    procedure ResetExtendedOptions;
     /// setup web authentication using the Basic access algorithm
     procedure AuthorizeBasic(const UserName: RawUtf8; const Password: SpiUtf8);
     /// setup web authentication using the Digest access algorithm
@@ -2131,7 +2156,7 @@ end;
 function THttpPartials.IsVoid: boolean;
 begin
   result := (self = nil) or
-            (fDownload = nil);
+            (fUsed = 0);
 end;
 
 function THttpPartials.Add(const Partial: TFileName; ExpectedFullSize: Int64;
@@ -2147,13 +2172,15 @@ begin
   fSafe.Lock;
   try
     inc(fLastID);
-    result := fLastID; // returns 1,2,3... THttpPartialID
+    inc(fUsed);
+    result := fLastID; // returns 1,2,3... THttpPartialID (process specific)
+    n := length(fDownload);
     p := FromID(0); // try to reuse an empty slot
     if p = nil then
     begin
-      n := length(fDownload);
       SetLength(fDownload, n + 1); // need a new slot
       p := @fDownload[n];
+      inc(n); // for OnLog() below
     end;
     p^.ID := result;
     p^.Digest := Hash;
@@ -2169,7 +2196,8 @@ begin
     fSafe.UnLock;
   end;
   if Assigned(OnLog) then
-    OnLog(sllTrace, 'Add(%,%)=%', [Partial, ExpectedFullSize, result], self);
+    OnLog(sllTrace, 'Add(%,%)=% used=%/%',
+      [Partial, ExpectedFullSize, result, Fused, n], self);
 end;
 
 function THttpPartials.Find(const Hash: THashDigest; out Size: Int64): TFileName;
@@ -2207,6 +2235,7 @@ begin
       exit;
     PtrArrayAdd(p^.HttpContext, Http);
     Http^.ProgressiveID := p^.ID;
+    result := true;
   finally
     fSafe.UnLock;
   end;
@@ -2246,9 +2275,10 @@ end;
 
 function THttpPartials.Abort(ID: THttpPartialID): integer;
 var
-  i: PtrInt;
+  i, n: PtrInt;
   p: PHttpPartial;
 begin
+  // called on aborted partial retrieval
   result := 0; // returns the number of changed entries
   if IsVoid or
      (ID = 0) or
@@ -2272,36 +2302,54 @@ begin
           end;
         p^.HttpContext := nil;
       end;
+      dec(fUsed);
+      if fUsed = 0 then
+        fDownload := nil;
     end;
+    n := length(fDownload);
   finally
     fSafe.UnLock;
   end;
   if Assigned(OnLog) then
-    OnLog(LOG_TRACEWARNING[p = nil], 'Abort(%)=%', [ID, result], self);
+    OnLog(LOG_TRACEWARNING[p = nil], 'Abort(%)=% used=%/%',
+      [ID, result, fUsed, n], self);
 end;
 
 procedure THttpPartials.Remove(Sender: PHttpRequestContext);
 var
   p: PHttpPartial;
+  n: integer;
 begin
+  // nominal case, when the partial retrieval has eventually successed
   if IsVoid or
      (Sender = nil) or
      (Sender.ProgressiveID = 0) then
     exit;
   fSafe.Lock;
   try
+    n := length(fDownload);
     p := FromID(Sender.ProgressiveID);
     if p <> nil then
     begin
       PtrArrayDelete(p^.HttpContext, Sender);
       if p^.HttpContext = nil then
-        p^.ID := 0; // we can reuse this slot
+      begin
+        p^.ID := 0; // reuse this slot at next Add()
+        dec(fUsed);
+        if (fUsed = 0) and
+           (n > 16) then // worth releasing the memory
+        begin
+          fDownload := nil;
+          n := 0;
+        end;
+      end;
     end;
   finally
     fSafe.UnLock;
   end;
   if Assigned(OnLog) then
-    OnLog(LOG_TRACEWARNING[p = nil], 'Remove(%)', [Sender.ProgressiveID], self);
+    OnLog(LOG_TRACEWARNING[p = nil], 'Remove(%) used=%/%',
+      [Sender.ProgressiveID, fUsed, n], self);
 end;
 
 
@@ -2492,7 +2540,7 @@ begin
 end;
 
 constructor THttpClientSocket.OpenOptions(const aUri: TUri;
-  var aOptions: THttpRequestExtendedOptions);
+  var aOptions: THttpRequestExtendedOptions; const aOnLog: TSynLogProc);
 var
   temp: TUri;
   pu: PUri;
@@ -2500,6 +2548,8 @@ begin
   // setup the proper options before any connection
   fExtendedOptions := aOptions;
   Create(fExtendedOptions.CreateTimeoutMS);
+  if Assigned(aOnLog) then
+    OnLog := aOnLog; // allow to debug ASAP
   case fExtendedOptions.Auth.Scheme of
     wraDigest:
       begin
@@ -2688,7 +2738,7 @@ begin
         exit;
       end;
       // retrieve all HTTP headers
-      GetHeader({unfiltered=}false);
+      GetHeader(hroHeadersUnfiltered in Http.Options);
       if (rfHttp10 in Http.ResponseFlags) and // implicit keepalive in HTTP/1.1
          not (hfConnectionKeepAlive in Http.HeaderFlags) then
         include(Http.HeaderFlags, hfConnectionClose);
@@ -3212,7 +3262,7 @@ begin
         DeletePartAndResetDownload('resume'); // get rid of wrong file
         NewStream(fmCreate);                  // setup a new output stream
         requrl := url;                        // reset any redirection
-        RttiRequestAndFreeStream;               // try again without any resume
+        RttiRequestAndFreeStream;             // try again without any resume
       end;
       // now the hash should be correct
       if not PropNameEquals(parthash, params.Hash) then
@@ -3234,7 +3284,7 @@ begin
        (params.Hasher <> nil) and
        (params.Hash <> '') then
       try
-        params.Alternate.OnDowloaded(params, part, altdownloading);
+        params.Alternate.OnDownloaded(params, part, altdownloading);
         altdownloading := 0;
       except
         // ignore any fatal error in callbacks
@@ -3287,6 +3337,11 @@ function THttpClientSocket.Delete(const url: RawUtf8; KeepAlive: cardinal;
   const header: RawUtf8): integer;
 begin
   result := Request(url, 'DELETE', KeepAlive, header);
+end;
+
+procedure THttpClientSocket.ResetExtendedOptions;
+begin
+  fExtendedOptions.Init;
 end;
 
 procedure THttpClientSocket.SetAuthBearer(const Value: SpiUtf8);
@@ -3566,9 +3621,80 @@ begin
     end;
 end;
 
+function THttpRequestExtendedOptions.ToDocVariant: variant;
+var
+  v: TDocVariantData absolute result;
+begin
+  result := SaveNetTlsContext(TLS);
+  v.AddNameValuesToObject([
+    'p',  Proxy,
+    'as', ord(Auth.Scheme),
+    'au', Auth.UserName,
+    'ap', Auth.Password,
+    'at', Auth.Token], {dontAddDefault=}true);
+  if v.Count = 0 then
+    v.Clear;
+end;
+
+function THttpRequestExtendedOptions.ToUrlEncode(const UriRoot: RawUtf8): RawUtf8;
+begin
+  result := _Safe(ToDocVariant)^.ToUrlEncode(UriRoot);
+end;
+
+function THttpRequestExtendedOptions.InitFromDocVariant(const Value: variant): boolean;
+var
+  v: PDocVariantData;
+  s: integer;
+begin
+  Init;
+  result := _SafeObject(Value, v);
+  if not result or
+     (v^.Count = 0) then
+    exit;
+  LoadTlsContext(TLS, v^);
+  v^.GetAsRawUtf8('p', Proxy);
+  if v^.GetAsInteger('as', s) and
+     (cardinal(s) <= cardinal(high(Auth.Scheme))) then
+    Auth.Scheme := THttpRequestAuthentication(s);
+  v^.GetAsRawUtf8('au', Auth.UserName);
+  v^.GetAsRawUtf8('ap', RawUtf8(Auth.Password));
+  v^.GetAsRawUtf8('at', RawUtf8(Auth.Token));
+end;
+
+function THttpRequestExtendedOptions.InitFromUrl(const UrlParams: RawUtf8): boolean;
+var
+  v: TDocVariantData;
+begin
+  v.InitFromUrl(pointer(UrlParams), JSON_FAST);
+  result := InitFromDocVariant(variant(v));
+end;
+
+
 function ToText(wra: THttpRequestAuthentication): PShortString;
 begin
   result := GetEnumName(TypeInfo(THttpRequestAuthentication), ord(wra));
+end;
+
+function SaveNetTlsContext(const TLS: TNetTlsContext): variant;
+begin
+  VarClear(result{%H-});
+  TDocVariantData(result).InitObject([
+    'te', TLS.Enabled,
+    'ti', TLS.IgnoreCertificateErrors,
+    'ta', TLS.AllowDeprecatedTls,
+    'tu', TLS.ClientAllowUnsafeRenegotation,
+    'cf', TLS.CertificateFile,
+    'ca', TLS.CACertificatesFile], JSON_FAST, {dontAddDefault=}true);
+end;
+
+procedure LoadTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData);
+begin
+  V.GetAsBoolean('te', TLS.Enabled);
+  V.GetAsBoolean('ti', TLS.IgnoreCertificateErrors);
+  V.GetAsBoolean('ta', TLS.AllowDeprecatedTls);
+  V.GetAsBoolean('tu', TLS.ClientAllowUnsafeRenegotation);
+  V.GetAsRawUtf8('cf', TLS.CertificateFile);
+  V.GetAsRawUtf8('ca', TLS.CACertificatesFile);
 end;
 
 
@@ -5040,9 +5166,9 @@ begin
   p := @NameValuePairs[0];
   for a := 0 to high(NameValuePairs) shr 1 do
   begin
-    VarRecToUtf8(p^, name);
+    VarRecToUtf8(p, name);
     inc(p);
-    VarRecToUtf8(p^, value);
+    VarRecToUtf8(p, value);
     if (name = '') or
        (value = '') then
       continue;

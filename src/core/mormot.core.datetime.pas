@@ -567,6 +567,10 @@ procedure FromGlobalTime(out NewTime: TSynSystemTime; LocalTime: boolean;
 function TryEncodeDate(Year, Month, Day: cardinal; out Date: TDateTime): boolean;
 
 /// our own faster version of the corresponding RTL function
+function TryEncodeTime(Hour, Min, Sec, MSec: cardinal; out Time: TDateTime): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// our own faster version of the corresponding RTL function
 function IsLeapYear(Year: cardinal): boolean;
 
 /// compute how many days there are in a given month
@@ -952,6 +956,30 @@ function Iso8601ToTimeLogPUtf8Char(P: PUtf8Char; L: integer;
 function Iso8601ToTimeLog(const S: RawByteString): TTimeLog;
   {$ifdef HASINLINE}inline;{$endif}
 
+const
+  { some constants for efficient TTimeLog / TTimeLogBits.Value process
+       bits 0..5   = Seconds (0..59)   BTS_S   AND_S
+       bits 6..11  = Minutes (0..59)   BTS_M   AND_M   SHR_M
+       bits 12..16 = Hours   (0..23)   BTS_H   AND_H   SHR_H
+       bits 17..21 = Day-1   (0..31)   BTS_DD  AND_DD  SHR_DD
+       bits 22..25 = Month-1 (0..11)   BTS_MM  AND_MM  SHR_MM
+       bits 26..40 = Year    (0..9999) BTS_YY  AND_YY  SHR_YY   }
+  BTS_S  = 6;
+  BTS_M  = 6;
+  BTS_H  = 5;
+  BTS_DD = 5;
+  BTS_MM = 4;
+  BTS_YY = 12;
+  AND_S  = (1 shl BTS_S)  - 1;
+  AND_M  = (1 shl BTS_M)  - 1;
+  AND_H  = (1 shl BTS_H)  - 1;
+  AND_DD = (1 shl BTS_DD) - 1;
+  AND_MM = (1 shl BTS_MM) - 1;
+  SHR_M  = BTS_S;
+  SHR_H  = SHR_M  + BTS_M;
+  SHR_DD = SHR_H  + BTS_H;
+  SHR_MM = SHR_DD + BTS_DD;
+  SHR_YY = SHR_MM + BTS_MM;
 
 
 { ******************* TTextDateWriter supporting date/time ISO-8601 serialization }
@@ -1075,6 +1103,11 @@ implementation
 
 { ************ ISO-8601 Compatible Date/Time Text Encoding }
 
+const // sysutils' MonthDays[] stores Word values - and better alignment here
+  DaysPerMonth: array [{leapYear=}boolean, 0 .. 15] of byte = (
+   (0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0, 0, 0),
+   (0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0, 0, 0));
+
 function Iso8601ToDateTimePUtf8Char(P: PUtf8Char; L: integer): TDateTime;
 var
   tmp: TDateTime; // circumvent FPC limitation
@@ -1176,7 +1209,7 @@ begin
           exit; // invalid date format
         d := ord(P[6]) * 10 + ord(P[7]) - (48 + 480);
         if (d = 0) or
-           (d > MonthDays[true][m]) then
+           (d > DaysPerMonth[true][m]) then
           exit; // worse day number to allow is for leapyear=true
       end;
     end
@@ -1347,7 +1380,7 @@ begin
     inc(P);
   D := ord(P[6]) * 10 + ord(P[7]) - (48 + 480);
   if (D <> 0) and
-     (D <= MonthDays[true][M]) then
+     (D <= DaysPerMonth[true][M]) then
     // worse day number to allow is for leapyear=true
     result := true;
 end;
@@ -1575,8 +1608,9 @@ end;
 
 function DaysToIso8601(Days: cardinal; Expanded: boolean): RawUtf8;
 var
-  y, m: cardinal;
-begin
+  m: PtrUInt;
+  y, d: cardinal;
+begin // not very optimized, but fast enough
   y := 0;
   while Days > 365 do
   begin
@@ -1585,14 +1619,13 @@ begin
   end;
   m := 0;
   if Days > 31 then
-  begin
-    inc(m); // years as increment, not absolute: always 365 days with no leap
-    while Days > MonthDays[false][m] do
-    begin
-      dec(Days, MonthDays[false][m]);
-      inc(m);
-    end;
-  end;
+    repeat
+      inc(m); // years as increment, not absolute: always 365 days with no leap
+      d := DaysPerMonth[false][m];
+      if Days <= d then
+        break;
+      dec(Days, d);
+    until false;
   result := DateToIso8601(y, m, Days, Expanded);
 end;
 
@@ -1912,6 +1945,55 @@ begin
     end;
 end;
 
+function TryEncodeDate(Year, Month, Day: cardinal; out Date: TDateTime): boolean;
+var
+  y100: TDiv100Rec;
+  d: cardinal;
+begin
+  result := false;
+  if (Month - 1 >= 12) or
+     (Day = 0) or
+     (Year = 0) or
+     (Year > 10000) then
+    exit;
+  Div100(Year, y100{%H-});
+  if Day > DaysPerMonth[(Year and 3 = 0) and // inlined IsLeapYear()
+            ((y100.M <> 0) or (Year - ((y100.D shr 2) * 400) = 0))][Month] then
+    exit;
+  if Month > 2 then
+    dec(Month, 3)
+  else if Month > 0 then
+  begin
+    inc(Month, 9);
+    if y100.M = 0 then // Div100(Year - 1, y100)
+    begin
+      dec(y100.D);
+      y100.M := 99;
+    end
+    else
+      dec(y100.M);
+  end;
+  d := (146097 * y100.D) shr 2 + (1461 * y100.M) shr 2 +
+       (153 * Month + 2) div 5 + Day;
+  Date := d - 693900; // separated to avoid sign issue
+  result := true;
+end;
+
+function TryEncodeTime(Hour, Min, Sec, MSec: cardinal; out Time: TDateTime): boolean;
+var
+  d: cardinal;
+begin
+  result := false;
+  if (Hour > 23) or
+     (Min > 59) or
+     (Sec > 59) or
+     (MSec > 999) then
+    exit;
+  d := Hour * MilliSecsPerHour + Min * MilliSecsPerMin + Sec * MilliSecsPerSec + MSec;
+  Time := d / MSecsPerDay;
+  result := true;
+end;
+
 
 { TSynDate }
 
@@ -2034,7 +2116,7 @@ end;
 
 function DaysInMonth(Year, Month: cardinal): cardinal;
 begin
-  result := MonthDays[IsLeapYear(Year)][Month];
+  result := DaysPerMonth[mormot.core.datetime.IsLeapYear(Year)][Month];
 end;
 
 function DaysInMonth(Date: TDateTime): cardinal;
@@ -2050,7 +2132,7 @@ end;
 
 function TSynSystemTime.DaysInMonth: cardinal;
 begin
-  result := MonthDays[IsLeapYear(Year)][Month];
+  result := DaysPerMonth[mormot.core.datetime.IsLeapYear(Year)][Month];
 end;
 
 function TryEncodeDayOfWeekInMonth(y, m, nthdow, dow: integer;
@@ -2252,7 +2334,7 @@ begin
            (not ParseMonth(P, Month)) then
         begin
           hasday := true; // first alphabetic word is always the week day text
-          P := GotoNextSpace(P); // also ignore trailing '-'
+          P := GotoNextSpace(P); // also ignore trailing '-' or ','
         end;
       '0'..'9':
         begin
@@ -2544,7 +2626,7 @@ var
   time: TDateTime;
 begin
   if mormot.core.datetime.TryEncodeDate(Year, Month, Day, result) then
-    if TryEncodeTime(Hour, Minute, Second, MilliSecond, time) then
+    if mormot.core.datetime.TryEncodeTime(Hour, Minute, Second, MilliSecond, time) then
       result := result + time
     else
       result := 0
@@ -2612,25 +2694,8 @@ begin
 end;
 
 procedure TSynSystemTime.Normalize;
-
-  procedure NormalizeMonth;
-  var
-    thismonth: cardinal;
-  begin
-    repeat
-      thismonth := DaysInMonth;
-      if Day <= thismonth then
-        break;
-      dec(Day, thismonth);
-      inc(Month);
-      if Month > 12 then
-      begin
-        dec(Month, 12);
-        inc(Year);
-      end;
-    until false;
-  end;
-
+var
+  thismonth: cardinal;
 begin
   DayOfWeek := 0;
   while MilliSecond >= MilliSecsPerSec do
@@ -2653,13 +2718,23 @@ begin
     dec(Hour, 24);
     inc(Day);
   end;
-  NormalizeMonth;
   while Month > 12 do
   begin
     dec(Month, 12);
     inc(Year);
-    NormalizeMonth;
   end;
+  repeat
+    thismonth := DaysInMonth;
+    if Day <= thismonth then
+      break;
+    dec(Day, thismonth);
+    inc(Month);
+    if Month > 12 then
+    begin
+      dec(Month, 12);
+      inc(Year);
+    end;
+  until false;
 end;
 
 function TSynSystemTime.ChangeOperatingSystemTime: boolean;
@@ -2672,33 +2747,6 @@ begin
   FillCharFast(GlobalTime, SizeOf(GlobalTime), 0); // reset cache
 end;
 
-
-function TryEncodeDate(Year, Month, Day: cardinal;
-  out Date: TDateTime): boolean;
-var
-  d100: TDiv100Rec;
-begin 
-  result := false;
-  if (Month = 0) or
-     (Month > 12) or
-     (Day = 0) or
-     (Year = 0) or
-     (Year > 10000) or
-     (Day > MonthDays[IsLeapYear(Year)][Month]) then
-    exit;
-  if Month > 2 then
-    dec(Month, 3)
-  else if Month > 0 then
-  begin
-    inc(Month, 9);
-    dec(Year);
-  end;
-  Div100(Year, d100{%H-});
-  Date := (146097 * d100.D) shr 2 + (1461 * d100.M) shr 2 +
-          (153 * Month + 2) div 5 + Day;
-  Date := Date - 693900; // separated to avoid sign issue
-  result := true;
-end;
 
 function NowToString(Expanded: boolean; FirstTimeChar: AnsiChar;
   UtcDate: boolean): RawUtf8;
@@ -2779,7 +2827,7 @@ begin
 end;
 
 function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
-  tolocaltime: boolean): boolean; overload;
+  tolocaltime: boolean): boolean;
 var
   T: TSynSystemTime;
 begin
@@ -2803,7 +2851,7 @@ var
   T: TSynSystemTime;
 begin
   PInt64(@datetime)^ := 0;
-  result := (httpdate <> '') and
+  result := (httpdate <> nil) and
             T.FromHttpDateBuffer(httpdate, tolocaltime);
   if result then
     datetime := T.ToDateTime;
@@ -2878,7 +2926,7 @@ var
   bits: TTimeLogBits;
 begin
   bits.FromNow;
-  bits.Value := bits.Value and (1 shl (6 + 6 + 5) - 1); // keep only time
+  bits.Value := bits.Value and (1 shl SHR_DD - 1); // keep only time
   result := bits.Text(true, ' ');
 end;
 
@@ -3073,16 +3121,16 @@ end;
 
 { ************ TTimeLog efficient 64-bit custom date/time encoding }
 
-// bits: S=0..5 M=6..11 H=12..16 D=17..21 M=22..25 Y=26..40
-// size: S=6 M=6  H=5  D=5  M=4  Y=12
-// i.e. S<64 M<64 H<32 D<32 M<16 Y<=9999: power of 2 -> use fast shl/shr
+// bits: S=0..5 M=6..11 H=12..16 DD=17..21 MM=22..25 YY=26..40
+// size: S=6 M=6  H=5  DD=5  MM=4  YY=12
+// i.e. S<64 M<64 H<32 DD<32 MM<16 YY<=9999: power of 2 -> use fast shl/shr
 
 { TTimeLogBits }
 
 procedure TTimeLogBits.From(Y, M, D, HH, MM, SS: cardinal);
 begin
-  inc(HH, D shl 5 + M shl 10 + Y shl 14 - (1 shl 5 + 1 shl 10));
-  Value := SS + MM shl 6 + Int64(HH) shl 12;
+  inc(HH, D shl BTS_H + M shl (BTS_H + BTS_DD) + Y shl 14 - (1 shl 5 + 1 shl 10));
+  Value := SS + MM shl SHR_M + Int64(HH) shl SHR_H;
 end;
 
 procedure TTimeLogBits.From(P: PUtf8Char; L: integer);
@@ -3095,13 +3143,13 @@ var
   v: PtrUInt;
 begin
   v := PPtrUint(@Value)^;
-  Date.Year := {$ifdef CPU32} Value {$else} v {$endif} shr (6 + 6 + 5 + 5 + 4);
-  Date.Month := 1 + (v shr (6 + 6 + 5 + 5)) and 15;
+  Date.Year := {$ifdef CPU32} Value {$else} v {$endif} shr SHR_YY;
+  Date.Month := 1 + (v shr SHR_MM) and AND_MM;
   Date.DayOfWeek := 0;
-  Date.Day := 1 + (v shr (6 + 6 + 5)) and 31;
-  Date.Hour := (v shr (6 + 6)) and 31;
-  Date.Minute := (v shr 6) and 63;
-  Date.Second := v and 63;
+  Date.Day := 1 + (v shr SHR_DD) and AND_DD;
+  Date.Hour := (v shr SHR_H) and AND_H;
+  Date.Minute := (v shr SHR_M) and AND_M;
+  Date.Second := v and AND_S;
   Date.MilliSecond := 0;
 end;
 
@@ -3131,12 +3179,12 @@ begin
     T.Hour := 0
   else
     T.FromTime(DateTime);
-  v := T.Day shl 5 + T.Month shl 10 + T.Year shl 14 - (1 shl 5 + 1 shl 10);
+  v := T.Day shl BTS_H + T.Month shl 10 + T.Year shl 14 - (1 shl 5 + 1 shl 10);
   Value := v; // circumvent C1093 error on oldest Delphi
-  Value := Value shl 12;
+  Value := Value shl BTS_YY;
   if not DateOnly then
   begin
-    v := T.Second + T.Minute shl 6 + T.Hour shl 12;
+    v := T.Second + T.Minute shl SHR_M + T.Hour shl SHR_H;
     Value := Value + v;
   end;
 end;
@@ -3158,8 +3206,8 @@ begin
   v := Time^.Hour + Time^.Day shl 5 + Time^.Month shl 10 +
        Time^.Year shl 14 - (1 shl 5 + 1 shl 10);
   Value := v; // circumvent C1093 error on Delphi 5
-  v := Time^.Second + Time^.Minute shl 6;
-  Value := (Value shl 12) + v;
+  v := Time^.Second + Time^.Minute shl SHR_M;
+  Value := (Value shl BTS_YY) + v;
 end;
 
 procedure TTimeLogBits.FromUtcTime;
@@ -3187,12 +3235,12 @@ begin
   {$else}
   lo := PCardinal(@Value)^;
   {$endif CPU64}
-  if lo and (1 shl (6 + 6 + 5) - 1) = 0 then
+  if lo and (1 shl SHR_DD - 1) = 0 then
     result := 0
   else
-    result := EncodeTime((lo shr (6 + 6)) and 31,
-                         (lo shr 6) and 63,
-                         lo and 63, 0);
+    result := EncodeTime((lo shr SHR_H) and AND_H,
+                         (lo shr SHR_M) and AND_M,
+                         lo and AND_S, 0);
 end;
 
 function TTimeLogBits.ToDate: TDate;
@@ -3201,15 +3249,15 @@ var
 begin
   {$ifdef CPU64}
   lo := Value;
-  y := lo shr (6 + 6 + 5 + 5 + 4);
+  y := lo shr SHR_YY;
   {$else}
-  y := Value shr (6 + 6 + 5 + 5 + 4);
+  y := Value shr SHR_YY;
   lo := PCardinal(@Value)^;
   {$endif CPU64}
   if (y = 0) or
-     not TryEncodeDate(y,
-                       1 + (lo shr (6 + 6 + 5 + 5)) and 15,
-                       1 + (lo shr (6 + 6 + 5)) and 31,
+     not mormot.core.datetime.TryEncodeDate(y,
+                       1 + (lo shr SHR_MM) and AND_MM,
+                       1 + (lo shr SHR_DD) and AND_DD,
                        TDateTime(result)) then
     result := 0;
 end;
@@ -3221,21 +3269,21 @@ var
 begin
   {$ifdef CPU64}
   lo := Value;
-  y := lo shr (6 + 6 + 5 + 5 + 4);
+  y := lo shr SHR_YY;
   {$else}
-  y := Value shr (6 + 6 + 5 + 5 + 4);
+  y := Value shr SHR_YY;
   lo := PCardinal(@Value)^;
   {$endif CPU64}
   if (y = 0) or
-      not TryEncodeDate(y,
-                        1 + (lo shr (6 + 6 + 5 + 5)) and 15,
-                        1 + (lo shr (6 + 6 + 5)) and 31,
+      not mormot.core.datetime.TryEncodeDate(y,
+                        1 + (lo shr SHR_MM) and AND_MM,
+                        1 + (lo shr SHR_DD) and AND_DD,
                         result) then
     result := 0;
-  if (lo and (1 shl (6 + 6 + 5) - 1) <> 0) and
-     TryEncodeTime((lo shr (6 + 6)) and 31,
-                   (lo shr 6) and 63,
-                   lo and 63,
+  if (lo and (1 shl SHR_DD - 1) <> 0) and
+     mormot.core.datetime.TryEncodeTime((lo shr SHR_H) and AND_H,
+                   (lo shr SHR_M) and AND_M,
+                   lo and AND_S,
                    0,
                    time) then
     result := result + time;
@@ -3243,32 +3291,32 @@ end;
 
 function TTimeLogBits.Year: integer;
 begin
-  result := Value shr (6 + 6 + 5 + 5 + 4);
+  result := Value shr SHR_YY;
 end;
 
 function TTimeLogBits.Month: integer;
 begin
-  result := 1 + (PCardinal(@Value)^ shr (6 + 6 + 5 + 5)) and 15;
+  result := 1 + (PCardinal(@Value)^ shr SHR_MM) and AND_MM;
 end;
 
 function TTimeLogBits.Day: integer;
 begin
-  result := 1 + (PCardinal(@Value)^ shr (6 + 6 + 5)) and 31;
+  result := 1 + (PCardinal(@Value)^ shr SHR_DD) and AND_DD;
 end;
 
 function TTimeLogBits.Hour: integer;
 begin
-  result := (PCardinal(@Value)^ shr (6 + 6)) and 31;
+  result := (PCardinal(@Value)^ shr SHR_H) and AND_H;
 end;
 
 function TTimeLogBits.Minute: integer;
 begin
-  result := (PCardinal(@Value)^ shr 6) and 63;
+  result := (PCardinal(@Value)^ shr SHR_M) and AND_M;
 end;
 
 function TTimeLogBits.Second: integer;
 begin
-  result := PCardinal(@Value)^ and 63;
+  result := PCardinal(@Value)^ and AND_S;
 end;
 
 function TTimeLogBits.ToUnixTime: TUnixTime;
@@ -3304,34 +3352,34 @@ begin
     {$else}
     lo := PCardinal(@Value)^;
     {$endif CPU64}
-    if lo and (1 shl (6 + 6 + 5) - 1) = 0 then
+    if lo and (1 shl SHR_DD - 1) = 0 then
       // no Time: just convert date
       Dest := DateToIso8601PChar(Dest, Expanded,
-        {$ifdef CPU64} lo {$else} Value {$endif} shr (6 + 6 + 5 + 5 + 4),
-        1 + (lo shr (6 + 6 + 5 + 5)) and 15,
-        1 + (lo shr (6 + 6 + 5)) and 31)
+        {$ifdef CPU64} lo {$else} Value {$endif} shr SHR_YY,
+        1 + (lo shr SHR_MM) and AND_MM,
+        1 + (lo shr SHR_DD) and AND_DD)
     else
     {$ifdef CPU64}
-    if lo shr (6 + 6 + 5) = 0 then
+    if lo shr SHR_DD = 0 then
     {$else}
-    if Value shr (6 + 6 + 5) = 0 then
+    if Value shr SHR_DD = 0 then
     {$endif CPU64}
       // no Date: just convert time
       Dest := TimeToIso8601PChar(Dest, Expanded,
-        (lo shr (6 + 6)) and 31,
-        (lo shr 6) and 63,
-        lo and 63, 0, FirstTimeChar)
+        (lo shr SHR_H) and AND_H,
+        (lo shr SHR_M) and AND_M,
+        lo and AND_S, 0, FirstTimeChar)
     else
     begin
       // convert time and date
       Dest := DateToIso8601PChar(Dest, Expanded,
-        {$ifdef CPU64} lo {$else} Value {$endif} shr (6+6+5+5+4),
-        1 + (lo shr (6 + 6 + 5 + 5)) and 15,
-        1 + (lo shr (6 + 6 + 5)) and 31);
+        {$ifdef CPU64} lo {$else} Value {$endif} shr SHR_YY,
+        1 + (lo shr SHR_MM) and AND_MM,
+        1 + (lo shr SHR_DD) and AND_DD);
       Dest := TimeToIso8601PChar(Dest, Expanded,
-                (lo shr (6 + 6)) and 31,
-                (lo shr 6) and 63,
-                lo and 63, 0, FirstTimeChar);
+                (lo shr SHR_H) and AND_H,
+                (lo shr SHR_M) and AND_M,
+                lo and AND_S, 0, FirstTimeChar);
     end;
   end;
   if QuoteChar <> #0 then
@@ -3371,13 +3419,13 @@ begin
   end;
   lo := {$ifdef CPU64}Value{$else}PCardinal(@Value)^{$endif};
   Dest := DateToIso8601PChar(Dest, Expanded,
-    {$ifdef CPU64}lo{$else}Value{$endif} shr (6 + 6 + 5 + 5 + 4),
-    1 + (lo shr (6 + 6 + 5 + 5)) and 15,
-    1 + (lo shr (6 + 6 + 5)) and 31);
+    {$ifdef CPU64}lo{$else}Value{$endif} shr SHR_YY,
+    1 + (lo shr SHR_MM) and AND_MM,
+    1 + (lo shr SHR_DD) and AND_DD);
   Dest := TimeToIso8601PChar(Dest, Expanded,
-    (lo shr (6 + 6)) and 31,
-    (lo shr 6) and 63,
-    lo and 63, 0, FirstTimeChar);
+    (lo shr SHR_H) and AND_H,
+    (lo shr SHR_M) and AND_M,
+    lo and AND_S, 0, FirstTimeChar);
   if QuotedChar <> #0 then
   begin
     Dest^ := QuotedChar;

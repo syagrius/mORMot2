@@ -1138,12 +1138,12 @@ begin
     PInteger(PtrUInt(@self) + 3)^ := 0;  // set Day=Hour=Min=Sec to 0
     exit; // invalid ISO-8601 text -> store as null date
   end;
-  Y := Value shr (6 + 6 + 5 + 5 + 4);
+  Y := Value shr SHR_YY;
   C := Y div 100;
   Cent := C + 100;
   Year := (Y - C * 100) + 100;
-  Month := ((Value32 shr (6 + 6 + 5 + 5)) and 15) + 1;
-  Day := ((Value32 shr (6 + 6 + 5)) and 31) + 1;
+  Month := ((Value32 shr SHR_MM) and AND_MM) + 1;
+  Day := ((Value32 shr SHR_DD) and AND_DD) + 1;
   if NoTime then
   begin
     Hour := 1;
@@ -1151,9 +1151,9 @@ begin
     Sec := 1;
     exit;
   end;
-  Hour := ((Value32 shr (6 + 6)) and 31) + 1;
-  Min := ((Value32 shr 6) and 63) + 1;
-  Sec := (Value32 and 63) + 1;
+  Hour := ((Value32 shr SHR_H) and AND_H) + 1;
+  Min := ((Value32 shr SHR_M) and AND_M) + 1;
+  Sec := (Value32 and AND_S) + 1;
 end;
 
 
@@ -1381,7 +1381,7 @@ begin
   if UseLobChunks then
   begin
     Check(nil, Stmt, LobGetChunkSize(svchp, errhp, locp, ChunkSize), errhp);
-    pointer(tmp) := FastNewString(ChunkSize * SynDBOracleBlobChunksCount, CP_RAWBYTESTRING);
+    pointer(tmp) := FastNewString(ChunkSize * SynDBOracleBlobChunksCount);
     result := 0;
     repeat
       Read := BlobLen;
@@ -1394,7 +1394,7 @@ begin
   end
   else
   begin
-    pointer(tmp) := FastNewString(BlobLen, CP_RAWBYTESTRING);
+    pointer(tmp) := FastNewString(BlobLen);
     Check(nil, Stmt, LobRead(svchp, errhp, locp, result, 1, pointer(tmp), result,
       nil, nil, csid, csfrm), errhp);
     stream.WriteBuffer(pointer(tmp)^, result);
@@ -1409,7 +1409,7 @@ var
 begin
   Len := BlobOpen(Stmt, svchp, errhp, locp);
   try
-    pointer(result) := FastNewString(Len, CP_RAWBYTESTRING);
+    pointer(result) := FastNewString(Len);
     Read := BlobRead(Stmt, svchp, errhp, locp, pointer(result), Len);
     if Read <> Len then
       SetLength(result, Read);
@@ -1461,7 +1461,7 @@ var
   tmp: RawByteString;
 begin
   Check(nil, Stmt, LobGetChunkSize(svchp, errhp, locp, ChunkSize), errhp);
-  pointer(tmp) := FastNewString(ChunkSize * SynDBOracleBlobChunksCount, CP_RAWBYTESTRING);
+  pointer(tmp) := FastNewString(ChunkSize * SynDBOracleBlobChunksCount);
   l_Offset := 1;
   while stream.Position < stream.Size do
   begin
