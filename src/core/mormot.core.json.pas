@@ -478,7 +478,7 @@ function JsonObjectsByPath(JsonObject, PropPath: PUtf8Char): RawUtf8;
 
 /// convert one JSON object into two JSON arrays of keys and values
 // - i.e. makes the following transformation:
-// $ {key1:value1,key2,value2...} -> [key1,key2...] + [value1,value2...]
+// $ {key1:value1,key2:value2...} -> ["key1","key2"...] + [value1,value2...]
 // - this function won't allocate any memory during its process, nor
 // modify the JSON input buffer
 // - is the reverse of the TJsonWriter.AddJsonArraysAsJsonObject() method
@@ -942,7 +942,7 @@ type
       const Args, Params: array of const);
     /// append two JSON arrays of keys and values as one JSON object
     // - i.e. makes the following transformation:
-    // $ [key1,key2...] + [value1,value2...] -> {key1:value1,key2,value2...}
+    // $ ["key1","key2"...] + [value1,value2...] -> {"key1":value1,"key2":value2...}
     // - this method won't allocate any memory during its process, nor
     // modify the keys and values input buffers
     // - is the reverse of the JsonObjectAsJsonArrays() function
@@ -1206,6 +1206,16 @@ type
 
 { *********** JSON-aware TSynDictionary Storage }
 
+const
+  // TSynDictionary.fSafe.Padding[DIC_*] place holders - defined here for inlining
+  DIC_KEYCOUNT   = 0;   // Keys.Count integer
+  DIC_VALUECOUNT = 1;   // Values.Count integer
+  DIC_KEY        = 2;   // Key.Value pointer
+  DIC_VALUE      = 3;   // Values.Value pointer
+  DIC_COMPALGO   = 4;   // CompressAlgo pointer
+  DIC_TIMESEC    = 5;   // Timeouts Seconds integer
+  DIC_TIMETIX    = 6;   // last GetTickCount64 shr 10 integer
+
 type
   /// exception raised during TSynDictionary process
   ESynDictionary = class(ESynException);
@@ -1241,18 +1251,17 @@ type
   // access the stored data, including JSON serialization and binary storage
   // - consider IKeyValue<> from mormot.core.collections.pas, for more robust
   // generics-based code where TKey/TValue are propagated to all methods
-  TSynDictionary = class(TSynLocked)
+  TSynDictionary = class(TSynPersistent)
   protected
     fKeys: TDynArrayHashed;
     fValues: TDynArray;
     fTimeOut: TCardinalDynArray;
-    fTimeOuts: TDynArray;
-    fCompressAlgo: TAlgoCompress;
+    fSafe: TSynLocker;
     fOnCanDelete: TOnSynDictionaryCanDelete;
     function InternalAddUpdate(aKey, aValue: pointer; aUpdate: boolean): PtrInt;
     function InArray(const aKey, aArrayValue; aAction: TSynDictionaryInArray;
       aCompare: TDynArraySortCompare): boolean;
-    procedure SetTimeouts;
+    procedure AdjustAfterLoad;
     function ComputeNextTimeOut: cardinal;
       {$ifdef HASINLINE} inline; {$endif}
     function GetCapacity: integer;
@@ -1260,10 +1269,10 @@ type
     function GetTimeOutSeconds: cardinal;
       {$ifdef HASINLINE} inline; {$endif}
     procedure SetTimeOutSeconds(Value: cardinal);
+    function GetCompressAlgo: TAlgoCompress;
+    procedure SetCompressAlgo(Value: TAlgoCompress);
     function GetThreadUse: TSynLockerUse;
-      {$ifdef HASINLINE} inline; {$endif}
-    procedure SetThreadUse(const Value: TSynLockerUse);
-      {$ifdef HASINLINE} inline; {$endif}
+    procedure SetThreadUse(Value: TSynLockerUse);
   public
     /// initialize the dictionary storage, specifying dynamic array keys/values
     // - aKeyTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
@@ -1292,6 +1301,12 @@ type
     /// finalize the storage
     // - would release all internal stored values
     destructor Destroy; override;
+    /// could be used as a short-cut to Safe.Lock
+    procedure Lock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// could be used as a short-cut to Safe.UnLock
+    procedure Unlock;
+      {$ifdef HASINLINE} inline; {$endif}
     /// try to add a value associated with a primary key
     // - returns the index of the inserted item, -1 if aKey is already existing
     // - this method is thread-safe, since it will lock the instance
@@ -1470,15 +1485,15 @@ type
     function SaveValuesToJson(EnumSetsAsText: boolean = false;
       ReFormat: TTextWriterJsonFormat = jsonCompact): RawUtf8;
     /// unserialize the content from "key":value JSON object
-    // - if the JSON input may not be correct (i.e. if not coming from SaveToJson),
-    // you may set EnsureNoKeyCollision=TRUE for a slow but safe keys validation
+    // - the JSON input should be safe, i.e. with no key collision
     function LoadFromJson(const Json: RawUtf8;
-      CustomVariantOptions: PDocVariantOptions = nil): boolean; overload;
+      CustomVariantOptions: PDocVariantOptions = nil): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// unserialize the content from "key":value JSON object
     // - note that input JSON buffer is not modified in place: no need to create
     // a temporary copy if the buffer is about to be re-used
-    function LoadFromJson(Json: PUtf8Char;
-      CustomVariantOptions: PDocVariantOptions = nil): boolean; overload;
+    function LoadFromJsonBuffer(Json: PUtf8Char;
+      CustomVariantOptions: PDocVariantOptions = nil): boolean;
     /// save the content as SynLZ-compressed raw binary data
     // - warning: this format is tied to the values low-level RTTI, so if you
     // change the value/key type definitions, LoadFromBinary() would fail
@@ -1501,7 +1516,7 @@ type
     /// returns how many items are currently stored in this dictionary
     // - this method is NOT thread-safe so should be protected by fSafe.Lock/UnLock
     function Count: integer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASINLINE} inline; {$endif}
     /// direct access to the primary key identifiers
     // - if you want to access the keys, you should use fSafe.Lock/Unlock
     property Keys: TDynArrayHashed
@@ -1520,17 +1535,21 @@ type
     property TimeOut: TCardinalDynArray
       read fTimeOut;
     /// returns the aTimeOutSeconds parameter value, as specified to Create()
+    // - default 0 means timeout deprecation is disabled
     // - warning: setting a new timeout will clear all previous content
     property TimeOutSeconds: cardinal
       read GetTimeOutSeconds write SetTimeOutSeconds;
     /// the compression algorithm used for binary serialization
     property CompressAlgo: TAlgoCompress
-      read fCompressAlgo write fCompressAlgo;
+      read GetCompressAlgo write SetCompressAlgo;
     /// callback to by-pass DeleteDeprecated deletion by returning false
     // - can be assigned e.g. to OnCanDeleteSynLockedWithRttiMethods if Value is a
     // TSynLockedWithRttiMethods instance, to avoid any potential access violation
     property OnCanDeleteDeprecated: TOnSynDictionaryCanDelete
       read fOnCanDelete write fOnCanDelete;
+    /// access to the lock associated to this dictionary (see also ThreadUse)
+    property Safe: TSynLocker
+      read fSafe;
     /// can tune TSynDictionary threading process depending on your use case
     // - will redirect to the internal Safe TSynLocker instance
     // - warning: to be set only before any process is done
@@ -1538,16 +1557,6 @@ type
     property ThreadUse: TSynLockerUse
       read GetThreadUse write SetThreadUse;
   end;
-
-const
-  // TSynDictionary.fSafe.Padding[DIC_*] place holders - defined here for inlining
-  DIC_KEYCOUNT   = 0;   // Keys.Count integer
-  DIC_KEY        = 1;   // Key.Value pointer
-  DIC_VALUECOUNT = 2;   // Values.Count integer
-  DIC_VALUE      = 3;   // Values.Value pointer
-  DIC_TIMECOUNT  = 4;   // Timeouts.Count integer
-  DIC_TIMESEC    = 5;   // Timeouts Seconds integer
-  DIC_TIMETIX    = 6;   // last GetTickCount64 shr 10 integer
 
 
 { ********** Low-level JSON Serialization for any kind of Values }
@@ -2939,7 +2948,9 @@ type
   TJsonGotoEndParserState = (
     stObjectName,
     stObjectValue,
-    stValue);
+    stValue,
+    stPropName,
+    stPropNameUnquoted);
 
   /// state machine for fast (900MB/s) parsing of (extended) JSON input
   {$ifdef USERECORDWITHMETHODS}
@@ -3192,7 +3203,13 @@ prop:     if ExpectStandard then
               inc(P);
           end
           else if State <> stObjectName then
-            exit; // identifier values are functions like isodate() objectid()
+            if State = stPropName then
+            begin
+              State := stPropNameUnquoted;
+              break;
+            end
+            else
+              exit; // identifier values are functions like isodate() objectid()
           continue;
         end;
       jtSlash: // '/' extended /regex/i or /*comment*/ or //comment
@@ -4442,9 +4459,10 @@ function JsonObjectAsJsonArrays(Json: PUtf8Char; out keys, values: RawUtf8): int
 var
   wk, wv: TTextWriter;
   kb, ke, vb, ve: PUtf8Char;
-  temp1, temp2: TTextWriterStackBuffer;
-  parser: TJsonGotoEndParser;
   n: integer;
+  aftername: TJsonGotoEndParserState;
+  parser: TJsonGotoEndParser;
+  temp1, temp2: TTextWriterStackBuffer;
 begin
   result := -1;
   if (Json = nil) or
@@ -4459,17 +4477,25 @@ begin
     wv.AddDirect('[');
     kb := Json + 1;
     repeat
+      parser.State := stPropName; // parse '"a":' or 'a:'
       ke := parser.GotoEnd(kb);
       if (ke = nil) or
          (ke^ <> ':') then
         exit; // invalid input content
+      aftername := parser.State;
       vb := ke + 1;
+      parser.State := stValue;
       ve := parser.GotoEnd(vb);
       if (ve = nil) or
          not (ve^ in [',', '}']) then
         exit;
+      if aftername = stPropNameUnquoted then // was 'a:' -> append '"a",'
+        wk.AddDirect('"');
       wk.AddNoJsonEscape(kb, ke - kb);
-      wk.AddComma;
+      if aftername = stPropNameUnquoted then
+        wk.AddDirect('"', ',')
+      else
+        wk.AddComma;
       wv.AddNoJsonEscape(vb, ve - vb);
       wv.AddComma;
       kb := ve + 1;
@@ -9467,13 +9493,12 @@ var
 begin
   if fRamUsed > fMaxRamUsed then
     Reset;
-  if fTimeoutSeconds > 0 then
-  begin
-    tix := GetTickCount64 shr MilliSecsPerSecShl;
-    if fTimeoutTix > tix then
-      Reset;
-    fTimeoutTix := tix + fTimeoutSeconds;
-  end;
+  if fTimeoutSeconds = 0 then
+    exit;
+  tix := GetTickCount64 shr MilliSecsPerSecShl;
+  if fTimeoutTix > tix then
+    Reset;
+  fTimeoutTix := tix + fTimeoutSeconds;
 end;
 
 function TSynCache.Find(const aKey: RawUtf8; aResultTag: PPtrInt): RawUtf8;
@@ -9559,12 +9584,10 @@ constructor TSynDictionary.Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
   aKeyCaseInsensitive: boolean; aTimeoutSeconds: cardinal;
   aCompressAlgo: TAlgoCompress; aHasher: THasher; aKeySpecific: TRttiParserType);
 begin
-  inherited Create;
+  // inherited Create; is void
+  fSafe.InitFromClass;
   fSafe.Padding[DIC_KEYCOUNT].VType   := varInteger;  // Keys.Count
-  fSafe.Padding[DIC_KEY].VType        := varNull;     // Key.Value
   fSafe.Padding[DIC_VALUECOUNT].VType := varInteger;  // Values.Count
-  fSafe.Padding[DIC_VALUE].VType      := varNull;     // Values.Value
-  fSafe.Padding[DIC_TIMECOUNT].VType  := varInteger;  // Timeouts.Count
   fSafe.Padding[DIC_TIMESEC].VType    := varInteger;  // Timeouts Seconds
   fSafe.Padding[DIC_TIMETIX].VType    := varInteger;  // GetTickCount64 shr 10
   fSafe.PaddingUsedCount := DIC_TIMETIX + 1;          // manual registration
@@ -9573,11 +9596,9 @@ begin
   fValues.Init(aValueTypeInfo, fSafe.Padding[DIC_VALUE].VAny,
     @fSafe.Padding[DIC_VALUECOUNT].VInteger);
   fValues.Compare := DynArraySortOne(fValues.Info.ArrayFirstField, aKeyCaseInsensitive);
-  fTimeouts.Init(TypeInfo(TIntegerDynArray), fTimeOut,
-    @fSafe.Padding[DIC_TIMECOUNT].VInteger);
   if aCompressAlgo = nil then
     aCompressAlgo := AlgoSynLZ;
-  fCompressAlgo := aCompressAlgo;
+  fSafe.Padding[DIC_COMPALGO].VAny := aCompressAlgo;
   fSafe.Padding[DIC_TIMESEC].VInteger := aTimeoutSeconds;
 end;
 
@@ -9590,6 +9611,24 @@ begin
     aKeyCaseInsensitive, aTimeoutSeconds, aCompressAlgo, aHasher, aKeySpecific);
 end;
 {$endif HASGENERICS}
+
+destructor TSynDictionary.Destroy;
+begin
+  fKeys.Clear;
+  fValues.Clear;
+  fSafe.Done;
+  // inherited Destroy; is void
+end;
+
+procedure TSynDictionary.Lock;
+begin
+  fSafe.Lock;
+end;
+
+procedure TSynDictionary.Unlock;
+begin
+  fSafe.UnLock;
+end;
 
 function TSynDictionary.ComputeNextTimeOut: cardinal;
 begin
@@ -9610,14 +9649,19 @@ begin
     fKeys.Capacity := Value;
     fValues.Capacity := Value;
     if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
-      fTimeOuts.Capacity := Value;
+      SetLength(fTimeOut, Value);
   finally
     fSafe.UnLock;
   end;
 end;
 
+function TSynDictionary.Count: integer;
+begin // we need a function to avoid URW1111 Internal Error on Delphi
+  result := fSafe.Padding[DIC_KEYCOUNT].VInteger;
+end;
+
 function TSynDictionary.GetTimeOutSeconds: cardinal;
-begin
+begin // we need a function to avoid URW1111 Internal Error on Delphi
   result := fSafe.Padding[DIC_TIMESEC].VInteger;
 end;
 
@@ -9628,27 +9672,49 @@ begin
   fSafe.Padding[DIC_TIMESEC].VInteger := Value;
 end;
 
-procedure TSynDictionary.SetTimeouts;
+function TSynDictionary.GetCompressAlgo: TAlgoCompress;
+begin
+  result := fSafe.Padding[DIC_COMPALGO].VAny;
+end;
+
+procedure TSynDictionary.SetCompressAlgo(Value: TAlgoCompress);
+begin
+  fSafe.Padding[DIC_COMPALGO].VAny := Value;
+end;
+
+function TSynDictionary.GetThreadUse: TSynLockerUse;
+begin
+  result := fSafe.RWUse; // Delphi can't use read/write on a record property
+end;
+
+procedure TSynDictionary.SetThreadUse(Value: TSynLockerUse);
+begin
+  fSafe.RWUse := Value;
+end;
+
+procedure TSynDictionary.AdjustAfterLoad;
 var
   i: PtrInt;
   timeout: cardinal;
 begin
+  fKeys.ForceRehash; // warning: duplicated keys won't be identified
+  fTimeOut := nil;
   if fSafe.Padding[DIC_TIMESEC].VInteger = 0 then
     exit;
-  fTimeOuts.Count := fSafe.Padding[DIC_KEYCOUNT].VInteger;
+  SetLength(fTimeOut, fKeys.Capacity);
   timeout := ComputeNextTimeOut;
-  for i := 0 to fSafe.Padding[DIC_TIMECOUNT].VInteger - 1 do
+  for i := 0 to fSafe.Padding[DIC_KEYCOUNT].VInteger - 1 do
     fTimeOut[i] := timeout;
 end;
 
 function TSynDictionary.DeleteDeprecated(tix64: Int64): integer;
 var
-  i: PtrInt;
+  i, tomove: PtrInt;
   now: cardinal;
 begin
   result := 0;
   if (self = nil) or
-     (fSafe.Padding[DIC_TIMECOUNT].VInteger = 0) or // no entry
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) or // no entry
      (fSafe.Padding[DIC_TIMESEC].VInteger = 0) then // nothing in fTimeOut[]
     exit;
   if tix64 = 0 then
@@ -9659,7 +9725,7 @@ begin
   fSafe.ReadWriteLock; // would upgrade to cWrite only if needed
   try
     fSafe.Padding[DIC_TIMETIX].VInteger := now;
-    for i := fSafe.Padding[DIC_TIMECOUNT].VInteger - 1 downto 0 do
+    for i := fSafe.Padding[DIC_KEYCOUNT].VInteger - 1 downto 0 do
       if (now > fTimeOut[i]) and
          (fTimeOut[i] <> 0) and
          (not Assigned(fOnCanDelete) or
@@ -9669,11 +9735,17 @@ begin
           fSafe.Lock; // = cWrite
         fKeys.Delete(i);
         fValues.Delete(i);
-        fTimeOuts.Delete(i);
+        tomove := fSafe.Padding[DIC_KEYCOUNT].VInteger - i;
+        if tomove <> 0 then
+          MoveFast(fTimeOut[i + 1], fTimeOut[i], tomove * 4);
         inc(result);
       end;
-    if result > 0 then
+    if result <> 0 then
+    begin
+      if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
+        fTimeout := nil;
       fKeys.ForceReHash; // mandatory after manual fKeys.Delete(i)
+    end;
   finally
     if result > 0 then
       fSafe.UnLock; // = cWrite
@@ -9690,28 +9762,10 @@ begin
     fKeys.Clear;
     fKeys.Hasher.ForceReHash(nil); // mandatory to avoid GPF
     fValues.Clear;
-    if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
-      fTimeOuts.Clear;
+    fTimeOut := nil;
   finally
     fSafe.UnLock;
   end;
-end;
-
-destructor TSynDictionary.Destroy;
-begin
-  fKeys.Clear;
-  fValues.Clear;
-  inherited Destroy;
-end;
-
-function TSynDictionary.GetThreadUse: TSynLockerUse;
-begin
-  result := fSafe^.RWUse;
-end;
-
-procedure TSynDictionary.SetThreadUse(const Value: TSynLockerUse);
-begin
-  fSafe^.RWUse := Value;
 end;
 
 function TSynDictionary.InternalAddUpdate(
@@ -9730,8 +9784,11 @@ begin
         ItemCopy(aKey, PAnsiChar(Value^) + (result * Info.Cache.ItemSize));
       if fValues.Add(aValue^) <> result then
         ESynDictionary.RaiseUtf8('%.Add fValues.Add', [self]);
-      if tim <> 0 then
-        fTimeOuts.Add(tim);
+      if tim = 0 then
+        exit;
+      if result >= length(fTimeOut) then
+        SetLength(fTimeOut, fKeys.Capacity);
+      fTimeOut[result] := tim;
     end
     else if aUpdate then
     begin
@@ -9783,7 +9840,11 @@ begin
     begin
       fValues.Delete(result);
       if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
-        fTimeOuts.Delete(result);
+        if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
+          fTimeout := nil
+        else
+          MoveFast(fTimeOut[result + 1], fTimeOut[result],
+            (fSafe.Padding[DIC_KEYCOUNT].VInteger - result) * 4);
     end;
   finally
     fSafe.UnLock;
@@ -9909,9 +9970,7 @@ var
   tim: cardinal;
 begin
   // caller is expected to call fSafe.Lock/Unlock
-  if self = nil then
-    result := -1
-  else
+  if self <> nil then
   begin
     result := fKeys.Hasher.FindOrNew(fKeys.Hasher.HashOne(@aKey), @aKey, nil);
     if result < 0 then
@@ -9922,7 +9981,9 @@ begin
       if tim > 0 then // inlined fTimeout[result] := GetTimeout
         fTimeout[result] := cardinal(GetTickCount64 shr MilliSecsPerSecShl) + tim;
     end;
-  end;
+  end
+  else
+    result := -1
 end;
 
 function TSynDictionary.FindValue(const aKey; aUpdateTimeOut: boolean;
@@ -9954,10 +10015,11 @@ begin
     fKeys{$ifdef UNDIRECTDYNARRAY}.InternalDynArray{$endif}.
       ItemCopyFrom(@aKey, ndx); // fKey[i] := aKey
     fValues.Count := ndx + 1; // reserve new place for associated value
-    if tim > 0 then
-      fTimeOuts.Add(tim);
-  end
-  else if tim > 0 then
+    if (tim <> 0) and
+       (ndx >= length(fTimeOut)) then
+      SetLength(fTimeOut, fKeys.Capacity);
+  end;
+  if tim <> 0 then
     fTimeOut[ndx] := tim;
   if aIndex <> nil then
     aIndex^ := ndx;
@@ -10046,16 +10108,19 @@ begin
   fSafe.ReadWriteLock;
   try
     ndx := fKeys.FindHashedAndDelete(aKey);
-    if ndx >= 0 then
-    begin
-      fSafe.Lock;
-      fValues.ItemMoveTo(ndx, @aValue); // faster than ItemCopy()
-      fValues.Delete(ndx);
-      if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
-        fTimeOuts.Delete(ndx);
-      fSafe.UnLock;
-      result := true;
-    end;
+    if ndx < 0 then
+      exit;
+    fSafe.Lock;
+    fValues.ItemMoveTo(ndx, @aValue); // faster than ItemCopy()
+    fValues.Delete(ndx);
+    if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
+      if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
+        fTimeout := nil
+      else
+        MoveFast(fTimeOut[ndx + 1], fTimeOut[ndx],
+          (fSafe.Padding[DIC_KEYCOUNT].VInteger - ndx) * 4);
+    fSafe.UnLock;
+    result := true;
   finally
     fSafe.ReadWriteUnLock;
   end;
@@ -10195,11 +10260,6 @@ begin
     fTimeOut[aIndex] := cardinal(GetTickCount64 shr MilliSecsPerSecShl) + tim;
 end;
 
-function TSynDictionary.Count: integer;
-begin
-  result := fSafe.Padding[DIC_KEYCOUNT].VInteger;
-end;
-
 procedure TSynDictionary.SaveToJson(W: TJsonWriter; EnumSetsAsText: boolean);
 var
   k, v: RawUtf8;
@@ -10252,19 +10312,22 @@ function TSynDictionary.LoadFromJson(const Json: RawUtf8;
   CustomVariantOptions: PDocVariantOptions): boolean;
 begin
   // pointer(Json) is not modified in-place thanks to JsonObjectAsJsonArrays()
-  result := LoadFromJson(pointer(Json), CustomVariantOptions);
+  result := LoadFromJsonBuffer(pointer(Json), CustomVariantOptions);
 end;
 
-function TSynDictionary.LoadFromJson(Json: PUtf8Char;
+function TSynDictionary.LoadFromJsonBuffer(Json: PUtf8Char;
   CustomVariantOptions: PDocVariantOptions): boolean;
 var
   k, v: RawUtf8; // private copy of the Json input, expanded as Keys/Values arrays
   n: integer;
 begin
   result := false;
-  n := JsonObjectAsJsonArrays(Json, k, v);
+  n := JsonObjectAsJsonArrays(Json, k, v); // translate without JSON (un)escape
   if n <= 0 then
     exit;
+  if (CustomVariantOptions = nil) and
+     (fValues.Info.ArrayRtti.Kind in rkCompositeTypes) then
+    CustomVariantOptions := @JSON_[mFast]; // may contain TDocVariant values
   fSafe.Lock;
   try
     if (fKeys.LoadFromJson(pointer(k), nil, CustomVariantOptions) <> nil) and
@@ -10272,8 +10335,7 @@ begin
        (fValues.LoadFromJson(pointer(v), nil, CustomVariantOptions) <> nil) and
        (fValues.Count = n) then
       begin
-        SetTimeouts;
-        fKeys.ForceRehash; // warning: duplicated keys won't be identified
+        AdjustAfterLoad;
         result := true;
       end;
   finally
@@ -10288,7 +10350,7 @@ var
   n: integer;
 begin
   result := false;
-  plain := fCompressAlgo.Decompress(binary);
+  plain := GetCompressAlgo.Decompress(binary);
   if plain = '' then
     exit;
   rdr.Init(plain);
@@ -10303,8 +10365,7 @@ begin
         // RTTI_BINARYLOAD[rkDynArray]() did not set the external count
         fSafe.Padding[DIC_KEYCOUNT].VInteger   := n;
         fSafe.Padding[DIC_VALUECOUNT].VInteger := n;
-        SetTimeouts;  // set ComputeNextTimeOut for all items
-        fKeys.ForceReHash; // optimistic: input from TSynDictionary.SaveToBinary
+        AdjustAfterLoad; // set ComputeNextTimeOut for all items
         result := true;
       end;
     except
@@ -11928,13 +11989,13 @@ end;
 constructor TSynAutoCreateFieldsLocked.Create;
 begin
   AutoCreateFields(self);
-  inherited Create; // initialize fSafe := NewSynLocker
+  fSafe := NewSynLocker; // = inherited Create
 end;
 
 destructor TSynAutoCreateFieldsLocked.Destroy;
 begin
   AutoDestroyFields(self);
-  inherited Destroy;
+  fSafe^.DoneAndFreeMem; // = inherited Destroy
 end;
 
 

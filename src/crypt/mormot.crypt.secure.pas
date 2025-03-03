@@ -5107,7 +5107,7 @@ begin
   inherited Create(aRealm, aAlgo);
   fUsers := TSynDictionary.Create(
     TypeInfo(TRawUtf8DynArray), TypeInfo(TDigestAuthHashs));
-  fUsers.Safe.RWUse := uRWLock; // multi-read / single-write thread-safe access
+  fUsers.ThreadUse := uRWLock; // multi-read / single-write thread-safe access
 end;
 
 destructor TDigestAuthServerMem.Destroy;
@@ -5540,7 +5540,7 @@ end;
 
 constructor TSynAuthenticationAbstract.Create;
 begin
-  fSafe.Init;
+  fSafe.InitFromClass;
   fTokenSeed := Random32Not0;
   fSessionGenerator := abs(fTokenSeed * PPtrInt(self)^);
   fTokenSeed := fTokenSeed * Random31Not0;
@@ -8040,14 +8040,14 @@ begin
      (fList.Count = 0) or
      (Value = '') then
     exit;
-  fList.Safe^.ReadLock;
+  fList.Safe.ReadLock;
   try
     // non-blocking O(n) search - overriden in TCryptCertX509 for performance
     if fCryptCertClass <> nil then
       fCryptCertClass.InternalFind(
         fList.Values.Value^, Value, Method, fList.Count, MaxCount, result);
   finally
-    fList.Safe^.ReadUnLock;
+    fList.Safe.ReadUnLock;
   end;
 end;
 
