@@ -192,11 +192,11 @@ type
     // - <param> will be replaced in aToUri
     // - if aToUri is an '200'..'599' integer, it will return it as HTTP error
     // - otherwise, the URI will be rewritten into aToUri, e.g.
-    // $ Rewrite(urmGet, '/info', urmGet, 'root/timestamp/info');
-    // $ Rewrite(urmGet, '/path/from/<from>/to/<to>', urmPost,
-    // $  '/root/myservice/convert?from=<from>&to=<to>'); // for IMyService.Convert
-    // $ Rewrite(urmGet, '/index.php', '400'); // to avoid fuzzing
-    // $ Rewrite(urmGet, '/*', '/static/*' // '*' synonymous to '<path:path>'
+    // ! Rewrite(urmGet, '/info', urmGet, 'root/timestamp/info');
+    // ! Rewrite(urmGet, '/path/from/<from>/to/<to>', urmPost,
+    // !  '/root/myservice/convert?from=<from>&to=<to>'); // for IMyService.Convert
+    // ! Rewrite(urmGet, '/index.php', '400'); // to avoid fuzzing
+    // ! Rewrite(urmGet, '/*', '/static/*' // '*' synonymous to '<path:path>'
     procedure Rewrite(aFrom: TUriRouterMethod; const aFromUri: RawUtf8;
       aTo: TUriRouterMethod; const aToUri: RawUtf8);
     /// just a wrapper around Rewrite(urmGet, aFrom, aToMethod, aTo)
@@ -238,9 +238,9 @@ type
     // - <param> place holders will be parsed and available in callback
     // as Ctxt['param'] default property or Ctxt.RouteInt64/RouteEquals methods
     // - could be used e.g. for standard REST process as
-    // $ Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
-    // $ Route.Run([urmGet, urmPost, urmPut, urmDelete],
-    // $    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
+    // ! Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
+    // ! Route.Run([urmGet, urmPost, urmPut, urmDelete],
+    // !    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
     procedure Run(aFrom: TUriRouterMethods; const aFromUri: RawUtf8;
       const aExecute: TOnHttpServerRequest; aExecuteOpaque: pointer = nil);
     /// just a wrapper around Run([urmGet], aUri, aExecute) registration method
@@ -554,9 +554,9 @@ type
     // rewrite internally '/user/1234' URI as '/root/userservice/new?id=1234'
     // - could be used e.g. for standard REST process via event callbacks with
     // Ctxt['user'] or Ctxt.RouteInt64('id') parameter extraction in DoUserPic:
-    // $ Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
-    // $ Route.Run([urmGet, urmPost, urmPut, urmDelete],
-    // $    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
+    // ! Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
+    // ! Route.Run([urmGet, urmPost, urmPut, urmDelete],
+    // !    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
     // - warning: with the THttpApiServer, URIs will be limited by the actual
     // root URI registered at http.sys level - there is no such limitation with
     // the socket servers, which bind to a port, so handle all URIs on it
@@ -814,10 +814,8 @@ function PrivKeyCertPfx: RawByteString;
 // Generate(CU_TLS_SERVER, '127.0.0.1', nil, 3650) with a random password
 // - if UsePreComputed=true or on pure SChannel, will use the PrivKeyCertPfx
 // pre-computed constant
-// - you should eventually call DeleteFile(Utf8ToString(TLS.CertificateFile))
-// and DeleteFile(Utf8ToString(TLS.PrivateKeyFile)) to delete the two temp files
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
-  Algo: TCryptAsymAlgo = caaRS256; UsePreComputed: boolean = false);
+  Algo: TCryptAsymAlgo = caaRS256; UsePreComputed: boolean = true);
 
 /// used by THttpServerGeneric.SetFavIcon to return a nice /favicon.ico
 function FavIconBinary: RawByteString;
@@ -1134,7 +1132,7 @@ type
     // some temporary key files, which are deleted once started
     // - as used e.g. by TRestHttpServer for secTLSSelfSigned
     procedure WaitStartedHttps(Seconds: integer = 30;
-      UsePreComputed: boolean = false);
+      UsePreComputed: boolean = true);
     /// could be called after WaitStarted(seconds,'','','') to setup TLS
     // - validate Sock.TLS.CertificateFile/PrivateKeyFile/PrivatePassword
     // - otherwise TLS is initialized at first incoming connection, which
@@ -1287,9 +1285,9 @@ type
   // - under Windows, will trigger the firewall UAC popup at first run
   // - don't forget to use Free method when you are finished
   // - a typical HTTPS server usecase could be:
-  // $ fHttpServer := THttpServer.Create('443', nil, nil, '', 32, 30000, [hsoEnableTls]);
-  // $ fHttpServer.WaitStarted('cert.pem', 'privkey.pem', '');  // cert.pfx for SSPI
-  // $ // now certificates will be initialized and used
+  // ! fHttpServer := THttpServer.Create('443', nil, nil, '', 32, 30000, [hsoEnableTls]);
+  // ! fHttpServer.WaitStarted('cert.pem', 'privkey.pem', '');  // cert.pfx for SSPI
+  // ! // now certificates will be initialized and used
   THttpServer = class(THttpServerSocketGeneric)
   protected
     fThreadPool: TSynThreadPoolTHttpServer;
@@ -1674,14 +1672,14 @@ type
   THttpPeerCrypt = class(TInterfacedPersistent)
   protected
     fAesSafe: TLightLock; // topmost to ensure proper aarch64 alignment
-    fClientSafe: TLightLock; // paranoid - only if unproperly used
+    fClientSafe: TLightLock; // if try to download with background direct mode
     fSettings: THttpPeerCacheSettings;
     fSharedMagic, fFrameSeqLow: cardinal;
     fFrameSeq: integer;
     fIP4, fMaskIP4, fBroadcastIP4, fClientIP4, fLastNetworkTix: cardinal;
     fAesEnc, fAesDec: TAesGcmAbstract;
     fLog: TSynLogClass;
-    fPort, fIpPort: RawUtf8;
+    fPort, fIpPort, fDirectSecret: RawUtf8;
     fClient: THttpClientSocket;
     fInstable: THttpAcceptBan; // from Settings.RejectInstablePeersMin
     fMac: TMacAddress;
@@ -1817,6 +1815,7 @@ type
     fPermFilesPath, fTempFilesPath: TFileName;
     fTempFilesMaxSize: Int64; // from Settings.CacheTempMaxMB
     fTempCurrentSize: Int64;
+    fBroadcastStart: Int64;   // QueryPerformanceMicroSeconds()
     fTempFilesDeleteDeprecatedTix, fInstableTix, fBroadcastTix: cardinal;
     fFilesSafe: TOSLock; // concurrent cached files access
     fPartials: THttpPartials;
@@ -3642,192 +3641,191 @@ end;
 
 const
   // was generated from InitNetTlsContextSelfSignedServer commented lines
+  // - .pfx/pkcs#12 of RSA-2048 cert+pk for CN:127.0.0.1 valid until 03/03/2035
+  // - was regenerated with OpenSSL 3.x to avoid usage of legacy RC2 algorithm
+  // as the initial constant did - so that TCryptCertOpenSsl.Load() can succeed
+  // - Save() used '3des=pass' password to force SHA1-3DES legacy format
   PRIVKEY_PFX: array[0..2400] of byte = (
     $30, $82, $09, $5d, $02, $01, $03, $30, $82, $09, $27, $06, $09, $2a, $86, $48,
     $86, $f7, $0d, $01, $07, $01, $a0, $82, $09, $18, $04, $82, $09, $14, $30, $82,
     $09, $10, $30, $82, $03, $c7, $06, $09, $2a, $86, $48, $86, $f7, $0d, $01, $07,
     $06, $a0, $82, $03, $b8, $30, $82, $03, $b4, $02, $01, $00, $30, $82, $03, $ad,
     $06, $09, $2a, $86, $48, $86, $f7, $0d, $01, $07, $01, $30, $1c, $06, $0a, $2a,
-    $86, $48, $86, $f7, $0d, $01, $0c, $01, $06, $30, $0e, $04, $08, $d4, $f9, $e6,
-    $de, $12, $70, $dd, $ee, $02, $02, $08, $00, $80, $82, $03, $80, $3a, $91, $73,
-    $2f, $46, $f9, $49, $00, $b6, $90, $5b, $59, $8f, $37, $6f, $19, $6f, $85, $ef,
-    $01, $97, $1d, $cd, $a6, $c5, $04, $df, $0a, $0f, $87, $28, $59, $80, $9a, $88,
-    $5f, $7f, $8b, $b2, $97, $a5, $13, $6e, $3e, $ab, $04, $b2, $5f, $62, $12, $0b,
-    $30, $a5, $a7, $cc, $54, $9a, $8a, $6b, $6b, $8a, $7f, $0c, $cd, $af, $bb, $ea,
-    $78, $a5, $7f, $11, $85, $13, $6f, $db, $61, $40, $d2, $26, $7c, $eb, $99, $a2,
-    $6f, $1b, $a4, $71, $77, $44, $7a, $10, $ec, $02, $3d, $26, $48, $72, $77, $10,
-    $07, $9e, $fe, $75, $20, $7a, $3b, $f2, $d8, $74, $74, $e8, $5c, $ff, $12, $df,
-    $6c, $ed, $54, $c1, $76, $29, $d7, $2d, $dd, $fa, $3a, $32, $26, $7d, $f0, $31,
-    $cf, $2d, $06, $37, $83, $9b, $39, $92, $2b, $78, $1d, $17, $1a, $d3, $4b, $24,
-    $70, $00, $9f, $66, $8d, $3d, $be, $05, $e3, $63, $7c, $2e, $58, $f7, $db, $6d,
-    $4f, $3e, $36, $cf, $0b, $c5, $5f, $b1, $ae, $6d, $e2, $61, $63, $12, $4c, $99,
-    $24, $3e, $c9, $cf, $b9, $97, $20, $4a, $55, $41, $35, $f1, $6c, $43, $9f, $67,
-    $63, $da, $14, $31, $57, $d2, $13, $b2, $ab, $59, $6b, $30, $d7, $1d, $2c, $54,
-    $ed, $73, $0c, $2d, $aa, $f9, $11, $13, $64, $88, $56, $d8, $b6, $16, $f9, $e7,
-    $9c, $03, $da, $87, $2f, $7b, $4b, $c2, $ee, $1b, $2c, $53, $06, $74, $d2, $11,
-    $7f, $81, $31, $e8, $ee, $84, $40, $27, $1c, $18, $fa, $66, $02, $b1, $67, $42,
-    $4a, $b9, $4d, $8b, $96, $95, $6b, $ab, $1a, $48, $47, $44, $0e, $63, $2c, $26,
-    $27, $7c, $c1, $c8, $7c, $74, $b8, $1c, $f5, $9d, $6f, $09, $0f, $27, $f0, $b0,
-    $46, $68, $0c, $99, $03, $80, $e5, $81, $2b, $74, $e6, $b4, $02, $12, $ad, $ef,
-    $a8, $e6, $be, $36, $bf, $24, $2b, $ab, $b5, $4d, $33, $7d, $cd, $a0, $db, $6d,
-    $19, $68, $c9, $00, $db, $a3, $d7, $02, $a8, $8a, $fb, $2f, $71, $4a, $a7, $82,
-    $06, $cd, $bc, $e3, $88, $12, $ca, $35, $66, $66, $36, $cf, $2d, $e9, $97, $f8,
-    $c1, $03, $48, $9c, $7a, $f4, $5f, $f5, $bc, $fd, $67, $62, $90, $19, $25, $62,
-    $03, $b2, $b1, $ae, $27, $ff, $a0, $d5, $47, $0e, $a1, $21, $29, $c8, $a5, $19,
-    $d3, $d5, $f1, $0c, $51, $5b, $4a, $db, $fb, $d8, $a6, $49, $db, $3a, $8e, $9d,
-    $64, $be, $24, $01, $80, $f0, $35, $4e, $da, $83, $5a, $db, $83, $d7, $7c, $01,
-    $1b, $5c, $8f, $b3, $d7, $b7, $49, $9f, $af, $c7, $29, $87, $4d, $73, $ef, $d0,
-    $d7, $be, $bf, $c2, $09, $60, $bb, $fc, $5b, $64, $24, $04, $e6, $09, $9a, $19,
-    $68, $61, $9c, $da, $62, $5e, $a4, $8a, $38, $5d, $de, $bd, $4f, $bf, $78, $04,
-    $6d, $ce, $9a, $e2, $e4, $e7, $93, $a1, $e9, $ca, $f1, $3d, $9b, $e5, $14, $c8,
-    $98, $fb, $29, $b0, $1f, $01, $48, $40, $80, $67, $2b, $f2, $30, $21, $1e, $a9,
-    $4a, $b4, $8c, $be, $dd, $9b, $3e, $2d, $82, $37, $63, $51, $24, $17, $ac, $9a,
-    $49, $bd, $af, $df, $2c, $ce, $bc, $d5, $a9, $43, $1f, $7a, $9a, $bf, $7b, $5a,
-    $3e, $f3, $12, $55, $67, $7d, $97, $9b, $b6, $35, $4f, $d4, $97, $df, $2c, $d9,
-    $40, $32, $1b, $92, $8e, $25, $6e, $f0, $7a, $48, $41, $2b, $9f, $55, $7e, $d2,
-    $e5, $58, $85, $ba, $73, $51, $5c, $3f, $95, $18, $f6, $9b, $6a, $8d, $85, $25,
-    $a2, $5e, $f0, $4f, $f7, $96, $51, $ca, $ac, $ff, $c9, $cc, $96, $4f, $c6, $b0,
-    $63, $60, $c1, $50, $9a, $5b, $0d, $ca, $8f, $19, $cc, $87, $89, $6a, $31, $0f,
-    $10, $df, $c8, $26, $64, $09, $2e, $59, $94, $22, $24, $e7, $5b, $59, $eb, $86,
-    $f9, $99, $ee, $39, $28, $14, $0c, $a7, $c4, $1f, $b5, $69, $93, $c1, $cc, $dc,
-    $14, $35, $de, $a8, $ea, $14, $6f, $c0, $d3, $13, $98, $2a, $a9, $55, $d6, $b6,
-    $d4, $84, $0c, $92, $b2, $64, $28, $b5, $0f, $89, $a4, $f2, $7f, $3b, $3c, $35,
-    $5d, $0b, $4a, $42, $6b, $cf, $b4, $70, $78, $b3, $5e, $3e, $3d, $6e, $86, $29,
-    $5f, $f0, $27, $9a, $31, $a5, $6f, $94, $ab, $22, $8d, $e7, $fb, $21, $72, $da,
-    $5a, $cf, $7b, $6a, $23, $f7, $6c, $05, $6d, $e1, $17, $24, $36, $7c, $3f, $56,
-    $a7, $f4, $96, $8d, $b1, $9e, $d1, $90, $f0, $9d, $f8, $32, $4b, $24, $b5, $5b,
-    $30, $b6, $b1, $3e, $9d, $d0, $fc, $56, $19, $41, $0a, $90, $cb, $e2, $bf, $e4,
-    $55, $d1, $f1, $14, $af, $90, $b2, $13, $4e, $16, $2a, $1b, $43, $d9, $34, $14,
-    $17, $c8, $8a, $fe, $1c, $a0, $66, $40, $5e, $6b, $9f, $ee, $15, $bf, $90, $d7,
-    $6d, $87, $e2, $03, $10, $2a, $ff, $18, $e5, $a1, $da, $00, $9b, $b7, $e6, $1e,
-    $3c, $5c, $8a, $36, $1e, $33, $e9, $4d, $89, $da, $6c, $49, $2f, $0d, $7b, $54,
-    $68, $30, $b3, $ac, $af, $5f, $6f, $ff, $cb, $ee, $d7, $21, $28, $73, $7d, $32,
-    $32, $d5, $c2, $74, $08, $c3, $01, $7e, $80, $c1, $f4, $cb, $ac, $91, $05, $5d,
-    $b3, $d2, $b6, $95, $d4, $d0, $19, $b8, $25, $46, $d2, $ea, $17, $3a, $bf, $d3,
-    $ff, $dc, $a1, $85, $a8, $56, $01, $1c, $24, $55, $bb, $2d, $6d, $7a, $07, $ac,
-    $c3, $1a, $dc, $93, $97, $60, $9b, $6f, $aa, $4c, $2e, $61, $86, $30, $82, $05,
+    $86, $48, $86, $f7, $0d, $01, $0c, $01, $03, $30, $0e, $04, $08, $bc, $54, $f1,
+    $25, $8b, $4d, $58, $6e, $02, $02, $08, $00, $80, $82, $03, $80, $6a, $e7, $2c,
+    $98, $af, $16, $5b, $3f, $63, $9e, $9b, $cb, $7b, $4f, $0f, $16, $e7, $bd, $bb,
+    $03, $40, $da, $a2, $51, $48, $97, $2e, $cb, $28, $69, $9b, $cd, $12, $01, $2d,
+    $e7, $ca, $a9, $57, $58, $68, $77, $e2, $e1, $94, $0f, $dc, $2a, $e9, $06, $dc,
+    $51, $7b, $91, $f4, $54, $00, $6a, $d6, $d6, $18, $9e, $f4, $8b, $30, $d2, $32,
+    $e2, $93, $b4, $63, $7b, $39, $3f, $0a, $17, $ae, $52, $87, $69, $a3, $30, $c8,
+    $75, $13, $81, $9e, $53, $74, $38, $4e, $3d, $5c, $b1, $a4, $fc, $14, $81, $0b,
+    $e4, $0b, $58, $3a, $95, $36, $57, $e8, $65, $e5, $b4, $d8, $55, $da, $f8, $6c,
+    $7c, $09, $36, $70, $40, $9e, $99, $0f, $39, $67, $6d, $1a, $24, $7c, $02, $a6,
+    $ee, $23, $5c, $69, $29, $36, $77, $ac, $fe, $e1, $b2, $af, $11, $2e, $46, $d1,
+    $6b, $70, $e4, $01, $31, $0b, $72, $42, $55, $b7, $70, $4c, $aa, $d5, $df, $f4,
+    $26, $b7, $67, $52, $45, $93, $26, $e3, $b1, $40, $76, $c8, $2f, $f5, $07, $8a,
+    $1e, $56, $90, $ab, $1d, $5d, $75, $4c, $b2, $2d, $5c, $5d, $7d, $bc, $ec, $bc,
+    $d6, $3c, $74, $7b, $19, $31, $5e, $fa, $dd, $04, $a7, $bf, $97, $93, $b9, $48,
+    $59, $3a, $4f, $22, $c9, $4e, $a3, $e6, $4d, $04, $01, $83, $fd, $53, $f4, $00,
+    $2f, $c2, $65, $fe, $13, $95, $e2, $68, $a9, $39, $14, $39, $0d, $6c, $fa, $04,
+    $96, $0f, $44, $a2, $79, $6b, $e3, $b3, $e0, $5f, $e6, $31, $55, $56, $b6, $6b,
+    $8b, $b8, $e1, $8d, $78, $cb, $dc, $da, $f3, $2a, $18, $30, $d0, $41, $07, $48,
+    $2d, $d9, $1d, $b8, $dc, $e1, $54, $71, $29, $60, $48, $ee, $50, $41, $0c, $85,
+    $47, $47, $6c, $db, $0b, $7e, $30, $90, $49, $9e, $c2, $30, $58, $5d, $1e, $69,
+    $d6, $2e, $6f, $2d, $da, $48, $20, $37, $e4, $10, $e4, $58, $42, $b7, $20, $f7,
+    $c7, $dd, $2a, $50, $c2, $a8, $ed, $cc, $df, $87, $9e, $05, $f6, $d3, $6f, $c7,
+    $4c, $68, $d3, $cd, $71, $23, $21, $93, $f5, $70, $88, $9c, $aa, $a6, $01, $00,
+    $24, $39, $0d, $d4, $c8, $0d, $a1, $4c, $c1, $54, $39, $32, $1f, $32, $68, $15,
+    $77, $95, $98, $33, $36, $2b, $4c, $1a, $9f, $86, $2e, $e5, $87, $22, $9e, $54,
+    $b4, $ba, $11, $5b, $31, $6c, $9b, $77, $2f, $c6, $93, $09, $2d, $d9, $a4, $17,
+    $3b, $bb, $15, $5a, $b6, $4a, $70, $f0, $02, $9d, $79, $8a, $ad, $e6, $f5, $b6,
+    $5a, $62, $74, $25, $11, $d1, $e7, $6c, $bb, $ae, $66, $bc, $47, $8a, $68, $e2,
+    $81, $4c, $2b, $a6, $f6, $71, $2f, $38, $5a, $eb, $26, $1b, $0f, $c3, $2c, $7f,
+    $9e, $09, $ad, $ce, $16, $61, $75, $b1, $69, $03, $a3, $a1, $73, $dc, $d8, $48,
+    $62, $16, $ed, $4b, $74, $80, $31, $4d, $61, $26, $24, $40, $04, $65, $31, $9c,
+    $77, $6e, $40, $a7, $64, $55, $87, $01, $64, $7c, $e0, $f1, $18, $fe, $ef, $a9,
+    $b4, $9d, $cf, $e3, $13, $66, $38, $b0, $4b, $12, $1e, $3e, $e2, $17, $fa, $75,
+    $03, $ca, $cb, $4e, $25, $90, $16, $fd, $ad, $c1, $f1, $82, $b6, $95, $36, $33,
+    $49, $fa, $91, $a1, $3e, $4e, $07, $10, $d0, $86, $ab, $8a, $a7, $15, $b1, $9c,
+    $aa, $ec, $40, $f0, $d0, $0d, $b4, $bd, $cf, $2b, $e3, $c6, $eb, $6a, $cb, $6b,
+    $a1, $53, $74, $55, $12, $a3, $8c, $bc, $d7, $69, $23, $aa, $ed, $04, $cf, $5b,
+    $84, $26, $fc, $80, $5a, $61, $46, $6f, $f9, $3e, $0a, $33, $77, $ea, $27, $59,
+    $ed, $bb, $2b, $fb, $2d, $f6, $b2, $e8, $d9, $7b, $88, $53, $21, $0c, $c3, $5e,
+    $96, $44, $32, $f6, $5e, $2b, $c6, $09, $b5, $10, $12, $93, $f8, $6a, $0e, $6d,
+    $7b, $04, $44, $5f, $ff, $01, $a7, $bd, $21, $56, $31, $1c, $24, $56, $3a, $f3,
+    $ad, $4a, $da, $27, $f0, $d2, $a3, $00, $8c, $aa, $cc, $66, $7e, $c3, $45, $cb,
+    $3b, $57, $7d, $93, $2b, $f3, $e1, $1f, $26, $df, $88, $35, $5e, $49, $3a, $fc,
+    $84, $b0, $7c, $46, $82, $d6, $0a, $ca, $50, $21, $fd, $69, $3c, $70, $bf, $0b,
+    $07, $86, $62, $39, $d7, $33, $aa, $2c, $89, $f0, $a1, $db, $40, $8a, $04, $ac,
+    $6f, $ef, $e9, $75, $44, $6c, $46, $cc, $00, $3f, $a2, $5f, $ff, $89, $5d, $b3,
+    $35, $1c, $37, $c9, $52, $ab, $36, $b8, $9f, $25, $a1, $e8, $d8, $fa, $e2, $4d,
+    $ce, $fa, $c5, $99, $46, $4d, $f8, $87, $be, $b5, $c2, $c3, $80, $b0, $78, $39,
+    $f9, $72, $5b, $db, $98, $61, $4b, $74, $3f, $62, $b5, $f5, $bb, $17, $26, $17,
+    $e4, $6d, $3d, $09, $ac, $3e, $95, $7a, $ee, $aa, $75, $0f, $50, $b5, $af, $af,
+    $e9, $45, $3c, $52, $2e, $bb, $72, $a3, $a1, $40, $bd, $2e, $3a, $27, $a2, $43,
+    $ad, $26, $82, $e5, $ae, $38, $fd, $8e, $b6, $65, $fe, $0f, $ab, $6b, $fa, $81,
+    $e7, $9b, $d8, $69, $b2, $0e, $a8, $e0, $50, $1c, $19, $b6, $7a, $dd, $8c, $b8,
+    $a4, $52, $21, $46, $0c, $db, $c3, $9e, $13, $b1, $08, $e0, $25, $fd, $fc, $48,
+    $04, $61, $f6, $bc, $f1, $bd, $cb, $51, $b8, $70, $43, $38, $c7, $d9, $af, $3b,
+    $74, $8c, $b0, $5b, $a5, $95, $0f, $a3, $c8, $6d, $2e, $73, $4f, $51, $a2, $4e,
+    $ee, $07, $fe, $4c, $95, $8b, $4a, $8c, $52, $ba, $eb, $62, $d2, $30, $82, $05,
     $41, $06, $09, $2a, $86, $48, $86, $f7, $0d, $01, $07, $01, $a0, $82, $05, $32,
     $04, $82, $05, $2e, $30, $82, $05, $2a, $30, $82, $05, $26, $06, $0b, $2a, $86,
     $48, $86, $f7, $0d, $01, $0c, $0a, $01, $02, $a0, $82, $04, $ee, $30, $82, $04,
     $ea, $30, $1c, $06, $0a, $2a, $86, $48, $86, $f7, $0d, $01, $0c, $01, $03, $30,
-    $0e, $04, $08, $04, $e0, $0a, $b0, $d6, $79, $a5, $44, $02, $02, $08, $00, $04,
-    $82, $04, $c8, $7f, $48, $8d, $d1, $ab, $5e, $a1, $d8, $d0, $63, $62, $6a, $d2,
-    $af, $dd, $20, $de, $91, $4d, $9a, $2f, $78, $20, $0c, $84, $a2, $c9, $38, $69,
-    $fe, $8a, $aa, $8e, $b6, $3e, $4e, $d7, $ca, $f4, $2e, $6b, $d6, $9d, $c0, $3b,
-    $5a, $4e, $7b, $89, $b8, $86, $38, $29, $87, $08, $a4, $b0, $2a, $ed, $ca, $13,
-    $b2, $fe, $15, $3e, $87, $bd, $1d, $ad, $43, $1f, $62, $93, $c1, $b8, $9f, $93,
-    $46, $74, $b3, $f4, $34, $d3, $9c, $97, $e1, $38, $09, $4c, $f4, $19, $35, $81,
-    $34, $27, $93, $c7, $b3, $fa, $af, $58, $46, $73, $cc, $56, $91, $9f, $c8, $dc,
-    $6b, $04, $af, $f1, $67, $65, $3d, $2c, $8e, $d1, $cc, $ac, $b7, $94, $41, $ea,
-    $56, $c4, $45, $ed, $c9, $2c, $bb, $c1, $0f, $05, $06, $73, $03, $33, $d1, $c2,
-    $bc, $34, $b2, $d5, $ea, $78, $5a, $22, $ca, $c3, $b4, $31, $43, $47, $92, $e8,
-    $b4, $21, $f2, $70, $0e, $b5, $1b, $9a, $07, $86, $45, $66, $8f, $dd, $90, $2e,
-    $9b, $af, $9f, $d4, $04, $42, $ec, $07, $78, $c8, $66, $0f, $19, $ae, $64, $f6,
-    $99, $11, $6c, $71, $db, $58, $f2, $ce, $13, $29, $ff, $c2, $4a, $c7, $4a, $02,
-    $d8, $28, $f7, $54, $dc, $a8, $fb, $30, $df, $53, $98, $85, $6d, $3c, $cf, $16,
-    $93, $b9, $8b, $f5, $39, $80, $cd, $84, $36, $0a, $0f, $2f, $a2, $9e, $cb, $9b,
-    $83, $f0, $49, $c5, $34, $b9, $4b, $1d, $5a, $46, $56, $8f, $a8, $05, $e0, $4c,
-    $51, $41, $a4, $6b, $07, $38, $af, $f4, $43, $81, $8d, $7d, $54, $dd, $85, $da,
-    $39, $2b, $0e, $ef, $44, $90, $e8, $99, $67, $65, $32, $5b, $f1, $ca, $1f, $cd,
-    $58, $2d, $b3, $1e, $10, $4f, $b5, $6e, $23, $a0, $26, $d3, $22, $a7, $d9, $bd,
-    $cc, $e6, $25, $52, $fe, $00, $70, $b3, $a8, $e6, $be, $42, $ae, $09, $7a, $ad,
-    $46, $ec, $03, $a5, $12, $d4, $07, $23, $a7, $9e, $7e, $42, $00, $48, $13, $96,
-    $e5, $3b, $55, $13, $2b, $a6, $e6, $6c, $9a, $25, $e0, $53, $27, $b5, $e7, $5f,
-    $2b, $96, $b3, $7c, $77, $a9, $d7, $f7, $14, $c7, $a8, $e1, $19, $0f, $5c, $88,
-    $e4, $f2, $1c, $ad, $71, $e8, $8f, $b2, $f6, $88, $b9, $2a, $57, $63, $ef, $b5,
-    $d7, $ca, $7c, $95, $14, $5e, $9d, $21, $6c, $6f, $87, $37, $88, $b5, $5e, $f1,
-    $8e, $0c, $33, $4b, $32, $a5, $ad, $3c, $b8, $e1, $bc, $1c, $74, $c2, $36, $d4,
-    $14, $37, $96, $1f, $3d, $93, $ef, $23, $5a, $59, $b5, $13, $cd, $34, $c7, $d6,
-    $78, $f5, $de, $1b, $38, $ec, $70, $d3, $9e, $d4, $08, $ef, $b7, $9c, $34, $14,
-    $12, $9a, $7d, $d0, $7a, $09, $74, $16, $5f, $0e, $88, $cf, $f4, $d7, $f7, $30,
-    $97, $d7, $d2, $18, $ff, $c7, $62, $8d, $37, $d0, $77, $66, $fd, $b3, $ee, $86,
-    $d9, $1b, $9e, $7c, $d0, $d5, $b8, $d7, $f1, $3c, $57, $be, $51, $07, $a5, $25,
-    $37, $e4, $73, $5e, $60, $b7, $98, $99, $6a, $c1, $f0, $35, $ff, $f6, $d7, $12,
-    $44, $7b, $1e, $70, $bf, $32, $e2, $49, $58, $78, $41, $22, $ee, $b5, $99, $2b,
-    $08, $c6, $a3, $e2, $c6, $65, $06, $8e, $d1, $fb, $cb, $2d, $d9, $0b, $92, $d2,
-    $05, $ab, $91, $ea, $43, $62, $16, $b3, $4b, $73, $7a, $bd, $c5, $41, $a0, $2d,
-    $6d, $28, $44, $a2, $93, $62, $2e, $67, $6b, $4a, $a0, $ab, $5e, $20, $a2, $f3,
-    $00, $56, $b4, $a8, $e8, $a3, $da, $08, $99, $83, $c2, $ad, $8a, $7f, $85, $70,
-    $3e, $ce, $2f, $39, $06, $77, $a8, $77, $3e, $bf, $e5, $c8, $38, $dc, $68, $28,
-    $35, $49, $c8, $a8, $e3, $fd, $9d, $05, $dc, $70, $4c, $a2, $0d, $2c, $44, $37,
-    $f4, $f3, $b8, $0a, $99, $3c, $97, $10, $92, $77, $58, $b2, $e3, $00, $a2, $0e,
-    $34, $af, $5f, $c6, $1d, $22, $dd, $34, $57, $dc, $5b, $f1, $f1, $6e, $03, $12,
-    $c2, $6c, $ad, $75, $03, $bf, $cd, $7a, $cd, $52, $0a, $75, $a1, $31, $b5, $19,
-    $df, $52, $09, $3b, $94, $76, $ee, $1a, $5a, $a8, $8d, $3b, $ee, $b7, $86, $c6,
-    $65, $c7, $e8, $0b, $3c, $b9, $ee, $7d, $80, $22, $89, $3d, $f8, $6c, $9e, $4f,
-    $6e, $c8, $f8, $3a, $54, $76, $b5, $89, $6b, $05, $a5, $c9, $68, $68, $0b, $33,
-    $e5, $55, $e8, $b2, $f9, $39, $dc, $c8, $0a, $13, $94, $01, $d2, $a1, $0a, $42,
-    $f5, $37, $a4, $18, $c9, $97, $bb, $a4, $93, $4c, $49, $bb, $fb, $b0, $f5, $4e,
-    $c5, $d3, $3b, $bd, $a0, $37, $10, $9f, $8f, $e7, $bb, $8a, $6d, $fe, $c3, $6c,
-    $36, $a6, $3d, $c6, $ed, $d0, $7d, $68, $37, $11, $22, $16, $82, $ab, $c4, $02,
-    $ec, $eb, $a0, $7d, $0e, $22, $79, $ce, $6a, $39, $45, $31, $5c, $99, $75, $c3,
-    $6a, $b9, $a1, $00, $2d, $4d, $4d, $f5, $ac, $cc, $1e, $0d, $36, $a7, $36, $40,
-    $53, $6c, $a8, $6c, $b0, $f8, $27, $30, $68, $ae, $06, $39, $a5, $89, $86, $cc,
-    $bb, $b0, $ca, $43, $62, $1d, $71, $6a, $30, $62, $b9, $bc, $dc, $8a, $d1, $23,
-    $04, $6f, $35, $4b, $6f, $81, $b8, $31, $91, $26, $83, $28, $e6, $2e, $d3, $84,
-    $fb, $53, $f9, $6f, $b0, $0e, $37, $e1, $ce, $4d, $6f, $35, $14, $37, $4b, $ee,
-    $31, $46, $ee, $85, $df, $04, $0d, $3d, $f0, $ac, $d2, $b7, $ef, $ae, $87, $7a,
-    $a8, $c0, $9f, $98, $4e, $e9, $c0, $a6, $7c, $e9, $ff, $d7, $76, $72, $82, $ca,
-    $89, $fb, $94, $9c, $67, $7a, $47, $47, $5c, $2c, $17, $61, $96, $15, $d6, $26,
-    $bb, $0f, $ef, $f0, $c7, $23, $ba, $39, $8a, $08, $b5, $f3, $68, $de, $54, $80,
-    $15, $a3, $43, $a5, $da, $0b, $60, $fe, $f9, $bf, $54, $fe, $21, $34, $08, $ab,
-    $0d, $59, $a8, $dc, $8e, $7b, $54, $46, $4d, $f7, $b6, $ac, $df, $1d, $6f, $50,
-    $9c, $3c, $17, $5d, $19, $4c, $48, $21, $d2, $5b, $f0, $6f, $a7, $2b, $d4, $b0,
-    $87, $fd, $42, $d0, $87, $d3, $be, $7a, $01, $61, $16, $8a, $a3, $bc, $83, $1d,
-    $bb, $6a, $fb, $51, $eb, $6b, $37, $f9, $1e, $e8, $ff, $0a, $4f, $46, $14, $1c,
-    $04, $ee, $cd, $8d, $4a, $33, $cd, $8d, $4f, $0b, $24, $2c, $e1, $25, $48, $42,
-    $a2, $eb, $04, $f4, $7e, $30, $62, $ae, $cc, $20, $1a, $a6, $38, $5c, $d5, $f3,
-    $27, $07, $81, $75, $9c, $f4, $d0, $87, $79, $6f, $0a, $28, $3d, $a5, $22, $b8,
-    $ec, $c7, $b3, $c0, $f5, $de, $77, $6c, $7f, $c3, $01, $1e, $fa, $88, $83, $bb,
-    $d0, $9c, $29, $82, $11, $db, $d0, $99, $c7, $d8, $e0, $2f, $e0, $22, $22, $0d,
-    $2a, $e7, $29, $64, $b3, $72, $a2, $08, $5a, $fa, $08, $86, $d4, $e5, $fe, $05,
-    $08, $64, $cc, $c3, $53, $7f, $9a, $2e, $93, $21, $c2, $fa, $16, $37, $3e, $28,
-    $cf, $ca, $57, $da, $bb, $15, $1a, $c6, $41, $39, $be, $d7, $f9, $9e, $78, $1b,
-    $83, $a7, $6d, $1e, $22, $be, $49, $7f, $64, $41, $5d, $a8, $11, $40, $d7, $ad,
-    $43, $f6, $c3, $9e, $7e, $3a, $95, $2d, $27, $04, $80, $95, $02, $60, $a6, $a6,
-    $55, $25, $bd, $64, $e2, $d0, $99, $b5, $d9, $4b, $42, $f5, $69, $ce, $9a, $fe,
-    $26, $d1, $c4, $9e, $29, $3d, $af, $85, $2f, $8e, $e0, $0a, $69, $f2, $69, $ee,
-    $66, $c2, $f7, $ab, $81, $bc, $82, $01, $22, $b6, $45, $31, $25, $30, $23, $06,
-    $09, $2a, $86, $48, $86, $f7, $0d, $01, $09, $15, $31, $16, $04, $14, $11, $9c,
-    $ab, $d1, $44, $93, $91, $54, $3c, $52, $a0, $66, $4c, $a5, $99, $db, $42, $62,
-    $d2, $43, $30, $2d, $30, $21, $30, $09, $06, $05, $2b, $0e, $03, $02, $1a, $05,
-    $00, $04, $14, $e0, $d8, $41, $1f, $76, $85, $94, $b5, $64, $2d, $fd, $59, $27,
-    $ce, $ea, $3b, $b1, $e2, $25, $11, $04, $08, $01, $3e, $2b, $1b, $94, $cf, $41,
-    $11);
+    $0e, $04, $08, $ad, $0d, $c3, $b1, $f1, $40, $45, $42, $02, $02, $08, $00, $04,
+    $82, $04, $c8, $38, $b0, $70, $9a, $57, $38, $93, $5c, $85, $61, $30, $6f, $5a,
+    $de, $d8, $26, $ac, $8b, $aa, $a1, $2e, $85, $8a, $07, $8d, $2b, $a6, $16, $e2,
+    $0d, $8b, $eb, $49, $b9, $30, $f0, $99, $0a, $83, $48, $d0, $1f, $93, $34, $a9,
+    $e9, $6f, $3d, $1b, $25, $c5, $51, $73, $aa, $65, $36, $29, $e1, $54, $34, $c7,
+    $bd, $0b, $94, $e7, $6b, $b1, $38, $b3, $4d, $ae, $7d, $49, $07, $ad, $93, $73,
+    $66, $a2, $00, $e9, $02, $3c, $71, $af, $fe, $fb, $5c, $42, $7f, $62, $1a, $8a,
+    $19, $d1, $12, $4d, $d6, $a0, $76, $9f, $2d, $5f, $29, $ea, $47, $83, $4a, $98,
+    $7c, $e6, $54, $ae, $3d, $ae, $22, $9d, $04, $af, $31, $32, $5d, $3b, $9b, $ef,
+    $26, $55, $7b, $16, $54, $8f, $0b, $7d, $33, $f5, $43, $cf, $4d, $08, $54, $f5,
+    $89, $d3, $bf, $b6, $f3, $18, $ad, $7b, $cf, $b3, $15, $8f, $49, $94, $2d, $30,
+    $8d, $43, $e7, $60, $23, $d8, $dc, $c4, $8e, $bf, $cc, $a2, $03, $fd, $7a, $7e,
+    $96, $25, $e2, $fb, $7c, $56, $5d, $b1, $0f, $99, $36, $aa, $0f, $49, $a4, $79,
+    $42, $f4, $c7, $81, $29, $59, $cd, $9f, $c5, $2d, $ae, $e2, $5b, $1c, $fb, $bf,
+    $ef, $02, $ef, $4a, $5c, $20, $0b, $27, $94, $99, $d3, $0b, $0b, $b9, $d4, $7c,
+    $b8, $19, $a7, $70, $6d, $61, $b0, $78, $01, $9d, $f9, $fb, $13, $08, $07, $17,
+    $58, $dc, $1f, $8a, $ba, $a7, $80, $59, $de, $27, $90, $90, $5a, $c0, $82, $98,
+    $27, $4f, $73, $eb, $e9, $ea, $c9, $9b, $7b, $e8, $05, $e1, $ef, $40, $0a, $d3,
+    $2c, $dd, $09, $f0, $eb, $a5, $c8, $66, $ac, $4b, $66, $e3, $1c, $19, $ad, $99,
+    $99, $9d, $87, $0e, $80, $ec, $70, $8a, $5c, $c6, $28, $01, $be, $f7, $ac, $34,
+    $7e, $90, $3b, $fc, $3b, $e0, $66, $72, $bc, $bf, $bf, $b9, $7a, $16, $e7, $5b,
+    $67, $83, $74, $89, $5f, $4e, $b1, $bb, $51, $69, $75, $00, $36, $52, $93, $e3,
+    $53, $1e, $de, $cb, $a3, $6b, $19, $fd, $67, $29, $63, $48, $e9, $50, $22, $de,
+    $3a, $a0, $bb, $f2, $4f, $59, $01, $5d, $71, $f0, $64, $05, $6b, $4a, $de, $0f,
+    $77, $77, $e2, $5d, $18, $ad, $ac, $95, $b8, $b9, $f5, $fa, $c5, $f8, $e1, $ce,
+    $f5, $ba, $93, $0c, $fa, $e1, $7d, $fc, $ea, $b7, $0b, $dd, $91, $22, $55, $c3,
+    $95, $9a, $3e, $eb, $5a, $aa, $56, $e6, $96, $22, $7b, $9d, $0a, $fa, $28, $bf,
+    $26, $6e, $fa, $5a, $b2, $9a, $30, $34, $6b, $a9, $79, $79, $a6, $da, $ce, $c5,
+    $f2, $5f, $51, $ce, $fc, $51, $22, $e6, $b0, $db, $a3, $c7, $95, $22, $7d, $0d,
+    $73, $fd, $bc, $e4, $56, $69, $5f, $f3, $89, $3b, $aa, $6b, $c0, $bf, $be, $3d,
+    $f6, $be, $24, $df, $3a, $fb, $ee, $40, $10, $2e, $e9, $df, $da, $2d, $2a, $6a,
+    $d0, $51, $9e, $9e, $81, $48, $27, $87, $56, $4d, $af, $21, $e7, $b3, $e0, $26,
+    $ed, $9e, $fd, $fa, $19, $50, $7d, $14, $58, $e6, $af, $3f, $62, $7f, $68, $48,
+    $00, $4e, $cc, $10, $28, $e5, $60, $02, $ec, $fc, $43, $cc, $d2, $9b, $b4, $e9,
+    $d6, $05, $4d, $dc, $a8, $b5, $e9, $44, $5b, $04, $a7, $c0, $90, $4e, $b4, $08,
+    $d7, $4e, $24, $0f, $5d, $5e, $b9, $ae, $9d, $81, $4d, $d3, $8d, $11, $22, $f8,
+    $b4, $b1, $3f, $fb, $32, $83, $0f, $73, $ac, $af, $33, $52, $f7, $5d, $36, $a3,
+    $a8, $91, $49, $9e, $e1, $07, $65, $f0, $42, $be, $06, $f3, $9c, $2f, $41, $5c,
+    $1c, $33, $cd, $bb, $4f, $df, $c0, $4b, $1f, $c8, $9f, $dd, $f8, $65, $48, $c6,
+    $63, $6c, $79, $d8, $5a, $5d, $36, $45, $44, $f2, $6d, $6d, $49, $f2, $48, $ed,
+    $79, $0c, $a4, $56, $0d, $7e, $fa, $10, $2a, $c2, $2b, $02, $9c, $f4, $3d, $04,
+    $6c, $62, $26, $0a, $37, $1f, $d1, $51, $cd, $e5, $db, $f5, $d6, $e7, $51, $29,
+    $9b, $6a, $19, $26, $34, $62, $0d, $a4, $4a, $cd, $4e, $be, $c7, $47, $90, $2d,
+    $bc, $4b, $b3, $c4, $ff, $28, $5d, $96, $84, $e1, $dd, $8f, $38, $f6, $fb, $cf,
+    $86, $0e, $50, $2d, $da, $dc, $06, $8d, $2d, $c4, $90, $58, $bb, $36, $ff, $f6,
+    $38, $05, $bf, $b2, $eb, $27, $83, $46, $c2, $aa, $02, $d3, $b8, $ca, $94, $c8,
+    $0f, $9a, $46, $fb, $8b, $56, $92, $e3, $3b, $e8, $35, $60, $b9, $57, $31, $81,
+    $3a, $44, $6b, $f5, $ed, $9c, $f1, $b6, $39, $eb, $29, $39, $28, $ab, $1c, $f3,
+    $cb, $9e, $bd, $86, $2b, $b9, $6b, $c7, $23, $fd, $51, $6a, $5a, $2e, $df, $74,
+    $e1, $1c, $6e, $7f, $76, $c8, $17, $24, $b8, $5a, $d7, $59, $23, $bd, $ff, $70,
+    $0f, $71, $b2, $46, $4f, $12, $8a, $f2, $22, $a5, $e9, $5b, $3d, $a9, $3a, $d5,
+    $36, $52, $c7, $fd, $8b, $fd, $35, $20, $d2, $f6, $c6, $34, $d2, $6f, $de, $ef,
+    $fc, $cf, $fc, $6e, $c7, $30, $6c, $cd, $f6, $62, $cb, $7d, $8d, $b8, $67, $c1,
+    $cf, $24, $f4, $bb, $7c, $5d, $89, $50, $51, $4c, $12, $85, $38, $98, $3d, $67,
+    $9c, $ec, $a5, $af, $7c, $b8, $89, $4d, $54, $98, $02, $29, $78, $83, $d0, $a4,
+    $13, $30, $36, $d6, $ca, $9a, $85, $fd, $89, $83, $81, $1e, $52, $ba, $1b, $60,
+    $cb, $46, $16, $de, $ea, $41, $50, $67, $c9, $16, $7a, $d9, $03, $35, $59, $cd,
+    $5e, $94, $3a, $6b, $c2, $52, $92, $7d, $c3, $61, $a3, $6d, $aa, $75, $79, $ea,
+    $d1, $54, $0e, $15, $dc, $de, $32, $11, $de, $d6, $23, $31, $57, $3e, $e1, $d3,
+    $1c, $94, $75, $30, $ff, $a5, $5d, $2f, $1a, $77, $6d, $ce, $48, $fd, $bc, $bc,
+    $65, $5a, $13, $41, $0e, $2f, $58, $2f, $41, $d0, $e5, $2d, $20, $84, $32, $69,
+    $75, $ed, $0f, $4c, $dc, $10, $00, $35, $1f, $dc, $b4, $ba, $6f, $c4, $00, $97,
+    $74, $5c, $d1, $51, $40, $3f, $11, $fe, $a0, $e0, $2f, $c6, $ea, $14, $26, $72,
+    $d5, $70, $42, $1a, $2b, $dd, $fe, $64, $54, $99, $63, $1d, $0e, $86, $e4, $a9,
+    $04, $b9, $90, $2d, $88, $9f, $cc, $68, $f5, $f6, $33, $f3, $0b, $4d, $b2, $bb,
+    $41, $e5, $82, $63, $85, $79, $d6, $15, $cf, $e4, $23, $18, $1f, $35, $5c, $98,
+    $83, $61, $0d, $8e, $fd, $7f, $e5, $83, $6d, $c7, $4c, $dc, $51, $b6, $d9, $09,
+    $30, $a5, $9b, $15, $00, $94, $b3, $98, $5b, $40, $4e, $40, $de, $da, $11, $8a,
+    $16, $64, $ca, $17, $6b, $ff, $02, $71, $86, $64, $92, $b8, $33, $22, $e5, $82,
+    $6e, $49, $56, $77, $d6, $7e, $83, $ba, $a8, $f6, $6a, $0c, $56, $0c, $b4, $2c,
+    $3d, $20, $b1, $fb, $5b, $db, $06, $24, $bf, $48, $e7, $ae, $89, $c7, $42, $5a,
+    $4c, $b6, $7f, $cd, $51, $dd, $bc, $4d, $b1, $21, $95, $f1, $32, $12, $05, $90,
+    $a4, $1c, $13, $12, $bc, $c7, $7a, $f6, $36, $ea, $a9, $f4, $1a, $a8, $a1, $56,
+    $9a, $5a, $17, $84, $0d, $ff, $0f, $30, $7b, $9a, $23, $1c, $1c, $bf, $4c, $81,
+    $51, $7b, $72, $cd, $43, $ea, $c6, $f5, $bb, $7f, $f5, $97, $d3, $87, $7b, $c3,
+    $03, $73, $c3, $d7, $12, $d2, $f1, $7a, $e1, $74, $92, $bc, $5e, $7b, $fb, $f2,
+    $37, $9d, $fc, $2a, $2b, $19, $3d, $cd, $38, $48, $e6, $69, $79, $ec, $d7, $00,
+    $e8, $91, $62, $2a, $13, $0a, $66, $d4, $7c, $f4, $72, $31, $25, $30, $23, $06,
+    $09, $2a, $86, $48, $86, $f7, $0d, $01, $09, $15, $31, $16, $04, $14, $b4, $df,
+    $63, $02, $4c, $1e, $34, $b3, $26, $13, $6e, $20, $ce, $7c, $cb, $b0, $eb, $93,
+    $b6, $08, $30, $2d, $30, $21, $30, $09, $06, $05, $2b, $0e, $03, $02, $1a, $05,
+    $00, $04, $14, $c3, $de, $e4, $37, $ed, $29, $0f, $50, $48, $18, $ca, $d9, $69,
+    $b5, $14, $06, $58, $a3, $e4, $8b, $04, $08, $48, $05, $11, $9c, $39, $f2, $02,
+    $34);
 
 function PrivKeyCertPfx: RawByteString;
 begin
   FastSetRawByteString(result, @PRIVKEY_PFX, SizeOf(PRIVKEY_PFX));
 end;
 
+var
+  SharedCert: array[TCryptAsymAlgo] of ICryptCert; // generated once per algo
+
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
   Algo: TCryptAsymAlgo; UsePreComputed: boolean);
-var
-  cert: ICryptCert;
-  certfile, keyfile: TFileName;
-  keypass: RawUtf8;
 begin
-  certfile := TemporaryFileName;
-  if UsePreComputed or
-     (CryptCertOpenSsl[Algo] = nil) then
-     // we can't use CryptCertX509[] because SSPI requires PFX binary format
+  InitNetTlsContext(TLS, {server=}true);
+  if UsePrecomputed or
+     (CryptCertOpenSsl[Algo] = nil) then // pure SChannel can use embedded PFX
+  // can't use CryptCertX509[] because SChannel/SSPI requires PFX binary format
   begin
-    FileFromString(PrivKeyCertPfx, certfile); // use pre-computed key
-    keypass := 'pass';
-    // warning: will work with SSPI but NOT with OpenSSL
-  end
-  else
-  begin
-    keyfile := TemporaryFileName;
-    keypass := CardinalToHexLower(Random32Not0);
-    cert := CryptCertOpenSsl[Algo].
-              Generate(CU_TLS_SERVER, '127.0.0.1', nil, 3650);
-    cert.SaveToFile(certfile, cccCertOnly, '', ccfPem);
-    cert.SaveToFile(keyfile, cccPrivateKeyOnly, keypass, ccfPem);
-    //writeln(BinToSource('PRIVKEY_PFX', '',
-    //  cert.Save(cccCertWithPrivateKey, 'pass', ccfBinary)));
+    TLS.CertificateBin := PrivKeyCertPfx; // use pre-computed key
+    TLS.PrivatePassword := 'pass';
+    exit;
   end;
-  InitNetTlsContext(TLS, {server=}true, certfile, keyfile, keypass);
+  if SharedCert[Algo] = nil then // reuse a per-algo ICryptCert instance
+    SharedCert[Algo] := CryptCertOpenSsl[Algo].Generate(
+      CU_TLS_SERVER, '127.0.0.1', nil, 3650);
+  //writeln(BinToSource('PRIVKEY_PFX', '', // force SHA1-3DES legacy format
+  //  SharedCert.Save(cccCertWithPrivateKey, '3des=pass', ccfBinary)));
+  // no temporary file needed: we just provide the shared OpenSSL handles
+  TLS.CertificateRaw := SharedCert[Algo].Handle;           // PX509
+  TLS.PrivateKeyRaw  := SharedCert[Algo].PrivateKeyHandle; // PEVP_PKEY
 end;
 
 const
@@ -3854,9 +3852,10 @@ begin
   result := _FavIconBinary;
 end;
 
-var
-  GetMacAddressSafe: TLightLock; // to protect the filter global variable
-  GetMacAddressFilter: TMacAddressFilter;
+type
+  TSortByMacAddress = class // a fake class to propagate TMacAddressFilter
+    function Compare(const A, B): integer;
+  end;
 
 const
   NETHW_ORDER: array[TMacAddressKind] of byte = ( // Kind to sort priority
@@ -3868,34 +3867,44 @@ const
     5,  // makCellular
     6); // makSoftware
 
-function SortByMacAddressFilter(const A, B): integer;
+function TSortByMacAddress.Compare(const A, B): integer;
 var
   ma: TMacAddress absolute A;
   mb: TMacAddress absolute B;
+  filter: TMacAddressFilter;
 begin
+  result := 0;
+  if @ma = @mb then
+    exit;
+  // was called as arr.Sort(TSortByMacAddress(PtrUInt(byte(Filter))).Compare)
+  byte(filter) := PtrInt(self);
   // sort by kind
-  if not (mafIgnoreKind in GetMacAddressFilter) then
+  if not (mafIgnoreKind in filter) then
   begin
     result := CompareCardinal(NETHW_ORDER[ma.Kind], NETHW_ORDER[mb.Kind]);
     if result <> 0 then
       exit;
   end;
   // sort with gateway first
-  if not (mafIgnoreGateway in GetMacAddressFilter) then
+  if not (mafIgnoreGateway in filter) then
   begin
     result := ord(ma.Gateway = '') - ord(mb.Gateway = '');
     if result <> 0 then
       exit;
   end;
   // sort by speed within this kind and gateway
-  if not (mafIgnoreSpeed in GetMacAddressFilter) then
+  if not (mafIgnoreSpeed in filter) then
   begin
     result := CompareCardinal(mb.Speed, ma.Speed);
     if result <> 0 then
       exit;
   end;
-  // fallback to sort by IfIndex
+  // fallback to sort by IfIndex or plain MAC address
   result := CompareCardinal(ma.IfIndex, mb.IfIndex);
+  if result = 0 then
+    result := SortDynArrayAnsiStringI(ma.Address, mb.Address);
+  if result = 0 then
+    result := ComparePointer(@ma, @mb);
 end;
 
 function GetMainMacAddress(out Mac: TMacAddress; Filter: TMacAddressFilter): boolean;
@@ -3906,7 +3915,7 @@ var
   i, bct: PtrInt;
 begin
   result := false;
-  all := copy(GetMacAddresses({upanddown=}false));
+  all := copy(GetMacAddresses({upanddown=}false)); // using a 65-seconds cache
   if all = nil then
     exit;
   arr.Init(TypeInfo(TMacAddressDynArray), all);
@@ -3938,15 +3947,7 @@ begin
   if all = nil then
     exit;
   if length(all) > 1 then
-  begin
-    GetMacAddressSafe.Lock; // protect GetMacAddressFilter global variable
-    try
-      GetMacAddressFilter := Filter;
-      arr.Sort(SortByMacAddressFilter);
-    finally
-      GetMacAddressSafe.UnLock;
-    end;
-  end;
+    arr.Sort(TSortByMacAddress(PtrUInt(byte(Filter))).Compare);
   Mac := all[0];
   result := true;
 end;
@@ -4079,8 +4080,10 @@ begin
   until false;
   // now the server socket has been bound, and is ready to accept connections
   if (hsoEnableTls in fOptions) and
-     (TLS <> nil) and
-     (TLS^.CertificateFile <> '') and
+     (TLS <> nil) and(
+      (TLS^.CertificateFile <> '') or
+      (TLS^.CertificateRaw <> nil) or
+      (TLS^.CertificateBin <> '')) and
      ((fSock = nil) or
       not fSock.TLS.Enabled) then
   begin
@@ -4102,12 +4105,7 @@ var
   net: TNetTlsContext;
 begin
   InitNetTlsContextSelfSignedServer(net, caaRS256, UsePreComputed);
-  try
-    WaitStarted(Seconds, @net);
-  finally
-    DeleteFile(Utf8ToString(net.CertificateFile));
-    DeleteFile(Utf8ToString(net.PrivateKeyFile));
-  end;
+  WaitStarted(Seconds, @net);
 end;
 
 function THttpServerSocketGeneric.GetStat(
@@ -5614,10 +5612,11 @@ begin
   fAesDec := fAesEnc.Clone as TAesGcmAbstract; // two AES-GCM-128 instances
   HmacSha256(key.b, '2b6f48c3ffe847b9beb6d8de602c9f25', key.b); // paranoid
   fSharedMagic := key.h.c3; // 32-bit derivation for anti-fuzzing checksum
+  FastSetString(fDirectSecret, @key, SizeOf(key)); // for HttpDirectUri()
   if Assigned(fLog) then
     // log includes safe 16-bit key.w[0] fingerprint
     fLog.Add.Log(sllTrace, 'Create: Uuid=% SecretFingerPrint=%, Seq=#%',
-      [GuidToShort(fUuid), key.w[0], CardinalToHexShort(fFrameSeq)], self);
+      [UuidToShort(fUuid), key.w[0], CardinalToHexShort(fFrameSeq)], self);
   FillZero(key.b);
   if aServerTls <> nil then
     fServerTls := aServerTls^;
@@ -5633,6 +5632,7 @@ begin
   FreeAndNil(fAesDec);
   fSharedMagic := 0;
   inherited Destroy;
+  FillZero(fDirectSecret);
 end;
 
 function THttpPeerCrypt.NetworkInterfaceChanged: boolean;
@@ -5691,7 +5691,8 @@ begin
     msg.Opaque := crc63c(pointer(aDirectUri), length(aDirectUri)); // no replay
     c.MessageEncodeBearer(msg, aDirectHeaderBearer);
     if aOptions <> nil then // extended options are URI-encoded to the bearer
-      aDirectHeaderBearer := aOptions^.ToUrlEncode(aDirectHeaderBearer);
+      aDirectHeaderBearer :=
+        aOptions^.ToUrlEncode(aDirectHeaderBearer, c.fDirectSecret);
     result := true;
   finally
     c.Free;
@@ -5956,6 +5957,7 @@ begin
   fBroadcastSafe.Lock; // serialize OnDownload() or Ping() calls
   try
     // setup this broadcasting sequence
+    QueryPerformanceMicroSeconds(fOwner.fBroadcastStart);
     fBroadcastEvent.ResetEvent;
     fBroadcastCurrentSeq := aReq.Seq; // ignore any other responses
     fResponses := 0; // reset counter for this broadcast (not late)
@@ -5979,6 +5981,7 @@ begin
     result := GetResponses(aReq.Seq);
   finally
     fBroadcastCurrentSeq := 0; // ignore any late responses
+    fOwner.fBroadcastStart := 0;
     aAlone := (fResponses = 0);
     fBroadcastSafe.UnLock;
   end;
@@ -6216,6 +6219,8 @@ function THttpPeerCache.Check(Status: THttpPeerCryptMessageDecode;
   const Ctxt: ShortString; const Msg: THttpPeerCacheMessage): boolean;
 var
   msgtxt: shortstring;
+  microsec: TShort16;
+  stop: Int64;
 begin
   result := (Status = mdOk);
   if fLog <> nil then
@@ -6224,11 +6229,19 @@ begin
       begin
         msgtxt[0] := #0;
         if fVerboseLog and
-           (Status > mdAes) then
-          MsgToShort(Msg, msgtxt); // decrypt ok: log the content
-        Add.Log(sllTrace, '% decode=% #%<=#% %',
+           (Status > mdAes) then // decrypt ok: log the content
+          MsgToShort(Msg, msgtxt);
+        microsec[0] := #0;
+        if fBroadcastStart <> 0 then
+        begin
+          QueryPerformanceMicroSeconds(stop);
+          dec(stop, fBroadcastStart);
+          if stop > 0 then
+            MicroSecToString(stop, microsec);
+        end;
+        Add.Log(sllTrace, '% decode=% #%<=#% % %',
           [Ctxt, ToText(Status)^, CardinalToHexShort(fFrameSeqLow),
-           CardinalToHexShort(fFrameSeq), msgtxt], self);
+           CardinalToHexShort(fFrameSeq), microsec, msgtxt], self);
       end;
 end;
 
@@ -6789,23 +6802,23 @@ begin
     result := fPartials.Add(Partial, ExpectedFullSize, h);
 end;
 
-function THttpPeerCache.PartialFileName(
-  const aMessage: THttpPeerCacheMessage; aHttp: PHttpRequestContext;
-  aFileName: PFileName; aSize: PInt64): integer;
+function THttpPeerCache.PartialFileName(const aMessage: THttpPeerCacheMessage;
+  aHttp: PHttpRequestContext; aFileName: PFileName; aSize: PInt64): integer;
 var
   fn: TFileName;
   size: Int64;
+  id: THttpPartialID;
 begin
   result := HTTP_NOTFOUND;
   if fPartials.IsVoid then // not supported or not used yet
     exit;
-  fn := fPartials.Find(aMessage.Hash, size);
+  fn := fPartials.Find(aMessage.Hash, size, @id);
   if fVerboseLog then
     if fn = '' then
       fLog.Add.Log(sllTrace, 'PartialFileName: none', self)
     else
-      fLog.Add.Log(sllTrace, 'PartialFileName: % size=% msg: size=% start=% end=%',
-        [fn, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
+      fLog.Add.Log(sllTrace, 'PartialFileName: % id=% size=% msg: size=% start=% end=%',
+        [fn, id, size, aMessage.Size, aMessage.RangeStart, aMessage.RangeEnd], self);
   if size = 0 then
     exit; // not existing
   result := HTTP_NOTACCEPTABLE;
@@ -6894,8 +6907,8 @@ begin
     exit;
   if aParams = '' then
     opt.Init
-  else if not opt.InitFromUrl(aParams) then // e.g. 'ti=1&as=3'
-    exit;
+  else if not opt.InitFromUrl(aParams, Sender.fDirectSecret) then
+    exit; // e.g. 'ti=1&as=3'
   opt.CreateTimeoutMS := 1000;
   opt.RedirectMax := redirmax;
   if Assigned(Sender.fOnDirectOptions) then
@@ -7249,26 +7262,26 @@ end;
 
 procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: shortstring);
 var
-  l: PtrInt;
   algoext: PUtf8Char;
   algohex: string[SizeOf(msg.Hash.Bin.b) * 2];
 begin
-  l := 0;
   algoext := nil;
+  algohex[0] := #0;
   if not IsZero(msg.Hash.Bin.b) then // append e.g. 'xxxHexaHashxxx.sha256'
   begin
+    BinToHexLower(@msg.Hash.Bin, @algohex[1], HASH_SIZE[msg.Hash.Algo]);
+    algohex[0] := AnsiChar(HASH_SIZE[msg.Hash.Algo] * 2);
     algoext := pointer(HASH_EXT[msg.Hash.Algo]);
-    l := HASH_SIZE[msg.Hash.Algo];
-    BinToHexLower(@msg.Hash.Bin, @algohex[1], l);
   end;
-  algohex[0] := AnsiChar(l * 2);
   with msg do
-    FormatShort('% #% % % % to % % % msk=% bst=% %Mb/s %% siz=%',
-      [ToText(Kind)^, CardinalToHexShort(Seq), GuidToShort(Uuid), OS_NAME[Os.os],
-       IP4ToShort(@IP4), IP4ToShort(@DestIP4), ToText(Hardware)^,
-       UnixTimeToFileShort(QWord(Timestamp) + UNIXTIME_MINIMAL),
+    FormatShort('% #% % %% % % to % % % %Mb/s % %% siz=% con=% ',
+      [ToText(Kind)^, CardinalToHexShort(Seq), OS_INITIAL[Os.os],
+       OsvToTextShorter(Os)^, WinOsBuild(Os, ' '), MAK_TXT[Hardware],
+       IP4ToShort(@IP4), IP4ToShort(@DestIP4),
        IP4ToShort(@MaskIP4), IP4ToShort(@BroadcastIP4), Speed,
-       algohex, algoext, Size], result);
+       UnixTimeToFileShort(QWord(Timestamp) + UNIXTIME_MINIMAL),
+       algohex, algoext, Size, Connections], result);
+  AppendShortUuid(msg.Uuid, result);
 end;
 
 {$ifdef USEWININET}

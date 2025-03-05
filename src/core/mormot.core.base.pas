@@ -5552,12 +5552,10 @@ var
   c: PtrInt;
   tab: PAnsichar;
 begin
+  result := '';
   if len <= 0 then
-  begin
-    result := '';
     exit;
-  end;
-  FastSetString(result, (len * 3) - 1);
+  pointer(result) := FastNewString((len * 3) - 1, CP_UTF8);
   tab := @HexCharsLower;
   p := pointer(result);
   if reverse then
@@ -6315,7 +6313,7 @@ var
   {$endif CPUX86NOTPIC}
 begin
   if PCardinalArray(@val)^[1] = 0 then
-    P := StrUInt32(P, PCardinal(@val)^)
+    P := StrUInt32(P, PCardinal(@val)^) // 32-bit value
   else
   begin
     {$ifndef CPUX86NOTPIC}

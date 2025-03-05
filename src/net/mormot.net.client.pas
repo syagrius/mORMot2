@@ -55,6 +55,7 @@ uses
   mormot.lib.sspi, // do-nothing units on non compliant systems
   mormot.lib.gssapi,
   {$endif DOMAINRESTAUTH}
+  mormot.crypt.core,
   mormot.crypt.secure;
 
 
@@ -197,26 +198,31 @@ type
     /// persist all fields of this record as a TDocVariant
     // - returns e.g. {"ti":1,"as":3} for TLS.IgnoreCertificateErrors = true
     // and Auth.Scheme = wraNegotiate
-    function ToDocVariant: variant;
+    function ToDocVariant(const Secret: RawByteString = ''): variant;
     /// persist all fields of this record as a URI-encoded TDocVariant
     // - returns e.g. '/root?ti=1&as=3' for TLS.IgnoreCertificateErrors = true
     // and Auth.Scheme = wraNegotiate and UriRoot = '/root'
-    function ToUrlEncode(const UriRoot: RawUtf8): RawUtf8;
+    function ToUrlEncode(const UriRoot: RawUtf8;
+      const Secret: RawByteString = ''): RawUtf8;
     /// reset this record, then set all fields from a ToDocVariant() value
-    function InitFromDocVariant(const Value: variant): boolean;
+    function InitFromDocVariant(const Value: variant;
+      const Secret: RawByteString = ''): boolean;
     /// reset this record, then set all fields from a URI-encoded ToDocVariant()
     // - expects UrlParams to be just after the '?', e.g.  'ti=1&as=3' for
     // TLS.IgnoreCertificateErrors = true and Auth.Scheme = wraNegotiate
-    function InitFromUrl(const UrlParams: RawUtf8): boolean;
+    function InitFromUrl(const UrlParams: RawUtf8;
+      const Secret: RawByteString = ''): boolean;
   end;
 
 function ToText(wra: THttpRequestAuthentication): PShortString; overload;
 
 /// persist main TNetTlsContext input fields into a TDocVariant
-function SaveNetTlsContext(const TLS: TNetTlsContext): variant;
+function SaveNetTlsContext(const TLS: TNetTlsContext;
+  const Secret: RawByteString = ''): variant;
 
 /// fill TNetTlsContext input fields from a SaveNetTlsContext() TDocVariant
-procedure LoadTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData);
+procedure LoadNetTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData;
+  const Secret: RawByteString = '');
 
 
 var
@@ -290,7 +296,8 @@ type
     function Add(const Partial: TFileName; ExpectedFullSize: Int64;
       const Hash: THashDigest; Http: PHttpRequestContext = nil): THttpPartialID;
     /// search for given partial file name and size, from its hash
-    function Find(const Hash: THashDigest; out Size: Int64): TFileName;
+    function Find(const Hash: THashDigest; out Size: Int64;
+      aID: PHttpPartialID = nil): TFileName;
     /// register a HTTP request to an existing partial
     function Associate(const Hash: THashDigest; Http: PHttpRequestContext): boolean;
     /// notify a partial file name change, e.g. when download is complete
@@ -2200,12 +2207,15 @@ begin
       [Partial, ExpectedFullSize, result, Fused, n], self);
 end;
 
-function THttpPartials.Find(const Hash: THashDigest; out Size: Int64): TFileName;
+function THttpPartials.Find(const Hash: THashDigest; out Size: Int64;
+  aID: PHttpPartialID): TFileName;
 var
   p: PHttpPartial;
 begin
   Size := 0;
   result := '';
+  if aID <> nil then
+    aID^ := 0;
   if IsVoid then
     exit;
   fSafe.Lock;
@@ -2215,6 +2225,8 @@ begin
       exit;
     Size := p^.FullSize;
     result := p^.PartFile;
+    if aID <> nil then
+      aID^ := p^.ID;
   finally
     fSafe.UnLock;
   end;
@@ -3621,11 +3633,11 @@ begin
     end;
 end;
 
-function THttpRequestExtendedOptions.ToDocVariant: variant;
+function THttpRequestExtendedOptions.ToDocVariant(const Secret: RawByteString): variant;
 var
   v: TDocVariantData absolute result;
 begin
-  result := SaveNetTlsContext(TLS);
+  result := SaveNetTlsContext(TLS, Secret);
   v.AddNameValuesToObject([
     'p',  Proxy,
     'as', ord(Auth.Scheme),
@@ -3636,12 +3648,14 @@ begin
     v.Clear;
 end;
 
-function THttpRequestExtendedOptions.ToUrlEncode(const UriRoot: RawUtf8): RawUtf8;
+function THttpRequestExtendedOptions.ToUrlEncode(const UriRoot: RawUtf8;
+  const Secret: RawByteString): RawUtf8;
 begin
-  result := _Safe(ToDocVariant)^.ToUrlEncode(UriRoot);
+  result := _Safe(ToDocVariant(Secret))^.ToUrlEncode(UriRoot);
 end;
 
-function THttpRequestExtendedOptions.InitFromDocVariant(const Value: variant): boolean;
+function THttpRequestExtendedOptions.InitFromDocVariant(const Value: variant;
+  const Secret: RawByteString): boolean;
 var
   v: PDocVariantData;
   s: integer;
@@ -3651,7 +3665,7 @@ begin
   if not result or
      (v^.Count = 0) then
     exit;
-  LoadTlsContext(TLS, v^);
+  LoadNetTlsContext(TLS, v^, Secret);
   v^.GetAsRawUtf8('p', Proxy);
   if v^.GetAsInteger('as', s) and
      (cardinal(s) <= cardinal(high(Auth.Scheme))) then
@@ -3661,12 +3675,13 @@ begin
   v^.GetAsRawUtf8('at', RawUtf8(Auth.Token));
 end;
 
-function THttpRequestExtendedOptions.InitFromUrl(const UrlParams: RawUtf8): boolean;
+function THttpRequestExtendedOptions.InitFromUrl(const UrlParams: RawUtf8;
+  const Secret: RawByteString): boolean;
 var
   v: TDocVariantData;
 begin
   v.InitFromUrl(pointer(UrlParams), JSON_FAST);
-  result := InitFromDocVariant(variant(v));
+  result := InitFromDocVariant(variant(v), Secret);
 end;
 
 
@@ -3675,7 +3690,12 @@ begin
   result := GetEnumName(TypeInfo(THttpRequestAuthentication), ord(wra));
 end;
 
-function SaveNetTlsContext(const TLS: TNetTlsContext): variant;
+const
+  TLS_ROUNDS = 1000;
+  TLS_SALT = 'a41c0c2447821c01afdcdc75f7ab8a0a';
+
+function SaveNetTlsContext(const TLS: TNetTlsContext;
+  const Secret: RawByteString): variant;
 begin
   VarClear(result{%H-});
   TDocVariantData(result).InitObject([
@@ -3684,10 +3704,17 @@ begin
     'ta', TLS.AllowDeprecatedTls,
     'tu', TLS.ClientAllowUnsafeRenegotation,
     'cf', TLS.CertificateFile,
-    'ca', TLS.CACertificatesFile], JSON_FAST, {dontAddDefault=}true);
+    'ca', TLS.CACertificatesFile,
+    'pf', TLS.PrivateKeyFile], JSON_FAST, {dontAddDefault=}true);
+  if (TLS.PrivateKeyFile <> '') and
+     (TLS.PrivatePassword <> '') then
+    TDocVariantData(result).AddValueFromText('pp',
+      BinToBase64uri(CryptDataWithSecret(TLS.PrivatePassword,
+        [TLS.PrivateKeyFile, TLS.CertificateFile, Secret], TLS_ROUNDS, TLS_SALT)));
 end;
 
-procedure LoadTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData);
+procedure LoadNetTlsContext(var TLS: TNetTlsContext; const V: TDocVariantData;
+  const Secret: RawByteString);
 begin
   V.GetAsBoolean('te', TLS.Enabled);
   V.GetAsBoolean('ti', TLS.IgnoreCertificateErrors);
@@ -3695,6 +3722,11 @@ begin
   V.GetAsBoolean('tu', TLS.ClientAllowUnsafeRenegotation);
   V.GetAsRawUtf8('cf', TLS.CertificateFile);
   V.GetAsRawUtf8('ca', TLS.CACertificatesFile);
+  V.GetAsRawUtf8('pf', TLS.PrivateKeyFile);
+  if (TLS.PrivateKeyFile <> '') and
+     V.GetAsRawUtf8('pp', TLS.PrivatePassword) then
+    TLS.PrivatePassword := CryptDataWithSecret(Base64uriToBin(TLS.PrivatePassword),
+      [TLS.PrivateKeyFile, TLS.CertificateFile, Secret], TLS_ROUNDS, TLS_SALT);
 end;
 
 

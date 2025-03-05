@@ -1868,17 +1868,19 @@ var
     $94, $63, $C2, $C0, $78, $05, $9C, $8B, $85, $B7, $A1, $E3, $ED, $93, $27, $18);
 
 /// protect some data via AES-256-CFB and a secret known by the current user only
+// - will include a TAesCfc.MacEncrypt() checksum to the encrypted output, so
+// if Encrypt=false, would detect and return '' on incorrect Data/AppSecret
 // - the application can specify a secret salt text, which should reflect the
 // current execution context, to ensure nobody could decrypt the data without
 // knowing this application-specific AppSecret value
-// - here data is cyphered using a random secret key, stored in a file located in
+// - here data is cyphered using a random secret key stored in a file located in
 // ! GetSystemPath(spUserData)+sep+Pbkdf2HmacSha256(CryptProtectDataEntropy,User)
 // with sep='_' under Windows, and sep='.syn-' under Linux/Posix
 // - under Windows, it will encode the secret file via CryptProtectData DPAPI,
 // so has the same security level than plain CryptDataForCurrentUserDPAPI(),
 // but will be much faster, since it won't call the API each time
-// - under Linux/POSIX, access to the $HOME user's .xxxxxxxxxxx secret file with
-// chmod 400 is considered to be a safe enough approach
+// - under Linux/POSIX, using $HOME user's .xxxxxxxxxxx secret file with chmod 400
+// is considered to be a safe enough approach for user-specific protection
 // - this function is up to 100 times faster than CryptDataForCurrentUserDPAPI,
 // generates smaller results, and is consistent on all Operating Systems
 // - you can use this function over a specified variable, to cypher it in place,
@@ -1899,6 +1901,21 @@ var
 // !  end;
 function CryptDataForCurrentUser(const Data, AppSecret: RawByteString;
   Encrypt: boolean): RawByteString;
+
+/// symmetrical protect/obfuscate some data from some secret(s)
+// - a "private key" is derivated using Pbkdf2Sha3Crypt() from the supplied
+// secret values, then applied in SHAKE-128 XOF cipher mode to the input data
+// - may be used as a stateless fallback to CryptDataForCurrentUser() to obfuscate
+// some data, but not as secure than pure asymmetric public/private cryptogaphy
+// - note that this function is much slower than CryptDataForCurrentUser()
+// because of Pbkdf2Sha3(Rounds) execution time (typically 1000-3000 calls/sec)
+// - pure function, by which encryption/decryption is the same symmetrical
+// process, and which result length will match input's
+// - at decryption, this function won't check the Data integrity nor the Secret
+// accuracy: it will just uncipher and may return unexpected/aberrant content
+function CryptDataWithSecret(const Data: RawByteString;
+  const Secret: array of const; Rounds: integer = 1000;
+  const Salt: RawByteString = 'f21d40859d9f7f4c82e7b1759c1f0ed9'): RawByteString;
 
 
 { ****************** SHA-2 SHA-3 Secure Hashing }
@@ -7673,12 +7690,12 @@ var
   i: integer;
 begin
   result := '';
-  if self <> nil then
-    SetLength(result, BufferBytes * (StripesCount + 1));
-  if result = '' then
+  if (self = nil) or
+     (BufferBytes <= 0) then
     exit;
-  dst := pointer(result);
-  SetLength(tmp, BufferBytes);
+  dst := FastNewString(BufferBytes * (StripesCount + 1));
+  pointer(result) := dst;
+  SetLength(tmp, BufferBytes); // filled with zeros
   for i := 1 to StripesCount do
   begin
     FillRandom(dst, BufferBytes);
@@ -7729,7 +7746,7 @@ begin
   if (len = 0) or
      (unsplit * cardinal(StripesCount) <> len) then
     exit;
-  SetLength(result, unsplit);
+  pointer(result) := FastNewString(unsplit);
   if not AFUnsplit(Split, pointer(result)^, unsplit) then
     result := '';
 end;
@@ -8237,6 +8254,18 @@ begin
   DetectRawUtf8(result); // detect and mark as CP_UTF8 to circumvent FPC RTL bug
 end;
 
+function CryptDataWithSecret(const Data: RawByteString; const Secret: array of const;
+  Rounds: integer; const Salt: RawByteString): RawByteString;
+var
+  sec: RawUtf8;
+begin
+  FastSetRawByteString(result, pointer(Data), length(Data)); // in-place encrypt
+  if Data = '' then
+    exit;
+  Make(Secret, sec);
+  Pbkdf2Sha3Crypt(SHAKE_128, sec, Salt, Rounds, result); // XOF/cipher mode
+  FillZero(sec);
+end;
 
 
 { ****************** SHA-2 SHA-3 Hashing }
@@ -9999,7 +10028,7 @@ var
 begin
   if resultbytes <= 0 then
     resultbytes := SHA3_DEF_LEN[algo] shr 3;
-  SetLength(tmp, resultbytes);
+  pointer(tmp) := FastNewString(resultbytes);
   first.Init(algo);
   first.Update(password);
   mac := first;
@@ -10025,7 +10054,9 @@ var
   len: integer;
 begin
   len := length(data);
-  SetLength(key, len);
+  if len = 0 then
+    exit;
+  pointer(key) := FastNewString(len);
   Pbkdf2Sha3(algo, password, salt, count, pointer(key), len);
   XorMemory(pointer(data), pointer(key), len);
   FillZero(key);

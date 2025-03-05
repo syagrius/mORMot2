@@ -226,10 +226,10 @@ type
     AesCipher: TAesAbstractClass;
     /// TWebSocketProtocol.SetEncryptKey AES key size in bits, for TProtocolAes
     // - default is 128 for efficient 'aes-128-ctr' at 2.5GB/s
-    // - for mORMot 1.18 compatibility, set for your custom settings:
-    // $ AesClass := TAesCfb;
-    // $ AesBits := 256;
-    // $ AesRounds := 0; // Sha256Weak() deprecated function
+    // - for mORMot 1.18 compatibility, you could override default globals as such:
+    // ! AesClass := TAesCfb;
+    // ! AesBits := 256;
+    // ! AesRounds := 0; // Sha256Weak() deprecated function
     AesBits: integer;
     /// TWebSocketProtocol.SetEncryptKey 'password#xxxxxx.private' ECDHE algo
     // - default is efAesCtr128 as set to TEcdheProtocol.FromPasswordSecureFile
@@ -2435,8 +2435,8 @@ begin
     else
       EWebSockets.RaiseUtf8('%.SendFrames[%]: Unexpected opcode=%',
         [self, i, ord(Frames[i].opcode)]);
-  FastNewRawByteString(jumboFrame.payload, len);
-  P := pointer(jumboFrame.payload);
+  P := FastNewString(len);
+  pointer(jumboFrame.payload) := P;
   MoveFast(JUMBO_HEADER, P^, SizeOf(JUMBO_HEADER));
   inc(P, SizeOf(JUMBO_HEADER));
   P := ToVarUInt32(FramesCount, P); // store max

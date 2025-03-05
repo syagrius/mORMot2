@@ -2169,6 +2169,12 @@ type
     // private key, so cccCertWithPrivateKey and cccPrivateKeyOnly content could
     // be used, with an optional PrivatePassword, to save the private key
     // - will use binary by default, but you can set e.g. ccfPem if needed
+    // - note that OpenSSL ccfBinary will use PKCS12 encoding, which default
+    // encoding did change with OpenSSL 3.X: you may start the PrivatePassword
+    // with PKCS12_3DES_PREFIX '3des=' prefix (which will be trimmed) to force
+    // legacy PBE-SHA1-3DES as compatible with Windows Server 2012 or MacOS/iOS,
+    // or start with PKCS12_AES_PREFIX 'aes=' prefix to force the newer (and
+    // safer) AES-256-CBC algorithm on OpenSSL 1.x
     // - warning: don't forget FillZero() once done with any sensitive result
     function Save(Content: TCryptCertContent = cccCertOnly;
       const PrivatePassword: SpiUtf8 = '';
@@ -2296,14 +2302,16 @@ type
     // - used internally to quickly retrieve the TCryptCert from an ICryptCert
     function Instance: TCryptCert;
     /// access to the low-level implementation handle of the certificate
-    // - e.g. a PX509 for OpenSsl, aTEccCertificate class for mormot.crypt.ecc,
+    // - e.g. a PX509 for OpenSsl, a TEccCertificate class for mormot.crypt.ecc,
     // or a TX509 class for mormot.crypt.x509
     // - equals nil if there is no associated certificate yet, e.g. after New
+    // - can be assigned e.g. to TNetTlsContext.CertificateRaw for OpenSSL
     function Handle: pointer;
     /// access to the low-level implementation handle of the stored private key
     // - e.g. a PEVP_PKEY for OpenSsl, a PEccPrivateKey for mormot.crypt.ecc,
-    // or a ICryptPrivateKey weak instance for mormot.crypt.x509
+    // or a ICryptPrivateKey weak reference for mormot.crypt.x509
     // - equals nil if there is no associated private key
+    // - can be assigned e.g. to TNetTlsContext.PrivateKeyRaw for OpenSSL
     function PrivateKeyHandle: pointer;
     /// return the public BigInt values associated to the stored private key
     // - as BigInt binaries, ready e.g. for JWS / JSON Web Key responses
@@ -3103,10 +3111,10 @@ var
   // mormot.crypt.rsa with TCryptPublicKeyRsa or mormot.crypt.opensssl with
   // with TCryptPublicKeyOpenSsl
   // - use as such:
-  // $ var key: ICryptPublicKey;
-  // $ ...
-  // $   key := CryptPublicKey[ckaEcc].Create;
-  // $   if key.Load(...) then ...
+  // ! var key: ICryptPublicKey;
+  // ! ...
+  // !   key := CryptPublicKey[ckaEcc].Create;
+  // !   if key.Load(...) then ...
   CryptPublicKey: array[TCryptKeyAlgo] of TCryptPublicKeyClass;
 
   /// RSA/ECC private key factory
@@ -3114,10 +3122,10 @@ var
   // mormot.crypt.rsa with TCryptPrivateKeyRsa or mormot.crypt.opensssl with
   // with TCryptPrivateKeyOpenSsl
   // - use as such:
-  // $ var key: ICryptPrivateKey;
-  // $ ...
-  // $   key := CryptPrivateKey[ckaEcc].Create;
-  // $   if key.Load(...) then ...
+  // ! var key: ICryptPrivateKey;
+  // ! ...
+  // !   key := CryptPrivateKey[ckaEcc].Create;
+  // !   if key.Load(...) then ...
   CryptPrivateKey: array[TCryptKeyAlgo] of TCryptPrivateKeyClass;
 
 
@@ -3130,13 +3138,13 @@ var
   /// direct access to the mormot.crypt.x509.pas ICryptCert factories
   // - may be nil if this unit was not included
   // - to get a new ICryptCert using OpenSSL RSA 2048 key over SHA-256, use e.g.
-  // $ CryptCertX509[caaRS256].New
+  // ! CryptCertX509[caaRS256].New
   CryptCertX509: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
   /// direct access to the mormot.crypt.openssl.pas ICryptCert factories
   // - may be nil if this unit was not included or if OpenSSL is not available
   // - to return a ICryptCert instance using OpenSSL RSA 2048 key, use e.g.
-  // $ CryptCertOpenSsl[caaRS256].New
+  // ! CryptCertOpenSsl[caaRS256].New
   // - call RegisterOpenSsl once to initialize this lookup table
   CryptCertOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
 

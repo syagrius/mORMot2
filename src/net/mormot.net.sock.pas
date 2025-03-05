@@ -675,6 +675,10 @@ type
   end;
   TMacAddressDynArray = array of TMacAddress;
 
+const
+  /// identify each TMacAddressKind as one uppercase letter
+  MAK_TXT: array[TMacAddressKind] of AnsiChar = '?EWTPCS';
+
 /// enumerate all network MAC addresses and their associated IP information
 // - an internal 65-seconds cache is used, with explicit MacIPAddressFlush
 function GetMacAddresses(UpAndDown: boolean = false): TMacAddressDynArray;
@@ -795,19 +799,19 @@ type
   // - currently only properly implemented by mormot.lib.openssl11 - SChannel
   // on Windows only recognizes IgnoreCertificateErrors and sets CipherName
   // - typical usage is the following:
-  // $ with THttpClientSocket.Create do
-  // $ try
-  // $   TLS.WithPeerInfo := true;
-  // $   TLS.IgnoreCertificateErrors := true;
-  // $   TLS.CipherList := 'ECDHE-RSA-AES256-GCM-SHA384';
-  // $   ConnectUri('https://synopse.info');
-  // $   ConsoleWrite(TLS.PeerInfo);
-  // $   ConsoleWrite(TLS.CipherName);
-  // $   ConsoleWrite([Get('/forum/', 1000), ' len=', ContentLength]);
-  // $   ConsoleWrite(Get('/fossil/wiki/Synopse+OpenSource', 1000));
-  // $ finally
-  // $   Free;
-  // $ end;
+  // ! with THttpClientSocket.Create do
+  // ! try
+  // !   TLS.WithPeerInfo := true;
+  // !   TLS.IgnoreCertificateErrors := true;
+  // !   TLS.CipherList := 'ECDHE-RSA-AES256-GCM-SHA384';
+  // !   ConnectUri('https://synopse.info');
+  // !   ConsoleWrite(TLS.PeerInfo);
+  // !   ConsoleWrite(TLS.CipherName);
+  // !   ConsoleWrite([Get('/forum/', 1000), ' len=', ContentLength]);
+  // !   ConsoleWrite(Get('/fossil/wiki/Synopse+OpenSource', 1000));
+  // ! finally
+  // !   Free;
+  // ! end;
   // - for passing a PNetTlsContext, use InitNetTlsContext for initialization
   TNetTlsContext = record
     /// output: set by ConnectUri/OpenBind method once TLS is established
@@ -848,10 +852,15 @@ type
     // ICryptCert.SaveToFile(FileName, cccCertWithPrivateKey, ', ccfBinary) or
     // openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
     CertificateFile: RawUtf8;
+    /// input: PEM/PFX content of a certificate to be loaded
+    // - on OpenSSL client or server, calls SSL_CTX_use_certificat() API
+    // - not used on SChannel client
+    // - on SChannel server, expects a .pfx / PKCS#12 binary content
+    CertificateBin: RawByteString;
     /// input: opaque pointer containing a certificate to be used
     // - on OpenSSL client or server, calls SSL_CTX_use_certificate() API
     // expecting the pointer to be of PX509 type
-    // - not used on SChannel client
+    // - not used on SChannel
     CertificateRaw: pointer;
     /// input: PEM file name containing a private key to be loaded
     // - (Delphi) warning: encoded as UTF-8 not UnicodeString/TFileName
@@ -875,6 +884,24 @@ type
     // - on OpenSSL, calls the SSL_CTX_load_verify_locations() API
     // - not used on SChannel
     CACertificatesFile: RawUtf8;
+    /// input: opaque pointers containing a set of CA certificates
+    // - on OpenSSL client or server, calls SSL_CTX_get_cert_store() API then
+    // X509_STORE_add_cert() on all pointers of PX509 type - i.e. expecting
+    // here a PX509DynArray e.g. from LoadCertificates() as such:
+    // ! var certs: PX509DynArray;
+    // ! ...
+    // !   certs := LoadCertificates(CA_CHAIN);
+    // !   aTlsContext.CACertificatesRaw := TPointerDynArray(certs);
+    // !   // ... eventually ...
+    // !   PX509DynArrayFree(certs);
+    // - not used on SChannel client
+    CACertificatesRaw: TPointerDynArray;
+    /// input: defines a set of CA certificates to be retrieved from the OS
+    // - on OpenSSL, calls and uses our cached LoadCertificatesFromSystemStore()
+    // which is more versatile than default SSL_CTX_set_default_verify_paths(),
+    // especially on Windows
+    // - not used on SChannel client
+    CASystemStores: TSystemCertificateStores;
     /// input: preferred Cipher List
     // - not used on SChannel
     CipherList: RawUtf8;
@@ -3977,7 +4004,10 @@ begin
             ((not tls1.Enabled) or
              ((tls1.IgnoreCertificateErrors = tls2.IgnoreCertificateErrors) and
               (tls1.CertificateFile         = tls2.CertificateFile) and
+              (tls1.CertificateBin          = tls2.CertificateBin) and
               (tls1.CACertificatesFile      = tls2.CACertificatesFile) and
+              (tls1.CACertificatesRaw       = tls2.CACertificatesRaw) and
+              (tls1.CASystemStores          = tls2.CASystemStores) and
               (tls1.CertificateRaw          = tls2.CertificateRaw) and
               (tls1.PrivateKeyFile          = tls2.PrivateKeyFile) and
               (tls1.PrivatePassword         = tls2.PrivatePassword) and

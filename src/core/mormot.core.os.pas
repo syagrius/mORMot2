@@ -443,6 +443,7 @@ type
 const
   /// the recognized MacOS versions, as plain text
   // - indexed from OSVersion32.utsrelease[2] kernel revision
+  // - see https://en.wikipedia.org/wiki/MacOS_version_history#Releases
   MACOS_NAME: array[8 .. 25] of RawUtf8 = (
     '10.4 Tiger',
     '10.5 Leopard',
@@ -737,17 +738,27 @@ var
   /// the running Operating System, encoded as a 32-bit integer
   OSVersionInt32: integer absolute OSVersion32;
 
-/// convert an Operating System type into its text representation
-// - returns e.g. 'Windows Vista' or 'Ubuntu' or 'macOS 13 Ventura'
+/// convert an Operating System type into its human-friendly text representation
+// - returns e.g. 'Windows Vista' or 'Windows 10 22H2' or 'Ubuntu' or
+// 'macOS 13 Ventura'
 function ToText(const osv: TOperatingSystemVersion): RawUtf8; overload;
+
+/// low-level function used internally by ToText(osv) to detect Windows versions
+function WinOsBuild(const osv: TOperatingSystemVersion;
+  firstchar: AnsiChar = #0): TShort8;
 
 /// convert an Operating System type into its one-word text representation
 // - returns e.g. 'Vista' or 'Ubuntu' or 'OSX'
-function ToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
+function OsvToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// internal function called when inlining ToTextShort()
+function OsvToTextShorter(const osv: TOperatingSystemVersion): PRawUtf8;
 
 /// convert a 32-bit Operating System type into its full text representation
 // - including the kernel revision (not the distribution version) on POSIX systems
-// - returns e.g. 'Windows Vista', 'Windows 11 64-bit 22000' or 'Ubuntu Linux 5.4.0'
+// - returns e.g. 'Windows Vista', 'Windows 11 64-bit 21H2 22000' or
+// 'Ubuntu Linux 5.4.0'
 function ToTextOS(osint32: integer): RawUtf8;
 
 /// check if the current OS (i.e. OS_KIND value) match a description
@@ -862,13 +873,15 @@ type
 function ArmCpuType(id: word): TArmCpuType;
 
 /// recognize a given ARM/AARCH64 CPU type name from its 12-bit hardware ID
-function ArmCpuTypeName(act: TArmCpuType; id: word): RawUtf8;
+function ArmCpuTypeName(act: TArmCpuType; id: word;
+  const before: shortstring = ''): shortstring;
 
 /// recognize a given ARM/AARCH64 CPU implementer from its 8-bit hardware ID
 function ArmCpuImplementer(id: byte): TArmCpuImplementer;
 
 /// recognize a given ARM/AARCH64 CPU implementer name from its 8-bit hardware ID
-function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word): RawUtf8;
+function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word;
+  const after: shortstring = ''): shortstring;
 
 
 const
@@ -5895,28 +5908,96 @@ end;
 
 { ****************** Gather Operating System Information }
 
+const // cf https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
+  DESKTOP_INT: array[0 .. 17] of cardinal = (
+     10240,  10586,  14393,  15063,  16299,  17134,  17763,  18362,  18363,
+     19041,  19042,  19043,  19044,  19045,  22000,  22621,  22631,  26100);
+  DESKTOP_TXT: array[0 .. high(DESKTOP_INT), 0 .. 3] of AnsiChar = (
+    '1507', '1511', '1607', '1703', '1709', '1803', '1809', '1903', '1909',
+    '2004', '20H2', '21H1', '21H2', '22H2', '21H2', '22H2', '23H2', '24H2');
+  SERVER_INT: array[0 .. 10] of cardinal = (
+    14393,  16299,  17134,  17763,  18362,  18363,  19041,  19042,  20348,
+    25398,  26100);
+  SERVER_TXT: array[0 .. high(SERVER_INT), 0 .. 3] of AnsiChar = (
+    '1607', '1709', '1803', '1809', '1903', '1909', '2004', '20H2', '21H2',
+    '23H2', '24H2');
+
+function FindOsBuild(c: cardinal; hi: PtrInt; b, t: PCardinalArray): cardinal;
+begin
+  repeat
+    if c >= b^[hi] then
+    begin
+      result := t^[hi];
+      exit;
+    end;
+    dec(hi);
+  until hi < 0;
+  result := 0;
+end;
+
+function WinOsBuild(const osv: TOperatingSystemVersion; firstchar: AnsiChar): TShort8;
+var
+  c: cardinal;
+begin
+  result[0] := #0;
+  if osv.os <> osWindows then
+    exit;
+  c := osv.winbuild;
+  case  osv.win of
+    wTen, wTen_64, wEleven, wEleven_64: // desktop versions
+      c := FindOsBuild(c, high(DESKTOP_INT), @DESKTOP_INT, @DESKTOP_TXT);
+    wServer2016, wServer2016_64, wServer2019_64, wServer2022_64, wServer2025_64:
+      c := FindOsBuild(c, high(SERVER_INT), @SERVER_INT, @SERVER_TXT);
+  else
+    exit;
+  end;
+  if c <> 0 then
+    if firstchar = #0 then
+    begin
+      result[0] := #4; // e.g. '21H2' for firstchar=#0
+      PCardinal(@result[1])^ := c;
+    end
+    else
+    begin
+      result[0] := #5; // e.g. ' 21H2' for firstchar=' '
+      result[1] := firstchar;
+      PCardinal(@result[2])^ := c;
+    end;
+end;
+
 function ToText(const osv: TOperatingSystemVersion): RawUtf8;
 begin
   result := OS_NAME[osv.os];
   case osv.os of
     osWindows:
-      result := 'Windows ' + WINDOWS_NAME[osv.win];
+      begin
+        result := 'Windows ' + WINDOWS_NAME[osv.win];
+        AppendShortToUtf8(WinOsBuild(osv, ' '), result);
+      end;
     osOSX:
       if osv.utsrelease[2] in [low(MACOS_NAME) .. high(MACOS_NAME)] then
         result := 'macOS ' + MACOS_NAME[osv.utsrelease[2]];
   end;
 end;
 
-function ToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
+function OsvToTextShorter(const osv: TOperatingSystemVersion): PRawUtf8;
 begin
-  result := OS_NAME[osv.os];
+  result := nil;
   case osv.os of
     osWindows:
-      result := WINDOWS_NAME[osv.win];
+      result := @WINDOWS_NAME[osv.win];
     osOSX:
       if osv.utsrelease[2] in [low(MACOS_NAME) .. high(MACOS_NAME)] then
-        result := MACOS_NAME[osv.utsrelease[2]];
+        result := @MACOS_NAME[osv.utsrelease[2]];
   end;
+  if (result = nil) or
+     (result^ = '') then
+    result := @OS_NAME[osv.os];
+end;
+
+function OsvToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
+begin
+  result := OsvToTextShorter(osv)^;
 end;
 
 const
@@ -5935,7 +6016,7 @@ begin
   result := ToText(osv);
   if (osv.os = osWindows) and
      (osv.winbuild <> 0) then
-    // include the Windows build number, e.g. 'Windows 11 64bit 22000'
+    // include the Windows build number, e.g. 'Windows 11 64bit 21H2 22000'
     result := _fmt('%s %d', [result, osv.winbuild]);
   if (osv.os >= osLinux) and
      (osv.utsrelease[2] <> 0) then
@@ -6090,12 +6171,16 @@ begin
   result := actUnknown;
 end;
 
-function ArmCpuTypeName(act: TArmCpuType; id: word): RawUtf8;
+function ArmCpuTypeName(act: TArmCpuType; id: word; const before: shortstring): shortstring;
 begin
+  result := before;
   if act = actUnknown then
-    result := 'ARM 0x' + RawUtf8(IntToHex(id, 3))
+  begin
+    AppendShort('ARM 0x', result);;
+    AppendShortIntHex(id, result);
+  end
   else
-    ShortStringToAnsi7String(ARMCPU_ID_TXT[act], result);
+    AppendShort(ARMCPU_ID_TXT[act], result);
 end;
 
 function ArmCpuImplementer(id: byte): TArmCpuImplementer;
@@ -6106,12 +6191,17 @@ begin
   result := aciUnknown;
 end;
 
-function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word): RawUtf8;
+function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word;
+  const after: shortstring): shortstring;
 begin
   if aci = aciUnknown then
-    result := 'HW 0x' + RawUtf8(IntToHex(id, 2))
+  begin
+    result := 'HW 0x';
+    AppendShortIntHex(id, result);
+  end
   else
-    ShortStringToAnsi7String(ARMCPU_IMPL_TXT[aci], result);
+    result := ARMCPU_IMPL_TXT[aci];
+  AppendShort(after, result);
 end;
 
 
@@ -6715,7 +6805,7 @@ begin
     if (size < MaxInt) and // 2GB seems big enough for a RawByteString
        (size > 0) then
     begin
-      FastSetString(RawUtf8(result), size); // assume CP_UTF8 for FPC RTL bug
+      pointer(result) := FastNewString(size, CP_UTF8); // UTF-8 for FPC RTL bug
       if not FileReadAll(h, pointer(result), size) then
         result := ''; // error reading
     end;
@@ -8333,23 +8423,19 @@ begin
   result := Get(UnAmp(name), value, description, default);
 end;
 
-function defI(default: integer): RawUtf8;
-begin
-  if default = maxInt then
-    result := ''
-  else
-    result := RawUtf8(IntToStr(default));
-end;
-
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
   out value: integer; const description: RawUtf8; default: integer): boolean;
 var
   i: PtrInt;
+  def: RawUtf8;
 begin
-  if self = nil then
-    i := -1
-  else
-    i := Find(name, clkParam, description, defI(default));
+  i := -1;
+  if self <> nil then
+  begin
+    if default <> maxInt then
+      ShortStringToAnsi7String(ToShort(default), def); // no Delphi str(RawUtf8)
+    i := Find(name, clkParam, description, def);
+  end;
   result := (i >= 0) and
             ToInteger(Values[i], value);
   if not result and
@@ -8705,23 +8791,22 @@ begin
     for s := low(s) to high(s) do
       if s in CertStores then
       begin
-        v := GetOneSystemStoreAsPem(s, FlushCache, now);
+        v := GetOneSystemStoreAsPem(s, FlushCache, now); // may use its cache
         if v <> '' then
           result := result + v + #13#10;
       end;
-  if result <> '' then
-  begin
-    _SystemStoreAsPemSafe.Lock;
-    try
-      with _SystemStoreAsPem do
-      begin
-        Tix := now;
-        Scope := CertStores;
-        Pem := result;
-      end;
-    finally
-      _SystemStoreAsPemSafe.UnLock;
+  if result = '' then
+    exit;
+  _SystemStoreAsPemSafe.Lock;
+  try
+    with _SystemStoreAsPem do
+    begin
+      Tix := now;
+      Scope := CertStores;
+      Pem := result;
     end;
+  finally
+    _SystemStoreAsPemSafe.UnLock;
   end;
 end;
 
@@ -10630,15 +10715,14 @@ end;
 
 procedure TrimDualSpaces(var s: RawUtf8);
 var
-  f, i: PtrInt;
+  i: PtrInt;
 begin
-  f := 1;
+  i := 1;
   repeat
-    i := PosEx('  ', s, f);
+    i := PosEx('  ', s, i);
     if i = 0 then
       break;
-    delete(s, i, 1); // dual space -> single space
-    f := i;
+    delete(s, i, 1); // dual spaces -> single space
   until false;
   TrimSelf(s);
 end;
@@ -10665,10 +10749,10 @@ begin
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
-  // minimal stubs which will be properly implemented in mormot.core.log.pas
-  GetExecutableLocation := _GetExecutableLocation;
+  // minimal stubs which will be properly implemented in other mormot.core units
+  GetExecutableLocation := _GetExecutableLocation; // mormot.core.log
   SetThreadName := _SetThreadName;
-  ShortToUuid := _ShortToUuid;
+  ShortToUuid := _ShortToUuid;                     // mormot.core.text.pas
   AppendShortUuid := _AppendShortUuid;
 end;
 

@@ -2614,8 +2614,12 @@ begin
           FillZero(pem);
         end
         else
-          // ccfBinary will use the PKCS#12 binary encoding
-          result := fX509.ToPkcs12(fPrivKey, PrivatePassword);
+          // ccfBinary will use PKCS#12/.PFX encoding
+          // - warning: default algorithm changed to AES-256-CBC with OpenSSL 3
+          // https://github.com/openssl/openssl/commit/762970bd686c4aa
+          // - use '3des=' prefix (which will be trimmed) to force PBE-SHA1-3DES
+          // or 'aes=' prefix to force AES-256-CBC algorithm on OpenSSL 1.x
+          result := fX509.ToPkcs12Ex(fPrivKey, PrivatePassword);
     cccPrivateKeyOnly:
       if fPrivKey = nil then
         RaiseError('Save(cccPrivateKeyOnly) with no Private Key')
@@ -2656,15 +2660,15 @@ begin
     exit;
   case Content of
     cccCertOnly:
-      // input only include the X.509 certificate as PEM, DER or PKCS#12
+      // input only include the X.509 certificate as PEM, DER or PKCS#12/.PFX
       if IsPem(Saved) then
-        fX509 := LoadCertificate(PemToDer(Saved)) // PEM
+        fX509 := LoadCertificate(PemToDer(Saved)) // certificate-only PEM
       else
       begin
-        fX509 := LoadCertificate(Saved); // DER
+        fX509 := LoadCertificate(Saved); // certificate-only DER binary
         if not Assigned(fX509) then
         begin
-          pkcs12 := LoadPkcs12(Saved); // try PKCS#12 certificate
+          pkcs12 := LoadPkcs12(Saved); // certificate in PKCS#12/.PFX binary
           pkcs12.Extract(PrivatePassword, nil, @fX509, nil); // ignore key
           pkcs12.Free;
         end;
@@ -2681,19 +2685,14 @@ begin
           if fX509 = nil then
             exit;
           fPrivKey := LoadPrivateKey(priv, PrivatePassword);
+          if not fX509.MatchPrivateKey(fPrivKey) then
+            Clear;
         finally
           FillZero(priv);
         end
-        else
-        begin
-          // input should be PKCS#12 binary with certificate and private key
-          pkcs12 := LoadPkcs12(Saved);
-          if not pkcs12.Extract(PrivatePassword, @fPrivKey, @fX509, nil) then
+        else // try PKCS#12/.PFX binary with certificate and private key
+          if not ParsePkcs12(Saved, PrivatePassword, fX509, fPrivKey) then
             Clear;
-          pkcs12.Free;
-        end;
-        if not fX509.MatchPrivateKey(fPrivKey) then
-          Clear;
       end;
   end;
   result := fX509 <> nil;
