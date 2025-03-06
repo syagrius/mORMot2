@@ -2498,7 +2498,7 @@ var
   notif: TPollSocketResult;
 begin
   FormatUtf8('R%:%', [fIndex, fOwner.fProcessName], fName);
-  SetCurrentThreadName(fName);
+  SetCurrentThreadName('=%', [fName]);
   fOwner.NotifyThreadStart(self);
   try
     fExecuteState := esRunning;
@@ -2619,6 +2619,9 @@ begin
         fOwner.DoLog(sllWarning, 'Execute raised a % -> terminate % thread %',
           [PClass(E)^, fOwner.fConnectionClass, fName], self);
   end;
+  if (fOwner <> nil) and
+     (fOwner.fLog <> nil) then
+    fOwner.fLog.Add.NotifyThreadEnded;
   fExecuteState := esFinished;
 end;
 
@@ -3842,7 +3845,7 @@ var
 begin
   // Accept() incoming connections
   // and Send() output packets in the background if fExecuteAcceptOnly=false
-  SetCurrentThreadName('AW:%', [fProcessName]);
+  SetCurrentThreadName('=AW:%', [fProcessName]);
   NotifyThreadStart(self);
   try
     // create and bind fServer to the expected TCP port
@@ -4024,6 +4027,8 @@ begin
   end;
   DoLog(sllInfo, 'Execute: done AW %', [fProcessName], self);
   SetExecuteState(esFinished);
+  if fLog <> nil then
+    fLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -4053,7 +4058,7 @@ var
   sub: PWinIocpSubscription;
   {$endif USE_WINIOCP}
 begin
-  SetCurrentThreadName('W:% %', [fProcessName, self]);
+  SetCurrentThreadName('=W:% %', [fProcessName, self]);
   NotifyThreadStart(self);
   try
     if fThreadClients.Count > 0 then
@@ -4081,6 +4086,8 @@ begin
       DoLog(sllWarning, 'Execute raised % -> terminate %',
         [PClass(E)^, fProcessName], self);
   end;
+  if fLog <> nil then
+    fLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -4435,7 +4442,7 @@ end;
 procedure THttpAsyncServerConnection.BeforeDestroy;
 begin
   if Assigned(fServer) and
-     Assigned(fServer.fOnProgressiveRequestFree) and
+     Assigned(fServer.fProgressiveRequests) and
      (rfProgressiveStatic in fHttp.ResponseFlags) then
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone; // ContentStream.Free
@@ -4599,7 +4606,7 @@ begin
   if fHttp.State = hrsSendBody then
   begin
     // use the HTTP state machine to fill fWr with outgoing body chunk
-    hrp := fHttp.ProcessBody(fWr, fOwner.fSockets.fSendBufferSize);
+    hrp := fServer.DoProcessBody(fHttp, fWr, fOwner.fSockets.fSendBufferSize);
     if acoVerboseLog in fOwner.fOptions then
       fOwner.DoLog(sllTrace, 'AfterWrite ProcessBody=% ContentLength=% Wr=%',
         [ToText(hrp)^, fHttp.ContentLength, fWr.Len], self);
@@ -4617,7 +4624,7 @@ begin
     end; // hrpAbort, hrpDone will check hrsResponseDone
   end;
   // if we reached here, we are either finished or failed
-  if Assigned(fServer.fOnProgressiveRequestFree) and
+  if Assigned(fServer.fProgressiveRequests) and
      (rfProgressiveStatic in fHttp.ResponseFlags) then
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone;   // ContentStream.Free
@@ -5160,7 +5167,7 @@ var
   msidle: integer;
 begin
   // call ProcessIdleTix - and POSIX Send() output packets in the background
-  SetCurrentThreadName('M:%', [fAsync.fProcessName]);
+  SetCurrentThreadName('=M:%', [fAsync.fProcessName]);
   NotifyThreadStart(self);
   WaitStarted(10); // wait for fAsync.Execute to bind and start
   if fAsync <> nil then
@@ -5227,7 +5234,11 @@ begin
         fAsync.DoLog(sllWarning, 'Execute raised uncatched % -> terminate %',
           [PClass(E)^, fAsync.fProcessName], self);
     end;
+  if fAsync = nil then
+    exit;
   fAsync.DoLog(sllInfo, 'Execute: done W %', [fAsync.fProcessName], self);
+  if fAsync.fLog <> nil then
+    fAsync.fLog.Add.NotifyThreadEnded;
 end;
 
 

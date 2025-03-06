@@ -1003,11 +1003,14 @@ type
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
 
-
 /// initialize a stack-allocated TNetTlsContext instance
-procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean = false;
-  const CertificateFile: TFileName = ''; const PrivateKeyFile: TFileName = '';
-  const PrivateKeyPassword: RawUtf8 = ''; const CACertificatesFile: TFileName = '');
+procedure InitNetTlsContext(var TLS: TNetTlsContext); overload;
+
+/// initialize a stack-allocated TNetTlsContext instance with auth parameters
+procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean;
+  const CertificateFile: TFileName = '';
+  const PrivateKeyFile: TFileName = ''; const PrivateKeyPassword: RawUtf8 = '';
+  const CACertificatesFile: TFileName = ''); overload;
 
 /// purge all output fields for a TNetTlsContext instance for proper reuse
 procedure ResetNetTlsContext(var TLS: TNetTlsContext);
@@ -1638,7 +1641,7 @@ function NetIsIP4(text: PUtf8Char; value: PByte = nil): boolean;
 /// parse a text input buffer until the end space or EOL
 function NetGetNextSpaced(var P: PUtf8Char): RawUtf8;
 
-/// RawUtf8-ready result := v + v + ... concatenation for FPC
+/// RawUtf8-ready result := v + v + ... concatenation (safer and faster on FPC)
 function NetConcat(const v: array of RawUtf8): RawUtf8;
 
 /// IdemPChar() like function, to avoid linking mormot.core.text
@@ -1646,6 +1649,10 @@ function NetStartWith(p, up: PUtf8Char): boolean;
 
 /// BinToBase64() like function, to avoid linking mormot.core.buffers
 function NetBinToBase64(const s: RawByteString): RawUtf8;
+
+/// IsPem() like function, to avoid linking mormot.crypt.secure
+// - search for '-----BEGIN' text, so may hardly give some false positives
+function NetIsPem(p: PUtf8Char): boolean;
 
 
 { ********* TCrtSocket Buffered Socket Read/Write Class }
@@ -3974,12 +3981,17 @@ end;
 
 { ******************** TLS / HTTPS Encryption Abstract Layer }
 
+procedure InitNetTlsContext(var TLS: TNetTlsContext); overload;
+begin
+  Finalize(TLS);
+  FillCharFast(TLS, SizeOf(TLS), 0);
+end;
+
 procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean;
   const CertificateFile, PrivateKeyFile: TFileName;
   const PrivateKeyPassword: RawUtf8; const CACertificatesFile: TFileName);
 begin
-  Finalize(TLS);
-  FillCharFast(TLS, SizeOf(TLS), 0);
+  InitNetTlsContext(TLS);
   TLS.IgnoreCertificateErrors := Server; // needed if no mutual auth is done
   TLS.CertificateFile := RawUtf8(CertificateFile); // RTL TFileName to RawUtf8
   TLS.PrivateKeyFile  := RawUtf8(PrivateKeyFile);
@@ -5002,6 +5014,23 @@ begin
     exit;
   SetLength(result, ((len + 2) div 3) * 4);
   DoEncode(pointer(result), pointer(s), @b64, len);
+end;
+
+function NetIsPem(p: PUtf8Char): boolean;
+begin
+  result := true;
+  repeat
+    p := PosChar(p, '-'); // may use SSE2 asm
+    if p = nil then
+      break;
+    repeat
+      inc(p);
+      if (PCardinal(p)^ = $2d2d2d2d) and  // -----BEGIN
+         (PCardinal(p + 4)^ = ord('B') + ord('E') shl 8 + ord('G') shl 16 + ord('I') shl 24) then
+        exit;
+    until p^ <> '-'
+  until p^ = #0;
+  result := false;
 end;
 
 function SplitFromRight(const Text: RawUtf8; Sep: AnsiChar;
@@ -6118,8 +6147,8 @@ begin
   read := Length;
   if not TrySockRecv(Buffer, read, {StopBeforeLength=}false, @res) or
      (Length <> read) then
-    raise ENetSock.CreateLastError('%s.SockRecv(%d) read=%d',
-      [ClassNameShort(self)^, Length, read], res);
+    raise ENetSock.CreateLastError('%s.SockRecv(%d) read=%d at %s:%s',
+      [ClassNameShort(self)^, Length, read, fServer, fPort], res);
 end;
 
 function TCrtSocket.SockRecv(Length: integer): RawByteString;
@@ -6250,7 +6279,7 @@ begin
       else if neRead in events then
         continue; // retry Recv()
       if Assigned(OnLog) then
-        OnLog(sllTrace, 'TrySockRecv: timeout after %ms)', [TimeOut], self);
+        OnLog(sllTrace, 'TrySockRecv: timeout after %s', [TimeOut div 1000], self);
       res := nrTimeout;  // identify read timeout as error
       break;
     until fAborted;

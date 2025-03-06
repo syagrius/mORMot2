@@ -804,6 +804,7 @@ const
 
 /// some pre-computed CryptCertOpenSsl[caaRS256].New key for Windows
 // - the associated password is 'pass'
+// - was generated via X509.ToPkcs12(p12Legacy), i.e. encoded as SHA1-3DES
 // - as used e.g. by THttpServerSocketGeneric.WaitStartedHttps
 function PrivKeyCertPfx: RawByteString;
 
@@ -1051,9 +1052,11 @@ type
     fAuthorizeBasic: TOnHttpServerBasicAuth;
     fAuthorizeBasicRealm: RawUtf8;
     fStats: array[THttpServerSocketGetRequestResult] of integer;
-    fOnProgressiveRequestFree: THttpPartials;
+    fProgressiveRequests: THttpPartials;
     function HeaderRetrieveAbortTix: Int64;
     function DoRequest(Ctxt: THttpServerRequest): boolean; // fRoute or Request()
+    function DoProcessBody(var Ctxt: THttpRequestContext;
+      var Dest: TRawByteStringBuffer; MaxSize: PtrInt): THttpRequestProcessBody;
     procedure DoProgressiveRequestFree(var Ctxt: THttpRequestContext);
     procedure SetServerKeepAliveTimeOut(Value: cardinal);
     function GetStat(one: THttpServerSocketGetRequestResult): integer;
@@ -1872,8 +1875,9 @@ type
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - if a file has been downloaded from the main repository, this method
     // should be called to copy the content into this instance files cache
+    // - also makes Rename(Partial, ToRename) with proper progressive support
     procedure OnDownloaded(var Params: THttpClientSocketWGet;
-      const Partial: TFileName; PartialID: integer); virtual;
+      const Partial, ToRename: TFileName; PartialID: integer); virtual;
     /// IWGetAlternate main processing method, as used by THttpClientSocketWGet
     // - OnDownload() may have returned corrupted data: local cache file is
     // likely to be deleted, for safety
@@ -3161,7 +3165,7 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
     fn := Utf8ToString(OutContent); // safer than Utf8ToFileName() here
     OutContent := '';
     ExtractHeader(fOutCustomHeaders, STATICFILE_PROGSIZE, progsizeHeader);
-    SetInt64(pointer(progsizeHeader), Context.ContentLength);
+    SetInt64(pointer(progsizeHeader), Context.ContentLength); // expected size
     if Context.ContentLength <> 0 then
       // STATICFILE_PROGSIZE: file is not fully available: wait for sending
       if ((not (rfWantRange in Context.ResponseFlags)) or
@@ -3170,10 +3174,11 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
         h := FileOpen(fn, fmOpenReadShared);
         if ValidHandle(h) then
         begin
-          Context.ContentStream := TFileStreamEx.CreateFromHandle(h, fn);
+          FileInfoByHandle(h, nil, nil, @Context.ContentLastModified, nil);
+          FileClose(h);
+          Context.ContentStream := TStreamWithPositionAndSize.Create; // <> nil
           Context.ResponseFlags := Context.ResponseFlags +
             [rfAcceptRange, rfContentStreamNeedFree, rfProgressiveStatic];
-          FileInfoByHandle(h, nil, nil, @Context.ContentLastModified, nil);
         end
         else
           fRespStatus := HTTP_NOTFOUND
@@ -3640,11 +3645,11 @@ end;
 
 
 const
-  // was generated from InitNetTlsContextSelfSignedServer commented lines
+  // was generated from InitNetTlsContextSelfSignedServer() commented lines
   // - .pfx/pkcs#12 of RSA-2048 cert+pk for CN:127.0.0.1 valid until 03/03/2035
   // - was regenerated with OpenSSL 3.x to avoid usage of legacy RC2 algorithm
   // as the initial constant did - so that TCryptCertOpenSsl.Load() can succeed
-  // - Save() used '3des=pass' password to force SHA1-3DES legacy format
+  // - Save() used '3des=pass' password to force SHA1-3DES p12Legacy format
   PRIVKEY_PFX: array[0..2400] of byte = (
     $30, $82, $09, $5d, $02, $01, $03, $30, $82, $09, $27, $06, $09, $2a, $86, $48,
     $86, $f7, $0d, $01, $07, $01, $a0, $82, $09, $18, $04, $82, $09, $14, $30, $82,
@@ -3804,28 +3809,30 @@ begin
 end;
 
 var
-  SharedCert: array[TCryptAsymAlgo] of ICryptCert; // generated once per algo
+  SelfSignedCert: array[TCryptAsymAlgo] of ICryptCert; // one generated per algo
 
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
   Algo: TCryptAsymAlgo; UsePreComputed: boolean);
 begin
-  InitNetTlsContext(TLS, {server=}true);
+  InitNetTlsContext(TLS);
+  TLS.IgnoreCertificateErrors := true; // needed if no mutual auth is done
   if UsePrecomputed or
-     (CryptCertOpenSsl[Algo] = nil) then // pure SChannel can use embedded PFX
+     (CryptCertOpenSsl[Algo] = nil) then // pure SChannel will use embedded PFX
   // can't use CryptCertX509[] because SChannel/SSPI requires PFX binary format
   begin
     TLS.CertificateBin := PrivKeyCertPfx; // use pre-computed key
     TLS.PrivatePassword := 'pass';
     exit;
   end;
-  if SharedCert[Algo] = nil then // reuse a per-algo ICryptCert instance
-    SharedCert[Algo] := CryptCertOpenSsl[Algo].Generate(
+  // generate a reusable per-algo ICryptCert instance (RSA-2048 can take time)
+  if SelfSignedCert[Algo] = nil then
+    SelfSignedCert[Algo] := CryptCertOpenSsl[Algo].Generate(
       CU_TLS_SERVER, '127.0.0.1', nil, 3650);
-  //writeln(BinToSource('PRIVKEY_PFX', '', // force SHA1-3DES legacy format
-  //  SharedCert.Save(cccCertWithPrivateKey, '3des=pass', ccfBinary)));
+  //writeln(BinToSource('PRIVKEY_PFX', '', // force SHA1-3DES p12Legacy format
+  //  SelfSignedCert[Algo].Save(cccCertWithPrivateKey, '3des=pass', ccfBinary)));
   // no temporary file needed: we just provide the shared OpenSSL handles
-  TLS.CertificateRaw := SharedCert[Algo].Handle;           // PX509
-  TLS.PrivateKeyRaw  := SharedCert[Algo].PrivateKeyHandle; // PEVP_PKEY
+  TLS.CertificateRaw := SelfSignedCert[Algo].Handle;           // PX509
+  TLS.PrivateKeyRaw  := SelfSignedCert[Algo].PrivateKeyHandle; // PEVP_PKEY
 end;
 
 const
@@ -4183,19 +4190,35 @@ begin
   end;
 end;
 
+function THttpServerSocketGeneric.DoProcessBody(var Ctxt: THttpRequestContext;
+  var Dest: TRawByteStringBuffer; MaxSize: PtrInt): THttpRequestProcessBody;
+begin
+  // called when up to MaxSize (128/256KB typical) bytes could be sent
+  result := hrpDone;
+  if Ctxt.ContentLength = 0 then
+    // we just finished background ProcessWrite of the last chunk
+    Ctxt.State := hrsResponseDone
+  else if Ctxt.State = hrsSendBody then
+    if rfProgressiveStatic in Ctxt.ResponseFlags then
+      // support progressive/partial body process
+      result := fProgressiveRequests.ProcessBody(Ctxt, Dest, MaxSize)
+    else
+      // send in the background from ContentStream / fContentPos
+      result := Ctxt.ProcessBody(Dest, MaxSize);
+end;
+
 procedure THttpServerSocketGeneric.DoProgressiveRequestFree(
   var Ctxt: THttpRequestContext);
 begin
-  if Assigned(fOnProgressiveRequestFree) and
-     (rfProgressiveStatic in Ctxt.ResponseFlags) then
-  begin
-    try
-      fOnProgressiveRequestFree.Remove(@Ctxt);
-    except
-      ; // ignore any exception in callbacks
-    end;
-    exclude(Ctxt.ResponseFlags, rfProgressiveStatic); // remove it once
+  if (fProgressiveRequests = nil) or
+     not (rfProgressiveStatic in Ctxt.ResponseFlags) then
+    exit;
+  try
+    fProgressiveRequests.Remove(@Ctxt);
+  except
+    ; // ignore any exception in callbacks
   end;
+  exclude(Ctxt.ResponseFlags, rfProgressiveStatic); // remove it once
 end;
 
 procedure THttpServerSocketGeneric.SetServerKeepAliveTimeOut(Value: cardinal);
@@ -4562,6 +4585,7 @@ var
 begin
   // THttpServerGeneric thread preparation: launch any OnHttpThreadStart event
   fExecuteState := esBinding;
+  SetCurrentThreadName('=httpA-%', [fSockPort]);
   NotifyThreadStart(self);
   bansec := 0;
   // main server process loop
@@ -4688,6 +4712,7 @@ begin
   fSafe.Lock;
   fExecuteState := esFinished;
   fSafe.UnLock;
+  TSynLog.Add.NotifyThreadEnded;
 end;
 
 procedure THttpServer.OnConnect;
@@ -4745,7 +4770,7 @@ begin
           hrsSendBody:
             begin
               dest.Reset; // body is retrieved from Content/ContentStream
-              case ClientSock.Http.ProcessBody(dest, fServerSendBufferSize) of
+              case DoProcessBody(ClientSock.Http, dest, fServerSendBufferSize) of
                 hrpSend:
                   if ClientSock.TrySndLow(dest.Buffer, dest.Len) then
                     continue;
@@ -4800,7 +4825,7 @@ begin
     end;
   finally
     req.Free;
-    if Assigned(fOnProgressiveRequestFree) then
+    if Assigned(fProgressiveRequests) then
       DoProgressiveRequestFree(ClientSock.Http); // e.g. THttpPartials.Remove
     ClientSock.Http.ProcessDone;   // ContentStream.Free
   end;
@@ -5250,6 +5275,7 @@ procedure THttpServerResp.Execute;
 var
   netsock: TNetSocket;
 begin
+  SetCurrentThreadName('=conn-%', [fServerSock.RemoteConnectionID]);
   fServer.NotifyThreadStart(self);
   try
     try
@@ -5295,6 +5321,7 @@ begin
     on Exception do
       ; // just ignore unexpected exceptions here, especially during clean-up
   end;
+  TSynLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -5307,6 +5334,7 @@ begin
   fOnThreadTerminate := fServer.fOnThreadTerminate;
   fBigBodySize := THREADPOOL_BIGBODYSIZE;
   fMaxBodyThreadCount := THREADPOOL_MAXWORKTHREADS;
+  fPoolName := 'http';
   inherited Create(NumberOfThreads,
     {$ifdef USE_WINIOCP} INVALID_HANDLE_VALUE {$else} {queuepending=}true{$endif},
     Server.ProcessName);
@@ -6175,7 +6203,7 @@ begin
     fPartials := THttpPartials.Create;
     if fVerboseLog then
       fPartials.OnLog := fLog.DoLog;
-    srv.fOnProgressiveRequestFree := fPartials;
+    srv.fProgressiveRequests := fPartials;
     // actually start and wait for the local HTTP(S) server to be available
     if fServerTls.Enabled then
     begin
@@ -6353,9 +6381,11 @@ end;
 
 function THttpPeerCache.TempFolderEstimateNewSize(aAddingSize: Int64): Int64;
 var
-  i: PtrInt;
+  i: integer;
   deleted: Int64;
   dir: TFindFilesDynArray;
+  d: PFindFiles;
+  fn: TFileName;
 begin
   // check if the file is clearly too big to be cached
   result := aAddingSize;
@@ -6363,11 +6393,15 @@ begin
     exit;
   // compute the current folder cache size
   result := fTempCurrentSize;
-  if result = 0 then // first time, or after OnIdle
+  if result = 0 then // first time, or after OnIdle DirectoryDeleteOlderFiles()
   begin
-    dir := FindFiles(fTempFilesPath, PEER_CACHE_PATTERN);
-    for i := 0 to high(dir) do
-      inc(result, dir[i].Size);
+    dir := FindFiles(fTempFilesPath, PEER_CACHE_PATTERN, '', [ffoExcludesDir]);
+    d := pointer(dir);
+    for i := 1 to length(dir) do
+    begin
+      inc(result, d^.Size);
+      inc(d);
+    end;
     fTempCurrentSize := result;
   end;
   // enough space to write this file?
@@ -6376,17 +6410,23 @@ begin
     exit;
   // delete oldest files in cache up to CacheTempMaxMB
   if dir = nil then
-    dir := FindFiles(fTempFilesPath, PEER_CACHE_PATTERN);
+    dir := FindFiles(fTempFilesPath, PEER_CACHE_PATTERN, '', [ffoExcludesDir]);
   FindFilesSortByTimestamp(dir);
   deleted := 0;
-  for i := 0 to high(dir) do
-    if DeleteFile(dir[i].Name) then // if not currently downloading
-    begin
-      dec(result, dir[i].Size);
-      inc(deleted, dir[i].Size);
-      if result < fTempFilesMaxSize then
-        break; // we have deleted enough old files
-    end;
+  d := pointer(dir);
+  for i := 1 to length(dir) do
+  begin
+    fn := fTempFilesPath + d^.Name;
+    if not fPartials.FindFile(fn) then // if not currently downloading
+      if DeleteFile(fn) then
+      begin
+        dec(result, d^.Size);
+        inc(deleted, d^.Size);
+        if result < fTempFilesMaxSize then
+          break; // we have deleted enough old files
+      end;
+    inc(d);
+  end;
   fLog.Add.Log(sllTrace, 'OnDownloaded: deleted %', [KB(deleted)], self);
   dec(fTempCurrentSize, deleted);
 end;
@@ -6690,27 +6730,27 @@ begin
     if size = 0 then
       exit; // nothing changed on disk
     fLog.Add.Log(sllTrace, 'OnIdle: deleted %', [KBNoSpace(size)], self);
-    fTempCurrentSize := 0; // we need to call FindFiles()
+    fTempCurrentSize := 0; // folder change: need to call FindFiles() again
   finally
     fFilesSafe.UnLock; // re-allow background file access
   end;
 end;
 
 procedure THttpPeerCache.OnDownloaded(var Params: THttpClientSocketWGet;
-  const Partial: TFileName; PartialID: integer);
+  const Partial, ToRename: TFileName; PartialID: integer);
 var
   local: TFileName;
   localsize, sourcesize, tot, start, stop: Int64;
-  ok, istemp: boolean;
+  localok, istemp: boolean;
 begin
   // avoid GPF at shutdown or in case of unexpected method call
   if (fSettings = nil) or
      (pcoNoServer in fSettings.Options) then
     exit;
-  ok := false; // for proper PartialID cleanup on abort
+  sourcesize := FileSize(Partial);
+  localok := false; // for proper PartialID cleanup on abort
   try
     // the supplied downloaded source file should be big enough
-    sourcesize := FileSize(Partial);
     if (sourcesize = 0) or // paranoid
        TooSmallFile(Params, sourcesize, 'OnDownloaded') then
       exit;
@@ -6730,11 +6770,13 @@ begin
         'OnDownloaded: % already in cache', [Partial], self);
       // size mismatch may happen on race condition (hash collision is unlikely)
       if localsize = sourcesize then
-        Params.SetStep(wgsAlternateAlreadyInCache, [local])
+      begin
+        Params.SetStep(wgsAlternateAlreadyInCache, [local]);
+        localok := true; // switch to the local file via fPartials.ChangeFile()
+      end
       else
         Params.SetStep(wgsAlternateWrongSizeInCache,
           [local, ' ', localsize, '<>', sourcesize]); // paranaoid
-      ok := true; // call fPartials.ChangeFile() to switch to the local file
       exit;
     end;
     QueryPerformanceMicroSeconds(start);
@@ -6753,23 +6795,44 @@ begin
         end;
       end;
       // actually copy the source file into the local cache folder
-      ok := CopyFile(Partial, local, {failsifexists=}false);
+      localok := CopyFile(Partial, local, {failsifexists=}false);
       Params.SetStep(wgsAlternateCopiedInCache, [local]);
-      if ok and istemp then
+      if localok and istemp then
         // force timestamp = now within the temporary folder
-        FileSetDateFromUnixUtc(local, UnixTimeUtc)
+        FileSetDateFromUnixUtc(local, UnixTimeUtc);
     finally
       fFilesSafe.UnLock;
     end;
     QueryPerformanceMicroSeconds(stop);
-    fLog.Add.Log(LOG_TRACEWARNING[not ok], 'OnDownloaded: copy % into % in %',
+    fLog.Add.Log(LOG_TRACEWARNING[not localok], 'OnDownloaded: copy % into % in %',
       [Partial, local, MicroSecToString(stop - start)], self);
   finally
-    if PartialID <> 0 then // always eventually finalize any associated partial
-      if ok then
+    // optional rename *.partial to final WGet() file name
+    if ToRename <> '' then
+    begin
+      fPartials.Safe.WriteLock; // safely move file without background access
+      try
+        if RenameFile(Partial, ToRename) then
+        begin
+          Params.SetStep(wgsAlternateRename, [ToRename]);
+          if not localok then
+          begin
+            local := ToRename; // fallback to the renamed file for partials
+            localok := true;   // it would work as long as it remains available
+          end;
+        end;
+      finally
+        fPartials.Safe.WriteUnLock;
+      end;
+    end;
+    // always eventually notify or finalize any associated partial
+    if PartialID <> 0 then
+      if sourcesize = 0 then
+        OnDownloadingFailed(PartialID) // clearly something went wrong
+      else if localok then
         fPartials.ChangeFile(PartialID, local) // switch to final local file
       else
-        OnDownloadingFailed(PartialID); // remove this partial on abort
+        fPartials.ChangeFile(PartialID, Partial); // fallback to downloaded file
   end;
 end;
 
@@ -6842,7 +6905,7 @@ procedure THttpPeerCache.OnDownloadingFailed(ID: THttpPartialID);
 begin
   // unregister and abort any partial downloading process
   if fPartials.Abort(ID) <> 0 then
-    SleepHiRes(500); // wait for THttpServer.Process abort
+    SleepHiRes(100); // wait for THttpServer.Process abort
 end;
 
 type
@@ -7068,7 +7131,7 @@ begin
             end;
       end;
       // start the GET request to the remote URI into aFileName via a sub-thread
-      Make(['direct', cs.PartialID], err);
+      Make(['direct-', cs.PartialID], err);
       TLoggedWorkThread.Create(fLog, err, cs, DirectFileNameBackgroundGet);
       cs := nil; // will be owned by TLoggedWorkThread from now on
       result := HTTP_SUCCESS;
@@ -7175,11 +7238,11 @@ begin
     exit;
   // retrieve context - already checked by OnBeforeBody
   err := oreOK;
+  http := (Ctxt as THttpServerRequest).fHttp;
   if Check(BearerDecode(Ctxt.AuthBearer, pcfRequest, msg, @opt), 'OnRequest', msg) then
   try
     // resource will always be identified by decoded bearer hash
     progsize := 0;
-    http := (Ctxt as THttpServerRequest).fHttp;
     case msg.Kind of
       pcfBearerDirect,
       pcfBearerDirectPermanent:
@@ -7236,11 +7299,13 @@ begin
         AddReprDigest(Ctxt, msg.Hash);
     end;
   finally
-    errtxt := GetEnumNameUnCamelCase(TypeInfo(TOnRequestError), ord(err));
+    if err <> oreOK then
+      errtxt := GetEnumNameUnCamelCase(TypeInfo(TOnRequestError), ord(err));
     if not StatusCodeIsSuccess(result) then
       Ctxt.OutContent := Make([StatusCodeToErrorMsg(result), ' - ', errtxt]);
-    fLog.Add.Log(sllDebug, 'OnRequest=% from % % as % % (%)',
-      [result, Ctxt.RemoteIP, Ctxt.Url, fn, progsize, errtxt], self);
+    fLog.Add.Log(sllDebug, 'OnRequest=% % % % fn=% progsiz=% progid=% %',
+      [result, Ctxt.Method, Ctxt.RemoteIP, Ctxt.Url, fn, progsize,
+       http^.ProgressiveID, errtxt], self);
   end;
 end;
 

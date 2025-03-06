@@ -274,8 +274,6 @@ type
   // - used e.g. during progressive download in THttpPeerCache
   THttpPartials = class
   protected
-    /// thread-safe access to the list of partial downloads
-    fSafe: TLightLock;
     /// 32-bit monotonic counter sequence to populate THttpPartial.ID
     fLastID: cardinal;
     /// how many fDownload[] are actually non void (ID <> 0)
@@ -287,6 +285,10 @@ type
     /// retrieve a Partial[] for a given hash
     function FromHash(const Hash: THashDigest): PHttpPartial;
   public
+    /// thread-safe access to the list of partial downloads
+    // - concurrent ReadLock is used during background rfProgressiveStatic process
+    // - blocking WriteLock is for Add/Associate/ChangeFile/Abort/Remove methods
+    Safe: TRWLightLock;
     /// can be assigned to TSynLog.DoLog class method for low-level logging
     OnLog: TSynLogProc;
     /// return true if self is nil or fDownload is void
@@ -298,11 +300,18 @@ type
     /// search for given partial file name and size, from its hash
     function Find(const Hash: THashDigest; out Size: Int64;
       aID: PHttpPartialID = nil): TFileName;
+    /// search for given partial file name from its ID, returning its file name
+    // - caller should eventually run Safe.ReadUnLock
+    function FindReadLocked(ID: THttpPartialID): TFileName;
+    /// search for a given partial file name
+    function FindFile(const FileName: TFileName): boolean;
     /// register a HTTP request to an existing partial
     function Associate(const Hash: THashDigest; Http: PHttpRequestContext): boolean;
     /// notify a partial file name change, e.g. when download is complete
-    // - returns the number of changed entries
-    function ChangeFile(ID: THttpPartialID; const NewFile: TFileName): integer;
+    function ChangeFile(ID: THttpPartialID; const NewFile: TFileName): boolean;
+    /// fill Dest buffer from up to MaxSize bytes from Ctxt.ProgressiveID
+    function ProcessBody(var Ctxt: THttpRequestContext;
+      var Dest: TRawByteStringBuffer; MaxSize: PtrInt): THttpRequestProcessBody;
     /// notify a partial file download failure, e.g. on invalid hash
     // - returns the number of removed HTTP requests
     function Abort(ID: THttpPartialID): integer;
@@ -366,7 +375,8 @@ type
     wgsProgressiveFailed,
     wgsGet,
     wgsSetDate,
-    wgsLastMod);
+    wgsLastMod,
+    wgsAlternateRename);
   /// which steps have been performed during THttpClientSocket.WGet() process
   TWGetSteps = set of TWGetStep;
 
@@ -485,8 +495,9 @@ type
     // pcfResponsePartial with the new file name
     // - this method is called after any file has been successfully downloaded
     // - Params.Hasher/Hash are expected to be populated
+    // - can Rename(Partial, ToRename) with proper progressive support
     procedure OnDownloaded(var Params: THttpClientSocketWGet;
-      const Partial: TFileName; OnDownloadingID: THttpPartialID);
+      const Partial, ToRename: TFileName; OnDownloadingID: THttpPartialID);
     /// notify the alternate download implementation that the data supplied
     // by OnDownload() was incorrect
     // - e.g. THttpPeerCache will delete this file from its cache
@@ -2176,7 +2187,7 @@ begin
   if (self = nil) or
      (ExpectedFullSize = 0) then
     exit;
-  fSafe.Lock;
+  Safe.WriteLock;
   try
     inc(fLastID);
     inc(fUsed);
@@ -2200,7 +2211,7 @@ begin
       Http^.ProgressiveID := p^.ID;
     end;
   finally
-    fSafe.UnLock;
+    Safe.WriteUnLock;
   end;
   if Assigned(OnLog) then
     OnLog(sllTrace, 'Add(%,%)=% used=%/%',
@@ -2218,7 +2229,7 @@ begin
     aID^ := 0;
   if IsVoid then
     exit;
-  fSafe.Lock;
+  Safe.ReadLock;
   try
     p := FromHash(Hash);
     if p = nil then
@@ -2228,8 +2239,50 @@ begin
     if aID <> nil then
       aID^ := p^.ID;
   finally
-    fSafe.UnLock;
+    Safe.ReadUnLock;
   end;
+end;
+
+function THttpPartials.FindReadLocked(ID: THttpPartialID): TFileName;
+var
+  p: PHttpPartial;
+begin
+  result := '';
+  if IsVoid then
+    exit;
+  Safe.ReadLock;
+  try
+    p := FromID(ID);
+    if p <> nil then
+      result := p^.PartFile;
+  finally
+    if result = '' then
+      Safe.ReadUnLock; // keep ReadLock if a file name was found
+  end;
+end;
+
+function THttpPartials.FindFile(const FileName: TFileName): boolean;
+var
+  p: PHttpPartial;
+  i: integer;
+begin
+  result := false;
+  if IsVoid then
+    exit;
+  result := true;
+  Safe.ReadLock;
+  try
+    p := pointer(fDownload);
+    for i := 1 to length(fDownload) do
+      if (p^.ID <> 0) and
+         (p^.PartFile = FileName) then // fast enough O(n) search
+        exit
+      else
+         inc(p);
+  finally
+    Safe.ReadUnLock; // keep ReadLock if a file name was found
+  end;
+  result := false;
 end;
 
 function THttpPartials.Associate(const Hash: THashDigest; Http: PHttpRequestContext): boolean;
@@ -2240,7 +2293,7 @@ begin
   if IsVoid or
      (Http = nil) then
     exit;
-  fSafe.Lock;
+  Safe.WriteLock;
   try
     p := FromHash(Hash);
     if p = nil then
@@ -2249,40 +2302,86 @@ begin
     Http^.ProgressiveID := p^.ID;
     result := true;
   finally
-    fSafe.UnLock;
+    Safe.WriteUnLock;
   end;
 end;
 
-function THttpPartials.ChangeFile(ID: THttpPartialID;
-  const NewFile: TFileName): integer;
+function THttpPartials.ProcessBody(var Ctxt: THttpRequestContext;
+  var Dest: TRawByteStringBuffer; MaxSize: PtrInt): THttpRequestProcessBody;
 var
-  i: PtrInt;
+  tix: cardinal;
+  fn: TFileName;
+  src: THandle;
+begin
+  result := hrpAbort;
+  if IsVoid or
+     (Ctxt.ProgressiveID = 0) or // e.g. after Abort()
+     not (rfProgressiveStatic in Ctxt.ResponseFlags) then
+    exit;
+  // prepare to wait for the data to be available
+  tix := GetTickCount64 shr MilliSecsPerSecShl;
+  if Ctxt.ProgressiveTix = 0 then
+    Ctxt.ProgressiveTix := tix + STATICFILE_PROGTIMEOUTSEC; // first seen
+  // retrieve the file name to be processed
+  fn := FindReadLocked(Ctxt.ProgressiveID);
+  if fn <> '' then
+    try
+      src := FileOpen(fn, fmOpenReadShared); // partial file access
+      if ValidHandle(src) then
+      try
+        // fill up to MaxSize bytes of src file into Dest buffer
+        result := Ctxt.ProcessBody(src, Dest, MaxSize);
+        case result of
+          hrpSend:
+            Ctxt.ProgressiveTix := tix + STATICFILE_PROGTIMEOUTSEC; // reset
+          hrpWait:
+            if tix > Ctxt.ProgressiveTix then
+            begin
+              if Assigned(OnLog) then
+                OnLog(sllWarning, 'ProcessBody: ProgressiveID=% timeout % at %/%',
+                  [Ctxt.ProgressiveID, fn, FileSize(src), Ctxt.ContentLength], self);
+              result := hrpAbort; // never wait forever: abort after 10 seconds
+            end;
+        else // hrpAbort (hrpDone in THttpServerSocketGeneric.DoProcessBody)
+          if Assigned(OnLog) then
+            OnLog(sllTrace, 'ProcessBody=% id=% fn=%',
+              [ToText(result)^, Ctxt.ProgressiveID], self);
+        end;
+      finally
+        FileClose(src); // the lock protects the file itself
+      end
+      else if Assigned(OnLog) then
+        OnLog(sllLastError, 'ProcessBody: ProgressiveID=% FileOpen % failed',
+          [Ctxt.ProgressiveID, fn], self);
+    finally
+      Safe.ReadUnLock;
+    end;
+end;
+
+function THttpPartials.ChangeFile(ID: THttpPartialID;
+  const NewFile: TFileName): boolean;
+var
   p: PHttpPartial;
 begin
-  result := 0; // returns the number of changed entries
+  result := false;
   if IsVoid or
      (ID = 0) or
      (cardinal(ID) >= fLastID) then
     exit;
-  fSafe.Lock;
+  Safe.WriteLock;
   try
     p := FromID(ID);
     if p <> nil then
     begin
       p^.PartFile := NewFile;
-      for i := length(p^.HttpContext) - 1 downto 0 do
-      try
-        if p^.HttpContext[i]^.ChangeProgressiveFileName(ID, NewFile) then
-          inc(result);
-      except
-        PtrArrayDelete(p^.HttpContext, i); // paranoid
-      end;
+      result := true;
     end;
   finally
-    fSafe.UnLock;
+    Safe.WriteUnLock;
   end;
   if Assigned(OnLog) then
-    OnLog(LOG_TRACEWARNING[result = 0], 'ChangeFile(%)=%', [ID, result], self);
+    OnLog(LOG_TRACEWARNING[not result], 'ChangeFile(%,%)=%',
+      [ID, NewFile, result], self);
 end;
 
 function THttpPartials.Abort(ID: THttpPartialID): integer;
@@ -2296,7 +2395,7 @@ begin
      (ID = 0) or
      (cardinal(ID) >= fLastID) then
     exit;
-  fSafe.Lock;
+  Safe.WriteLock;
   try
     p := FromID(ID);
     if p <> nil then
@@ -2310,7 +2409,9 @@ begin
             p^.HttpContext[i].ProgressiveID := 0; // abort THttpServer.Process
             inc(result);
           except
-            ; // paranoid
+            on E: Exception do // paranoid
+              if Assigned(OnLog) then
+                OnLog(sllWarning, 'Abort: HttpContext[%] raised %', [i, E], self);
           end;
         p^.HttpContext := nil;
       end;
@@ -2320,7 +2421,7 @@ begin
     end;
     n := length(fDownload);
   finally
-    fSafe.UnLock;
+    Safe.WriteUnLock;
   end;
   if Assigned(OnLog) then
     OnLog(LOG_TRACEWARNING[p = nil], 'Abort(%)=% used=%/%',
@@ -2337,7 +2438,7 @@ begin
      (Sender = nil) or
      (Sender.ProgressiveID = 0) then
     exit;
-  fSafe.Lock;
+  Safe.WriteLock;
   try
     n := length(fDownload);
     p := FromID(Sender.ProgressiveID);
@@ -2357,7 +2458,7 @@ begin
       end;
     end;
   finally
-    fSafe.UnLock;
+    Safe.WriteUnLock;
   end;
   if Assigned(OnLog) then
     OnLog(LOG_TRACEWARNING[p = nil], 'Remove(%) used=%/%',
@@ -3296,15 +3397,17 @@ begin
        (params.Hasher <> nil) and
        (params.Hash <> '') then
       try
-        params.Alternate.OnDownloaded(params, part, altdownloading);
+        // notify peercache and also make RenameFile(part, result)
+        params.Alternate.OnDownloaded(params, part, result, altdownloading);
         altdownloading := 0;
       except
         // ignore any fatal error in callbacks
       end;
     // valid .part file can now be converted into the result file
-    if not RenameFile(part, result) then
-      EHttpSocket.RaiseUtf8(
-        '%.WGet: impossible to rename % as %', [self, part, result]);
+    if FileExists(part) then // if not already done in Alternate.OnDownloaded()
+      if not RenameFile(part, result) then
+        EHttpSocket.RaiseUtf8(
+          '%.WGet: impossible to rename % as %', [self, part, result]);
     // set part='' to notify fully downloaded into result file name
     part := '';
   finally

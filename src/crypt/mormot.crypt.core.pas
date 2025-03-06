@@ -1351,7 +1351,7 @@ type
   protected
     fStream: TStream;
     fAes: TAesAbstract;
-    fBuf: RawByteString;    // internal buffer
+    fBuf: RawByteString; // internal buffer
     fBufPos, fBufAvailable: integer;
   public
     /// initialize AES encryption/decryption stream for a given stream and key
@@ -1391,8 +1391,6 @@ type
     /// finalize the AES encryption stream
     // - internally call the Finish method
     destructor Destroy; override;
-    /// reading some data is not allowed -> will raise an exception on call
-    function Read(var Buffer; Count: Longint): Longint; override;
     /// append some data to the outStream, after encryption
     function Write(const Buffer; Count: Longint): Longint; override;
     /// write pending data to the Dest stream
@@ -1419,8 +1417,6 @@ type
       bufferSize: integer = 128 shl 10); override;
     /// read and decode some data from the inStream
     function Read(var Buffer; Count: Longint): Longint; override;
-    /// writing some data is not allowed -> will raise an exception on call
-    function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
 /// cypher/decypher any buffer using AES and PKCS7 padding, from a key buffer
@@ -7118,17 +7114,12 @@ begin
   inherited Destroy;
 end;
 
-function TAesPkcs7Writer.Read(var Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Read');
-end;
-
 function TAesPkcs7Writer.Write(const Buffer; Count: Longint): Longint;
 var
   chunk: integer;
 begin
   if fBuf = '' then
-    RaiseStreamError(self, 'Write');
+    RaiseStreamError(self, 'Write: no buffer');
   result := 0;
   repeat
     chunk := fBufAvailable;
@@ -7161,7 +7152,7 @@ var
   padding: integer;
 begin
   if fBuf = '' then
-    RaiseStreamError(self, 'Finish twice');
+    RaiseStreamError(self, 'Finish: twice');
   padding := SizeOf(TAesBlock) - (fBufPos and AesBlockMod); // PKCS7 padding
   FillcharFast(PByteArray(fBuf)^[fBufPos], padding, padding);
   inc(padding, fBufPos); // now we can encrypt as full AES blocks
@@ -7243,10 +7234,6 @@ begin
   until Count = 0;
 end;
 
-function TAesPkcs7Reader.Write(const Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Write');
-end;
 
 function AesPkcs7(const src: RawByteString; encrypt: boolean; const key;
   keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock): RawByteString;
@@ -7369,10 +7356,8 @@ begin
 end;
 
 const
-  AESMODESTXT4: PAnsiChar =
-    'ECB'#0'CBC'#0'CFB'#0'OFB'#0'C64'#0'CTR'#0'CFC'#0'OFC'#0'CTC'#0'GCM'#0;
-  AESMODESTXT4LOWER: PAnsiChar =
-    'ecb'#0'cbc'#0'cfb'#0'ofb'#0'c64'#0'ctr'#0'cfc'#0'ofc'#0'ctc'#0'gcm'#0;
+  AESMODE_TXT: array[TAesMode] of array[0..3] of AnsiChar = (
+    'ecb', 'cbc', 'cfb', 'ofb', 'c64', 'ctr', 'cfc', 'ofc', 'ctc', 'gcm');
 
 procedure AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer;
   out Result: TShort15);
@@ -7387,7 +7372,7 @@ begin
           ord('a') + ord('e') shl 8 + ord('s') shl 16 + ord('-') shl 24;
         PCardinal(@Result[5])^ := PCardinal(SmallUInt32Utf8[KeyBits])^;
         Result[8] := '-'; // SmallUInt32Utf8 put a #0 there
-        PCardinal(@Result[9])^ := PCardinalArray(AESMODESTXT4LOWER)[ord(Mode)];
+        PCardinal(@Result[9])^ := PCardinal(@AESMODE_TXT[Mode])^;
       end
   else
     PCardinal(@Result)^ := 0;
@@ -7423,8 +7408,8 @@ begin
   else
     exit;
   end;
-  tab := @NormToUpperAnsi7Byte;
-  i := IntegerScanIndex(pointer(AESMODESTXT4), succ(ord(high(TAesMode))),
+  tab := @NormToLowerAnsi7Byte;
+  i := IntegerScanIndex(@AESMODE_TXT, length(AESMODE_TXT),
          cardinal(tab[ord(AesAlgoName[8])]) +
          cardinal(tab[ord(AesAlgoName[9])]) shl 8 +
          cardinal(tab[ord(AesAlgoName[10])]) shl 16);

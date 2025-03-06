@@ -2358,17 +2358,10 @@ type
   end;
 
   /// a fake TStream, which will just count the number of bytes written
-  TFakeWriterStream = class(TStream)
-  protected
-    fWritten: Int64;
-    {$ifdef FPC}
-    function GetPosition: Int64; override;
-    {$endif FPC}
+  TFakeWriterStream = class(TStreamWithPositionAndSize)
   public
     function Read(var Buffer; Count: Longint): Longint; override;
     function Write(const Buffer; Count: Longint): Longint; override;
-    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-    function Seek(Offset: Longint; Origin: Word): Longint; override;
   end;
 
   TNestedStream = record
@@ -2399,8 +2392,6 @@ type
     procedure Flush; virtual;
     /// will read up to Count bytes from the internal nested TStream
     function Read(var Buffer; Count: Longint): Longint; override;
-    /// this TStream is read-only: calling this method will raise an exception
-    function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
   /// TStream with an internal memory buffer
@@ -2427,8 +2418,6 @@ type
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
     /// will read up to Count bytes from the internal buffer or source TStream
     function Read(var Buffer; Count: Longint): Longint; override;
-    /// this TStream is read-only: calling this method will raise an exception
-    function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
 
@@ -5677,7 +5666,7 @@ begin
   trail.Magic := Magic;
   trail.HeaderRelativeOffset := result;        // Int64 into cardinal
   if trail.HeaderRelativeOffset <> result then // max 4GB compressed size
-    RaiseStreamError(self, 'StreamCompress trail overflow');
+    RaiseStreamError(self, 'StreamCompress: trail overflow');
   Dest.WriteBuffer(trail, SizeOf(trail));
 end;
 
@@ -10090,45 +10079,14 @@ end;
 
 function TFakeWriterStream.Read(var Buffer; Count: Longint): Longint;
 begin
-  // do nothing
-  result := Count;
+  result := Count; // do nothing
 end;
 
 function TFakeWriterStream.Write(const Buffer; Count: Longint): Longint;
 begin
-  // do nothing
-  inc(fWritten, Count);
+  inc(fPosition, Count);
+  inc(fSize, Count);
   result := Count;
-end;
-
-{$ifdef FPC}
-function TFakeWriterStream.GetPosition: Int64;
-begin
-  result := fWritten;
-end;
-{$endif FPC}
-
-function TFakeWriterStream.Seek(Offset: Longint; Origin: Word): Longint;
-begin
-  result := Seek(Offset, TSeekOrigin(Origin));
-end;
-
-function TFakeWriterStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
-begin
-  case Origin of
-    soBeginning:
-      result := Offset;
-    soEnd:
-      result := fWritten - Offset;
-    else
-      result := fWritten + Offset;
-  end;
-  if result > fWritten then
-    result := fWritten
-  else if result < 0 then
-    result := 0
-  else if result < fWritten then
-    fWritten := result;
 end;
 
 
@@ -10251,11 +10209,6 @@ begin
   fContentRead := pointer(s);
 end;
 
-function TNestedStreamReader.Write(const Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Write');
-end;
-
 
 { TBufferedStreamReader }
 
@@ -10331,12 +10284,6 @@ begin
   end;
   inc(fPosition, result);
 end;
-
-function TBufferedStreamReader.Write(const Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Write');
-end;
-
 
 
 function HashFile(const FileName: TFileName; Hasher: THasher): cardinal;

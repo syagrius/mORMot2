@@ -9406,14 +9406,16 @@ begin
   case format of
     p12Legacy:
       // force legacy compatibility with Windows Server 2012 or MacOS/iOS
-      if OpenSslVersion >= OPENSSL3_VERNUM then
+      // - warning: OpenSSL 1.x uses legacy 40bit-RC2 by default, which is sadly
+      // incompatible with OpenSSL 3.x, so we force those safer (but still
+      // downward compatible with Windows XP) parameters on all OpenSSL versions
       begin
         nid := NID_pbe_WithSHA1And3_Key_TripleDES_CBC; // old SHA1-3DES algo
         mac_iter := 1;
         md_type := EVP_sha1;
       end;
     p12New:
-      // force OpenSSL 3.x new algorithm on OpenSSL 1.x
+      // force OpenSSL 3.x new algorithm on OpenSSL 1.x (keep default otherwise)
       if OpenSslVersion < OPENSSL3_VERNUM then
       begin
         nid := NID_aes_256_cbc; // new AES-256-CBC safer algo
@@ -10203,20 +10205,6 @@ begin
   result := BioLoad(Der, @d2i_X509_REQ_bio);
 end;
 
-function IsPem(p: PUtf8Char; up: PUtf8Char = '-----BEGIN'): boolean;
-begin
-  result := true;
-  repeat
-    p := PosChar(p, '-');
-    if p = nil then
-      break;
-    if NetStartWith(p, up) then // naive but good enough
-      exit;
-    inc(p);
-  until false;
-  result := false;
-end;
-
 function LoadPrivateKey(PrivateKey: pointer; PrivateKeyLen: integer;
   const Password: SpiUtf8; Pkcs12Cert: PPX509): PEVP_PKEY;
 var
@@ -10231,7 +10219,7 @@ begin
   begin
     pw := PassNotNil(Password);
     priv := BIO_new_mem_buf(PrivateKey, PrivateKeyLen);
-    if IsPem(PrivateKey) then
+    if NetIsPem(PrivateKey) then
       result := PEM_read_bio_PrivateKey(priv, nil, nil, pw)
     else
       result := nil;
@@ -10279,7 +10267,7 @@ begin
   else
   begin
     pub := BIO_new_mem_buf(PublicKey, PublicKeyLen);
-    if IsPem(PublicKey) then
+    if NetIsPem(PublicKey) then
       result := PEM_read_bio_PUBKEY(pub, nil, nil, PassNotNil(Password))
     else
       result := nil;
@@ -10336,7 +10324,7 @@ var
   x: PX509DynArray;
 begin
   result := nil;
-  if IsPem(pointer(DerOrPem)) then
+  if NetIsPem(pointer(DerOrPem)) then
   begin
     x := LoadCertificates(DerOrPem, {max=}1); // read first PEM
     if x <> nil then

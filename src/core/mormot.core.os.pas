@@ -2940,7 +2940,7 @@ function Unicode_CodePage: integer;
 // - will compute StrLen(PW1/PW2) if L1 or L2 < 0
 // - on POSIX, use the ICU library, or fallback to FPC RTL widestringmanager
 // with a temporary variable - you would need to include cwstring unit
-// - in practice, is seldom called, unless our proprietary WIN32CASE collation
+// - in practice, is hardly called, unless our proprietary WIN32CASE collation
 // is used in mormot.db.raw.sqlite3, or via Utf8CompareOS() or Utf8CompareIOS()
 // functions from mormot.core.unicode
 // - consider Utf8ILCompReference() from mormot.core.unicode.pas for an
@@ -3282,7 +3282,8 @@ function FileIsSymLink(const FileName: TFileName): boolean;
 function DirectorySize(const FileName: TFileName; Recursive: boolean = false;
   const Mask: TFileName = FILES_ALL): Int64;
 
-/// copy one file to another, similar to the Windows API
+/// copy one file to another, using the Windows API if possible
+// - on POSIX, will call StreamCopyUntilEnd() between two TFileStreamEx
 function CopyFile(const Source, Target: TFileName;
   FailIfExists: boolean): boolean;
 
@@ -4214,7 +4215,7 @@ type
   TRWLightLock = object
   {$endif USERECORDWITHMETHODS}
   private
-    Flags: PtrUInt; // bit 0 = WriteLock, >0 = ReadLock
+    Flags: PtrUInt; // bit 0 = WriteLock, bits 1..31/63 = ReadLock
     // low-level functions called by the Lock methods when inlined
     procedure ReadLockSpin;
     procedure WriteLockSpin;
@@ -5896,7 +5897,7 @@ begin
   result := ShortToUuid(tmp, uuid); // may call mormot.core.text
 end;
 
-procedure UuidToText(const u: TGuid; var result: RawUtf8); // seldom used
+procedure UuidToText(const u: TGuid; var result: RawUtf8); // rarely called
 var
   tmp: ShortString;
 begin
@@ -6630,11 +6631,6 @@ end;
 
 { TFileStreamEx }
 
-function TFileStreamEx.GetSize: Int64;
-begin
-  result := FileSize(Handle); // faster than 3 FileSeek() calls - and threadsafe
-end;
-
 constructor TFileStreamEx.Create(const aFileName: TFileName; Mode: cardinal);
 var
   h: THandle;
@@ -6663,6 +6659,11 @@ begin
   if not ValidHandle(h) then // we may need to create the file
     h := FileCreate(aFileName, fmShareRead);
   CreateFromHandle(h, aFileName);
+end;
+
+function TFileStreamEx.GetSize: Int64;
+begin
+  result := FileSize(Handle); // faster than 3 FileSeek() calls - and threadsafe
 end;
 
 
