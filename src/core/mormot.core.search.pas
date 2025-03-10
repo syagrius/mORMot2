@@ -70,14 +70,18 @@ type
   /// result list, as returned by FindFiles()
   TFindFilesDynArray = array of TFindFiles;
 
-  /// one optional feature of FindFiles()
+  /// each optional feature of FindFiles()
   // - ffoSortByName will sort the result files by extension then name
+  // - ffoSortByFullName will sort the result files by name but not extension
+  // - ffoSortByDate will sort the result files by increasing timestamp
   // - ffoExcludesDir won't include the path in TFindFiles.Name
-  // - ffoSubFolder will search within nested folders
-  // - ffoIncludeFolder will add the nested folders
-  // - ffoIncludeHiddenFiles will add any hidden file (on Windows)
+  // - ffoSubFolder will recursively search within nested folders
+  // - ffoIncludeFolder will add the nested folder names with Size=-1
+  // - ffoIncludeHiddenFiles will add also hidden file to the results
   TFindFilesOption = (
     ffoSortByName,
+    ffoSortByFullName,
+    ffoSortByDate,
     ffoExcludesDir,
     ffoSubFolder,
     ffoIncludeFolder,
@@ -86,21 +90,27 @@ type
   TFindFilesOptions = set of TFindFilesOption;
 
 /// search for matching files by names
-// - just an enhanced wrapper around FindFirst/FindNext with some options
+// - on Windows, will just call FindFirst/FindNext, i.e. FindFilesRtl()
+// - on POSIX, calls PosixFileNames() than fpStat() and avoid slower TSearchRec
 // - you may specify several masks in Mask, e.g. as '*.jpg;*.jpeg'
 function FindFiles(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; const IgnoreFileName: TFileName = '';
   Options: TFindFilesOptions = []): TFindFilesDynArray;
 
+/// internal function using TSearchRec - published for regression tests only
+procedure FindFilesRtl(const Directory, Mask, IgnoreFileName: TFileName;
+  Options: TFindFilesOptions; out Files: TFindFilesDynArray);
+
 /// search for matching file names
 // - on Windows, just a wrapper around FindFilesDynArrayToFileNames(FindFiles())
 // - on POSIX, calls PosixFileNames() if possible, with fast TMatch mask lookup
+// - by design, will ignore ffoSortByDate option (because not POSIX compatible)
 function FileNames(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; Options: TFindFilesOptions = [];
   const IgnoreFileName: TFileName = ''): TFileNameDynArray; overload;
 
 /// search for matching file names from path-delimited content
-// - is a wrapper around FindFileNames(MakePath())
+// - just wrap FindFileNames(MakePath(Path))
 function FileNames(const Path: array of const; const Mask: TFileName = FILES_ALL;
   Options: TFindFilesOptions = []): TFileNameDynArray; overload;
 
@@ -108,7 +118,23 @@ function FileNames(const Path: array of const; const Mask: TFileName = FILES_ALL
 function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNameDynArray;
 
 /// sort a FindFiles() result list by increasing TFindFiles[].Timestamp field
+// - could be done if not already via ffoSortByDate
 procedure FindFilesSortByTimestamp(var Files: TFindFilesDynArray);
+
+/// compute the sum of all Files[].Size file sizes in bytes
+function FindFilesSize(const Files: TFindFilesDynArray): Int64;
+
+/// compare two TFindFilesDynArray elements by file extension then name
+// - folders will be put in front of all files, as with ffoSortByName
+function SortFindFileName(const A, B): integer;
+
+/// compare two TFindFilesDynArray elements by full name
+// - folders won't be put in front of all files, as with ffoSortByFullName
+function SortFindFileFullName(const A, B): integer;
+
+/// compare two TFindFilesDynArray elements by date
+// - folders will be put in front of all files, as with ffoSortByDate
+function SortFindFileTimestamp(const A, B): integer;
 
 /// compute the HTML index page corresponding to a local folder
 procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
@@ -1722,26 +1748,81 @@ begin
   FormatShort('% % %', [Name, KB(Size), DateTimeToFileShort(Timestamp)], result);
 end;
 
-function SortDynArrayFindFiles(const A, B): integer;
+function SortFindFileName(const A, B): integer;
+var
+  fa: TFindFiles absolute A;
+  fb: TFindFiles absolute B;
 begin
-  if TFindFiles(A).Size < 0 then
-    if TFindFiles(B).Size < 0 then
-      result := SortDynArrayFileName(A, B) // both are folders
+  result := 0;
+  if @A = @B then
+    exit;
+  if fa.Size < 0 then
+    if fb.Size < 0 then
+      result := 0 // both are folders
     else
-      result := -1                         // folders first
-  else if TFindFiles(B).Size < 0 then
-    result := 1                           // files last
+      dec(result) // folders first
+  else if fb.Size < 0 then
+    inc(result)   // files last
   else
-    result := SortDynArrayFileName(A, B); // both are files
+    result := 0;  // both are files
+  if result = 0 then
+    result := SortDynArrayFileName(fa.Name, fb.Name)
 end;
 
-function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
-  Options: TFindFilesOptions): TFindFilesDynArray;
+function SortFindFileFullName(const A, B): integer;
 var
-  m, count: integer;
-  dir: TFileName;
+  fa: TFindFiles absolute A;
+  fb: TFindFiles absolute B;
+begin
+  if @A = @B then
+    result := 0
+  else
+    {$ifdef OSPOSIX}
+    result := SortDynArrayString(fa.Name, fb.Name);
+    {$else}
+    result := SortDynArrayStringI(fa.Name, fb.Name);
+    {$endif}
+end;
+
+function SortFindFileTimestamp(const A, B): integer;
+var
+  fa: TFindFiles absolute A;
+  fb: TFindFiles absolute B;
+begin
+  result := 0;
+  if @A = @B then
+    exit;
+  if fa.Size < 0 then
+    if fb.Size < 0 then
+      result := CompareFloat(fa.Timestamp, fb.Timestamp) // both are folders
+    else
+      dec(result) // folders first
+  else if fb.Size < 0 then
+    inc(result)   // files last
+  else
+    result := CompareFloat(fa.Timestamp, fb.Timestamp); // both are files
+  if result = 0 then
+    result := SortDynArrayFileName(fa.Name, fb.Name); // for consistency
+end;
+
+procedure FindFilesSort(var da: TDynArray; Options: TFindFilesOptions);
+begin
+  if da.count > 1 then
+    if ffoSortByName in Options then
+      da.Sort(SortFindFileName) // use RTL and "natural" order
+    else if ffoSortByFullName in Options then
+      da.Sort(SortFindFileFullName)
+    else if ffoSortByDate in Options then
+      da.Sort(SortFindFileTimestamp);
+end;
+
+procedure FindFilesRtl(const Directory, Mask, IgnoreFileName: TFileName;
+  Options: TFindFilesOptions; out Files: TFindFilesDynArray);
+var
+  count: integer;
+  m: PChar;
+  dir, onemask: TFileName;
   da: TDynArray;
-  masks: TRawUtf8DynArray;
   masked: TFindFilesDynArray;
 
   procedure SearchFolder(const folder: TFileName);
@@ -1785,72 +1866,119 @@ var
   end;
 
 begin
-  Finalize(result);
-  da.Init(TypeInfo(TFindFilesDynArray), result, @count);
-  if Pos(';', Mask) > 0 then
-    CsvToRawUtf8DynArray(pointer(StringToUtf8(Mask)), masks, ';');
-  if masks <> nil then
-  begin
-    // recursive calls for each masks[], optionally sorted by mask
-    if ffoSortByName in Options then
-      QuickSortRawUtf8(masks, length(masks), nil,
-        {$ifdef OSWINDOWS} @StrIComp {$else} @StrComp {$endif});
-    for m := 0 to length(masks) - 1 do
-    begin
-      masked := FindFiles(
-        Directory, Utf8ToString(masks[m]), IgnoreFileName, Options);
-      da.AddArray(masked);
-    end;
-  end
+  da.Init(TypeInfo(TFindFilesDynArray), Files, @count);
+  if Directory <> '' then
+    dir := IncludeTrailingPathDelimiter(Directory);
+  if Pos(';', Mask) = 0 then
+    // single mask search
+    SearchFolder('')
   else
   begin
-    // single mask search
-    if Directory <> '' then
-      dir := IncludeTrailingPathDelimiter(Directory);
-    SearchFolder('');
-    if (ffoSortByName in Options) and
-       (da.Count > 1) then
-      da.Sort(SortDynArrayFindFiles);
+    m := pointer(Mask); // e.g. '*.txt;*.json'
+    repeat
+      onemask := GetNextItemString(m, ';');
+      if onemask = '' then
+        break;
+      FindFilesRtl(dir, onemask, IgnoreFileName, Options, masked);
+      da.AddArray(masked);
+    until false;
   end;
-  if count <> 0 then
-    DynArrayFakeLength(result, count);
+  if count = 0 then
+    exit;
+  FindFilesSort(da, Options);
+  DynArrayFakeLength(Files, count);
 end;
 
-function FileNames(const Directory, Mask: TFileName;
-  Options: TFindFilesOptions; const IgnoreFileName: TFileName): TFileNameDynArray;
 {$ifdef OSPOSIX}
+
+function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
+  Options: TFindFilesOptions): TFindFilesDynArray;
+var
+  dir: TFileName;
+  names: TRawUtf8DynArray;
+  n, r, i: PtrInt;
+  d: PFindFiles;
+  ts, tolocal: TUnixMSTime;
+  da: TDynArray;
+begin
+  result := nil;
+  dir := IncludeTrailingPathDelimiter(Directory);
+  if not DirectoryExists(dir) then
+    exit;
+  // call PosixFileNames() i.e. efficient getdents/getdents64 syscall
+  names := FileNames(dir, Mask, Options, IgnoreFileName);
+  n := length(names);
+  if n = 0 then
+    exit;
+  // compute TFindFilesDynArray from names[]
+  if not (ffoExcludesDir in Options) then
+    dir := '';
+  tolocal := TimeZoneLocalBias * 60000; // local TSearchRec: use TZSeconds * 60
+  SetLength(result, n);
+  r := 0;
+  d := pointer(result);
+  for i := 0 to n - 1 do
+  begin
+    d^.Name := names[i];
+    if FileInfoByName(dir + d^.Name, d^.Size, ts, @d^.Attr) then // = fpStat()
+    begin
+      d^.Timestamp := UnixMSTimeToDateTime(ts + tolocal);
+      inc(d); // will leave d^.Attr = 0
+      inc(r);
+    end;
+  end;
+  if r <> n then
+    DynArrayFakeLength(result, r);
+  if not (ffoSortByDate in Options) then
+    exit;
+  da.Init(TypeInfo(TFindFilesDynArray), result);
+  FindFilesSort(da, Options);
+end;
+
+function FileNames(const Directory, Mask: TFileName; Options: TFindFilesOptions;
+  const IgnoreFileName: TFileName): TFileNameDynArray;
 var
   m: TMatchDynArray;
   cb: TOnPosixFileName;
-{$endif OSPOSIX}
 begin
-  {$ifdef OSPOSIX}
-  if (Options * [ffoIncludeFolder] = []) and
-     ((Options * [ffoSortByName] = []) or
-      (PosExChar(';', Mask) = 0)) then // sort on multi-mask not yet implemented
+  // use much faster PosixFileNames() low-level function over TMatchDynArray
+  cb := nil;
+  if Mask <> FILES_ALL then
   begin
-    // use much faster PosixFileNames() low-level function over TMatchDynArray
-    cb := nil;
-    if Mask <> FILES_ALL then
-    begin
-      cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
-      SetMatchs(Mask, {caseinsens=}false, m, ';');
-    end;
-    result := PosixFileNames(Directory,
-      ffoSubFolder in Options, cb, pointer(m), ffoExcludesDir in Options);
-    if result = nil then
-      exit;
-    if IgnoreFileName <> '' then
-      DeleteRawUtf8(result, FindRawUtf8(result, IgnoreFileName));
-    if ffoSortByName in Options then
-      QuickSortRawUtf8(result, length(result));
-  end
-  else
-  {$endif OSPOSIX}
-    // use regular FindFirst/FindNext and transient TFindFilesDynArray resultset
-    result := FindFilesDynArrayToFileNames(
-      FindFiles(Directory, Mask, IgnoreFileName, Options));
+    cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
+    SetMatchs(Mask, {caseinsens=}false, m, ';');
+  end;
+  result := PosixFileNames(Directory, ffoSubFolder in Options, cb, pointer(m),
+    ffoExcludesDir in Options, ffoIncludeHiddenFiles in Options,
+    ffoIncludeFolder in Options);
+  if result = nil then
+    exit;
+  if IgnoreFileName <> '' then
+    DeleteRawUtf8(result, FindRawUtf8(result, IgnoreFileName));
+  if ffoSortByName in Options then
+    QuickSortRawUtf8(result, length(result), nil, StrCompPosixFileName)
+  else if ffoSortByFullName in Options then
+    QuickSortRawUtf8(result, length(result));
 end;
+
+{$else} // Windows can just call FindFiles() and RTL FindFirst/FindNext
+
+function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
+  Options: TFindFilesOptions): TFindFilesDynArray;
+begin
+  FindFilesRtl(Directory, Mask, IgnoreFileName, Options, result);
+end;
+
+function FileNames(const Directory, Mask: TFileName; Options: TFindFilesOptions;
+  const IgnoreFileName: TFileName): TFileNameDynArray;
+var
+  files: TFindFilesDynArray;
+begin
+  FindFilesRtl(Directory, Mask, IgnoreFileName, Options, files);
+  result := FindFilesDynArrayToFileNames(files);
+end;
+
+{$endif OSPOSIX}
 
 function FileNames(const Path: array of const; const Mask: TFileName;
   Options: TFindFilesOptions): TFileNameDynArray;
@@ -1863,25 +1991,48 @@ end;
 
 function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNameDynArray;
 var
-  i, n: PtrInt;
+  n: integer;
+  r: PFileName;
+  f: PFindFiles;
 begin
   Finalize(result);
   if Files = nil then
     exit;
   n := length(Files);
   SetLength(result, n);
-  for i := 0 to n - 1 do
-    result[i] := Files[i].Name;
-end;
-
-function SortFindFileTimestamp(const A, B): integer;
-begin
-  result := CompareFloat(TFindFiles(A).Timestamp, TFindFiles(B).Timestamp);
+  f := pointer(Files);
+  r := pointer(result);
+  repeat
+    r^ := f^.Name;
+    inc(f);
+    inc(r);
+    dec(n);
+  until n = 0;
 end;
 
 procedure FindFilesSortByTimestamp(var Files: TFindFilesDynArray);
 begin
   DynArray(TypeInfo(TFindFilesDynArray), Files).Sort(SortFindFileTimestamp);
+end;
+
+function FindFilesSize(const Files: TFindFilesDynArray): Int64;
+var
+  n: integer;
+  f: PFindFiles;
+begin
+  result := 0;
+  f := pointer(Files);
+  if f = nil then
+    exit;
+  n := PDALen(PAnsiChar(f) - _DALEN)^ + _DAOFF;
+  repeat
+    if f^.Size > 0 then // folder f^.Size = -1
+      inc(result, f^.Size);
+    dec(n);
+    if n = 0 then
+      break;
+    inc(f);
+  until false;
 end;
 
 function SynchFolders(const Reference, Dest: TFileName;

@@ -136,6 +136,35 @@ end;
 
 {$endif UNICODE}
 
+function StrICompPChar(Str1, Str2: PChar): PtrInt;
+var
+  c1, c2: PtrInt;
+begin // StrIComp() from Delphi does not support Str1/Str2 = nil
+  result := 0;
+  if Str1 <> Str2 then
+    if Str1 <> nil then
+      if Str2 <> nil then
+        repeat
+          c1 := ord(Str1^);
+          if (c1 >= ord('a')) and (c1 <= ord('z')) then
+            dec(c1, 32);
+          c2 := ord(Str2^);
+          if (c2 >= ord('a')) and (c2 <= ord('z')) then
+            dec(c2, 32);
+          result := c1 - c2;
+          if result <> 0 then
+            exit;
+          if c1 = 0 then
+            exit; // Str1 = Str2
+          inc(Str1);
+          inc(Str2);
+        until false
+      else
+        inc(result) // Str2=''
+    else
+      dec(result);  // Str1=''
+end;
+
 function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
 begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
@@ -791,6 +820,13 @@ begin
   result := WindowsFileTimeToDateTime(FileDate);
 end;
 
+{$ifdef ISDELPHI20062007} // circumvent Delphi 2007 RTL inlining issue
+function AnsiCompareFileName(const S1, S2 : TFileName): integer;
+begin
+  result := SysUtils.AnsiCompareFileName(S1,S2);
+end;
+{$endif ISDELPHI20062007}
+
 // some definitions missing on oldest Delphi
 const
   FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink
@@ -1084,7 +1120,7 @@ begin
 end;
 
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
-  out FileTimestampUtc: TUnixMSTime): boolean;
+  out FileTimestampUtc: TUnixMSTime; FileAttr: PInteger): boolean;
 var
   fa: WIN32_FILE_ATTRIBUTE_DATA;
 begin
@@ -1099,7 +1135,9 @@ begin
   end
   else
     FileSize := -1; // FileName is a folder
-  FileTimestampUtc := FileTimeToUnixMSTime(fa.ftLastWriteTime) // no local time
+  FileTimestampUtc := FileTimeToUnixMSTime(fa.ftLastWriteTime); // no local time
+  if FileAttr <> nil then
+    FileAttr^ := fa.dwFileAttributes;
 end;
 
 function FileIsSymLink(const FileName: TFileName): boolean;

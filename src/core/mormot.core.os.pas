@@ -3250,7 +3250,7 @@ function FileSeek64(Handle: THandle; const Offset: Int64;
 // - if FileName is a folder/directory, then returned FileSize equals -1
 // - use a single Operating System call, so is faster than FileSize + FileAge
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
-  out FileTimestampUtc: TUnixMSTime): boolean; overload;
+  out FileTimestampUtc: TUnixMSTime; FileAttr: PInteger = nil): boolean; overload;
 
 /// get low-level file information, in a cross-platform way
 // - returns true on success
@@ -3491,7 +3491,7 @@ function ExtractNameU(const FileName: RawUtf8): RawUtf8;
 function ExtractExt(const FileName: TFileName; WithoutDot: boolean = false): TFileName;
 
 // defined here for proper ExtractExtP() inlining
-function GetLastDelimU(const FileName: RawUtf8; OtherDelim: AnsiChar): PtrInt;
+function GetLastDelimU(const FileName: RawUtf8; OtherDelim: AnsiChar = #0): PtrInt;
 
 /// extract an extension from a file name like ExtractFileExt function
 // - but cross-platform, i.e. detect both '\' and '/' on all platforms
@@ -3518,7 +3518,7 @@ function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
 /// compare two "array of TFileName" elements, grouped by file extension
 // - i.e. with no case sensitivity on Windows
 // - the expected string type is the RTL string, i.e. TFileName
-// - calls internally GetFileNameWithoutExt() and AnsiCompareFileName()
+// - like calling GetFileNameWithoutExt() and AnsiCompareFileName()
 function SortDynArrayFileName(const A, B): integer;
 
 {$ifdef ISDELPHI20062007}
@@ -3893,12 +3893,6 @@ var
   // - on Windows, is initialized when AllocConsole or TextColor() are called
   StdOut: THandle;
 
-  {$ifdef OSPOSIX}
-  /// set at initialization if StdOut has the TTY flag and env has a known TERM
-  // - equals false if the console does not support colors, e.g. piped to a file
-  StdOutIsTTY: boolean;
-  {$endif OSPOSIX}
-
   /// global flag to modify the code behavior at runtime when run from TSynTests
   // - e.g. TSynDaemon.AfterCreate won't overwrite TSynTests.RunAsConsole logs
   RunFromSynTests: boolean;
@@ -3911,6 +3905,13 @@ procedure AllocConsole;
 /// always true on POSIX, may be false for a plain Windows GUI application
 function HasConsole: boolean;
   {$ifdef OSPOSIX} inline; {$endif OSPOSIX}
+
+{$ifdef OSPOSIX}
+/// true if StdOut has the TTY flag and env has a known TERM
+// - equals false if the console does not support colors, e.g. piped to a file
+// or from the Lazarus debugger
+function StdOutIsTTY: boolean; inline;
+{$endif OSPOSIX}
 
 /// change the console text writing color
 procedure TextColor(Color: TConsoleColor);
@@ -4003,9 +4004,11 @@ type
 // search, and may return some false positives, like symlinks or nested folders
 // - an optional callback can be supplied, used e.g. by the FileNames() function
 // in mormot.core.search to efficiently implement name mask search with a TMatch
+// - IncludeFolders would include nested folders as '/foldername'
 function PosixFileNames(const Folder: TFileName; Recursive: boolean;
   OnFile: TOnPosixFileName = nil; OnFileOpaque: pointer = nil;
-  ExcludesDir: boolean = false): TRawUtf8DynArray;
+  ExcludesDir: boolean = false; IncludeHiddenFiles: boolean = false;
+  IncludeFolders: boolean = false): TRawUtf8DynArray;
 
 {$endif OSWINDOWS}
 
@@ -6979,23 +6982,37 @@ end;
 function GetLastDelim(const FileName: TFileName; OtherDelim: cardinal): PtrInt;
 var
   {$ifdef UNICODE}
-  p: PWordArray absolute FileName;
+  p: PWordArray;
   {$else}
-  p: PByteArray absolute FileName;
+  p: PByteArray;
   {$endif UNICODE}
+  c: cardinal;
 begin
   result := length(FileName);
-  while (result > 0) and
-        not (p[result - 1] in [ord('\'), ord('/'), ord(':'), OtherDelim]) do
+  if result = 0 then
+    exit;
+  p := pointer(FileName);
+  repeat
+    c := p[result - 1];
+    if (c = OtherDelim) or  (c = ord('\')) or (c = ord('/')) or (c = ord(':')) then
+      exit;
     dec(result);
+  until result = 0;
 end;
 
 function GetLastDelimU(const FileName: RawUtf8; OtherDelim: AnsiChar): PtrInt;
+var
+  c: AnsiChar;
 begin
   result := length(FileName);
-  while (result > 0) and
-        not (FileName[result] in ['\', '/', ':', OtherDelim]) do
+  if result = 0 then
+    exit;
+  repeat
+    c := AnsiChar(PByteArray(FileName)[result - 1]);
+    if (c = OtherDelim) or  (c = '\') or (c = '/') or (c = ':') then
+      exit;
     dec(result);
+  until result = 0;
 end;
 
 function ExtractPath(const FileName: TFileName): TFileName;
@@ -7010,12 +7027,12 @@ end;
 
 function ExtractNameU(const FileName: RawUtf8): RawUtf8;
 begin
-  result := copy(FileName, GetLastDelimU(FileName, #0) + 1, maxInt);
+  result := copy(FileName, GetLastDelimU(FileName) + 1, maxInt);
 end;
 
 function ExtractPathU(const FileName: RawUtf8): RawUtf8;
 begin
-  FastSetString(result, pointer(FileName), GetLastDelimU(FileName, #0));
+  FastSetString(result, pointer(FileName), GetLastDelimU(FileName));
 end;
 
 function ExtractExt(const FileName: TFileName; WithoutDot: boolean): TFileName;
@@ -7091,24 +7108,38 @@ begin
   result := RawUtf8(GetFileNameWithoutExt(ExtractFileName(FileName)));
 end;
 
-{$ifdef ISDELPHI20062007} // circumvent Delphi 2007 RTL inlining issue
-function AnsiCompareFileName(const S1, S2 : TFileName): integer;
+function PosExtString(Str: PChar): PChar; // work on AnsiString + UnicodeString
+var
+  i: PtrInt;
 begin
-  result := SysUtils.AnsiCompareFileName(S1,S2);
+  result := nil;
+  if Str <> nil then // excludes '.' at first position e.g. for '.htdigest'
+    for i := PStrLen(PAnsiChar(Str) - _STRLEN)^ - 1 downto 1 do
+      case Str[i] of
+        {$ifdef OSWINDOWS} '\', ':' {$else} '/' {$endif}:
+          exit; // reached end of filename
+        '.':
+          begin
+            result := @Str[i + 1]; // compare extension just after '.'
+            exit;
+          end;
+      end;
 end;
-{$endif ISDELPHI20062007}
 
 function SortDynArrayFileName(const A, B): integer;
-var
-  an, ae, bn, be: TFileName;
-begin
-  // code below is not very fast, but correct ;)
-  an := GetFileNameWithoutExt(string(A), @ae);
-  bn := GetFileNameWithoutExt(string(B), @be);
-  result := AnsiCompareFileName(ae, be);
+begin // check extension, then filename
+  result := 0;
+  if @A = @B then
+    exit;
+  {$ifdef OSPOSIX}
+  result := StrComp(PosExtString(pointer(A)), PosExtString(pointer(B)));
   if result = 0 then
-    // if both extensions matches, compare by filename
-    result := AnsiCompareFileName(an, bn);
+    result := StrComp(pointer(A), pointer(B)); // fast case-sensitive order
+  {$else}
+  result := StrICompPChar(PosExtString(pointer(A)), PosExtString(pointer(B)));
+  if result = 0 then
+    result := AnsiCompareFileName(string(A), string(B)); // as user-expected
+  {$endif OSPOSIX}
 end;
 
 function EnsureDirectoryExists(const Directory: TFileName;
@@ -8354,7 +8385,7 @@ begin
   repeat
     i := Find(name, clkParam, '', '', first);
     if i < 0 then
-      break;
+      break; // no more occurence
     AddRawUtf8(value, fValues[i]);
     result := true;
     first := i + 1;

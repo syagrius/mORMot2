@@ -78,33 +78,6 @@ begin
   result := false;
 end;
 
-procedure FindNameValue(const s, up: RawUtf8; var res: RawUtf8);
-var
-  p: PUtf8Char;
-  L: PtrInt;
-begin
-  p := pointer(s);
-  while p <> nil do
-  begin
-    if IdemPChar(p, pointer(up)) then
-    begin
-      inc(p, length(up));
-      while (p^ <= ' ') and
-            (p^ <> #0) do
-        inc(p); // trim left
-      L := 0;
-      while p[L] > #13 do
-        inc(L);
-      while p[L - 1] = ' ' do
-        dec(L); // trim right
-      FastSetString(res, p, L);
-      exit;
-    end;
-    p := GotoNextLine(p);
-  end;
-  res := '';
-end;
-
 function GetNextCardinal(var P: PAnsiChar): PtrUInt;
 var
   c: cardinal;
@@ -1250,6 +1223,11 @@ begin
     result := st.st_mtime; // as TUnixTime seconds, with no local conversion
 end;
 
+function ValidHandle(Handle: THandle): boolean;
+begin
+  result := PtrInt(Handle) >= 0; // 0=StdIn is a valid POSIX file descriptor
+end;
+
 function FileHandleToUnixTimeUtc(F: THandle): TUnixTime;
 var
   st: TStat;
@@ -1331,7 +1309,7 @@ end;
 
 procedure FileSetSticky(const FileName: TFileName);
 begin
-  fpchmod(FileName, S_IRUSR or S_IWUSR or S_IRGRP or S_IROTH or S_ISVTX);
+  fpchmod(pointer(FileName), S_IRUSR or S_IWUSR or S_IRGRP or S_IROTH or S_ISVTX);
 end;
 
 function FileSize(const FileName: TFileName): Int64;
@@ -1381,8 +1359,35 @@ begin
           {$endif OSLINUXANDROID}
 end;
 
+function StatFileAttr(const fn: RawUtf8; const st: TStat): integer;
+var
+  p: PByteArray;
+begin
+  result := faArchive; // as LinuxToWinAttr() in fpcsrc/rtl/unix/sysutils.pp
+  p := @PByteArray(fn)[GetLastDelimU(fn)]; // no memory allocation
+  if FpS_ISDIR(st.st_mode) then
+  begin
+    result := result or faDirectory;
+    if (p[0] = ord('.')) and
+       (p[1] <> 0) and
+       (PWord(@p[1])^ <> ord('.')) then
+      result := result or faHidden{%H-}; // '.' and '..' are not hidden
+  end
+  else if p[0] = ord('.') then
+    result := result or faHidden{%H-}; // e.g. '.htdigest'
+  if (st.st_mode and S_IWUSR) = 0 then
+    result := result or faReadOnly;
+  if fpS_ISSOCK(st.st_mode) or
+     fpS_ISBLK(st.st_mode) or
+     fpS_ISCHR(st.st_mode) or
+     fpS_ISFIFO(st.st_mode) Then
+    result := result or faSysFile{%H-};
+  if fpS_ISLNK(st.st_mode) then
+    result := result or faSymLink{%H-};
+end;
+
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
-  out FileTimestampUtc: TUnixMSTime): boolean;
+  out FileTimestampUtc: TUnixMSTime; FileAttr: PInteger): boolean;
 var
   st: TStat;
 begin
@@ -1395,6 +1400,8 @@ begin
   else
     FileSize := st.st_size;
   StatTimeMS(st, FileTimestampUtc);
+  if FileAttr <> nil then
+    FileAttr^ := StatFileAttr(FileName, st);
 end;
 
 function FileSize(F: THandle): Int64;
@@ -1524,11 +1531,6 @@ begin
   result := (SymLink <> '') and
             FileExists(Target) and
             (fpsymlink(pointer(Target), pointer(SymLink)) = 0);
-end;
-
-function ValidHandle(Handle: THandle): boolean;
-begin
-  result := PtrInt(Handle) >= 0; // 0=StdIn is a valid POSIX file descriptor
 end;
 
 function WaitReadPending(fd, timeout: integer): boolean;
@@ -1945,6 +1947,17 @@ end;
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   TextAttr: integer = -1; // always change the color at startup
+  __IsDebuggerTested, __IsDebuggerPresent, __StdOutIsTTY,
+  _XorEntropyGetOsRandom256failed: boolean;
+
+procedure TestOnceDebuggerTty; forward;
+
+function StdOutIsTTY: boolean;
+begin
+  if not __IsDebuggerTested then
+    TestOnceDebuggerTty;
+  result :=  __StdOutIsTTY;
+end;
 
 procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
 const
@@ -2401,7 +2414,8 @@ const
   DT_WHT      = 14;
 
 function PosixFileNames(const Folder: TFileName; Recursive: boolean;
-  OnFile: TOnPosixFileName; OnFileOpaque: pointer; ExcludesDir: boolean): TRawUtf8DynArray;
+  OnFile: TOnPosixFileName; OnFileOpaque: pointer;
+  ExcludesDir, IncludeHiddenFiles, IncludeFolders: boolean): TRawUtf8DynArray;
 var
   n: PtrInt;
   root: TFileName;
@@ -2410,14 +2424,38 @@ var
   var
     dir: pDir;
     ent: pDirent;
-    sublen, entlen: PtrInt;
-    fn: RawUtf8;
-    withsub: boolean;
+    entlen, subcount, i: integer;
+    addedpath: TFileName;
+    fn: PByteArray; // is a temp RawUtf8
+    sub: TRawUtf8DynArray;
+
+    procedure MakeFileName(const path: TFileName);
+    var
+      plen: PtrInt;
+    begin
+      if path <> '' then // fn := path + d_name
+      begin
+        plen := length(path);
+        fn := FastNewString(plen + entlen, CP_UTF8);
+        MoveFast(pointer(path)^, fn^, plen);
+        MoveFast(ent^.d_name, fn[plen], entlen);
+      end
+      else
+      begin
+        fn := FastNewString(entlen, CP_UTF8);
+        MoveFast(ent^.d_name, fn^, entlen); // fn := d_name
+      end;
+    end;
+
   begin
-    dir := FpOpendir(root + subpath); // faster alternative to FindFirst()
+    // read all the file or directory names of this folder
+    subcount := 0;
+    addedpath := root + subpath;
+    dir := FpOpendir(pointer(addedpath)); // faster than FindFirst()
     if dir = nil then
       exit;
-    sublen := length(subpath);
+    if ExcludesDir then
+      addedpath := subpath;
     repeat
       ent := FpReaddir(dir^); // FPC RTL use getdents64 syscall on Linux and BSD :)
       if ent = nil then
@@ -2430,42 +2468,50 @@ var
           if Assigned(OnFile) and
              not OnFile(OnFileOpaque, ent^.d_name, entlen) then
             continue // e.g. no MatchAnyP()
-          else
-            withsub := not ExcludesDir;
-        DT_DIR:
-          if Recursive and
-             (ent^.d_name[0] <> '.') then
-            withsub := true // DoFolder(fn) requires full nested path
-          else
+          else if (not IncludeHiddenFiles) and
+                  (ent^.d_name[0] = '.') then
             continue;
+        DT_DIR:
+          begin
+            if (ent^.d_name[0] = '.') and
+               ((not IncludeHiddenFiles) or
+                (ent^.d_name[1] = #0) or
+                (PWord(@ent^.d_name[1])^ = ord('.'))) then
+              continue; // ignore hidden or '.' or '..' folders
+            if Recursive then
+            begin
+              MakeFileName(subpath);
+              with PStrRec(PAnsiChar(fn) - _STRRECSIZE)^ do
+              begin
+                fn[length] := ord('/'); // full nested path/ in sub[]
+                inc(length);
+              end;
+              if subcount = length(sub) then
+                SetLength(sub, NextGrow(subcount));
+              pointer(sub[subcount]) := fn;
+              inc(subcount);
+            end;
+            if not IncludeFolders then
+              continue;
+            if Assigned(OnFile) and
+               not OnFile(OnFileOpaque, ent^.d_name, entlen) then
+              continue; // simulate a FindFirst(mask) as in FindFilesRtl()
+          end;
       else
         continue; // not a real file (e.g. link, sysproc or blockdev)
       end;
-      // compute file/folder name
-      if withsub and
-         (sublen <> 0) then // fn := subpath + '/' + d_name
-      begin
-        FastSetString(fn, sublen + entlen + 1);
-        MoveFast(pointer(subpath)^, pointer(fn)^, sublen);
-        PByteArray(fn)[sublen] := ord('/');
-        MoveFast(ent^.d_name, PByteArray(fn)[sublen + 1], entlen);
-      end
-      else
-        FastSetString(fn, @ent^.d_name, entlen); // fn := d_name
-      // handle this entry
-      if ent^.d_type = DT_DIR then
-        DoFolder(fn)
-      else
-      begin
-        if n = 0 then // generous initial result capacity
-          SetLength(result, 128)
-        else if n = length(result) then
-          SetLength(result, NextGrow(n));
-        result[n] := fn;
-        inc(n);
-      end;
+      if n = 0 then // generous initial result capacity
+        SetLength(result, 128)
+      else if n = length(result) then
+        SetLength(result, NextGrow(n));
+      MakeFileName(addedpath);
+      pointer(result[n]) := fn;
+      inc(n);
     until false;
     FpClosedir(dir^);
+    // now process the sub-folders recursively outside of FpOpendir/FpCLoseDir
+    for i := 0 to subcount - 1 do
+      DoFolder(sub[i]);
   end;
 
 begin
@@ -2675,8 +2721,8 @@ begin
   QueryPerformanceMicroSeconds(us);
   e.i[0] := e.i[0] xor us;
   e.i[1] := e.i[1] xor GetTickCount64;
-  getloadavg(avg, 3);
-  DefaultHasher128(@e.h1, @avg, SizeOf(avg)); // may be AesNiHash128
+  getloadavg(avg, 3); // cpu stats and random stack data
+  DefaultHasher128(@e.h1, @mem, SizeOf(mem)); // may be AesNiHash128
   GetMemoryInfo(mem, {withalloc=}false);
   DefaultHasher128(@e.h2, @mem, SizeOf(mem));
   {$ifdef OSDARWIN} // FPC CreateGuid calls /dev/urandom which is not advised
@@ -2691,18 +2737,121 @@ end;
 
 {$else} // Linux-specific code
 
-function IsValidPid(pid: cardinal): boolean;
+procedure FindNameValue(const s, up: RawUtf8; var res: RawUtf8);
 var
-  status, tgid: RawUtf8;
+  p: PUtf8Char;
+  L: PtrInt;
 begin
-  result := false;
-  if pid = 0 then
+  p := pointer(s);
+  while p <> nil do
+    if IdemPChar(p, pointer(up)) then
+    begin
+      inc(p, length(up));
+      while (p^ <= ' ') and
+            (p^ <> #0) do
+        inc(p); // trim left
+      L := 0;
+      while p[L] > #13 do
+        inc(L);
+      while p[L - 1] = ' ' do
+        dec(L); // trim right
+      FastSetString(res, p, L);
+      exit;
+    end
+    else
+      p := GotoNextLine(p);
+  FastAssignNew(res);
+end;
+
+function FindNameValueCardinal(p: PUtf8Char; const up: shortstring): PtrUInt;
+begin
+  while p <> nil do
+    if IdemPChar(p, @up[1]) then // agressively inlined on FPC
+    begin
+      inc(p, ord(up[0]));
+      result := GetCardinal(p);
+      exit;
+    end
+    else
+      p := GotoNextLine(p);
+  result := 0;
+end;
+
+procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
+var
+  v: integer;
+begin
+  v := ParseHex0x(p);
+  if v <> 0 then
+    AddInteger(result, v, {nodup=}true);
+end;
+
+function ParseLine(P: PUtf8Char): PUtf8Char;
+begin
+  if P <> nil then
+    P := strscan(P, ':');
+  result := P;
+  if P = nil then
     exit;
-  status := StringFromFile('/proc/' + IntToStr(pid) + '/status', {nosize=}true);
+  repeat
+    inc(P);
+  until (P^ = #0) or
+        (P^ > ' ');
+  result := P;
+  while not (ord(P^) in [0, 10, 13]) do
+  begin
+    if P^ < ' ' then
+      P^ := ' '; // change any tab into space
+    inc(P);
+  end;
+  P^ := #0; // make asciiz
+end;
+
+function ParseInt(P: PUtf8Char): integer;
+begin
+  P := ParseLine(P);
+  if (P <> nil) and
+     (P^ in ['0'..'9']) then
+    result := GetCardinal(P)
+  else
+    result := -1;
+end;
+
+function FindFileCardinal(fn: PAnsiChar; const up: shortstring): PtrUInt;
+var
+  h: THandle;
+  len: PtrInt;
+  buf: array[0..4095] of AnsiChar; // reading up to 4KB of content is enough
+begin
+  result := 0;
+  h := FpOpen(fn, O_RDONLY);
+  if PtrInt(h) <= 0 then
+    exit;
+  len := FileRead(h, buf, SizeOf(buf) - 1);
+  if len >= 10 then
+  begin
+    buf[len] := #0;
+    result := FindNameValueCardinal(@buf, up);
+  end;
+  FileClose(h);
+end;
+
+function FindPidStatus(pid: cardinal; const up: shortstring): PtrUInt;
+var
+  fn: shortstring; // avoid any memory allocation
+begin
+  fn := '/proc/';
+  AppendShortCardinal(pid, fn);
+  AppendShort('/status'#0, fn);
+  result := FindFileCardinal(@fn[1], up);
+end;
+
+function IsValidPid(pid: cardinal): boolean;
+begin
   // ensure is a real process, not a thread
   // https://www.memsql.com/blog/the-curious-case-of-thread-groups-identifiers
-  FindNameValue(status, 'TGID:', tgid);
-  result := GetCardinal(pointer(tgid)) = pid;
+  result := (pid <> 0) and
+            (FindPidStatus(pid, 'TGID:') = pid);
 end;
 
 function EnumAllProcesses: TCardinalDynArray;
@@ -2713,7 +2862,7 @@ var
   pid: cardinal;
 begin
   result := nil;
-  d := FpOpendir('/proc'); // (much) faster alternative to FindFirst()
+  d := FpOpendir(PAnsiChar('/proc')); // faster alternative to FindFirst()
   if d = nil then
     exit;
   n := 0;
@@ -2762,43 +2911,22 @@ begin
 end;
 
 function GetParentProcess(PID: cardinal): cardinal;
-var
-  status, ppid: RawUtf8;
 begin
   if PID = 0 then
     result := FpGetppid // we have a system call for the current process :)
   else
-  begin
-    result := 0;
-    status := StringFromFile('/proc/' + IntToStr(PID) + '/status', {nosize=}true);
-    if status = '' then
-      exit; // no such process
-    FindNameValue(status, 'PPID:', ppid);
-    result := GetCardinal(pointer(ppid));
-  end;
+    result := FindPidStatus(PID, 'PPID:');
 end;
 
 function _IsDebuggerPresent: boolean;
-var
-  status, tracerpid: RawUtf8;
 begin
-  status := StringFromFile('/proc/self/status', {nosize=}true);
-  FindNameValue(status, 'TRACERPID:', tracerpid);
-  result := (tracerpid <> '0');
+  result := FindFileCardinal('/proc/self/status', 'TRACERPID:') <> 0;
 end;
 
 function RetrieveLoadAvg: RawUtf8;
 begin
   // the libc parses this file anyway :)
   result := TrimU(StringFromFile('/proc/loadavg', {nosize=}true));
-end;
-
-function FindMemInfo(const meminfo, up: RawUtf8): PtrUInt;
-var
-  v: RawUtf8;
-begin
-  FindNameValue(meminfo, up, v);
-  result := GetCardinal(pointer(v)) shl 10; // from KB to bytes
 end;
 
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
@@ -2812,19 +2940,19 @@ begin
   proc := StringFromFile('/proc/meminfo', {hasnosize=}true);
   if proc = '' then
     exit;
-  info.memtotal  := FindMemInfo(proc, 'MEMTOTAL:');
-  info.memfree   := FindMemInfo(proc, 'MEMAVAILABLE:'); // MemFree is too low
-  info.filetotal := FindMemInfo(proc, 'SWAPTOTAL:');
-  info.filefree  := FindMemInfo(proc, 'SWAPFREE:');
+  info.memtotal  := FindNameValueCardinal(pointer(proc), 'MEMTOTAL:') shr 10;
+  info.memfree   := FindNameValueCardinal(pointer(proc), 'MEMAVAILABLE:') shr 10;
+  info.filetotal := FindNameValueCardinal(pointer(proc), 'SWAPTOTAL:') shr 10;
+  info.filefree  := FindNameValueCardinal(pointer(proc), 'SWAPFREE:') shr 10;
   // note: Windows-like virtual memory information is not available under Linux
-  info.vmtotal   := FindMemInfo(proc, 'COMMITLIMIT:');
-  info.vmfree    := FindMemInfo(proc, 'MEMFREE:');
+  info.vmtotal   := FindNameValueCardinal(pointer(proc), 'COMMITLIMIT:') shr 10;
+  info.vmfree    := FindNameValueCardinal(pointer(proc), 'MEMFREE:') shr 10;
   if info.memfree = 0 then // kernel < 3.14 may not have the MemAvailable field
-    info.memfree  := info.vmfree +
-                     FindMemInfo(proc, 'BUFFERS:') +
-                     FindMemInfo(proc, 'CACHED:')  +
-                     FindMemInfo(proc, 'SRECLAIMABLE:') -
-                     FindMemInfo(proc, 'SHMEM:');
+    info.memfree  := info.vmfree + (
+                     FindNameValueCardinal(pointer(proc), 'BUFFERS:') +
+                     FindNameValueCardinal(pointer(proc), 'CACHED:')  +
+                     FindNameValueCardinal(pointer(proc), 'SRECLAIMABLE:') -
+                     FindNameValueCardinal(pointer(proc), 'SHMEM:')) shr 10;
   if info.memtotal <> 0 then
   begin
     info.percent := ((info.memtotal - info.memfree) * 100) div info.memtotal;
@@ -2917,17 +3045,21 @@ end;
 
 {$endif OSBSDDARWIN}
 
-var
-  __IsDebuggerPresent: (idpUntested, idpNone, idpPresent);
+procedure TestOnceDebuggerTty;
+begin
+  __IsDebuggerTested := true;
+  __IsDebuggerPresent := _IsDebuggerPresent; // syscall
+  __StdOutIsTTY := (not __IsDebuggerPresent) and
+                   (IsATTY(StdOut) = 1) and
+                   IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
+                     'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
+end;
 
 function IsDebuggerPresent: boolean;
 begin
-  if __IsDebuggerPresent = idpUntested then
-    if _IsDebuggerPresent then
-      __IsDebuggerPresent := idpPresent
-    else
-      __IsDebuggerPresent := idpNone;
-  result := __IsDebuggerPresent = idpPresent;
+  if not __IsDebuggerTested then
+    TestOnceDebuggerTty;
+  result := __IsDebuggerPresent;
 end;
 
 {$ifndef OSDARWIN}
@@ -2942,7 +3074,7 @@ begin
   result := '';
   if size > 4 shl 20 then
     exit; // read up to 4MB
-  mem := FpOpen('/dev/mem', O_RDONLY, 0);
+  mem := FpOpen(PAnsiChar('/dev/mem'), O_RDONLY, 0);
   if mem <= 0 then
     exit;
   // Fpmmap() is more complex but works around problems using plain read() calls
@@ -3022,6 +3154,23 @@ begin
   Idle   := 100 - Kernel - User; // ensure sum is always 100%
 end; { TODO : use a diff approach for TProcessInfo.PerSystem on Linux? }
 
+procedure _XorEntropyGetOsRandom256(var e: THash256Rec);
+var
+  dev: THandle;
+begin
+  dev := 0;
+  if not _XorEntropyGetOsRandom256failed then
+    dev := FpOpen('/dev/urandom', O_RDONLY);  // non blocking on Linux + BSD
+  if (dev <= 0) or
+     (FileRead(dev, e, SizeOf(e)) <> SizeOf(e)) then
+  begin
+    _XorEntropyGetOsRandom256failed := true;
+    sysutils.CreateGUID(e.l.guid); // fallback to FPC RTL
+    sysutils.CreateGUID(e.h.guid);
+  end;
+  if dev > 0 then
+    FileClose(dev);
+end;
 
 function FillSystemRandom(Buffer: PByteArray; Len: integer;
   AllowBlocking: boolean): boolean;
@@ -3060,7 +3209,7 @@ begin
   if aDriveFolderOrFile = '' then
     aDriveFolderOrFile := '.';
   FillCharFast(fs, SizeOf(fs), 0);
-  result := fpStatFS(aDriveFolderOrFile, @fs) = 0;
+  result := fpStatFS(pointer(aDriveFolderOrFile), @fs) = 0;
   aAvailableBytes := QWord(fs.bavail) * QWord(fs.bsize);
   aFreeBytes := aAvailableBytes; // no user Quota involved here
   aTotalBytes := QWord(fs.blocks) * QWord(fs.bsize);
@@ -3984,46 +4133,6 @@ end;
 
 {$endif CPUARM3264}
 
-procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
-var
-  v: integer;
-begin
-  v := ParseHex0x(p);
-  if v <> 0 then
-    AddInteger(result, v, {nodup=}true);
-end;
-
-function ParseLine(P: PUtf8Char): PUtf8Char;
-begin
-  if P <> nil then
-    P := strscan(P, ':');
-  result := P;
-  if P = nil then
-    exit;
-  repeat
-    inc(P);
-  until (P^ = #0) or
-        (P^ > ' ');
-  result := P;
-  while not (ord(P^) in [0, 10, 13]) do
-  begin
-    if P^ < ' ' then
-      P^ := ' '; // change any tab into space
-    inc(P);
-  end;
-  P^ := #0; // make asciiz
-end;
-
-function ParseInt(P: PUtf8Char): integer;
-begin
-  P := ParseLine(P);
-  if (P <> nil) and
-     (P^ in ['0'..'9']) then
-    result := GetCardinal(P)
-  else
-    result := -1;
-end;
-
 {$ifdef CPUAARCH64}
 {$ifdef OSLINUXANDROID}
 // AARCH64 armv8.o is only validated on Linux
@@ -4079,10 +4188,6 @@ var
 begin
   // retrieve Kernel and Hardware information
   StdOut := StdOutputHandle;
-  StdOutIsTTY := not IsDebuggerPresent and
-                 (IsATTY(StdOut) = 1) and
-                 IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
-                   'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;
   fpuname(uts);
   {$ifdef OSBSDDARWIN}
@@ -4324,6 +4429,7 @@ begin
       [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
   // intialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
+  XorEntropyGetOsRandom256 := @_XorEntropyGetOsRandom256;
   {$ifndef NODIRECTTHREADMANAGER}
   // for inlined RTL calls (avoid one level of redirection)
   GetThreadManager(tm);

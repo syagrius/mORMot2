@@ -132,7 +132,7 @@ type
     /// some low-level RTTI access
     // - especially the field type retrieval from published properties
     procedure _RTTI;
-    /// validate some internal data structures
+    /// validate some internal data structures like TLockedList
     procedure DataStructures;
     /// some low-level Url encoding from parameters
     procedure UrlEncoding;
@@ -162,6 +162,8 @@ type
     procedure _TSelectStatement;
     /// test advanced statistics monitoring
     procedure _TSynMonitorUsage;
+    /// validate some folder-level functions
+    procedure Folders;
   end;
 
   /// this test case will test most functions, classes and types defined and
@@ -7279,6 +7281,97 @@ begin
     id.From(n.Year);
     Check(id.Granularity = mugYear);
   end;
+end;
+
+procedure TTestCoreProcess.Folders;
+var
+  folder, subfolder: TFileName;
+
+  procedure DoOne(opt: TFindFilesOptions; const mask: TFileName);
+  var
+    f1: TFindFilesDynArray;
+    {$ifdef OSPOSIX}
+    f2: TFindFilesDynArray;
+    p1, p2: PFindFiles;
+    siz: Int64;
+    {$endif}
+    n1, n2: TFileNameDynArray;
+    i: PtrInt;
+  begin
+    f1 := FindFiles(folder, mask, '', opt);
+    {$ifdef OSPOSIX} // not needed on Windows where FindFiles=FindFilesRtl
+    siz := FindFilesSize(f1);
+    FindFilesRtl(folder, mask, '', opt, f2); // use TSearchRec on POSIX
+    CheckEqual(length(f1), length(f2));
+    CheckEqual(FindFilesSize(f2), siz);
+    p1 := pointer(f1);
+    p2 := pointer(f2);
+    for i := 1 to length(f1) do
+    begin
+      Check(p1 <> p2);
+      if not (ffoSortByDate in opt) then // only dates are identical after sort
+      begin
+        Check(p1^.Name = p2^.Name);
+        CheckEqual(p1^.Size, p2^.Size);
+        CheckEqual(p1^.Attr, p2^.Attr);
+      end;
+      CheckSameTime(p1^.Timestamp, p2^.Timestamp);
+      if p1^.Size > 0 then
+        dec(siz, p1^.Size);
+      inc(p1);
+      inc(p2);
+    end;
+    CheckEqual(siz, 0);
+    {$endif OSPOSIX}
+    if ffoSortByDate in opt then
+      exit; // FileNames() knows no date
+    n1 := FileNames(folder, mask, opt);
+    CheckEqual(length(f1), length(n1));
+    for i := 0 to high(f1) do
+      Check(f1[i].Name = n1[i]);
+    n2 := FindFilesDynArrayToFileNames(f1);
+    CheckEqual(length(n1), length(n2));
+    for i := 0 to high(n1) do
+      Check(n1[i] = n2[i]);
+  end;
+
+  procedure DoOptions(opt: TFindFilesOptions);
+  begin
+    DoOne(opt + [ffoExcludesDir], FILES_ALL);
+    DoOne(opt, FILES_ALL);
+    DoOne(opt + [ffoExcludesDir], '*.txt');
+    DoOne(opt, '*.txt');
+  end;
+
+  procedure DoFolder(const one: TFileName);
+  begin
+    folder := one;
+    DoOptions([]);
+    DoOptions([ffoIncludeHiddenFiles]);
+    DoOptions([ffoSortByName]); // "human" sort by extension then name
+    DoOptions([ffoSortByFullName]); // name-only sort
+    DoOptions([ffoSortByDate]);
+    DoOptions([ffoIncludeFolder]);
+    DoOptions([ffoIncludeFolder, ffoSortByName]);
+    DoOptions([ffoIncludeFolder, ffoSortByFullName]);
+    DoOptions([ffoSubFolder]);
+    DoOptions([ffoSubFolder, ffoSortByName]);
+    DoOptions([ffoSubFolder, ffoSortByFullName]);
+    DoOne([ffoSubFolder, ffoSortByName], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByName, ffoExcludesDir], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByFullName], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByDate], '*.txt;*.json');
+  end;
+
+begin
+  // create at least two sub-folder levels to validate proper recursive process
+  subfolder := EnsureDirectoryExists([
+    Executable.ProgramFilePath, 'data', 'synecc', 'level2']);
+  Check(FileFromString('non void folder', subfolder + 'test.txt'));
+  // we can't use Executable.ProgramFilePath because of its live mormot*.log
+  DoFolder(Executable.ProgramFilePath + 'data');
+  DoFolder(Executable.ProgramFilePath + 'log');
+  Check(DirectoryDelete(subfolder), subfolder);
 end;
 
 
