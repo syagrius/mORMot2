@@ -1335,14 +1335,6 @@ procedure Curr64ToStr(const Value: Int64; var result: RawUtf8); overload;
 // - return the number of chars written to Dest^
 function Curr64ToPChar(const Value: Int64; Dest: PUtf8Char): PtrInt;
 
-/// internal fast INTEGER Curr64 (value*10000) value to text conversion
-// - expect the last available temporary char position in P
-// - return the last written char position (write in reverse order in P^)
-// - will return 0 for Value=0, or a string representation with always 4 decimals
-//   (e.g. 1->'0.0001' 500->'0.0500' 25000->'2.5000' 30000->'3.0000')
-// - is called by Curr64ToPChar() and Curr64ToStr() functions
-function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
-
 /// faster than default SysUtils.IntToStr implementation
 function IntToString(Value: integer): string; overload;
 
@@ -6275,41 +6267,6 @@ begin
   UInt32ToUtf8(Value, result);
 end;
 
-function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
-var
-  c: QWord;
-  d: cardinal;
-begin
-  if Value = 0 then
-  begin
-    result := P - 1;
-    result^ := '0';
-    exit;
-  end;
-  if Value < 0 then
-    c := -Value
-  else
-    c := Value;
-  if c < 10000 then
-  begin
-    result := P - 6; // only decimals -> append '0.xxxx'
-    PCardinal(result)^ := ord('0') + ord('.') shl 8;
-    YearToPChar(c, PUtf8Char(P) - 4);
-  end
-  else
-  begin
-    result := StrUInt64(P - 1, c);
-    d := PCardinal(P - 5)^; // in two explit steps for CPUARM (alf)
-    PCardinal(P - 4)^ := d;
-    P[-5] := '.'; // insert '.' just before last 4 decimals
-  end;
-  if Value < 0 then
-  begin
-    dec(result);
-    result^ := '-';
-  end;
-end;
-
 procedure Curr64ToStr(const Value: Int64; var result: RawUtf8);
 var
   tmp: array[0..31] of AnsiChar;
@@ -6325,10 +6282,10 @@ begin
     if L > 4 then
     begin
       Decim := PCardinal(P + L - SizeOf(cardinal))^; // 4 last digits = 4 decimals
-      if Decim = ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('0') shl 24 then
+      if Decim = $30303030 then
         dec(L, 5)
       else // no decimal
-      if Decim and $ffff0000 = ord('0') shl 16 + ord('0') shl 24 then
+      if Decim and $ffff0000 = $30300000 then
         dec(L, 2); // 2 decimals
     end;
     FastSetString(result, P, L);
@@ -6357,11 +6314,9 @@ begin
   begin
     // Decim = 4 last digits = 4 decimals
     Decim := PCardinal(P + result - SizeOf(cardinal))^;
-    if Decim = ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('0') shl 24 then
-      // no decimal -> trunc trailing *.0000 chars
+    if Decim = $30303030 then // no decimal -> trunc trailing *.0000 chars
       dec(result, 5)
-    else if Decim and $ffff0000 = ord('0') shl 16 + ord('0') shl 24 then
-      // 2 decimals -> trunc trailing *.??00 chars
+    else if Decim and $ffff0000 = $30300000 then // 2 decimals -> trunc *.??00
       dec(result, 2);
   end;
   MoveFast(P^, Dest^, result);

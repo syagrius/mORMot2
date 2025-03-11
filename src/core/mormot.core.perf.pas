@@ -943,6 +943,10 @@ type
     /// access to a global instance, corresponding to the current process
     // - its HistoryDepth will be of 60 items
     class function Current(aCreateIfNone: boolean = true): TSystemUse;
+    /// returns detailed CPU and RAM usage history as text of the supplied process
+    // - fallback to RetrieveLoadAvg if the ProcessID was not registered
+    class function CurrentHistoryText(aProcessID: integer = 0; aDepth: integer = 0;
+      aDestMemoryMB: PRawUtf8 = nil): RawUtf8;
     /// returns detailed CPU and RAM usage history of the supplied process
     // - aProcessID=0 will return information from the current process
     // - returns nil if the Process ID was not registered via Create/Subscribe
@@ -3878,31 +3882,42 @@ begin
   result := ProcessSystemUse;
 end;
 
+class function TSystemUse.CurrentHistoryText(aProcessID, aDepth: integer;
+  aDestMemoryMB: PRawUtf8): RawUtf8;
+begin
+  if ProcessSystemUse <> nil then
+    result := ProcessSystemUse.HistoryText(aProcessID, aDepth, aDestMemoryMB)
+  else // fallback to POSIX loadavg or Windows 'U:xx K:xx'
+    ShortStringToAnsi7String(RetrieveLoadAvg, result);
+end;
+
 function TSystemUse.HistoryText(aProcessID, aDepth: integer;
   aDestMemoryMB: PRawUtf8): RawUtf8;
 var
   data: TSystemUseDataDynArray;
+  d: ^TSystemUseData;
   mem: RawUtf8;
-  i: PtrInt;
+  i: integer;
 begin
   result := '';
-  mem := '';
-  data := HistoryData(aProcessID, aDepth);
-  {$ifndef OSWINDOWS}
-  if data = nil then
-    result := RetrieveLoadAvg // from '/proc/loadavg' or libc getloadavg()
+  if self <> nil then
+    data := HistoryData(aProcessID, aDepth);
+  d := pointer(data);
+  if d = nil then // POSIX loadavg or Windows 'U:xx K:xx'
+    ShortStringToAnsi7String(RetrieveLoadAvg, result)
   else
-  {$endif OSWINDOWS}
-    for i := 0 to high(data) do
-      with data[i] do
-      begin
-        result := FormatUtf8('%% ', [result, TwoDigits(Kernel + User)]);
-        if aDestMemoryMB <> nil then
-          mem := FormatUtf8('%% ', [mem, TwoDigits(WorkKB / 1024)]);
-      end;
+    for i := 1 to length(data) do
+    begin
+      Append(result, [TwoDigits(d^.Kernel + d^.User), ' ']);
+      if aDestMemoryMB <> nil then
+        Append(mem, [TwoDigits(d^.WorkKB / 1024), ' ']);
+      inc(d);
+    end;
   TrimSelf(result);
-  if aDestMemoryMB <> nil then
-    aDestMemoryMB^ := TrimU(mem);
+  if aDestMemoryMB = nil then
+    exit;
+  TrimSelf(mem);
+  aDestMemoryMB^ := mem;
 end;
 
 function TSystemUse.HistoryVariant(aProcessID, aDepth: integer): variant;
@@ -3915,7 +3930,8 @@ begin
   data := HistoryData(aProcessID, aDepth);
   res.InitFast(length(data), dvArray);
   for i := 0 to high(data) do
-    res.AddItem(TwoDigits(data[i].Kernel + data[i].User));
+    with data[i] do
+      res.AddItem(SimpleRoundTo2Digits(DoubleToCurrency(Kernel + User)));
 end;
 
 function SortDynArrayDiskPartitions(const A, B): integer;

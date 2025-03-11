@@ -1367,11 +1367,13 @@ function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boole
 var
   s, t: TW32Temp;
 begin
-  if (Source = '') or
-     (Target = '') then
-    result := false
-  else
-    result := Windows.CopyFileW(W32(Source, s), W32(Target, t), FailIfExists);
+  result := false;
+  if (Source <> '') and
+     (Target <> '') then
+    if Windows.CopyFileW(W32(Source, s), W32(Target, t), FailIfExists) then
+      result := true
+    else if not FailIfExists then
+      DeleteFile(Target); // remove any partial file
 end;
 
 const
@@ -2289,13 +2291,26 @@ begin
   if not result then
     exit;
   FileTimeToInt64(ftidl, IdleTime);
-  FileTimeToInt64(ftkrn, KernelTime);
+  FileTimeToInt64(ftkrn, KernelTime); // on Windows, ftkrn includes ftidl
   FileTimeToInt64(ftusr, UserTime);
 end;
 
-function RetrieveLoadAvg: RawUtf8;
-begin
-  result := ''; // call RetrieveSystemTimes() instead
+function RetrieveLoadAvg: TShort23;
+var
+  I, K, U, S: Int64;
+begin // return 'U:usr K:krn' percents on windows
+  result[0] := #0;
+  RetrieveSystemTimes(I, K, U);
+  dec(K, I); // raw KernelTime includes IdleTime with GetSystemTimes() WinAPI
+  S := I + K + U;
+  if S = 0 then
+    exit;
+  U := (U * 1000000) div S;
+  K := (K * 1000000) div S;
+  PCardinal(@result)^ := 2 + ord('U') shl 8 + ord(':') shl 16;
+  AppendShortCurr64(U, result, {fixeddecimals=}2);
+  AppendShort(' K:', result);
+  AppendShortCurr64(K, result, {fixeddecimals=}2);
 end;
 
 function DelayedGetProcessMemoryInfo: boolean;
@@ -2421,7 +2436,7 @@ begin
     end;
   if not result then
     // OS API call failed -> fallback to our Lecuyer's gsl_rng_taus2 generator
-    RandomBytes(pointer(Buffer), Len);
+    SharedRandom.Fill(pointer(Buffer), Len);
 end;
 
 function TProcessInfo.Init: boolean;
@@ -2971,15 +2986,14 @@ procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
   LeaveUnprotected: boolean);
 var
   restore, ignore: DWord;
-  i: PtrInt;
 begin
+  if Size <= 0 then
+    exit;
   if VirtualProtect(Old, Size, PAGE_EXECUTE_READWRITE, restore) then
   begin
     if Backup <> nil then
-      for i := 0 to Size - 1 do  // do not use Move() here
-        PByteArray(Backup)^[i] := PByteArray(Old)^[i];
-    for i := 0 to Size - 1 do    // do not use Move() here
-      PByteArray(Old)^[i] := PByteArray(New)^[i];
+      MoveByOne(Old, Backup, Size); // do not use Move() here
+    MoveByOne(New, Old, Size);
     if not LeaveUnprotected then
       VirtualProtect(Old, Size, restore, ignore);
     FlushInstructionCache(GetCurrentProcess, Old, Size);
@@ -2988,6 +3002,9 @@ begin
   end;
 end;
 
+procedure PatchCodeProtectBack;
+begin // nothing to do on Windows - LeaveUnprotected=false by default
+end;
 
 function StubMemoryAlloc: pointer;
 begin

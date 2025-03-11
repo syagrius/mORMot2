@@ -709,9 +709,6 @@ var
   /// the available cache information as returned by the OS
   // - e.g. 'L1=2*32KB  L2=256KB  L3=3MB' on Windows or '3072 KB' on Linux
   CpuCacheText: RawUtf8;
-  /// some textual information about the current computer hardware, from BIOS
-  // - contains e.g. 'LENOVO 20HES23B0U ThinkPad T470'
-  BiosInfoText: RawUtf8;
 
   /// how many hardware CPU sockets are defined on this system
   // - i.e. the number of physical CPU slots, not the number of logical CPU
@@ -729,6 +726,8 @@ var
   end;
 
   {$ifdef OSLINUXANDROID}
+  /// contains the content of Linux /proc/cpuinfo as retrieved at startup
+  CpuInfoLinux: RawUtf8;
   /// contains the Flags: or Features: value of Linux /proc/cpuinfo
   CpuInfoFeatures: RawUtf8;
   {$endif OSLINUXANDROID}
@@ -737,6 +736,11 @@ var
   OSVersion32: TOperatingSystemVersion;
   /// the running Operating System, encoded as a 32-bit integer
   OSVersionInt32: integer absolute OSVersion32;
+
+/// some textual information about the current computer hardware, from BIOS
+// - contains e.g. 'LENOVO 20HES23B0U ThinkPad T470'
+// - is a function on Linux to avoid some syscalls at startup
+{$ifdef OSLINUXANDROID} function {$endif} BiosInfoText: RawUtf8;
 
 /// convert an Operating System type into its human-friendly text representation
 // - returns e.g. 'Windows Vista' or 'Windows 10 22H2' or 'Ubuntu' or
@@ -836,10 +840,14 @@ type
     actCortexA520,
     actCortexA720,
     actCortexX4,
+    actNeoverseV3AE,
     actNeoverseV3,
     actCortextX925,
     actCortextA725,
-    actNeoverseN3);
+    actCortextA520AE,
+    actCortextA720AE,
+    actNeoverseN3,
+    actCortextA320);
   /// a set of recognized ARM/AARCH64 CPU types
   TArmCpuTypes = set of TArmCpuType;
 
@@ -1010,7 +1018,7 @@ var
     dwNumberOfProcessors: cardinal;
     /// meaningful system information, as returned by fpuname()
     uts: record
-      sysname, release, version: RawUtf8;
+      sysname, release, version, nodename: RawUtf8;
     end;
     /// Linux Distribution release name, retrieved from /etc/*-release
     release: RawUtf8;
@@ -1079,7 +1087,8 @@ type
     // GetExecutableVersion / SetExecutableVersion and access the Executable
     // global variable
     constructor Create(const aFileName: TFileName; aMajor: integer = 0;
-      aMinor: integer = 0; aRelease: integer = 0; aBuild: integer = 0); reintroduce;
+      aMinor: integer = 0; aRelease: integer = 0; aBuild: integer = 0;
+      aBuildDate: TDateTime = 0); reintroduce;
     /// open and extract file information from the executable FileName
     // - note that resource extraction is not available on POSIX, unless the
     // FPCUSEVERSIONINFO conditional has been specified in the project options
@@ -2381,11 +2390,6 @@ function DirectoryExists(const FileName: TFileName;
 /// redefined here to avoid warning to include "Windows" in uses clause
 // and support FileName longer than MAX_PATH
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
-function DeleteFile(const aFileName: TFileName): boolean;
-
-/// redefined here to avoid warning to include "Windows" in uses clause
-// and support FileName longer than MAX_PATH
-// - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 function RenameFile(const OldName, NewName: TFileName): boolean;
 
 /// redirection to Windows SetFileTime() of a file name from Int64(TFileTime)
@@ -2533,8 +2537,6 @@ const
   /// low-level libcurl library file name, depending on the running OS
   LIBSYSTEMD_PATH = 'libsystemd.so.0';
 
-  ENV_INVOCATION_ID: PAnsiChar = 'INVOCATION_ID';
-
 type
   /// low-level systemd parameter to sd.journal_sendv() function
   TIoVec = record
@@ -2591,10 +2593,10 @@ var
   // - this unit will make sd.Done in its finalization section
   sd: TSystemD;
 
-/// a wrapper to the eventfd() syscall
-// - returns 0 if the kernel does not support eventfd2 (before 2.6.27) or
-// if the platform is not supported (only validated on Linux x86_64 by now)
-// - returns a file descriptor handle on success, which should be fpclose()
+/// a wrapper to the Linux eventfd() syscall
+// - returns 0 if the kernel does not support eventfd2 (before 2.6.27) or if the
+// platform is not validated yet (only Linux x86_64 by now)
+// - returns a file descriptor handle on success, to be eventually closed
 function LinuxEventFD(nonblocking, semaphore: boolean): integer;
 
 /// wrapper to read from a eventfd() file
@@ -2610,6 +2612,13 @@ procedure LinuxEventFDWrite(fd: integer; count: QWord);
 /// wrapper to wait for a eventfd() file read
 // - return true if was notified for reading, or false on timeout
 function LinuxEventFDWait(fd: integer; ms: integer): boolean; inline;
+
+/// a wrapper to the Linux getrandom() syscall
+// - returns false if the kernel is unsupported (before 3.17) or if the
+// platform is not validated yet (only Linux x86_64 by now)
+// - used e.g. by function FillSystemRandom() if available, since it makes a
+// single syscall, and /dev/urandom may be not available from some chroot
+function LinuxGetRandom(buf: pointer; len: PtrInt): boolean;
 
 {$endif OSLINUX}
 
@@ -3206,7 +3215,12 @@ function WindowsFileTime64ToUnixMSTime(WinTime: QWord): TUnixMSTime;
 // - returns 0 if the conversion failed
 function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 
-/// check if a file exists and can be written
+/// redefined here to avoid warning to include "Windows" in uses clause
+// and support FileName longer than MAX_PATH
+// - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
+function DeleteFile(const aFileName: TFileName): boolean;
+
+/// check if a file (or folder) exists and can be written
 // - on POSIX, call fpaccess() and check for the W_OK attribute
 // - on Windows, check faReadOnly and supports aFileName longer than MAX_PATH
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -3284,6 +3298,7 @@ function DirectorySize(const FileName: TFileName; Recursive: boolean = false;
 
 /// copy one file to another, using the Windows API if possible
 // - on POSIX, will call StreamCopyUntilEnd() between two TFileStreamEx
+// - will delete the Target file on any copying issue (e.g. process abort)
 function CopyFile(const Source, Target: TFileName;
   FailIfExists: boolean): boolean;
 
@@ -3422,14 +3437,16 @@ function FileIsReadable(const aFileName: TFileName): boolean;
 // - returns the number of bytes copied from Source to Dest
 function StreamCopyUntilEnd(Source, Dest: TStream): Int64;
 
-/// read a File content into a string
+/// read a File content into a string, using FileSize() to guess its length
 // - content can be binary or text
 // - returns '' if file was not found or any read error occurred
-// - will use FileSize() API by default, unless HasNoSize is defined,
-// and read will be done using a buffer (required e.g. for POSIX char files)
 // - uses RawByteString for byte storage, whatever the codepage is
-function StringFromFile(const FileName: TFileName;
-  HasNoSize: boolean = false): RawByteString;
+function StringFromFile(const FileName: TFileName): RawByteString;
+
+/// read a File content into a string, without using FileSize()
+// - result will be filled using a buffer as required e.g. for POSIX char files
+// like /proc/... or /sys/...
+function StringFromFileNoSize(const FileName: TFileName): RawByteString;
 
 /// read a File content from a list of potential files
 // - returns '' if no file was found, or the first matching FileName[] content
@@ -3562,17 +3579,22 @@ type
   // - on Win32 Vista+, idwExcludeWinUac will check IsUacVirtualFolder()
   // - on Windows, idwExcludeWinSys will check IsSystemFolder()
   // - on Windows, idwTryWinExeFile will try to generate a 'xxxxx.exe' file
+  // - idwAttributesOnly won't create any file but just check folder faReadOnly
+  // which may be enough with a POSIX's fpaccess() call
   // - idwWriteSomeContent will also try to write some bytes into the file
   TIsDirectoryWritable = set of (
     idwExcludeWinUac,
     idwExcludeWinSys,
     idwTryWinExeFile,
+    idwAttributesOnly,
     idwWriteSomeContent);
 
 /// check if the directory is writable for the current user
 // - try to write and delete a void file with a random name in this folder
+// - use idwAttributesOnly by default on POSIX, since fpaccess() is accurate
+// unless the current user was changed via setuid / DropPriviledges()
 function IsDirectoryWritable(const Directory: TFileName;
-  Flags: TIsDirectoryWritable = []): boolean;
+  Flags: TIsDirectoryWritable = [ {$ifdef OSPOSIX} idwAttributesOnly {$endif} ]): boolean;
 
 type
   /// cross-platform memory mapping of a file content
@@ -3714,8 +3736,8 @@ type
       out Data: TSystemUseData; var PrevKernel, PrevUser: Int64): boolean;
   end;
 
-  /// hold low-level information about current memory usage
-  // - as filled by GetMemoryInfo()
+  /// hold low-level GetMemoryInfo() result about current memory usage
+  // - most fields are in bytes, but percent which is the % of used memory
   TMemoryInfo = record
     memtotal, memfree, filetotal, filefree,
     vmtotal, vmfree, allocreserved, allocused: QWord;
@@ -3805,36 +3827,38 @@ function IsDebuggerPresent: boolean;
 
 /// return the time and memory usage information about a given process
 // - under Windows, is a wrapper around GetProcessTimes/GetProcessMemoryInfo
+// - on POSIX, is not implemented yet, and return false
 function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
   out WorkKB, VirtualKB: cardinal): boolean;
 
 /// return the system-wide time usage information
 // - under Windows, is a wrapper around GetSystemTimes() kernel API call
-// - return false on POSIX system - call RetrieveLoadAvg() instead
+// - will use /proc/stat on Linux, or kern.cp_time sysctl on BSD
+// - returned KernelTime includes IdleTime, as with GetSystemTimes() WinAPI
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 
 /// return the system-wide time usage information
 // - on LINUX, retrieve /proc/loadavg or on OSX/BSD call libc getloadavg()
-// - return '' on Windows - call RetrieveSystemTimes() instead
-function RetrieveLoadAvg: RawUtf8;
+// - on Windows, calls RetrieveSystemTimes() and return 'U:user K:kernel' percents
+function RetrieveLoadAvg: TShort23;
 
 /// retrieve low-level information about current memory usage
-// - as used by TSynMonitorMemory
+// - as used e.g. by TSynMonitorMemory or GetMemoryInfoText
 // - under BSD, only memtotal/memfree/percent are properly returned
 // - allocreserved and allocused are set only if withalloc is TRUE
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 
 /// retrieve some human-readable text from GetMemoryInfo
 // - numbers are rounded up to a single GB number with no decimals
-// - returns e.g. 'used 6GB/16GB (35% free)' text
-function GetMemoryInfoText: RawUtf8;
+// - returns e.g. '6GB/16GB (35%)' text
+function GetMemoryInfoText: TShort31;
 
 /// retrieve some human-readable text about the current system in several lines
 // - includes UTC timestamp, memory and disk availability, and exe/OS/CPU info
 function GetSystemInfoText: RawUtf8;
 
 /// retrieve low-level information about a given disk partition
-// - as used by TSynMonitorDisk and GetDiskPartitionsText()
+// - as used e.g. by TSynMonitorDisk and GetDiskPartitionsText()
 // - aDriveFolderOrFile is a directory on disk (no need to specify a raw drive
 // name like 'c:\' on Windows)
 // - warning: aDriveFolderOrFile may be modified at input
@@ -3849,7 +3873,6 @@ function GetDiskInfo(var aDriveFolderOrFile: TFileName;
 function GetDiskAvailable(aDriveFolderOrFile: TFileName): QWord;
 
 /// retrieve low-level information about all mounted disk partitions of the system
-// - returned partitions array is sorted by "mounted" ascending order
 function GetDiskPartitions: TDiskPartitions;
 
 /// call several Operating System APIs to gather 512-bit of entropy information
@@ -3859,8 +3882,9 @@ procedure XorOSEntropy(var e: THash512Rec);
 // - will call /dev/urandom or /dev/random under POSIX, and CryptGenRandom API
 // on Windows then return TRUE, or fallback to mormot.core.base gsl_rng_taus2
 // generator and return FALSE if the system API failed
-// - on POSIX, only up to 32 bytes (256 bits) bits are retrieved from /dev/urandom
-// or /dev/random as stated by "man urandom" Usage - then RandomBytes() padded
+// - on POSIX, only up to 32 bytes (256-bits) bits are retrieved from /dev/urandom
+// or /dev/random as stated by "man urandom" Usage - then padded with our L'Ecuyer
+// gsl_rng_taus2 random generator
 // - so you may consider that the output Buffer is always filled with random
 // - you should not have to call this procedure, but faster and safer TAesPrng
 // from mormot.crypt.core - also consider the TSystemPrng class
@@ -4096,16 +4120,22 @@ type
 // - some systems do forbid such live patching: consider setting NOPATCHVMT
 // and NOPATCHRTL conditionals for such projects
 procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer = nil;
-  LeaveUnprotected: boolean = false);
+  LeaveUnprotected: boolean = {$ifdef OSLINUX} true {$else} false {$endif});
 
 /// self-modifying code - change one PtrUInt in the code segment
 procedure PatchCodePtrUInt(Code: PPtrUInt; Value: PtrUInt;
-  LeaveUnprotected: boolean = false);
+  LeaveUnprotected: boolean = {$ifdef OSLINUX} true {$else} false {$endif});
 
 {$ifdef CPUINTEL}
 /// low-level i386/x86_64 asm routine patch and redirection
 procedure RedirectCode(Func, RedirectFunc: pointer);
 {$endif CPUINTEL}
+
+/// close any LeaveUnprotected=true R/W/X memory-mapped paged back as R/X
+// - could be used to harden back all memory regions at once, when every RTTI,
+// ORM or SOA features are eventually initialized
+// - only implemented and tested on Linux by now
+procedure PatchCodeProtectBack;
 
 
 { **************** TSynLocker/TSynLocked and Low-Level Threading Features }
@@ -4856,7 +4886,7 @@ type
 function NewSynLocker: PSynLocker;
 
 type
-  /// a thread-safe Pierre L'Ecuyer software random generator
+  /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
   // - just wrap TLecuyer with a TLighLock
   // - should not be used, unless may be slightly faster than a threadvar
   {$ifdef USERECORDWITHMETHODS}
@@ -4868,9 +4898,11 @@ type
     Safe: TLightLock;
     Generator: TLecuyer;
     /// compute the next 32-bit generated value
-    function Next: cardinal; overload;
+    function Next: cardinal;
     /// compute a 64-bit floating point value
     function NextDouble: double;
+    /// compute a 64-bit integer value
+    function NextQWord: QWord;
     /// XOR some memory buffer with random bytes
     procedure Fill(dest: pointer; count: integer);
     /// fill some string[31] with 7-bit ASCII random text
@@ -4880,11 +4912,77 @@ type
   TThreadIDDynArray = array of TThreadID;
 
 var
-  /// a global thread-safe Pierre L'Ecuyer software random generator
-  // - should not be used, unless may be slightly faster than a threadvar
+  /// a global thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
+  // - could be used if a threadvar is overkill, e.g. for short-living threads
+  // - called e.g. by Random32/Random31/Random64/RandomDouble/RandomBytes functions
   SharedRandom: TLecuyerThreadSafe;
 
+/// fast compute of some 32-bit random value, using the gsl_rng_taus2 generator
+// - this function will use well documented and proven Pierre L'Ecuyer software
+// generator - which happens to be faster (and safer) than RDRAND opcode (which
+// is used for seeding anyway)
+// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
+// randomness, but is twice slower (even with AES-NI)
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random32: cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute of a 32-bit random value <> 0, using the gsl_rng_taus2 generator
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random32Not0: cardinal;
+
+/// fast compute of some 31-bit random value, using the gsl_rng_taus2 generator
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random31: integer;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute of a 31-bit random value <> 0, using the gsl_rng_taus2 generator
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random31Not0: integer;
+
+/// fast compute of a 64-bit random value, using the gsl_rng_taus2 generator
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random64: QWord;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
+// - calls internally the overloaded Random32 function, ensuring Random32(max)<max
+// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
+// randomness, but is twice slower (even with AES-NI)
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function Random32(max: cardinal): cardinal; overload;
+
+/// fast compute of a 64-bit random floating point, using the gsl_rng_taus2 generator
+// - returns a random value in range [0..1)
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+function RandomDouble: double;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fill a memory buffer with random bytes from the gsl_rng_taus2 generator
+// - will actually XOR the Dest buffer with Lecuyer numbers
+// - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+procedure RandomBytes(Dest: PByte; Count: integer);
+
+/// fill some string[31] with 7-bit ASCII random text
+// - thread-safe function calling SharedRandom - whereas the RTL Random() is not
+procedure RandomShort31(var dest: TShort31);
+
+{$ifndef PUREMORMOT2}
+/// fill some 32-bit memory buffer with values from the gsl_rng_taus2 generator
+// - the destination buffer is expected to be allocated as 32-bit items
+procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
+{$endif PUREMORMOT2}
+
+/// compute a random UUid value from the RandomBytes() generator and RFC 4122
+procedure RandomGuid(out result: TGuid); overload;
+
+/// compute a random UUid value from the RandomBytes() generator and RFC 4122
+function RandomGuid: TGuid; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 {$ifdef OSPOSIX}
+var
   /// could be set to TRUE to force SleepHiRes(0) to call the POSIX sched_yield
   // - in practice, it has been reported as buggy under POSIX systems
   // - even Linus Torvald himself raged against its usage - see e.g.
@@ -5900,7 +5998,7 @@ begin
   result := ShortToUuid(tmp, uuid); // may call mormot.core.text
 end;
 
-procedure UuidToText(const u: TGuid; var result: RawUtf8); // rarely called
+procedure UuidToText(const u: TGuid; var result: RawUtf8); // internal call
 var
   tmp: ShortString;
 begin
@@ -5913,12 +6011,14 @@ end;
 { ****************** Gather Operating System Information }
 
 const // cf https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
-  DESKTOP_INT: array[0 .. 17] of cardinal = (
+  DESKTOP_INT: array[0 .. 18] of cardinal = (
      10240,  10586,  14393,  15063,  16299,  17134,  17763,  18362,  18363,
-     19041,  19042,  19043,  19044,  19045,  22000,  22621,  22631,  26100);
+     19041,  19042,  19043,  19044,  19045,  22000,  22621,  22631,  26100,
+     27686); // detect 25H2 Canary builds since 15/8/2024
   DESKTOP_TXT: array[0 .. high(DESKTOP_INT), 0 .. 3] of AnsiChar = (
     '1507', '1511', '1607', '1703', '1709', '1803', '1809', '1903', '1909',
-    '2004', '20H2', '21H1', '21H2', '22H2', '21H2', '22H2', '23H2', '24H2');
+    '2004', '20H2', '21H1', '21H2', '22H2', '21H2', '22H2', '23H2', '24H2',
+    '25H2');
   SERVER_INT: array[0 .. 10] of cardinal = (
     14393,  16299,  17134,  17763,  18362,  18363,  19041,  19042,  20348,
     25398,  26100);
@@ -6117,10 +6217,14 @@ const
     $0d80,  // actCortexA520
     $0d81,  // actCortexA720
     $0d82,  // actCortexX4
+    $0d83,  // actNeoverseV3AE
     $0d84,  // actNeoverseV3
     $0d85,  // actCortextX925
     $0d87,  // actCortextA725
-    $0d8e); // actNeoverseN3
+    $0d88,  // actCortextA520AE
+    $0d89,  // actCortextA720AE
+    $0d8e,  // actNeoverseN3
+    $0d8f); // actCortextA320
 
   ARMCPU_IMPL: array[TArmCpuImplementer] of byte = (
     0,    // aciUnknown
@@ -6158,8 +6262,9 @@ const
      'Neoverse-V1', 'Cortex-A78', 'Cortex-A78AE', 'Cortex-X1', 'Cortex-510',
      'Cortex-710', 'Cortex-X2', 'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
      'Cortex-X1C', 'Cortex-A715', 'Cortex-X3', 'Neoverse-V2', 'Cortex-A520',
-     'Cortex-A720', 'Cortex-X4', 'Neoverse-V3', 'Cortex-X925', 'Cortex-A725',
-     'Neoverse-N3');
+     'Cortex-A720', 'Cortex-X4', 'Neoverse-V3AE', 'Neoverse-V3', 'Cortex-X925',
+     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'Neoverse-N3',
+     'Cortex-A320');
 
   ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
       '',
@@ -6783,11 +6888,10 @@ begin
   result := true;
 end;
 
-function StringFromFile(const FileName: TFileName; HasNoSize: boolean): RawByteString;
+function StringFromFileNoSize(const FileName: TFileName): RawByteString;
 var
   h: THandle;
-  size: Int64;
-  read: PtrInt;
+  pos, read: PtrInt;
   tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
 begin
   result := '';
@@ -6796,23 +6900,40 @@ begin
   h := FileOpenSequentialRead(FileName); // = plain fpOpen() on POSIX
   if not ValidHandle(h) then
     exit;
-  if HasNoSize then
-    repeat
-      read := FileRead(h, tmp, SizeOf(tmp)); // fill per 32KB local buffer
-      if read <= 0 then
-        break;
-      AppendBufferToUtf8(@tmp, read, RawUtf8(result)); // in-place resize
-    until false
-  else
+  pos := 0;
+  repeat
+    read := FileRead(h, tmp[pos], SizeOf(tmp) - pos); // try to fill the buffer
+    if read <= 0 then
+      break; // end of input
+    inc(pos, read);
+    if pos < SizeOf(tmp) then // is likely to flush before 32KB of output
+      continue;
+    AppendBufferToUtf8(@tmp, pos, RawUtf8(result)); // in-place resize
+    pos := 0;
+  until false;
+  if pos <> 0 then
+    AppendBufferToUtf8(@tmp, pos, RawUtf8(result));
+  FileClose(h);
+end;
+
+function StringFromFile(const FileName: TFileName): RawByteString;
+var
+  h: THandle;
+  size: Int64;
+begin
+  result := '';
+  if FileName = '' then
+    exit;
+  h := FileOpenSequentialRead(FileName); // = plain fpOpen() on POSIX
+  if not ValidHandle(h) then
+    exit;
+  size := FileSize(h);
+  if (size < MaxInt) and // 2GB seems big enough for a RawByteString
+     (size > 0) then
   begin
-    size := FileSize(h);
-    if (size < MaxInt) and // 2GB seems big enough for a RawByteString
-       (size > 0) then
-    begin
-      pointer(result) := FastNewString(size, CP_UTF8); // UTF-8 for FPC RTL bug
-      if not FileReadAll(h, pointer(result), size) then
-        result := ''; // error reading
-    end;
+    pointer(result) := FastNewString(size, CP_UTF8); // UTF-8 for FPC RTL bug
+    if not FileReadAll(h, pointer(result), size) then
+      result := ''; // error reading
   end;
   FileClose(h);
 end;
@@ -7239,13 +7360,10 @@ begin
   end;
 end;
 
-var
-  lastIsDirectoryWritable: TFileName; // naive but efficient cache
-
 function IsDirectoryWritable(const Directory: TFileName;
   Flags: TIsDirectoryWritable): boolean;
 var
-  dir, last, fmt, fn: TFileName;
+  dir, fmt, fn: TFileName;
   h: THandle;
   retry: integer;
 begin
@@ -7254,16 +7372,13 @@ begin
   if Directory = '' then
     exit;                       
   dir := ExcludeTrailingPathDelimiter(Directory);
-  if Flags = [] then
-  begin
-    last := lastIsDirectoryWritable;
-    result := (last <> '') and
-              (dir = last);
-    if result then
-      exit; // we just tested this folder
-  end;
   if not FileIsWritable(dir) then
     exit; // the folder does not exist or is read-only for the current user
+  if idwAttributesOnly in Flags then
+  begin
+    result := true; // e.g. POSIX folder fpaccess() seems enough
+    exit;
+  end;
   {$ifdef OSWINDOWS}
   // ensure is not a system/virtual folder
   if ((idwExcludeWinUac in Flags) and
@@ -7294,15 +7409,11 @@ begin
   h := FileCreate(fn);
   if not ValidHandle(h) then
     exit; // a file can't be created
-  result := true;
-  if (idwWriteSomeContent in flags) and // some pointers and hash
-     (FileWrite(h, Executable, SizeOf(Executable)) <> SizeOf(Executable)) then
-    result := false;
+  result := (not (idwWriteSomeContent in flags)) or // some pointers and hash
+            (FileWrite(h, Executable, SizeOf(Executable)) = SizeOf(Executable));
   FileClose(h);
   if not DeleteFile(fn) then // success if the file can be created and deleted
-    result := false
-  else if result then
-    lastIsDirectoryWritable := dir
+    result := false;
 end;
 
 
@@ -7651,15 +7762,19 @@ begin
 end;
 {$endif PUREMORMOT2}
 
-function GetMemoryInfoText: RawUtf8;
+function GetMemoryInfoText: TShort31;
 var
   info: TMemoryInfo;
 begin
-  if GetMemoryInfo(info, false) then
-    _fmt('used %s/%s (%d%s free)', [_oskb(info.memtotal - info.memfree),
-      _oskb(info.memtotal), info.percent, '%'], result)
-  else
-    result := '';
+  result[0] := #0;
+  if not GetMemoryInfo(info, false) then
+    exit;
+  AppendShort(_oskb(info.memtotal - info.memfree), result);
+  AppendShortChar('/', @result);
+  AppendShort(_oskb(info.memtotal), result);
+  AppendShort(' (', result);
+  AppendShortCardinal(info.percent, result);
+  AppendShort('%)', result);
 end;
 
 function GetDiskAvailable(aDriveFolderOrFile: TFileName): QWord;
@@ -7675,14 +7790,12 @@ var
   avail, free, total: QWord;
 begin
   GetDiskInfo(Executable.ProgramFilePath, avail, free, total);
-  result := _fmt('Current UTC date is %s (%d)'#13#10'Memory %s'#13#10 +
-                 'Executable free disk %s/%s'#13#10 +
-                 {$ifdef OSPOSIX} 'LoadAvg is %s'#13#10 + {$endif OSPOSIX}
-                 '%s'#13#10'%s'#13#10'%s'#13#10'%s'#13#10,
+  result := _fmt('Current UTC date: %s (%d)'+ CRLF +'Memory: %s'+ CRLF +
+                 'Current disk free: %s/%s'+ CRLF +'Load: %s'+ CRLF +
+                 'Exe: %s'+ CRLF +'OS: %s'+ CRLF +'Cpu: %s'+ CRLF +'Bios: %s'+ CRLF,
     [FormatDateTime('yyyy"-"mm"-"dd" "hh":"nn":"ss', NowUtc), UnixTimeUtc,
-     GetMemoryInfoText, _oskb(avail), _oskb(total),
-     {$ifdef OSPOSIX} RetrieveLoadAvg, {$endif} Executable.Version.VersionInfo,
-     OSVersionText, CpuInfoText, BiosInfoText]);
+     GetMemoryInfoText, _oskb(avail), _oskb(total), RetrieveLoadAvg,
+     Executable.Version.VersionInfo, OSVersionText, CpuInfoText, BiosInfoText]);
 end;
 
 procedure ConsoleWriteRaw(const Text: RawUtf8; NoLineFeed: boolean);
@@ -7887,16 +8000,17 @@ end;
 { TFileVersion }
 
 constructor TFileVersion.Create(const aFileName: TFileName;
-  aMajor, aMinor, aRelease, aBuild: integer);
+  aMajor, aMinor, aRelease, aBuild: integer; aBuildDate: TDateTime);
 var
   m, d: word;
 begin
   fFileName := aFileName;
   SetVersion(aMajor, aMinor, aRelease, aBuild);
-  if fBuildDateTime = 0 then // get build date from file age
-    fBuildDateTime := FileAgeToDateTime(aFileName);
-  if fBuildDateTime <> 0 then
-    DecodeDate(fBuildDateTime, BuildYear, m, d);
+  if aBuildDate = 0 then // get build date from file age
+    aBuildDate := FileAgeToDateTime(aFileName);
+  fBuildDateTime := aBuildDate;
+  if aBuildDate <> 0 then
+    DecodeDate(aBuildDate, BuildYear, m, d);
 end;
 
 function TFileVersion.Version32: integer;
@@ -8041,7 +8155,7 @@ begin
       Version.DetailedOrVoid, Version.BuildDateTimeString], ProgramFullSpec);
     Hash.c0 := Version.Version32;
     {$ifdef OSLINUXANDROID}
-    Hash.c0 := crc32c(Hash.c0, pointer(CpuInfoFeatures), length(CpuInfoFeatures));
+    Hash.c0 := crc32c(Hash.c0, pointer(CpuInfoLinux), length(CpuInfoLinux));
     {$else}
     {$ifdef CPUINTELARM}
     Hash.c0 := crc32c(Hash.c0, @CpuFeatures, SizeOf(CpuFeatures));
@@ -8063,15 +8177,23 @@ begin
 end;
 
 procedure InitializeExecutableInformation; // called once at startup
+var
+  dt: TDateTime;
 begin
   with Executable do
   begin
     {$ifdef OSWINDOWS}
     ProgramFileName := ParamStr(0); // RTL seems just fine here
+    dt := FileAgeToDateTime(ProgramFileName);
     {$else}
     ProgramFileName := GetExecutableName(@InitializeExecutableInformation);
-    if (ProgramFileName = '') or
-       not FileExists(ProgramFileName) then
+    if ProgramFileName <> '' then
+    begin
+      dt := FileAgeToDateTime(ProgramFileName);
+      if dt = 0 then
+        ProgramFileName := '';
+    end;
+    if ProgramFileName = '' then
       ProgramFileName := ExpandFileName(ParamStr(0));
     {$endif OSWINDOWS}
     ProgramFilePath := ExtractFilePath(ProgramFileName);
@@ -8085,7 +8207,7 @@ begin
       Host := 'unknown';
     if User = '' then
       User := 'unknown';
-    Version := TFileVersion.Create(ProgramFileName); // with versions=0
+    Version := TFileVersion.Create(ProgramFileName, 0, 0, 0, 0, dt);
     Command := TExecutableCommandLine.Create;
     Command.ExeDescription := ProgramName;
     Command.Parse;
@@ -10279,6 +10401,13 @@ begin
   Safe.UnLock;
 end;
 
+function TLecuyerThreadSafe.NextQWord: QWord;
+begin
+  Safe.Lock;
+  result := Generator.NextQWord;
+  Safe.UnLock;
+end;
+
 procedure TLecuyerThreadSafe.Fill(dest: pointer; count: integer);
 begin
   Safe.Lock;
@@ -10291,6 +10420,76 @@ begin
   Fill(@dest, 32);
   FillAnsiStringFromRandom(@dest, 32);
 end;
+
+function Random32: cardinal;
+begin
+  result := SharedRandom.Next;
+end;
+
+function Random32Not0: cardinal;
+begin
+  repeat
+    result := SharedRandom.Next;
+  until result <> 0;
+end;
+
+function Random31: integer;
+begin
+  result := SharedRandom.Next shr 1;
+end;
+
+function Random31Not0: integer;
+begin
+  repeat
+    result := SharedRandom.Next shr 1;
+  until result <> 0;
+end;
+
+function Random32(max: cardinal): cardinal;
+begin
+  result := (QWord(SharedRandom.Next) * max) shr 32;
+end;
+
+function Random64: QWord;
+begin
+  result := SharedRandom.NextQWord;
+end;
+
+function RandomDouble: double;
+begin
+  result := SharedRandom.NextDouble;
+end;
+
+procedure RandomBytes(Dest: PByte; Count: integer);
+begin
+  if Count > 0 then
+    SharedRandom.Fill(pointer(Dest), Count);
+end;
+
+procedure RandomShort31(var dest: TShort31);
+begin
+  SharedRandom.FillShort31(dest);
+end;
+
+function RandomGuid: TGuid;
+begin
+  RandomGuid(result);
+end;
+
+procedure RandomGuid(out result: TGuid);
+begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+  SharedRandom.Fill(@result, SizeOf(TGuid));
+  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
+  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
+end;
+
+{$ifndef PUREMORMOT2}
+procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
+begin
+  if CardinalCount > 0 then
+    SharedRandom.Fill(pointer(Dest), CardinalCount shl 2);
+end;
+{$endif PUREMORMOT2}
 
 
 procedure GlobalLock;
@@ -10772,7 +10971,7 @@ begin
   InitializeSpecificUnit; // in mormot.core.os.posix/windows.inc files
   TrimDualSpaces(OSVersionText);
   TrimDualSpaces(OSVersionInfoEx);
-  TrimDualSpaces(BiosInfoText);
+  {$ifndef OSLINUXANDROID} TrimDualSpaces(BiosInfoText); {$endif}
   TrimDualSpaces(CpuInfoText);
   OSVersionShort := ToTextOS(OSVersionInt32);
   InitializeExecutableInformation;

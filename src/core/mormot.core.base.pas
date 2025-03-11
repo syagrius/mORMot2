@@ -778,13 +778,6 @@ function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: 
 function AddGuid(var guids: TGuidDynArray; const guid: TGuid;
   NoDuplicates: boolean = false): integer;
 
-/// compute a random UUid value from the RandomBytes() generator and RFC 4122
-procedure RandomGuid(out result: TGuid); overload;
-
-/// compute a random UUid value from the RandomBytes() generator and RFC 4122
-function RandomGuid: TGuid; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
 /// fast O(log(n)) binary search of a binary (e.g. TGuid) value in a sorted array
 function FastFindBinarySorted(P, Value: PByteArray; Size, R: PtrInt): PtrInt;
 
@@ -935,10 +928,15 @@ procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortStrin
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 
 /// simple concatenation of a signed 64-bit integer as text into a shorstring
-procedure AppendShortInt64(value: Int64; var dest: ShortString);
+procedure AppendShortInt64(const value: Int64; var dest: ShortString);
 
 /// simple concatenation of an unsigned 64-bit integer as text into a shorstring
-procedure AppendShortQWord(value: QWord; var dest: ShortString);
+procedure AppendShortQWord(const value: QWord; var dest: ShortString);
+
+/// simple concatenation of INTEGER Curr64 (value*10000) into a shorstring
+// - will emit 0, 2 or 4 decimals in the output text (e.g. '1', '1.23', '1.2345')
+procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
+  fixeddecimals: PtrInt = 0);
 
 /// simple concatenation of a character into a @shorstring
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
@@ -1245,7 +1243,7 @@ procedure Int64ToCurrency(const i: Int64; c: PCurrency); overload;
 // - #.##51 will round to #.##+0.01 and #.##50 will be truncated to #.##
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function SimpleRoundTo2Digits(Value: Currency): Currency;
+function SimpleRoundTo2Digits(const Value: Currency): Currency;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// simple, no banker rounding of a Currency value, stored as Int64, to only 2 digits
@@ -1255,26 +1253,26 @@ function SimpleRoundTo2Digits(Value: Currency): Currency;
 procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
 
 /// no banker rounding into text, with two digits after the decimal point
-// - #.##51 will round to #.##+0.01 and #.##50 will be truncated to #.##
-// - this function will only allow 2 digits in the returned text
+// - i.e. SimpleRoundTo2DigitsCurr64() as text
 function TwoDigits(const d: double): TShort23;
 
 /// truncate a currency value to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function TruncTo2Digits(Value: currency): currency;
+function TruncTo2Digits(const Value: currency): currency;
+  {$ifdef CPU64}inline;{$endif}
 
 /// truncate a currency value, stored as Int64, to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
 procedure TruncTo2DigitsCurr64(var Value: Int64);
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// truncate a Currency value, stored as Int64, to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function TruncTo2Digits64(Value: Int64): Int64;
-  {$ifdef HASINLINE}inline;{$endif}
+function TruncTo2Digits64(const Value: Int64): Int64;
+  {$ifdef CPU64}inline;{$endif}
 
 /// simple wrapper to efficiently compute both division and modulo per 100
 // - compute result.D = Y div 100 and result.M = Y mod 100
@@ -1479,6 +1477,14 @@ function StrInt64(P: PAnsiChar; const val: Int64): PAnsiChar;
 // - same calling convention as with StrInt32() above
 function StrUInt64(P: PAnsiChar; const val: QWord): PAnsiChar;
   {$ifdef CPU64}inline;{$endif}
+
+/// internal fast INTEGER Curr64 (value*10000) value to text conversion
+// - expect the last available temporary char position in P
+// - return the last written char position (write in reverse order in P^)
+// - will return 0 for Value=0, or a string representation with always 4 decimals
+//   (e.g. 1->'0.0001' 500->'0.0500' 25000->'2.5000' 30000->'3.0000')
+// - is called by Curr64ToPChar() and Curr64ToStr() functions
+function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
 
 /// fast convert an Int64 value into a temporary shortstring on stack
 function ToShort(const val: Int64): TShort23;
@@ -2788,6 +2794,8 @@ var
   /// the low-level ARM/AARCH64 CPU features retrieved from system.envp
   // - text from CpuInfoFeatures may not be accurate on oldest kernels
   CpuFeatures: TArmHwCaps;
+  /// the low-level ARM/AARCH64 CPU model text as retrieved by mormot.core.os
+  CpuArmModel: RawUtf8;
 {$endif CPUARM3264}
 
 /// cross-platform wrapper function to check AES HW support on Intel or ARM
@@ -3234,60 +3242,6 @@ function Lecuyer: PLecuyer;
 
 /// internal function used e.g. by TLecuyer.FillShort/FillShort31
 procedure FillAnsiStringFromRandom(dest: PByteArray; size: PtrUInt);
-
-/// fast compute of some 32-bit random value, using the gsl_rng_taus2 generator
-// - this function will use well documented and proven Pierre L'Ecuyer software
-// generator - which happens to be faster (and safer) than RDRAND opcode (which
-// is used for seeding anyway)
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
-// - thread-safe and non-blocking function: each thread will maintain its own
-// TLecuyer table (note that RTL's system.Random function is not thread-safe)
-function Random32: cardinal; overload;
-
-/// compute of a 32-bit random value <> 0, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random32Not0: cardinal;
-
-/// fast compute of some 31-bit random value, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random31: integer;
-
-/// compute of a 31-bit random value <> 0, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random31Not0: integer;
-
-/// fast compute of a 64-bit random value, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random64: QWord;
-
-/// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
-// - calls internally the overloaded Random32 function, ensuring Random32(max)<max
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-function Random32(max: cardinal): cardinal; overload;
-
-/// fast compute of a 64-bit random floating point, using the gsl_rng_taus2 generator
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-// - returns a random value in range [0..1)
-function RandomDouble: double;
-
-/// fill a memory buffer with random bytes from the gsl_rng_taus2 generator
-// - will actually XOR the Dest buffer with Lecuyer numbers
-// - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-procedure RandomBytes(Dest: PByte; Count: integer);
-
-/// fill some string[31] with 7-bit ASCII random text
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-procedure RandomShort31(var dest: TShort31);
-
-{$ifndef PUREMORMOT2}
-/// fill some 32-bit memory buffer with values from the gsl_rng_taus2 generator
-// - the destination buffer is expected to be allocated as 32-bit items
-procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
-{$endif PUREMORMOT2}
 
 /// seed the thread-specific gsl_rng_taus2 Random32 generator
 // - by default, gsl_rng_taus2 generator is re-seeded every 2^32 values, which
@@ -4597,7 +4551,7 @@ end;
 
 function DoubleToCurrency(const d: double): currency;
 begin
-  result := trunc(d * CURR_RES);
+  PInt64(@result)^ := trunc(d * CURR_RES);
 end;
 
 {$endif CPUX86}
@@ -4613,10 +4567,10 @@ begin
   PVarData(@v).VCurrency := c;
 end;
 
-function SimpleRoundTo2Digits(Value: Currency): Currency;
+function SimpleRoundTo2Digits(const Value: Currency): Currency;
 begin
-  SimpleRoundTo2DigitsCurr64(PInt64(@Value)^);
   result := Value;
+  SimpleRoundTo2DigitsCurr64(PInt64(@result)^);
 end;
 
 procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
@@ -4636,40 +4590,19 @@ end;
 function TwoDigits(const d: double): TShort23;
 var
   v: Int64;
-  m, L: PtrInt;
-  tmp: array[0..23] of AnsiChar;
-  p: PAnsiChar;
 begin
-  v := trunc(d * CURR_RES);
-  m := v mod 100;
-  if m <> 0 then
-    if m > 50 then
-      {%H-}inc(v, 100 - m)
-    else if m < -50 then
-      {%H-}dec(v, 100 + m)
-    else
-      dec(v, m);
-  p := {%H-}StrInt64(@tmp[23], v);
-  L := @tmp[22] - p;
-  m := PWord(@tmp[L - 2])^;
-  if m = ord('0') or ord('0') shl 8 then
-    // '300' -> '3'
-    dec(L, 3)
-  else
-  begin
-    // '301' -> '3.01'
-    PWord(@tmp[L - 1])^ := m;
-    tmp[L - 2] := '.';
-  end;
-  SetString(result, p, L);
+  DoubleToCurrency(d, PCurrency(@v)^); // specific code for x87
+  SimpleRoundTo2DigitsCurr64(v);
+  result[0] := #0;
+  AppendShortCurr64(v, result, {decimals=}2);
 end;
 
-function TruncTo2Digits(Value: Currency): Currency;
+function TruncTo2Digits(const Value: Currency): Currency;
 var
-  v64: Int64 absolute Value; // to avoid any floating-point precision issues
+  r64: Int64 absolute result; // to avoid any floating-point precision issues
 begin
-  dec(v64, v64 mod 100);
   result := Value;
+  dec(r64, r64 mod 100);
 end;
 
 procedure TruncTo2DigitsCurr64(var Value: Int64);
@@ -4677,7 +4610,7 @@ begin
   dec(Value, Value mod 100);
 end;
 
-function TruncTo2Digits64(Value: Int64): Int64;
+function TruncTo2Digits64(const Value: Int64): Int64;
 begin
   result := Value - Value mod 100;
 end;
@@ -4740,18 +4673,6 @@ var
 begin
   d[0] := 0;
   d[1] := 0;
-end;
-
-function RandomGuid: TGuid;
-begin
-  RandomGuid(result);
-end;
-
-procedure RandomGuid(out result: TGuid);
-begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
-  RandomBytes(@result, SizeOf(TGuid));
-  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
-  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
 end;
 
 function FastFindBinarySorted(P, Value: PByteArray; Size, R: PtrInt): PtrInt;
@@ -5259,18 +5180,38 @@ begin
   AppendShortTemp(StrUInt32(@tmp[23], value), @tmp[23], @dest);
 end;
 
-procedure AppendShortInt64(value: Int64; var dest: ShortString);
+procedure AppendShortInt64(const value: Int64; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrInt64(@tmp[23], value), @tmp[23], @dest);
 end;
 
-procedure AppendShortQWord(value: QWord; var dest: ShortString);
+procedure AppendShortQWord(const value: QWord; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrUInt64(@tmp[23], value), @tmp[23], @dest);
+end;
+
+procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
+  fixeddecimals: PtrInt);
+var
+  tmp: array[0..31] of AnsiChar;
+  p: PAnsiChar;
+  l: PtrInt;
+begin
+  p := StrCurr64(@tmp[31], value);
+  l := @tmp[31] - p;
+  if (l > 5) and
+     (p[l - 5] = '.') then
+    if PCardinal(@p[l - 4])^ = $30303030 then
+      dec(l, 5)  // x.0000 -> x
+    else if fixeddecimals <> 0 then
+      dec(l, 4 - fixeddecimals)
+    else if PWord(@p[l - 2])^ = $3030 then
+      dec(l, 2); // x.xx00 -> x.xx
+  AppendShortBuffer(p, l, @dest);
 end;
 
 procedure AppendBufferToUtf8(src: PUtf8Char; srclen: PtrInt; var dest: RawUtf8);
@@ -6389,6 +6330,41 @@ begin
 end;
 
 {$endif CPU64}
+
+function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
+var
+  c: QWord;
+  d: cardinal;
+begin
+  if Value = 0 then
+  begin
+    result := P - 1;
+    result^ := '0';
+    exit;
+  end;
+  if Value < 0 then
+    c := -Value
+  else
+    c := Value;
+  if c < 10000 then
+  begin
+    result := P - 6; // only decimals -> append '0.xxxx'
+    PCardinal(result)^ := ord('0') + ord('.') shl 8;
+    YearToPChar(c, PUtf8Char(P) - 4);
+  end
+  else
+  begin
+    result := StrUInt64(P - 1, c);
+    d := PCardinal(P - 5)^; // in two explit steps for CPUARM (alf)
+    PCardinal(P - 4)^ := d;
+    P[-5] := '.'; // insert '.' just before last 4 decimals
+  end;
+  if Value < 0 then
+  begin
+    dec(result);
+    result^ := '-';
+  end;
+end;
 
 function ToShort(const val: Int64): TShort23;
 var
@@ -9583,7 +9559,7 @@ end;
 
 procedure _XorEntropyGetOsRandom256(var e: THash256Rec);
 begin
-  sysutils.CreateGUID(e.l.guid); // Windows CoCreateGuid()
+  sysutils.CreateGUID(e.l.guid); // e.g. Windows CoCreateGuid()
   sysutils.CreateGUID(e.h.guid);
 end;
 
@@ -9593,21 +9569,18 @@ var
 
 procedure XorEntropy(var e: THash512Rec);
 var
-  lec: PLecuyer;
+  lec: PHash128Rec;
   rnd: THash256Rec;
 begin
   // note: we don't use RTL Random() here because it is not thread-safe
-  XorEntropyGetOsRandom256(rnd);
-  if _EntropyGlobal.L = 0 then
+  XorEntropyGetOsRandom256(rnd); // fast get 256-bit of randomness from OS
+  if _EntropyGlobal.c0 = 0 then
     _EntropyGlobal.guid := rnd.h.guid; // initialize forward security
   e.r[0].L := e.r[0].L xor _EntropyGlobal.L;
   e.r[0].H := e.r[0].H xor _EntropyGlobal.H;
-  lec := @_Lecuyer; // lec^.rs#=0 at thread startup, but won't hurt
-  e.r[1].c0 := e.r[1].c0 xor lec^.RawNext xor rnd.l.c0;
-  e.r[1].c1 := e.r[1].c1 xor lec^.RawNext xor rnd.l.c1;
-  e.r[1].c2 := e.r[1].c2 xor lec^.RawNext xor rnd.l.c2;
-  // any threadvar is thread-specific, so PtrUInt(lec) identifies this thread
-  e.r[1].c3 := e.r[1].c3 xor PtrUInt(lec) xor rnd.l.c3;
+  lec := @_Lecuyer; // PtrUInt(lec) identifies this thread
+  e.r[1].L := e.r[1].L xor PtrUInt(@e)  xor lec^.L xor rnd.l.L;
+  e.r[1].H := e.r[1].H xor PtrUInt(lec) xor lec^.H xor rnd.l.H;
   e.r[2].L := e.r[2].L xor rnd.h.L;
   e.r[2].H := e.r[2].H xor rnd.h.H;
   // no mormot.core.os yet, so we can't use QueryPerformanceMicroSeconds()
@@ -9617,10 +9590,6 @@ begin
   RdRand32(@e.r[0].c, length(e.r[0].c));
   e.r[3].Hi := e.r[3].Hi xor Rdtsc; // has slightly changed in-between
   {$else}
-  {$ifdef OSDARWIN} // fallback to known OS API on Mac M1/M2
-  e.r[3].Lo := e.r[3].Lo xor mach_absolute_time; // as defined above
-  e.r[3].Hi := e.r[3].Hi xor mach_continuous_time;
-  {$endif OSDARWIN}
   e.r[3].Hi := e.r[3].Hi xor GetTickCount64; // always defined in FPC RTL
   {$endif CPUINTEL}
   crc128c(@e, SizeOf(e), _EntropyGlobal.b); // simple diffusion to move forward
@@ -9802,58 +9771,6 @@ begin
   _Lecuyer.Seed(entropy, entropylen);
 end;
 
-function Random32: cardinal;
-begin
-  result := _Lecuyer.Next;
-end;
-
-function Random32Not0: cardinal;
-begin
-  with _Lecuyer do
-    repeat
-      result := Next;
-    until result <> 0;
-end;
-
-function Random31: integer;
-begin
-  result := _Lecuyer.Next shr 1;
-end;
-
-function Random31Not0: integer;
-begin
-  with _Lecuyer do
-    repeat
-      result := Next shr 1;
-    until result <> 0;
-end;
-
-function Random32(max: cardinal): cardinal;
-begin
-  result := (QWord(_Lecuyer.Next) * max) shr 32;
-end;
-
-function Random64: QWord;
-begin
-  result := _Lecuyer.NextQWord;
-end;
-
-function RandomDouble: double;
-begin
-  result := _Lecuyer.NextDouble;
-end;
-
-procedure RandomBytes(Dest: PByte; Count: integer);
-begin
-  if Count > 0 then
-    _Lecuyer.Fill(pointer(Dest), Count);
-end;
-
-procedure RandomShort31(var dest: TShort31);
-begin
-  _Lecuyer.FillShort31(dest);
-end;
-
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 var
   gen: TLecuyer;
@@ -9867,14 +9784,6 @@ begin
   gen.Fill(@data[1], length(data));
   FillZero(THash128(gen)); // to avoid forensic leak
 end;
-
-{$ifndef PUREMORMOT2}
-procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
-begin
-  if CardinalCount > 0 then
-    _Lecuyer.Fill(pointer(Dest), CardinalCount shl 2);
-end;
-{$endif PUREMORMOT2}
 
 
 { MultiEvent* functions }
@@ -11455,7 +11364,7 @@ end;
 
 function TSynTempBuffer.InitRandom(RandomLen: integer): pointer;
 begin
-  RandomBytes(Init(RandomLen), RandomLen);
+  _Lecuyer.Fill(Init(RandomLen), RandomLen);
   result := buf;
 end;
 
