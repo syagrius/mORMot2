@@ -1814,9 +1814,9 @@ function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 /// retrieve the MIME content type from a supplied binary buffer
 // - inspect the first bytes, to guess from standard known headers
 // - return the MIME type, ready to be appended to a 'Content-Type: ' HTTP header
-// - returns DefaultContentType if the binary buffer has an unknown layout
-function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
-  const DefaultContentType: RawUtf8; Mime: PMimeType = nil): RawUtf8;
+// - keep the supplied ContentType if the binary buffer has an unknown layout
+function GetMimeContentTypeFromBuffer(const Content: RawByteString;
+  var ContentType: RawUtf8): TMimeType;
 
 /// retrieve the MIME content type from its file name or a supplied binary buffer
 // - will first check for known file extensions, then inspect the binary content
@@ -1824,15 +1824,15 @@ function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
 // - default is DefaultContentType or 'application/octet-stream' (BINARY_CONTENT_TYPE)
 // or 'application/fileextension' if FileName was specified
 // - see @http://en.wikipedia.org/wiki/Internet_media_type for most common values
-function GetMimeContentType(Content: pointer; Len: PtrInt; const FileName: TFileName = '';
-  const DefaultContentType: RawUtf8 = BINARY_CONTENT_TYPE; Mime: PMimeType = nil): RawUtf8;
+function GetMimeContentType(const Content: RawByteString; const FileName: TFileName = '';
+  const DefaultContentType: RawUtf8 = BINARY_CONTENT_TYPE): RawUtf8;
 
 /// retrieve the HTTP header for MIME content type from a supplied binary buffer
 // - just append HEADER_CONTENT_TYPE and GetMimeContentType() result
 // - can be used as such:
 // !  Call.OutHead := GetMimeContentTypeHeader(Call.OutBody,aFileName);
 function GetMimeContentTypeHeader(const Content: RawByteString;
-  const FileName: TFileName = ''; Mime: PMimeType = nil): RawUtf8;
+  const FileName: TFileName = ''): RawUtf8;
 
 function ToText(t: TMimeType): PShortString; overload;
 
@@ -4388,7 +4388,7 @@ end;
 
 constructor TBufferWriter.Create(aFile: THandle; BufLen: integer);
 begin
-  Create(THandleStream.Create(aFile), BufLen);
+  Create(TFileStreamEx.CreateFromHandle(aFile, ''), BufLen);
   fInternalStream := true;
 end;
 
@@ -4397,14 +4397,9 @@ constructor TBufferWriter.Create(const aFileName: TFileName;
 var
   s: TStream;
 begin
-  if Append and
-     FileExists(aFileName) then
-  begin
-    s := TFileStreamEx.Create(aFileName, fmOpenWrite);
+  s := TFileStreamEx.CreateWrite(aFileName);
+  if Append then
     s.Seek(0, soEnd);
-  end
-  else
-    s := TFileStreamEx.Create(aFileName, fmCreate);
   Create(s, BufLen);
   fInternalStream := true;
 end;
@@ -5639,10 +5634,9 @@ begin
     if {%H-}tmpd = '' then
       pointer(tmpd) := FastNewString(AlgoCompressDestLen(head.UnCompressedSize));
     dec(count, head.UnCompressedSize); // supports premature end of input
-    if S = pointer(tmps) then
-      head.UnCompressedSize := Source.Read(S^, head.UnCompressedSize);
-    if head.UnCompressedSize <= 0 then
-      exit; // read error
+    if S = pointer({%H-}tmps) then
+      if not StreamReadAll(Source, S, head.UnCompressedSize) then
+        exit;
     head.UncompressedHash := AlgoHash(ForceHash32, S, head.UnCompressedSize);
     D := pointer(tmpd);
     head.CompressedSize := AlgoCompress(S, head.UnCompressedSize, D);
@@ -5721,7 +5715,7 @@ var
       if sourcesize < tmplen then
         tmplen := sourcesize;
       Source.Position := sourceSize - tmplen;
-      if Source.Read(tmp, tmplen) <> tmplen then
+      if not StreamReadAll(Source, @tmp, tmplen) then
         exit;
       dec(tmplen, SizeOf(TAlgoCompressTrailer));
       t := @tmp[tmplen];
@@ -5773,8 +5767,8 @@ begin
       if Head.CompressedSize > length({%H-}tmps) then
         FastNewRawByteString(tmps, Head.CompressedSize);
       S := pointer(tmps);
-      if Source.Read(S^, Head.CompressedSize) <> Head.CompressedSize then
-        break;
+      if not StreamReadAll(Source, S, Head.CompressedSize) then
+        exit;
     end;
     inc(sourcePosition, Head.CompressedSize);
     // decompress chunk into Dest
@@ -5836,17 +5830,17 @@ function TAlgoCompress.StreamUnCompress(const Source: TFileName;
 var
   S: TStream;
 begin
-  try
-    S := FileStreamSequentialRead(Source);
+  result := nil;
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
     try
-      result := StreamUnCompress(S, Magic, ForceHash32);
-    finally
-      S.Free;
+      try
+        result := StreamUnCompress(S, Magic, ForceHash32);
+      finally
+        S.Free;
+      end;
+    except // catch any StreamUnCompress issue
     end;
-  except
-    on E: Exception do
-      result := nil;
-  end;
 end;
 
 function TAlgoCompress.StreamComputeLen(P: PAnsiChar; Len: PtrUInt;
@@ -5888,26 +5882,25 @@ var
 begin
   EnsureAlgoHasNoForcedFormat('FileCompres'); // should be overriden
   result := false;
-  if (ChunkBytes > 0) and
-     FileExists(Source) then
-  try
-    S := FileStreamSequentialRead(Source);
+  if ChunkBytes <= 0 then
+    exit;
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
     try
-      DeleteFile(Dest);
-      D := TFileStreamEx.Create(Dest, fmCreate);
       try
-        StreamCompress(S, D, Magic, ForceHash32, WithTrailer, ChunkBytes);
+        DeleteFile(Dest);
+        D := TFileStreamEx.Create(Dest, fmCreate);
+        try
+          StreamCompress(S, D, Magic, ForceHash32, WithTrailer, ChunkBytes);
+        finally
+          D.Free;
+        end;
+        result := FileSetDateFrom(Dest, S.Handle);
       finally
-        D.Free;
+        S.Free;
       end;
-      result := FileSetDateFrom(Dest, S.Handle);
-    finally
-      S.Free;
+    except  // catch any StreamUnCompress issue
     end;
-  except
-    on Exception do
-      result := false;
-  end;
 end;
 
 function TAlgoCompress.FileUnCompress(const Source, Dest: TFileName;
@@ -5917,9 +5910,9 @@ var
 begin
   EnsureAlgoHasNoForcedFormat('FileUnCompress'); // should be overriden
   result := false;
-  if FileExists(Source) then
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
   try
-    S := FileStreamSequentialRead(Source);
     try
       DeleteFile(Dest);
       D := TFileStreamEx.Create(Dest, fmCreate);
@@ -5933,9 +5926,7 @@ begin
     finally
       S.Free;
     end;
-  except
-    on Exception do
-      result := false;
+  except  // catch any StreamUnCompress issue
   end;
 end;
 
@@ -7869,8 +7860,7 @@ begin
   if ForcedContentType <> '' then
     part.ContentType := ForcedContentType
   else
-    part.ContentType := GetMimeContentType(
-      pointer(content), length(content), FileName);
+    part.ContentType := GetMimeContentType(content, FileName);
   part.Encoding := 'base64';
   part.Content := BinToBase64(content);
   SetLength(MultiPart, newlen);
@@ -7891,9 +7881,8 @@ begin
   part.Name := FieldName;
   if ForcedContentType <> '' then
     part.ContentType := ForcedContentType
-  else
-    part.ContentType := GetMimeContentTypeFromBuffer(
-      pointer(FieldValue), length(FieldValue), TEXT_CONTENT_TYPE);
+  else if GetMimeContentTypeFromBuffer(FieldValue, part.ContentType) = mtUnknown then
+    part.ContentType := TEXT_CONTENT_TYPE; // fallback to plain text
   part.Content := FieldValue;
   SetLength(MultiPart, newlen);
   MultiPart[newlen - 1] := part;
@@ -8743,38 +8732,46 @@ begin
   if (Content <> nil) and
      (Len > 4) then
   begin
-    if PAnsiChar(Content)^ = '<' then
-      case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
-        ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
-          begin
-            result := mtHtml; // legacy HTML document
-            exit;
-          end;
-        ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
-          begin
-            if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
-               ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
-               (PAnsiChar(Content)[9] = ' ') then
-              if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
-                 ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
-                result := mtHtml // HTML5 markup
-              else
-                result := mtXml; // malformed XML document
-            exit;
-          end;
-        ord('?') + ord('x') shl 8 + ord('m') shl 16 + ord('l') shl 24:
-          begin
-            result := mtXml; // "well formed" XML document
-            exit;
-          end;
-      end;
+    case PAnsiChar(Content)^ of
+      '<':
+        case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
+          ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+            begin
+              result := mtHtml; // legacy HTML document
+              exit;
+            end;
+          ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
+            begin
+              if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
+                 ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
+                 (PAnsiChar(Content)[9] = ' ') then
+                if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
+                   ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+                  result := mtHtml // HTML5 markup
+                else
+                  result := mtXml; // malformed XML document
+              exit;
+            end;
+          ord('?') + ord('x') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+            begin
+              result := mtXml; // "well formed" XML document
+              exit;
+            end;
+        end;
+      '{', '[':
+        begin
+          if (Len < 65535) and (StrLen(Content) = Len) then
+            result := mtJson;
+          exit;
+        end;
+    end;
     i := IntegerScanIndex(@MIME_MAGIC, length(MIME_MAGIC), PCardinal(Content)^ + 1);
     // + 1 to avoid finding it in the exe - may use SSE2
     if i >= 0 then
       result := MIME_MAGIC_TYPE[i];
     case result of // identify some partial matches
       mtUnknown:
-        case PCardinal(Content)^ and $00ffffff of
+        case PCardinal(Content)^ and $00ffffff of // identify 3 bytes magic
           $685a42:
             result := mtBz2;  // 42 5A 68
           $088b1f:
@@ -8848,18 +8845,12 @@ begin
   end;
 end;
 
-function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
-  const DefaultContentType: RawUtf8; Mime: PMimeType): RawUtf8;
-var
-  m: TMimeType;
+function GetMimeContentTypeFromBuffer(const Content: RawByteString;
+  var ContentType: RawUtf8): TMimeType;
 begin
-  m := GetMimeContentTypeFromMemory(Content, Len);
-  if Mime <> nil then
-    Mime^ := m;
-  if m = mtUnknown then
-    result := DefaultContentType
-  else
-    result := MIME_TYPE[m];
+  result := GetMimeContentTypeFromMemory(pointer(Content), Length(Content));
+  if result <> mtUnknown then
+    ContentType := MIME_TYPE[result];
 end;
 
 const
@@ -8909,41 +8900,34 @@ begin
     FileExt^ := {%H-}ext;
 end;
 
-function GetMimeContentType(Content: pointer; Len: PtrInt; const FileName: TFileName;
-  const DefaultContentType: RawUtf8; Mime: PMimeType): RawUtf8;
+function GetMimeContentType(const Content: RawByteString; const FileName: TFileName;
+  const DefaultContentType: RawUtf8): RawUtf8;
 var
   ext: RawUtf8;
   m: TMimeType;
 begin
-  if FileName <> '' then
+  result := DefaultContentType;
+  if FileName <> '' then // file extension is more precise -> check first
   begin
-    // file extension is more precise -> check first
     m := GetMimeContentTypeFromExt(FileName, @ext);
     if m <> mtUnknown then
     begin
       result := MIME_TYPE[m];
-      if Mime <> nil then
-        Mime^ := m;
       exit;
     end;
-    // fallback to content check
-    if (ext <> '') and
+    if (ext <> '') and // default e.g. 'application/zip' or 'application/pdf'
        (ext[1] in ['a'..'z']) then
-      // e.g. 'application/zip' or 'application/pdf'
-      result := 'application/' + LowerCase(ext)
-    else
-      result := DefaultContentType;
-  end
-  else
-    result := DefaultContentType;
-  result := GetMimeContentTypeFromBuffer(Content, Len, result, Mime);
+      result := 'application/' + LowerCase(ext);
+  end;
+  if Content <> '' then
+    GetMimeContentTypeFromBuffer(Content, result);
 end;
 
 function GetMimeContentTypeHeader(const Content: RawByteString;
-  const FileName: TFileName; Mime: PMimeType): RawUtf8;
+  const FileName: TFileName): RawUtf8;
 begin
-  result := HEADER_CONTENT_TYPE + GetMimeContentType(
-      pointer(Content), length(Content), FileName, BINARY_CONTENT_TYPE, Mime);
+  result := HEADER_CONTENT_TYPE +
+              GetMimeContentType(Content, FileName, BINARY_CONTENT_TYPE);
 end;
 
 function ToText(t: TMimeType): PShortString;
@@ -9879,7 +9863,7 @@ begin
   f := FileOpenSequentialRead(FileName);
   if not ValidHandle(f) then
     exit;
-  hasher := Create(TFileStreamFromHandle.Create(f));
+  hasher := Create(TFileStreamEx.CreateFromHandle(f, FileName));
   try
     if Assigned(OnProgress) then
     begin
@@ -10223,7 +10207,7 @@ end;
 constructor TBufferedStreamReader.Create(const aSourceFileName: TFileName;
   aBufSize: integer);
 begin
-  Create(TFileStreamEx.Create(aSourceFileName, fmOpenReadShared));
+  Create(TFileStreamEx.CreateRead(aSourceFileName));
   fOwnStream := fSource;
 end;
 

@@ -461,6 +461,8 @@ type
   // - hsoEnableLogging enable an associated THttpServerGeneric.Logger instance
   // - hsoTelemetryCsv and hsoTelemetryJson will enable CSV or JSON consolidated
   // per-minute metrics logging via an associated THttpServerGeneric.Analyzer
+  // - hsoContentTypeNoGuess will disable content-type detection from small
+  // content buffers via GetMimeContentTypeFromBuffer()
   THttpServerOption = (
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
@@ -478,7 +480,8 @@ type
     hsoEnablePipelining,
     hsoEnableLogging,
     hsoTelemetryCsv,
-    hsoTelemetryJson);
+    hsoTelemetryJson,
+    hsoContentTypeNoGuess);
 
   /// how a THttpServerGeneric class is expected to process incoming requests
   THttpServerOptions = set of THttpServerOption;
@@ -1744,21 +1747,31 @@ type
     // - the main fields are published below as Network* properties
     property Mac: TMacAddress
       read fMac;
+    /// the 'ip:port' value used for UDP and TCP process
+    property IpPort: RawUtf8
+      read fIpPort;
+    /// the raw 32-bit IPv4 value used for UDP and TCP process
+    property Ip4: cardinal
+      read fIp4;
   published
     /// define how this instance handles its process
     property Settings: THttpPeerCacheSettings
       read fSettings;
+    /// the UUID used to identify this PeerCache node
+    property Uuid: RawUtf8
+      read GetUuidText;
     /// which network interface is used for UDP and TCP process
     property NetworkInterface: RawUtf8
       read fMac.Name;
     /// the local IP address used for UDP and TCP process
     property NetworkIP: RawUtf8
       read fMac.IP;
+    /// the port value used for UDP and TCP process
+    property NetworkPort: RawUtf8
+      read fPort;
     /// the IP used for UDP and TCP process broadcast
     property NetworkBroadcast: RawUtf8
       read fMac.Broadcast;
-    property Uuid: RawUtf8
-      read GetUuidText;
   end;
 
   /// exception class raised on THttpPeerCache issues
@@ -3159,7 +3172,7 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
   var
     fn: TFileName;
     progsizeHeader: RawUtf8; // for rfProgressiveStatic mode
-    h: THandle;
+    fsiz: Int64;
   begin
     ExtractOutContentType;
     fn := Utf8ToString(OutContent); // safer than Utf8ToFileName() here
@@ -3171,11 +3184,10 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
       if ((not (rfWantRange in Context.ResponseFlags)) or
           Context.ValidateRange) then
       begin
-        h := FileOpen(fn, fmOpenReadShared);
-        if ValidHandle(h) then
+        if FileInfoByName(fn, fsiz, Context.ContentLastModified) and
+          (fsiz >= 0) and // not a folder
+          (fsiz <= Context.ContentLength) then
         begin
-          FileInfoByHandle(h, nil, nil, @Context.ContentLastModified, nil);
-          FileClose(h);
           Context.ContentStream := TStreamWithPositionAndSize.Create; // <> nil
           Context.ResponseFlags := Context.ResponseFlags +
             [rfAcceptRange, rfContentStreamNeedFree, rfProgressiveStatic];
@@ -3261,7 +3273,12 @@ begin
   if hsoIncludeDateHeader in fServer.Options then
     fServer.AppendHttpDate(h^);
   Context.Content := fOutContent;
-  Context.ContentType := fOutContentType;
+  if (fOutContentType = '') and
+     (fOutContent <> '') and
+     not (hsoContentTypeNoGuess in fServer.Options) then
+    GetMimeContentTypeFromBuffer(fOutContent, Context.ContentType)
+  else
+    Context.ContentType := fOutContentType;
   fOutContent := ''; // dec RefCnt to release body memory ASAP
   result := Context.CompressContentAndFinalizeHead(MaxSizeAtOnce); // set State
   // now TAsyncConnectionsSockets.Write(result) should be called

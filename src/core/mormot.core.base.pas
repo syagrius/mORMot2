@@ -765,7 +765,8 @@ function IsEqualGuid(guid1, guid2: PGuid): boolean; overload;
 
 /// returns the index of a matching TGuid in an array
 // - returns -1 if no item matched
-function IsEqualGuidArray(const guid: TGuid; const guids: array of TGuid): integer;
+function IsEqualGuidArray({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid; const guids: array of TGuid): integer;
 
 /// check if a TGuid value contains only zero bytes, i.e. GUID_NULL
 // - this version is faster than the one supplied by SysUtils
@@ -775,8 +776,8 @@ function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: 
 /// append one TGuid item to a TGuid dynamic array
 // - returning the newly inserted index in guids[], or an existing index in
 // guids[] if NoDuplicates is TRUE and TGuid already exists
-function AddGuid(var guids: TGuidDynArray; const guid: TGuid;
-  NoDuplicates: boolean = false): integer;
+function AddGuid(var guids: TGuidDynArray; {$ifdef FPC_HAS_CONSTREF}constref{$else}
+  const{$endif} guid: TGuid; NoDuplicates: boolean = false): integer;
 
 /// fast O(log(n)) binary search of a binary (e.g. TGuid) value in a sorted array
 function FastFindBinarySorted(P, Value: PByteArray; Size, R: PtrInt): PtrInt;
@@ -1752,11 +1753,31 @@ function FastLocateIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): P
 
 /// retrieve the matching index or where to insert an integer value
 function FastSearchIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// retrieve the index where to insert a word value in a sorted word array
 // - R is the last index of available integer entries in P^ (i.e. Count-1)
 // - returns -(foundindex+1) i.e. <0 if the specified Value was found
 function FastLocateWordSorted(P: PWordArray; R: integer; Value: word): PtrInt;
+
+/// retrieve the index where to insert an Int64 value in a sorted Int64 array
+// - R is the last index of available integer entries in P^ (i.e. Count-1)
+// - returns -(foundindex+1) i.e. <0 if the specified Value was found
+function FastLocateInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
+
+/// retrieve the matching index or where to insert an integer value
+function FastSearchInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// add an integer value in a sorted dynamic array of Int64
+// - returns the index where the Value was added successfully in Values[]
+// - returns -(foundindex+1) i.e. <0 if the specified Value was already present
+function AddSortedInt64(var Values: TInt64DynArray; var Count: integer;
+  Value: Int64): PtrInt;
+
+/// remove all values smaller or equal than MinValue in a sorted array of Int64
+procedure RemoveSortedInt64SmallerThan(var Values: TInt64DynArray;
+  var Count: integer; MinValue: Int64);
 
 /// add an integer value in a sorted dynamic array of integers
 // - returns the index where the Value was added successfully in Values[]
@@ -1827,9 +1848,6 @@ function AddInt64(var Values: TInt64DynArray;
 /// if not already existing, add a 64-bit integer value to a dynamic array
 function AddInt64Once(var Values: TInt64DynArray; Value: Int64): PtrInt;
 
-/// if not already existing, add a 64-bit integer value to a sorted dynamic array
-procedure AddInt64Sorted(var Values: TInt64DynArray; Value: Int64);
-
 /// add a pointer-sized integer array at the end of a dynamic array
 function AddPtrUInt(var Values: TPtrUIntDynArray;
   var ValuesCount: integer; Value: PtrUInt): PtrInt;
@@ -1837,17 +1855,21 @@ function AddPtrUInt(var Values: TPtrUIntDynArray;
 /// delete any 32-bit integer in Values[]
 procedure DeleteInteger(var Values: TIntegerDynArray; Index: PtrInt); overload;
 
-/// delete any 32-bit integer in Values[]
+/// delete any 32-bit integer in Values[] and associated ValuesCount
 procedure DeleteInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
   Index: PtrInt); overload;
 
 /// delete any 16-bit integer in Values[]
-procedure DeleteWord(var Values: TWordDynArray; Index: PtrInt);
+procedure DeleteWord(var Values: TWordDynArray; Index: PtrInt); overload;
+
+/// delete any 16-bit integer in Values[] and associated ValuesCount
+procedure DeleteWord(var Values: TWordDynArray; var ValuesCount: integer;
+  Index: PtrInt); overload;
 
 /// delete any 64-bit integer in Values[]
 procedure DeleteInt64(var Values: TInt64DynArray; Index: PtrInt); overload;
 
-/// delete any 64-bit integer in Values[]
+/// delete any 64-bit integer in Values[] and associated ValuesCount
 procedure DeleteInt64(var Values: TInt64DynArray; var ValuesCount: integer;
   Index: PtrInt); overload;
 
@@ -1906,7 +1928,7 @@ type
     /// the actual 16-bit word storage
     Values: TWordDynArray;
     /// how many items are currently in Values[]
-    Count: PtrInt;
+    Count: integer;
     /// add a value into the sorted array
     // - return the index of the new inserted value into the Values[] array
     // - return -(foundindex+1) if this value is already in the Values[] array
@@ -1914,6 +1936,9 @@ type
     /// return the index if the supplied value in the Values[] array
     // - return -1 if not found
     function IndexOf(aValue: Word): PtrInt; {$ifdef HASINLINE}inline;{$endif}
+    /// search and delete a supplied value in the Values[] array
+    // - return -1 if not found, or the index of the delete item
+    function Remove(aValue: Word): PtrInt;
     /// save the internal array into a TWordDynArray variable
     procedure SetArray(out aValues: TWordDynArray);
   end;
@@ -1930,7 +1955,7 @@ type
     /// the actual 32-bit integers storage
     Values: TIntegerDynArray;
     /// how many items are currently in Values[]
-    Count: PtrInt;
+    Count: integer;
     /// add a value into the sorted array
     // - return the index of the new inserted value into the Values[] array
     // - return -(foundindex+1) if this value is already in the Values[] array
@@ -1938,6 +1963,9 @@ type
     /// return the index if the supplied value in the Values[] array
     // - return -1 if not found
     function IndexOf(aValue: integer): PtrInt; {$ifdef HASINLINE}inline;{$endif}
+    /// search and delete a supplied value in the Values[] array
+    // - return -1 if not found, or the index of the delete item
+    function Remove(aValue: integer): PtrInt;
     /// save the internal array into a TWordDynArray variable
     procedure SetArray(out aValues: TIntegerDynArray);
   end;
@@ -2413,38 +2441,40 @@ type
 
 /// returns TRUE if all 16 bytes of this 128-bit buffer equal zero
 // - e.g. a MD5 digest, or an AES block
-function IsZero(const dig: THash128): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+function IsZero({$ifdef FPC}constref{$else}const{$endif} dig: THash128): boolean; overload;
+  {$ifdef CPU64}inline;{$endif}
 
 /// returns TRUE if all 16 bytes of both 128-bit buffers do match
 // - e.g. a MD5 digest, or an AES block
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose - and it is also branchless therefore fast
-function IsEqual(const A, B: THash128): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+function IsEqual({$ifdef FPC}constref{$else}const{$endif} A, B: THash128): boolean; overload;
+  {$ifdef CPU64}inline;{$endif}
 
 /// fill all 16 bytes of this 128-bit buffer with zero
 // - may be used to cleanup stack-allocated content
 // ! ... finally FillZero(digest); end;
 procedure FillZero(out dig: THash128); overload;
+  {$ifdef CPU64}inline;{$endif}
 
 /// fast O(n) search of a 128-bit item in an array of such values
 function Hash128Index(P: PHash128Rec; Count: integer; h: PHash128Rec): integer;
 
 /// add a 128-bit item in an array of such values
-function AddHash128(var Arr: THash128DynArray; const V: THash128; var Count: integer): PtrInt;
+function AddHash128(var Arr: THash128DynArray;
+  {$ifdef FPC}constref{$else}const{$endif} V: THash128; var Count: integer): PtrInt;
 
 /// returns TRUE if all 20 bytes of this 160-bit buffer equal zero
 // - e.g. a SHA-1 digest
 function IsZero(const dig: THash160): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// returns TRUE if all 20 bytes of both 160-bit buffers do match
 // - e.g. a SHA-1 digest
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose
 function IsEqual(const A, B: THash160): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// fill all 20 bytes of this 160-bit buffer with zero
 // - may be used to cleanup stack-allocated content
@@ -2454,14 +2484,14 @@ procedure FillZero(out dig: THash160); overload;
 /// returns TRUE if all 28 bytes of this 224-bit buffer equal zero
 // - e.g. a SHA-224 digest
 function IsZero(const dig: THash224): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// returns TRUE if all 28 bytes of both 224-bit buffers do match
 // - e.g. a SHA-224 digest
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose
 function IsEqual(const A, B: THash224): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// fill all 28 bytes of this 224-bit buffer with zero
 // - may be used to cleanup stack-allocated content
@@ -2471,14 +2501,14 @@ procedure FillZero(out dig: THash224); overload;
 /// returns TRUE if all 32 bytes of this 256-bit buffer equal zero
 // - e.g. a SHA-256 digest, or a TEccSignature result
 function IsZero(const dig: THash256): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// returns TRUE if all 32 bytes of both 256-bit buffers do match
 // - e.g. a SHA-256 digest, or a TEccSignature result
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose
 function IsEqual(const A, B: THash256): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// fast O(n) search of a 256-bit item in an array of such values
 function Hash256Index(P: PHash256Rec; Count: integer; h: PHash256Rec): integer;
@@ -2491,14 +2521,14 @@ procedure FillZero(out dig: THash256); overload;
 /// returns TRUE if all 48 bytes of this 384-bit buffer equal zero
 // - e.g. a SHA-384 digest
 function IsZero(const dig: THash384): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// returns TRUE if all 48 bytes of both 384-bit buffers do match
 // - e.g. a SHA-384 digest
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose
 function IsEqual(const A, B: THash384): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// fill all 32 bytes of this 384-bit buffer with zero
 // - may be used to cleanup stack-allocated content
@@ -2508,14 +2538,12 @@ procedure FillZero(out dig: THash384); overload;
 /// returns TRUE if all 64 bytes of this 512-bit buffer equal zero
 // - e.g. a SHA-512 digest
 function IsZero(const dig: THash512): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if all 64 bytes of both 512-bit buffers do match
 // - e.g. two SHA-512 digests
 // - this function is not sensitive to any timing attack, so is designed
 // for cryptographic purpose
 function IsEqual(const A, B: THash512): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// fill all 64 bytes of this 512-bit buffer with zero
 // - may be used to cleanup stack-allocated content
@@ -2683,12 +2711,12 @@ type
   TIntelCpuFeature = (
    { CPUID EAX=1 into EDX, ECX }
    cfFPU,  cfVME,   cfDE,   cfPSE,   cfTSC,  cfMSR, cfPAE,  cfMCE,
-   cfCX8,  cfAPIC,  cf_d10, cfSEP,   cfMTRR, cfPGE, cfMCA,  cfCMOV,
-   cfPAT,  cfPSE36, cfPSN,  cfCLFSH, cf_d20, cfDS,  cfACPI, cfMMX,
+   cfCX8,  cfAPIC,  _d10, cfSEP,   cfMTRR, cfPGE, cfMCA,  cfCMOV,
+   cfPAT,  cfPSE36, cfPSN,  cfCLFSH, _d20, cfDS,  cfACPI, cfMMX,
    cfFXSR, cfSSE,   cfSSE2, cfSS,    cfHTT,  cfTM,  cfIA64, cfPBE,
    cfSSE3, cfCLMUL, cfDS64, cfMON,   cfDSCPL, cfVMX,  cfSMX,   cfEST,
    cfTM2,  cfSSSE3, cfCID,  cfSDBG,  cfFMA,   cfCX16, cfXTPR,  cfPDCM,
-   cf_c16, cfPCID,  cfDCA,  cfSSE41, cfSSE42, cfX2A,  cfMOVBE, cfPOPCNT,
+   _c16, cfPCID,  cfDCA,  cfSSE41, cfSSE42, cfX2A,  cfMOVBE, cfPOPCNT,
    cfTSC2, cfAESNI, cfXS,   cfOSXS,  cfAVX,   cfF16C, cfRAND,  cfHYP,
    { extended features CPUID EAX=7,ECX=0 into EBX, ECX, EDX }
    cfFSGS, cfTSCADJ, cfSGX, cfBMI1, cfHLE, cfAVX2, cfFDPEO, cfSMEP,
@@ -2697,22 +2725,22 @@ type
    cfCLFLUSH, cfCLWB, cfIPT, cfAVX512PF, cfAVX512ER, cfAVX512CD, cfSHA,
    cfAVX512BW, cfAVX512VL, cfPREFW1, cfAVX512VBMI, cfUMIP, cfPKU, cfOSPKE,
    cfWAITPKG, cfAVX512VBMI2, cfCETSS, cfGFNI, cfVAES, cfVCLMUL, cfAVX512NNI,
-   cfAVX512BITALG, cfTMEEN, cfAVX512VPC, cf_c15, cfFLP, cfMPX0, cfMPX1,
-   cfMPX2, cfMPX3, cfMPX4, cfRDPID, cfKL, cfBUSLOCK, cfCLDEMOTE, cf_c26,
-   cfMOVDIRI, cfMOVDIR64B, cfENQCMD, cfSGXLC, cfPKS, cf_d0, cfSGXKEYS,
-   cfAVX512NNIW, cfAVX512MAPS, cfFSRM, cfUINTR, cf_d6, cf_d7, cfAVX512VP2I,
-   cfSRBDS, cfMDCLR, cfTSXABRT, cf_d12, cfTSXFA, cfSER, cfHYBRID,
-   cfTSXLDTRK, cf_d17, cfPCFG, cfLBR, cfIBT, cf_d21, cfAMXBF16, cfAVX512FP16,
+   cfAVX512BITALG, cfTMEEN, cfAVX512VPC, _c15, cfFLP, cfMPX0, cfMPX1,
+   cfMPX2, cfMPX3, cfMPX4, cfRDPID, cfKL, cfBUSLOCK, cfCLDEMOTE, _c26,
+   cfMOVDIRI, cfMOVDIR64B, cfENQCMD, cfSGXLC, cfPKS, _d0, cfSGXKEYS,
+   cfAVX512NNIW, cfAVX512MAPS, cfFSRM, cfUINTR, _d6, _d7, cfAVX512VP2I,
+   cfSRBDS, cfMDCLR, cfTSXABRT, _d12, cfTSXFA, cfSER, cfHYBRID,
+   cfTSXLDTRK, _d17, cfPCFG, cfLBR, cfIBT, _d21, cfAMXBF16, cfAVX512FP16,
    cfAMXTILE, cfAMXINT8, cfIBRSPB, cfSTIBP, cfL1DFL, cfARCAB, cfCORCAB, cfSSBD,
    { extended features CPUID EAX=7,ECX=1 into EAX, EDX }
    cfSHA512, cfSM3, cfSM4, cfRAOINT, cfAVXVNNI, cfAVX512BF16, cfLASS,
-   cfCMPCCXADD, cfAPMEL, cf_a9, cfFZLREPM, cfFSREPS, cfFSREPC, cf_a13, cf_a14,
-   cf_a15, cf_a16, cfFRED, cfLKGS, cfWRMSRNS, cfNMISRC, cfAMXFP16, cfHRESET,
-   cfAVXIFMA, cf_a24, cf_a25, cfLAM, cfMSRLIST, cf_a28, cf_a29, cfINVDDIS, cfMOVRS,
-   cf__d0, cf_d1, cf_d2, cf_d3, cfAVXVNN8, cfAVXNECVT, cf__d6, cf__d7, cfAMXCPLX,
-   cf_d9, cfAVXVNNI16, cf_d11, cf__d12, cfUTMR, cfPREFETCHI, cfUSERMSR, cf_d16,
-   cfUIRETUIF, cfCETSSS, cfAVX10, cf__d20, cf_APXF, cf_d22, cfMWAIT, cf_d24,
-   cf_d25, cf_d26, cf_d27, cf_d28, cf_d29, cf_d30, cf_d31);
+   cfCMPCCXADD, cfAPMEL, _a9, cfFZLREPM, cfFSREPS, cfFSREPC, _a13, _a14,
+   _a15, _a16, cfFRED, cfLKGS, cfWRMSRNS, cfNMISRC, cfAMXFP16, cfHRESET,
+   cfAVXIFMA, _a24, _a25, cfLAM, cfMSRLIST, _a28, _a29, cfINVDDIS, cfMOVRS,
+   _d0_, _d1, _d2, _d3, cfAVXVNN8, cfAVXNECVT, _d6_, _d7_, cfAMXCPLX,
+   _d9, cfAVXVNNI16, _d11, _d12_, cfUTMR, cfPREFETCHI, cfUSERMSR, _d16,
+   cfUIRETUIF, cfCETSSS, cfAVX10, _d20_, _APXF, _d22, cfMWAIT, _d24,
+   _d25, _d26, _d27, _d28, _d29, _d30, _d31);
 
   /// all CPU features flags, as retrieved from an Intel/AMD CPU
   TIntelCpuFeatures = set of TIntelCpuFeature;
@@ -2733,23 +2761,22 @@ type
   /// 32-bit ARM Hardware capabilities
   // - merging AT_HWCAP and AT_HWCAP2 flags as reported by
   // github.com/torvalds/linux/blob/master/arch/arm/include/uapi/asm/hwcap.h
-  // - is defined on all platforms for cross-system use
+  // - Linux-specific list, but defined on all platforms for cross-system use
   TArm32HwCap = (
     // HWCAP_* constants
     arm32SWP, arm32HALF, arm32THUMB, arm3226BIT, arm32FAST_MULT, arm32FPA,
     arm32VFP, arm32EDSP, arm32JAVA, arm32IWMMXT, arm32CRUNCH, arm32THUMBEE,
     arm32NEON, arm32VFPv3, arm32VFPv3D16, arm32TLS, arm32VFPv4, arm32IDIVA,
-    arm32IDIVT, arm32VFPD32, arm32LPAE, arm32EVTSTRM,
-    arm32_22, arm32_23, arm32_24, arm32_25, arm32_26, arm32_27, arm32_28,
-    arm32_29, arm32_30, arm32_31,
+    arm32IDIVT, arm32VFPD32, arm32LPAE, arm32EVTSTRM, arm32FPHP, arm32ASIMDHP,
+    arm32ASIMDDP, arm32ASIMDFHM, arm32ASIMDBF16, arm32I8MM, _28, _29, _30, _31,
     // HWCAP2_* constants
-    arm32AES, arm32PMULL, arm32SHA1, arm32SHA2, arm32CRC32);
+    arm32AES, arm32PMULL, arm32SHA1, arm32SHA2, arm32CRC32, arm32SB, arm32SSBS);
   TArm32HwCaps = set of TArm32HwCap;
 
   /// 64-bit AARCH64 Hardware capabilities
   // - merging AT_HWCAP and AT_HWCAP2 flags as reported by
-  // github.com/torvalds/linux/blob/master/arch/arm64/include/uapi/asm/ahccap.h
-  // - is defined on all platforms for cross-system use
+  // github.com/torvalds/linux/blob/master/arch/arm64/include/uapi/asm/hwcap.h
+  // - Linux-specific list, but defined on all platforms for cross-system use
   TArm64HwCap = (
     // HWCAP_* constants
     arm64FP, arm64ASIMD, arm64EVTSTRM, arm64AES, arm64PMULL,
@@ -2757,12 +2784,19 @@ type
     arm64CPUID, arm64ASIMDRDM, arm64JSCVT, arm64FCMA, arm64LRCPC, arm64DCPOP,
     arm64SHA3, arm64SM3, arm64SM4, arm64ASIMDDP, arm64SHA512, arm64SVE,
     arm64ASIMDFHM, arm64DIT, arm64USCAT, arm64ILRCPC, arm64FLAGM, arm64SSBS,
-    arm64SB, arm64PACA, arm64PACG,
+    arm64SB, arm64PACA, arm64PACG, arm64GCS, arm64CMPBR, arm64FPRCVT,
+    arm64F8MM8, arm64F8MM4, arm64SVE_F16MM, arm64SVE_ELTPERM, arm64SVE_AES2,
+    arm64SVE_BFSCALE, arm64SVE2P2, arm64SME2P2, arm64SME_SBITPERM, arm64SME_AES,
+    arm64SME_SFEXPA, arm64SME_STMOP, arm64SME_SMOP4,
+    _48, _49, _50, _51, _52, _53, _54, _55, _56, _57, _58, _59, _60, _61, _62, _63,
     // HWCAP2_* constants
     arm64DCPODP, arm64SVE2, arm64SVEAES, arm64SVEPMULL, arm64SVEBITPERM,
     arm64SVESHA3, arm64SVESM4, arm64FLAGM2, arm64FRINT, arm64SVEI8MM,
     arm64SVEF32MM, arm64SVEF64MM, arm64SVEBF16, arm64I8MM,
-    arm64BF16, arm64DGH, arm64RNG, arm64BTI, arm64MTE);
+    arm64BF16, arm64DGH, arm64RNG, arm64BTI, arm64MTE, arm64ECV,
+    arm64AFP, arm64RPRES, arm64MTE3, arm64SME, arm64SME_I16I64, arm64SME_F64F64,
+    arm64SME_I8I32, arm64SME_F16F32, arm64SME_B16F32, arm64SME_F32F32,
+    arm64SME_FA64, arm64WFXT);
   TArm64HwCaps = set of TArm64HwCap;
 
 {$ifdef CPUARM}
@@ -3257,20 +3291,20 @@ procedure Random32Seed(entropy: pointer = nil; entropylen: PtrInt = 0);
 // algorithm, and its gsl_rng_taus2 generator
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 
-/// retrieve 512-bit of entropy, from system time and current execution state
-// - entropy is gathered over several sources like RTL Now(), CreateGuid(),
-// current gsl_rng_taus2 Lecuyer state, and RdRand32/Rdtsc low-level Intel opcodes
+/// retrieve 512-bit of entropy, as used to seed our gsl_rng_taus2 TLecuyer
+// - will call XorEntropyGetOsRandom256() once at process startup for Intel/AMD,
+// or each time on other CPUs with no RdRand32/Rdtsc opcodes (e.g. on ARM)
 // - the resulting output is to be hashed - e.g. with DefaultHasher128
-// - execution is fast, but not enough as unique seed for a cryptographic PRNG:
+// - execution is fast and safe, but not secure enough for a cryptographic PRNG:
 // TAesPrng.GetEntropy will call it as one of its entropy sources, in addition
-// to system-retrieved randomness from mormot.core.os.pas' XorOSEntropy()
+// to the more complete mormot.core.os.pas' XorOSEntropy() function
 procedure XorEntropy(var e: THash512Rec);
 
 var
-  /// stub used by XorEntropy() to retrieve 256-bit of randomness
+  /// stub used at startup by XorEntropy() to retrieve 256-bit random from OS
   // - this default unit with call sysutils.CreateGuid() twice
   // - mormot.core.os.posix.inc will implement a proper POSIX function here
-  // and try to read 32 bytes from /dev/urandom
+  // and try to read 32 bytes from /dev/urandom or getrandom Linux syscall
   XorEntropyGetOsRandom256: procedure(var e: THash256Rec);
 
 /// convert the endianness of a given unsigned 16-bit integer into BigEndian
@@ -3472,6 +3506,11 @@ procedure XorMemory(Dest, Source: PByteArray; size: PtrInt); overload;
 // - will perform on all buffer bytes:
 // ! Dest[i] := Source1[i] xor Source2[i];
 procedure XorMemory(Dest, Source1, Source2: PByteArray; size: PtrInt); overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// logical XOR of two 128-bit memory buffers
+procedure XorMemory(var Dest: THash128Rec;
+  {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// logical AND of two memory buffers
@@ -3754,7 +3793,7 @@ function crc32cHash(const b: TBytes): cardinal; overload;
 
 /// combine/reduce a 128-bit hash into a 64-bit hash
 // - e.g. from non cryptographic 128-bit hashers with linked lower/higher 64-bit
-function Hash128To64(const b: THash128): QWord;
+function Hash128To64({$ifdef FPC}constref{$else}const{$endif} b: THash128): QWord;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// get maximum possible (worse) SynLZ compressed size
@@ -4005,7 +4044,7 @@ function VariantToInt64(const V: Variant; var Value: Int64): boolean;
 /// convert any numerical Variant into a 64-bit integer
 // - it will expect true numerical Variant and won't convert any string nor
 // floating-pointer Variant, which will return the supplied DefaultValue
-function VariantToInt64Def(const V: Variant; DefaultValue: Int64): Int64;
+function VariantToInt64Def(const V: Variant; DefaultValue: Int64 = 0): Int64;
 
 /// convert any numerical Variant into a floating point value
 function VariantToDouble(const V: Variant; var Value: double): boolean;
@@ -4023,7 +4062,7 @@ function VariantToBoolean(const V: Variant; var Value: boolean): boolean;
 /// convert any numerical Variant into an integer
 // - it will expect true numerical Variant and won't convert any string nor
 // floating-pointer Variant, which will return the supplied DefaultValue
-function VariantToIntegerDef(const V: Variant; DefaultValue: integer): integer; overload;
+function VariantToIntegerDef(const V: Variant; DefaultValue: integer = 0): integer; overload;
 
 /// convert an UTF-8 encoded text buffer into a variant RawUtf8 varString
 procedure RawUtf8ToVariant(Txt: PUtf8Char; TxtLen: integer; var Value: variant); overload;
@@ -4639,7 +4678,8 @@ begin
             (PHash128Rec(guid1).H = PHash128Rec(guid2).H);
 end;
 
-function IsEqualGuidArray(const guid: TGuid; const guids: array of TGuid): integer;
+function IsEqualGuidArray({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid; const guids: array of TGuid): integer;
 begin
   result := Hash128Index(@guids[0], length(guids), @guid);
 end;
@@ -4654,7 +4694,8 @@ begin
             (a[3] = 0) {$endif CPU32};
 end;
 
-function AddGuid(var guids: TGuidDynArray; const guid: TGuid; NoDuplicates: boolean): integer;
+function AddGuid(var guids: TGuidDynArray; {$ifdef FPC_HAS_CONSTREF}constref{$else}
+  const{$endif} guid: TGuid; NoDuplicates: boolean): integer;
 begin
   if NoDuplicates then
   begin
@@ -7037,19 +7078,6 @@ begin
   inc(ValuesCount);
 end;
 
-procedure AddInt64Sorted(var Values: TInt64DynArray; Value: Int64);
-var
-  last: PtrInt;
-begin
-  last := high(Values);
-  if FastFindInt64Sorted(pointer(Values), last, Value) >= 0 then
-    exit; // found
-  inc(last);
-  SetLength(Values, last + 1);
-  Values[last] := Value;
-  QuickSortInt64(pointer(Values), 0, last);
-end;
-
 function AddInt64Once(var Values: TInt64DynArray; Value: Int64): PtrInt;
 begin
   result := Int64ScanIndex(pointer(Values), Length(Values), Value);
@@ -7095,6 +7123,18 @@ begin
   dec(n);
   UnmanagedDynArrayDelete(Values, n, Index, SizeOf(Values[0]));
   SetLength(Values, n);
+end;
+
+procedure DeleteWord(var Values: TWordDynArray; var ValuesCount: integer; Index: PtrInt);
+var
+  n: PtrInt;
+begin
+  n := ValuesCount;
+  if PtrUInt(Index) >= PtrUInt(n) then
+    exit; // wrong Index
+  dec(n);
+  ValuesCount := n;
+  UnmanagedDynArrayDelete(Values, n, Index, SizeOf(Values[0]));
 end;
 
 procedure DeleteInteger(var Values: TIntegerDynArray; Index: PtrInt);
@@ -7654,39 +7694,10 @@ begin
 end;
 
 function FastSearchIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
-var
-  L {$ifndef CPUX86}, ll, rr{$endif CPUX86}: PtrInt;
-  cmp: integer;
 begin
-  if R < 0 then
-    result := 0
-  else
-  begin
-    L := 0;
-    repeat
-      result := (L + R) shr 1;
-      cmp := P^[result] - Value;
-      if cmp = 0 then
-        exit; // return exact matching index
-      {$ifdef CPUX86}
-      if cmp < 0 then
-        L := result + 1
-      else
-        R := result - 1;
-      {$else}
-      rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
-      ll := result - 1;
-      if cmp < 0 then
-        L := rr
-      else
-        R := ll;
-      {$endif CPUX86}
-    until L > R;
-    while (result >= 0) and
-          (P^[result] >= Value) do
-      dec(result);
-    inc(result); // return the index where to insert
-  end;
+  result := FastLocateIntegerSorted(P, R, Value);
+  if result < 0 then
+     result := -(result + 1);  // returned -(foundindex+1)
 end;
 
 function FastLocateWordSorted(P: PWordArray; R: integer; Value: word): PtrInt;
@@ -7716,6 +7727,85 @@ begin
       dec(result);
     inc(result); // return the index where to insert
   end;
+end;
+
+function FastLocateInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
+var
+  L, cmp {$ifndef CPUX86}, ll, rr{$endif CPUX86}: PtrInt;
+begin
+  if R < 0 then
+    result := 0
+  else
+  begin
+    L := 0;
+    repeat
+      result := (L + R) shr 1;
+      {$ifdef CPU32}
+      cmp := CompareInt64(P^[result], Value);
+      {$else}
+      cmp :=  P^[result] - Value;
+      {$endif CPU32}
+      if cmp = 0 then
+      begin
+        result := -result - 1; // return -(foundindex+1) if already exists
+        exit;
+      end;
+      {$ifdef CPUX86}   // less registers on good old i386 target
+      if cmp < 0 then
+        L := result + 1
+      else
+        R := result - 1;
+      {$else}
+      rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
+      ll := result - 1;
+      if cmp < 0 then
+        L := rr
+      else
+        R := ll;
+      {$endif CPUX86}
+    until L > R;
+    while (result >= 0) and
+          (P^[result] >= Value) do
+      dec(result);
+    inc(result); // return the index where to insert
+  end;
+end;
+
+function FastSearchInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
+begin
+  result := FastLocateInt64Sorted(P, R, Value);
+  if result < 0 then
+     result := -(result + 1);  // returned -(foundindex+1)
+end;
+
+function AddSortedInt64(var Values: TInt64DynArray; var Count: integer;
+  Value: Int64): PtrInt;
+begin
+  result := FastLocateInt64Sorted(pointer(Values), Count - 1, Value);
+  if result < 0 then
+    exit; // Value exists -> fails and return -(foundindex+1)
+  if Count = Length(Values) then
+    SetLength(Values, NextGrow(Count));
+  if result < Count then
+    MoveFast(Values[result], Values[result + 1], (Count - result) * SizeOf(Int64))
+  else
+    result := Count;
+  Values[result] := Value;
+  inc(Count);
+end;
+
+procedure RemoveSortedInt64SmallerThan(var Values: TInt64DynArray;
+  var Count: integer; MinValue: Int64);
+var
+  lastok: integer;
+begin
+  if (Count = 0) or
+     (Values[0] > MinValue) then
+    exit; // nothing to remove
+  lastok := FastSearchInt64Sorted(pointer(Values), Count - 1, MinValue);
+  dec(Count, lastok);
+  if Count <> 0 then
+    MoveFast(Values[lastok], Values[0], lastok * SizeOf(Int64));
 end;
 
 function AddSortedInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
@@ -7901,6 +7991,13 @@ begin
   result := FastFindWordSorted(pointer(Values), Count - 1, aValue);
 end;
 
+function TSortedWordArray.Remove(aValue: Word): PtrInt;
+begin
+  result := IndexOf(aValue);
+  if result >= 0 then
+    DeleteWord(Values, Count, result);
+end;
+
 procedure TSortedWordArray.SetArray(out aValues: TWordDynArray);
 begin
   if Count = 0 then
@@ -7933,6 +8030,13 @@ end;
 function TSortedIntegerArray.IndexOf(aValue: integer): PtrInt;
 begin
   result := FastFindIntegerSorted(pointer(Values), Count - 1, aValue);
+end;
+
+function TSortedIntegerArray.Remove(aValue: integer): PtrInt;
+begin
+  result := IndexOf(aValue);
+  if result >= 0 then
+    DeleteInteger(Values, Count, result);
 end;
 
 procedure TSortedIntegerArray.SetArray(out aValues: TIntegerDynArray);
@@ -8442,14 +8546,14 @@ end;
 
 { ************ low-level types mapping binary structures }
 
-function IsZero(const dig: THash128): boolean;
+function IsZero({$ifdef FPC}constref{$else}const{$endif} dig: THash128): boolean;
 var
   a: TPtrIntArray absolute dig;
 begin
   result := a[0] or a[1] {$ifdef CPU32} or a[2] or a[3]{$endif}  = 0;
 end;
 
-function IsEqual(const A, B: THash128): boolean;
+function IsEqual({$ifdef FPC}constref{$else}const{$endif} A, B: THash128): boolean;
 var
   a_: TPtrIntArray absolute A;
   b_: TPtrIntArray absolute B;
@@ -8543,8 +8647,8 @@ end;
 
 {$endif CPU64}
 
-function AddHash128(var Arr: THash128DynArray; const V: THash128;
-  var Count: integer): PtrInt;
+function AddHash128(var Arr: THash128DynArray;
+  {$ifdef FPC}constref{$else}const{$endif} V: THash128; var Count: integer): PtrInt;
 begin
   result := Count;
   if result = length(Arr) then
@@ -9549,6 +9653,13 @@ begin
   until Length = 0;
 end;
 
+procedure XorMemory(var Dest: THash128Rec;
+  {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec);
+begin
+  Dest.Lo := Dest.Lo xor Source.Lo;
+  Dest.Hi := Dest.Hi xor Source.Hi;
+end;
+
 threadvar // do not publish for compilation within Delphi packages
   _Lecuyer: TLecuyer; // uses only 16 bytes per thread
 
@@ -9561,38 +9672,36 @@ procedure _XorEntropyGetOsRandom256(var e: THash256Rec);
 begin
   sysutils.CreateGUID(e.l.guid); // e.g. Windows CoCreateGuid()
   sysutils.CreateGUID(e.h.guid);
-end;
+end; // overriden in mormot.core.os.posix.inc to use /dev/urandom or getrandom
 
 var
-  // cascaded 128-bit random to avoid replay attacks - shared by all threads
-  _EntropyGlobal: THash128Rec;
+  // cascaded 256-bit random to avoid replay attacks - shared by all threads
+  _EntropyGlobal: THash256Rec;
 
 procedure XorEntropy(var e: THash512Rec);
 var
   lec: PHash128Rec;
-  rnd: THash256Rec;
 begin
   // note: we don't use RTL Random() here because it is not thread-safe
-  XorEntropyGetOsRandom256(rnd); // fast get 256-bit of randomness from OS
-  if _EntropyGlobal.c0 = 0 then
-    _EntropyGlobal.guid := rnd.h.guid; // initialize forward security
-  e.r[0].L := e.r[0].L xor _EntropyGlobal.L;
-  e.r[0].H := e.r[0].H xor _EntropyGlobal.H;
+  {$ifdef CPUINTEL}
+  if _EntropyGlobal.i0 = 0 then // call OS API each only once at startup
+  {$endif CPUINTEL}
+    XorEntropyGetOsRandom256(_EntropyGlobal); // 256-bit randomness from OS
+  XorMemory(e.r[0], _EntropyGlobal.h);
   lec := @_Lecuyer; // PtrUInt(lec) identifies this thread
-  e.r[1].L := e.r[1].L xor PtrUInt(@e)  xor lec^.L xor rnd.l.L;
-  e.r[1].H := e.r[1].H xor PtrUInt(lec) xor lec^.H xor rnd.l.H;
-  e.r[2].L := e.r[2].L xor rnd.h.L;
-  e.r[2].H := e.r[2].H xor rnd.h.H;
-  // no mormot.core.os yet, so we can't use QueryPerformanceMicroSeconds()
-  unaligned(PDouble(@e.r[3].Lo)^) := Now * 2123923447; // cross-platform time
-  {$ifdef CPUINTEL} // use low-level Intel/AMD opcodes
+  e.r[1].L := e.r[1].L xor PtrUInt(@e)  xor lec^.L;
+  e.r[1].H := e.r[1].H xor PtrUInt(lec) xor lec^.H;
+  XorMemory(e.r[2], _EntropyGlobal.l);
+  {$ifdef CPUINTEL} // Intel/AMD opcodes are safe enough between calls
   e.r[3].Lo := e.r[3].Lo xor Rdtsc;
-  RdRand32(@e.r[0].c, length(e.r[0].c));
-  e.r[3].Hi := e.r[3].Hi xor Rdtsc; // has slightly changed in-between
+  RdRand32(@e.r[0].c, length(e.r[0].c)); // no-op if cfSSE42 is not available
+  crcblocks(@_EntropyGlobal.l, @e, 4);   // simple diffusion to move forward
+  crcblocks(@_EntropyGlobal.h, @e, 4);
+  e.r[3].Hi := e.r[3].Hi xor Rdtsc;      // has slightly changed in-between
   {$else}
+  FillCharFast(_EntropyGlobal, SizeOf(_EntropyGlobal), 0); // anti-forensic
   e.r[3].Hi := e.r[3].Hi xor GetTickCount64; // always defined in FPC RTL
   {$endif CPUINTEL}
-  crc128c(@e, SizeOf(e), _EntropyGlobal.b); // simple diffusion to move forward
 end;
 
 function bswap16(a: cardinal): cardinal; // inlining is good enough
@@ -9626,7 +9735,7 @@ begin
       e.b[j] := {%H-}e.b[j] xor entropy^[i];
     end;
   repeat
-    XorEntropy(e); // 512-bit from RdRand32 + Rdtsc + Now + CreateGuid
+    XorEntropy(e); // 512-bit from XorEntropyGetOsRandom256 + RdRand32 + Rdtsc
     DefaultHasher128(@h, @e, SizeOf(e)); // may be AesNiHash128
     rs1 := rs1 xor h.c0;
     rs2 := rs2 xor h.c1;
@@ -10501,9 +10610,9 @@ begin
     inc(p); // auxv is located after the last textual environment variable
     repeat
       if PtrUInt(p[0]) = AT_HWCAP then // 32-bit or 64-bit entries = PtrUInt
-        PCardinalArray(@caps)[0] := PtrUInt(p[1])
+        PPtrUIntArray(@caps)[0] := PtrUInt(p[1])
       else if PtrUInt(p[0]) = AT_HWCAP2 then
-        PCardinalArray(@caps)[1] := PtrUInt(p[1]);
+        PPtrUIntArray(@caps)[1] := PtrUInt(p[1]);
       p := @p[2];
     until p[0] = nil;
   except
@@ -11671,7 +11780,7 @@ procedure crc128c(buf: PAnsiChar; len: cardinal; out crc: THash128);
 var
   h: THash128Rec absolute crc;
   h1, h2: cardinal;
-begin // see https://goo.gl/Pls5wi
+begin // // https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;
@@ -11687,7 +11796,7 @@ procedure crc256c(buf: PAnsiChar; len: cardinal; out crc: THash256);
 var
   h: THash256Rec absolute crc;
   h1, h2: cardinal;
-begin // see https://goo.gl/Pls5wi
+begin // see // https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;
@@ -11771,7 +11880,7 @@ begin
   result := crc32c(0, pointer(b), length(b));
 end;
 
-function Hash128To64(const b: THash128): QWord;
+function Hash128To64({$ifdef FPC}constref{$else}const{$endif} b: THash128): QWord;
 begin
   result := THash128Rec(b).L xor (THash128Rec(b).H * QWord(2685821657736338717));
 end;

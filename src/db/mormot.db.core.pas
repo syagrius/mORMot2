@@ -395,10 +395,14 @@ type
     procedure SetCapacity(max: integer);
   end;
 
-/// set an error message for the current thread
+/// set a database error message for the current thread
 // - using an internal TLastError store and an associated TLastErrorID threadvar
 // since we can't create any string/RawUtf8 threadvar
-procedure SetDbError(const text: RawUtf8);
+procedure SetDbError(const text: RawUtf8); overload;
+
+/// set a database error message for the current thread from an exception
+// - could be used when E was not created via CreateU/CreateUtf8/RaiseUtf8
+procedure SetDbError(E: Exception); overload;
 
 /// unset the error message for the current thread
 procedure ClearDbError;
@@ -1988,6 +1992,11 @@ begin
   LastDbErrorID := LastDbError.NewMsg(text); // store in current threadvar
 end;
 
+procedure SetDbError(E: Exception);
+begin
+  SetDbError(FormatUtf8('%.%', [E, E.Message]));
+end;
+
 procedure ClearDbError;
 begin
   LastDbErrorID := 0; // reset
@@ -2978,14 +2987,14 @@ var
   P, PBegin, PEnd: PUtf8Char;
 begin
   if (self = nil) or
-     not fStream.InheritsFrom(TMemoryStream) or
+     not fStream.InheritsFrom(TCustomMemoryStream) or
      fExpand or
      (fStartDataPosition = 0) then
     exit;
   // go to begin of first row
   FlushToStream; // we need the data to be in fStream memory
   // PBegin^=val11 in { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
-  PBegin := TMemoryStream(fStream).Memory;
+  PBegin := TCustomMemoryStream(fStream).Memory;
   PEnd := PBegin + fStream.Position;
   PEnd^ := #0; // mark end of current values
   inc(PBegin, fStartDataPosition + 1); // +1 to include ',' of ',val11'

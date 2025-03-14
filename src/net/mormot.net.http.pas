@@ -4025,8 +4025,8 @@ end;
 function THttpRequestContext.ContentFromFile(
   const FileName: TFileName; CompressGz: integer): integer;
 var
-  h: THandle;
   gz: TFileName;
+  h: THandle;
 begin
   result := HTTP_NOTFOUND;
   Content := '';
@@ -4039,36 +4039,43 @@ begin
      not (rfWantRange in ResponseFlags) then
   begin
     gz := FileName + '.gz';
-    h := FileOpen(gz, fmOpenRead or fmShareRead);
-    if ValidHandle(h) then
+    if FileInfoByName(gz, ContentLength, ContentLastModified) and
+       (ContentLength >= 0) then // not a folder
     begin
-      ContentStream := TFileStreamEx.CreateFromHandle(h, gz);
+      ContentStream := TFileStreamEx.CreateRead(gz);
       include(ResponseFlags, rfContentStreamNeedFree);
-      FileInfoByHandle(h, nil, @ContentLength, @ContentLastModified, nil);
       fContentEncoding := 'gzip';
       result := HTTP_SUCCESS;
       exit; // force ContentStream of raw .gz file to bypass recompression
     end;
   end;
   // check the actual file on disk against any requested range
-  h := FileOpen(FileName, fmOpenReadShared);
-  if not ValidHandle(h) then
+  if not FileInfoByName(FileName, ContentLength, ContentLastModified) or
+     (ContentLength < 0) then // valid file, not a folder (size=-1)
     exit;
-  FileInfoByHandle(h, nil, @ContentLength, @ContentLastModified, nil);
   if rfWantRange in ResponseFlags then
     if not ValidateRange then
     begin
       result := HTTP_RANGENOTSATISFIABLE;
-      FileClose(h);
       exit;
-    end
-    else if RangeOffset <> 0 then
-      FileSeek64(h, RangeOffset);
-  // we can send this file out
-  result := HTTP_SUCCESS;
+    end;
   include(ResponseFlags, rfAcceptRange);
-  if (ContentLength < HttpContentFromFileSizeInMemory) and
-     (PCardinal(CommandMethod)^ <> _HEAD32) then
+  if PCardinal(CommandMethod)^ = _HEAD32 then // make FileOpen() only for GET
+  begin
+    result := HTTP_SUCCESS;
+    ContentStream := TStreamWithPositionAndSize.Create; // <> nil
+    include(ResponseFlags, rfContentStreamNeedFree);
+    exit;
+  end;
+  // we can send this file content out
+  h := FileOpen(FileName, fmOpenReadShared);
+  if not ValidHandle(h) then
+    exit;
+  if rfWantRange in ResponseFlags then
+    if RangeOffset <> 0 then
+      FileSeek64(h, RangeOffset);
+  result := HTTP_SUCCESS;
+  if ContentLength < HttpContentFromFileSizeInMemory then
   begin
     // smallest files (up to few MB) are sent from temp memory (maybe compressed)
     FastSetString(RawUtf8(Content), ContentLength); // assume CP_UTF8 for FPC
@@ -4611,7 +4618,7 @@ begin
     exit;
   fOutContentType := ContentType;
   if fOutContentType = '' then
-    fOutContentType := GetMimeContentType(pointer(Content), length(Content));
+    GetMimeContentTypeFromBuffer(Content, fOutContentType);
   fOutContent := Content;
   result := HTTP_SUCCESS;
 end;

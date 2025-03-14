@@ -1852,6 +1852,7 @@ var
 
 /// low-level anti-forensic diffusion of a memory buffer using SHA-256
 // - as used by TAesPrng.AFSplit and TAesPrng.AFUnSplit
+// - could also be used to expand some PRNG output into any size
 procedure AFDiffusion(buf, rnd: pointer; size: cardinal);
 
 
@@ -4922,6 +4923,8 @@ var
   {$ifdef USEAESNI64} ctr, {$endif USEAESNI64}
   blocks: cardinal;
 begin
+  if ILen = 0 then
+    exit;
   b_pos := state.blen;
   inc(state.blen, ILen);
   state.blen := state.blen and AesBlockMod;
@@ -4981,20 +4984,26 @@ end;
 procedure TAesGcmEngine.internal_auth(ctp: PByte; ILen: PtrUInt;
   var ghv: TAesBlock; var gcnt: TQWordRec);
 var
-  b_pos: PtrUInt;
+  b_pos, tomove: PtrUInt;
 begin
-  b_pos := gcnt.L and AesBlockMod;
+  if ILen = 0 then
+    exit;
+  b_pos := PPtrUInt(@gcnt)^ and AesBlockMod;
   inc(gcnt.V, ILen);
   if (b_pos = 0) and
      (gcnt.V <> 0) then
     gf_mul_h(self, ghv); // maybe CLMUL
-  while (ILen > 0) and
-        (b_pos < SizeOf(TAesBlock)) do
+  tomove := SizeOf(TAesBlock) - b_pos;
+  if tomove <> 0 then
   begin
-    ghv[b_pos] := ghv[b_pos] xor ctp^;
-    inc(b_pos);
-    inc(ctp);
-    dec(ILen);
+    if tomove > ILen then
+      tomove := ILen;
+    XorMemory(@ghv[b_pos], pointer(ctp), tomove);
+    dec(ILen, tomove);
+    if ILen = 0 then
+      exit;
+    inc(b_pos, tomove);
+    inc(ctp, tomove);
   end;
   while ILen >= SizeOf(TAesBlock) do
   begin
@@ -5002,19 +5011,23 @@ begin
     XorBlock16(@ghv, pointer(ctp));
     inc(PAesBlock(ctp));
     dec(ILen, SizeOf(TAesBlock));
+    if ILen = 0 then
+      exit;
   end;
-  while ILen > 0 do
-  begin
-    if b_pos = SizeOf(TAesBlock) then
-    begin
-      gf_mul_h(self, ghv); // maybe CLMUL
-      b_pos := 0;
-    end;
-    ghv[b_pos] := ghv[b_pos] xor ctp^;
-    inc(b_pos);
-    inc(ctp);
-    dec(ILen);
-  end;
+  if ILen <> 0 then
+    repeat
+      if b_pos = SizeOf(TAesBlock) then
+      begin
+        gf_mul_h(self, ghv); // maybe CLMUL
+        b_pos := 0;
+      end;
+      ghv[b_pos] := ghv[b_pos] xor ctp^;
+      dec(ILen);
+      if ILen = 0 then
+        exit;
+      inc(b_pos);
+      inc(ctp);
+    until false;
 end;
 
 {$ifdef USEGCMAVX}
@@ -5186,7 +5199,7 @@ begin
     inc(state.atx_cnt.V, ILen);
     ILen := ILen shr AesBlockShift;
     repeat
-      // single-pass loop optimized e.g. for PKCS7 padding without SSE4.1
+      // single-pass loop e.g. for PKCS7 padding without SSE4.1 (e.g. on ARM)
       {%H-}GCM_IncCtr(TAesContext(aes).iv.b);
       TAesContext(aes).DoBlock(aes, TAesContext(aes).iv,
         TAesContext(aes).buf); // buf=AES(iv) maybe AES-NI
@@ -5212,20 +5225,21 @@ function TAesGcmEngine.Decrypt(ctp, ptp: pointer; ILen: PtrInt;
 var
   tag: TAesBlock;
 begin
-  result := true;
-  if ILen <= 0 then
-    exit;
   result := false;
-  if (ptp = nil) or
-     (ctp = nil) or
+  if (ILen < 0) or
+     ((ILen <> 0) and
+       ((ptp = nil) or
+        (ctp = nil))) or
      (flagFinalComputed in state.flags) then
     exit;
   {$ifdef USEGCMAVX}
-  if flagAVX in state.flags then
+  if (flagAVX in state.flags) and
+     (ILen <> 0) then
     AvxProcess(ctp, ptp, ILen, {encrypt=}false)
   else
   {$endif USEGCMAVX}
-  if (ILen and AesBlockMod = 0) and
+  if (ILen <> 0) and
+     (ILen and AesBlockMod = 0) and
      {$ifdef USEAESNI64} // faster with 8x interleaved internal_crypt()
      not (aesNiSse41 in TAesContext(aes).Flags) and
      {$endif USEAESNI64}
@@ -7188,7 +7202,7 @@ end;
 
 function TAesPkcs7Reader.Read(var Buffer; Count: Longint): Longint;
 var
-  chunk, padding: integer;
+  chunk, padding, max: integer;
 begin
   result := 0;
   if Count > fStreamSize then
@@ -7201,7 +7215,15 @@ begin
     begin
       // we need to read and decode input stream into fBuf[]
       fBufPos := 0;
-      fBufAvailable := fStream.Read(pointer(fBuf)^, length(fBuf));
+      fBufAvailable := 0;
+      max := length(fBuf);
+      repeat
+        chunk := fStream.Read(PByteArray(fBuf)[fBufAvailable], max);
+        if chunk <= 0 then
+          break;
+        inc(fBufAvailable, chunk); // may need several Read() calls
+        dec(max, chunk);
+      until max = 0;
       if fBufAvailable = 0 then
         break;
       if fBufAvailable and AesBlockMod <> 0 then
@@ -7838,10 +7860,14 @@ begin
     {$ifdef CPUINTELARM}
     sha3.Update(@CpuFeatures, SizeOf(CpuFeatures));
     {$endif CPUINTELARM}
+    // 256 random bytes salt, set at startup to avoid hash flooding of AesNiHash
+    {$ifdef USEAESNIHASH}
+    sha3.Update(AESNIHASHKEYSCHED_);
+    {$endif USEAESNIHASH}
     // 512-bit randomness and entropy from mormot.core.base
     SharedRandom.Fill(@data, SizeOf(data)); // XOR stack data from gsl_rng_taus2
     sha3.Update(@data, SizeOf(data));
-    // 512-bit from RdRand32 + Rdtsc + Now + CreateGuid or dev/urandom
+    // 512-bit from XorEntropyGetOsRandom256 + RdRand + Rdtsc + Lecuyer + thread
     XorEntropy(data);
     sha3.Update(@data, SizeOf(data));
     // 512-bit from OpenSSL audited random generator (from mormot.crypt.openssl)
@@ -9757,7 +9783,7 @@ end;
 
 procedure crc256cmix(h1, h2: cardinal; h: PCardinalArray);
 begin
-  // see https://goo.gl/Pls5wi
+  // see // https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
   h^[0] := h1;
   inc(h1, h2);
   h^[1] := h1;
@@ -11367,7 +11393,7 @@ var
   procedure Read(Tmp: pointer; ByteCount: cardinal);
   begin
     if pIn = nil then
-      inStream.Read(Tmp^, ByteCount)
+      inStream.ReadBuffer(Tmp^, ByteCount)
     else
     begin
       MoveFast(pIn^, Tmp^, ByteCount);

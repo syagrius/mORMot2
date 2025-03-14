@@ -5475,11 +5475,22 @@ begin
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame4');
   Check(RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame4i');
   arr := CsvToRawUtf8DynArray('two,one,one');
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'two,one,one');
+  CheckEqual(RawUtf8ArrayToCsv(arr, ''), 'twooneone');
+  CheckEqual(RawUtf8ArrayToCsv(arr, '/', {rev=}true), 'one/one/two');
   Check(not RawUtf8DynArrayEquals(arr, arr2), 'RawUtf8DynArrayEquals5');
   Check(RawUtf8DynArrayContains(arr, arr2), 'RawUtf8DynArrayContains5');
   Check(RawUtf8DynArrayContains(arr, arr2, {insens=}true), 'RawUtf8DynArrayContains5i');
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame5');
   Check(not RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame5i');
+  CheckEqual(RawUtf8ToCsv([]), '');
+  CheckEqual(RawUtf8ToCsv(['one']), 'one');
+  CheckEqual(RawUtf8ToCsv(['one', 'two']), 'one,two');
+  CheckEqual(RawUtf8ToCsv(['one', 'two', ' three ']), 'one,two, three ');
+  CheckEqual(RawUtf8ToCsv(['one', 'two', '', 'three']), 'one,two,,three');
+  CheckEqual(RawUtf8ToCsv(['one'], '//', true), 'one');
+  CheckEqual(RawUtf8ToCsv(['one', 'two'], '//', true), 'two//one');
+  CheckEqual(RawUtf8ToCsv(['1', '2', '3'], '//', true), '3//2//1');
   Finalize(arr);
   CsvToRawUtf8DynArray(res, ',', '', arr);
   Check(arr[0] = 'one');
@@ -7195,6 +7206,8 @@ var
   end;
 
 begin
+  CheckEqual(ord(arm64DCPODP), 64);
+  CheckEqual(ord(arm32AES), 32);
   CheckEqual(SizeOf(TSmbiosBiosFlags), 8);
   CheckEqual(SizeOf(TSmbiosMemory) - 7 * SizeOf(RawUtf8), 11);
   CheckEqual(SizeOf(TSmbiosMemoryArray) - 2 * SizeOf(pointer), 5);
@@ -8368,7 +8381,7 @@ var
   fu: TUnixMSTime;
   fn: array[0..10] of TFileName;
   mp, mp2: TMultiPartDynArray;
-  s, mpc, mpct: RawUtf8;
+  s, ct, mpc, mpct: RawUtf8;
   st: THttpMultiPartStream;
   rfc2388: boolean;
 
@@ -8466,19 +8479,23 @@ begin
   Check(not HttpMethodWithNoBody('PUT'));
   Check(not HttpMethodWithNoBody('OPT'));
   // mime content types
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.h264'), 'video/H264');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto', 'def1'), 'def1');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.', 'def2'), 'def2');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.a', 'def3'), 'application/a');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.1', 'def4'), 'def4');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.ab', 'def5'), 'application/ab');
+  CheckEqual(GetMimeContentType('', 'toto.h264'), 'video/H264');
+  CheckEqual(GetMimeContentType('', 'toto', 'def1'), 'def1');
+  CheckEqual(GetMimeContentType('', 'toto.', 'def2'), 'def2');
+  CheckEqual(GetMimeContentType('', 'toto.a', 'def3'), 'application/a');
+  CheckEqual(GetMimeContentType('', 'toto.1', 'def4'), 'def4');
+  CheckEqual(GetMimeContentType('', 'toto.ab', 'def5'), 'application/ab');
   for i := 0 to high(MIMES) shr 1 do
-    CheckEqual(GetMimeContentType(nil, 0, 'toto.' + MIMES[i * 2]),
+    CheckEqual(GetMimeContentType('', 'toto.' + MIMES[i * 2]),
       ToUtf8(MIMES[i * 2 + 1]));
+  FastSetString(s, 34);
   for i := 0 to high(BIN) do
   begin
-    CheckEqual(GetMimeContentType(@BIN[i], 34, ''), BIN_MIME[i]);
-    CheckEqual(GetMimeContentTypeFromBuffer(@BIN[i], 34, ''), BIN_MIME[i]);
+    PCardinal(s)^ := BIN[i];
+    CheckEqual(GetMimeContentType(s), BIN_MIME[i]);
+    ct := '';
+    Check(GetMimeContentTypeFromBuffer(s, ct) <> mtUnknown);
+    CheckEqual(ct, BIN_MIME[i]);
   end;
   s := '<?xml';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
@@ -8494,6 +8511,12 @@ begin
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
   s := '<!DocType HTML<html><body>';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '{"json":123}';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtJson);
+  s := '["json",123]';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtJson);
+  s := '["json",'#0'123]';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtUnknown);
   Check(not IsContentTypeCompressible('anything'));
   Check(not IsContentTypeCompressible('toto/plain'));
   Check(IsContentTypeCompressible('text/plain'));

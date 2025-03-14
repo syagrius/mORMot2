@@ -589,12 +589,11 @@ type
     function GetEnumNameTrimed(const Value): RawUtf8;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the enumeration names corresponding to a set value as CSV
-    function GetSetName(const value; trimmed: boolean = false;
-      sep: AnsiChar = ','): RawUtf8;
+    function GetSetName(const value; trimmed: boolean = false; sep: AnsiChar = ','): RawUtf8;
     /// get the enumeration names corresponding to a set value as a RawUtf8 rray
     // - optionally return the corresponding ordinal values in a TIntegerDynArray
     procedure GetSetNameArray(const value; var res: TRawUtf8DynArray;
-      trimmed: boolean = false; resOrd: PIntegerDynArray = nil);
+    trimmed: boolean = false; resOrd: PIntegerDynArray = nil);
     /// get the enumeration names corresponding to a set value as JSON array
     function GetSetNameJsonArray(Value: cardinal; SepChar: AnsiChar = ',';
       FullSetsAsStar: boolean = false): RawUtf8; overload;
@@ -997,7 +996,8 @@ type
       OnlyImplementedBy: TInterfacedObjectClass;
       out AncestorsImplementedEntry: TPointerDynArray);
     /// for rkInterface: check if this type (or ancestor) implements a TGuid
-    function InterfaceImplements(const AGuid: TGuid): boolean;
+    function InterfaceImplements(
+      {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}aGuid: TGuid): boolean;
   end;
 
   {$A+}
@@ -1682,7 +1682,7 @@ procedure SetEnumFromOrdinal(aTypeInfo: PRttiInfo; out Value; Ordinal: PtrUInt);
 
 /// helper to retrieve the CSV text of all enumerate items defined in a set
 function GetSetName(aTypeInfo: PRttiInfo; const value;
-  trimmed: boolean = false): RawUtf8;
+  trimmed: boolean = false; sep: AnsiChar = ','): RawUtf8;
 
 /// retrieve the text of all enumerate items defined in a set as dynamic array
 // - optionally return the corresponding ordinal values in a TIntegerDynArray
@@ -3763,8 +3763,7 @@ begin
   TrimLeftLowerCaseShort(GetEnumName(Value), result);
 end;
 
-function TRttiEnumType.GetSetName(const value; trimmed: boolean;
-  sep: AnsiChar): RawUtf8;
+function TRttiEnumType.GetSetName(const value; trimmed: boolean; sep: AnsiChar): RawUtf8;
 var
   j: PtrInt;
   PS, v: PShortString;
@@ -3799,8 +3798,8 @@ begin
   tmp.Done(result, CP_UTF8);
 end;
 
-procedure TRttiEnumType.GetSetNameArray(const value; var res: TRawUtf8DynArray;
-  trimmed: boolean; resOrd: PIntegerDynArray);
+procedure TRttiEnumType.GetSetNameArray(const value;
+  var res: TRawUtf8DynArray; trimmed: boolean; resOrd: PIntegerDynArray);
 var
   n, j: PtrInt;
   PS: PShortString;
@@ -4358,14 +4357,15 @@ begin
   until false;
 end;
 
-function TRttiInfo.InterfaceImplements(const AGuid: TGuid): boolean;
+function TRttiInfo.InterfaceImplements(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else} const{$endif} aGuid: TGuid): boolean;
 var
   nfo: PRttiInfo;
   typ: PRttiInterfaceTypeData;
 begin
   result := false;
   if (@self = nil) or
-     IsNullGuid(AGuid) or
+     IsNullGuid(aGuid) or
      (Kind <> rkInterface) then
     exit;
   typ := InterfaceType;
@@ -4376,7 +4376,7 @@ begin
       exit;
     typ := nfo^.InterfaceType;
   until (ifHasGuid in typ^.IntfFlags) and
-        IsEqualGuid(AGuid, typ^.IntfGuid^);
+        IsEqualGuid(aGuid, typ^.IntfGuid^);
   result := true; // found
 end;
 
@@ -6102,13 +6102,14 @@ begin
   aTypeInfo^.EnumBaseType^.SetEnumFromOrdinal(Value, Ordinal);
 end;
 
-function GetSetName(aTypeInfo: PRttiInfo; const value; trimmed: boolean): RawUtf8;
+function GetSetName(aTypeInfo: PRttiInfo; const value;
+  trimmed: boolean; sep: AnsiChar): RawUtf8;
 begin
-  result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed);
+  result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed, sep);
 end;
 
-function GetSetNameArray(aTypeInfo: PRttiInfo; const value;
-  trimmed: boolean; resOrd: PIntegerDynArray): TRawUtf8DynArray;
+function GetSetNameArray(aTypeInfo: PRttiInfo; const value; trimmed: boolean;
+  resOrd: PIntegerDynArray): TRawUtf8DynArray;
 begin
   aTypeInfo^.SetEnumType^.EnumBaseType.GetSetNameArray(value, result, trimmed, resOrd);
 end;

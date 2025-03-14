@@ -8,6 +8,12 @@
 
 { ****************** Unicode, Time, File process }
 
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
+  overload; forward;
+procedure _fmt(const Fmt: string; const Args: array of const;
+  var result: RawUtf8); overload; forward;
+function PosExtString(Str: PChar): PChar; forward;
+
 procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 var
   tmp: TSynTempBuffer;
@@ -136,46 +142,6 @@ end;
 
 {$endif UNICODE}
 
-function StrICompPChar(Str1, Str2: PChar): PtrInt;
-var
-  c1, c2: PtrInt;
-begin // StrIComp() from Delphi does not support Str1/Str2 = nil
-  result := 0;
-  if Str1 <> Str2 then
-    if Str1 <> nil then
-      if Str2 <> nil then
-        repeat
-          c1 := ord(Str1^);
-          if (c1 >= ord('a')) and (c1 <= ord('z')) then
-            dec(c1, 32);
-          c2 := ord(Str2^);
-          if (c2 >= ord('a')) and (c2 <= ord('z')) then
-            dec(c2, 32);
-          result := c1 - c2;
-          if result <> 0 then
-            exit;
-          if c1 = 0 then
-            exit; // Str1 = Str2
-          inc(Str1);
-          inc(Str2);
-        until false
-      else
-        inc(result) // Str2=''
-    else
-      dec(result);  // Str1=''
-end;
-
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
-begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
-end;
-
-procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload;
-begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
-end;
-
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
@@ -252,6 +218,45 @@ begin
     tmpA.Done;
   end;
   tmpW.Done;
+end;
+
+function StrICompPChar(Str1, Str2: PChar): PtrInt;
+var
+  c1, c2: PtrInt;
+begin // StrIComp() from Delphi does not support Str1/Str2 = nil
+  result := 0;
+  if Str1 <> Str2 then
+    if Str1 <> nil then
+      if Str2 <> nil then
+        repeat
+          c1 := ord(Str1^);
+          if (c1 >= ord('a')) and (c1 <= ord('z')) then
+            dec(c1, 32);
+          c2 := ord(Str2^);
+          if (c2 >= ord('a')) and (c2 <= ord('z')) then
+            dec(c2, 32);
+          result := c1 - c2;
+          if result <> 0 then
+            exit;
+          if c1 = 0 then
+            exit; // Str1 = Str2
+          inc(Str1);
+          inc(Str2);
+        until false
+      else
+        inc(result) // Str2=''
+    else
+      dec(result);  // Str1=''
+end;
+
+function SortDynArrayFileName(const A, B): integer;
+begin // case-insensitive extension, then filename using plain string/PChar
+  result := 0;
+  if @A = @B then
+    exit;
+  result := StrICompPChar(PosExtString(pointer(A)), PosExtString(pointer(B)));
+  if result = 0 then
+    result := AnsiCompareFileName(string(A), string(B)); // as user-expected
 end;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
@@ -1531,6 +1536,11 @@ begin
   WaitForSingleObject(THandle(fHandle), INFINITE);
 end;
 
+function TSynEvent.IsEventFD: boolean;
+begin
+  result := false;
+end;
+
 
 {$ifdef FPC}
   {$define NOSETTHREADNAME} // only tested and supported on Delphi
@@ -2067,23 +2077,6 @@ begin
   result := pointer(api) <> pointer(1);
 end;
 
-function GetNextItem(var P: PAnsiChar): RawUtf8;
-var
-  beg: PAnsiChar;
-begin
-  result := '';
-  while P^ <= ' ' do
-    if P^ = #0 then
-      exit
-    else
-      inc(P);
-  beg := P;
-  repeat
-    inc(P);
-  until P^ <= ' ';
-  FastSetString(result, beg, P - beg);
-end;
-
 const
   PAGE_GUARD = $0100;
   PAGE_VALID = $00e6; // PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or
@@ -2296,21 +2289,8 @@ begin
 end;
 
 function RetrieveLoadAvg: TShort23;
-var
-  I, K, U, S: Int64;
-begin // return 'U:usr K:krn' percents on windows
-  result[0] := #0;
-  RetrieveSystemTimes(I, K, U);
-  dec(K, I); // raw KernelTime includes IdleTime with GetSystemTimes() WinAPI
-  S := I + K + U;
-  if S = 0 then
-    exit;
-  U := (U * 1000000) div S;
-  K := (K * 1000000) div S;
-  PCardinal(@result)^ := 2 + ord('U') shl 8 + ord(':') shl 16;
-  AppendShortCurr64(U, result, {fixeddecimals=}2);
-  AppendShort(' K:', result);
-  AppendShortCurr64(K, result, {fixeddecimals=}2);
+begin
+  result := RetrieveSystemTimesText;
 end;
 
 function DelayedGetProcessMemoryInfo: boolean;
@@ -2352,9 +2332,6 @@ begin
   end;
 end;
 
-function CoCreateGuid(out guid: THash128Rec): HRESULT;
-  stdcall; external 'ole32.dll';
-
 {$ifndef UNICODE} // 64-bit aware Windows API missing on FPC and oldest Delphi
 
 type
@@ -2376,46 +2353,41 @@ function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
 
 {$endif UNICODE}
 
+function CoCreateGuid(out guid: THash128Rec): HRESULT;
+  stdcall; external 'ole32.dll';
+
 procedure XorOSEntropy(var e: THash512Rec);
 var
   ft: packed record
     krn, usr, p, e: TFileTime;
   end;
+  i: PtrInt;
   mem: TProcessMemoryCounters;
   memst: TMemoryStatusEx;
-  h: THash128Rec absolute memst;
+  u: THash128Rec absolute memst;
 begin
-  QueryPerformanceCounter(h.Lo); // e.h3 xored with raw timestamps
-  e.i[6] := e.i[6] xor h.Lo;
+  QueryPerformanceCounter(u.Lo); // e.h3 xored with raw timestamps
+  e.i[6] := e.i[6] xor u.Lo;
   if Assigned(GetProcessTimes) then
     GetProcessTimes(GetCurrentProcess, ft.p, ft.e, ft.krn, ft.usr);
-  DefaultHasher128(@e.h0, @ft, SizeOf(ft));
-  FillCharFast(mem, SizeOf(mem), 0);
+  DefaultHasher128(@e.h0, @ft, SizeOf(ft)); // maybe AesNiHash128
   mem.cb := SizeOf(mem);
   if Assigned(GetProcessMemoryInfo) then // may have been delayed
     if GetProcessMemoryInfo(GetCurrentProcess, mem, SizeOf(mem)) then
       DefaultHasher128(@e.h1, @mem, SizeOf(mem));
-  FillCharFast(memst, SizeOf(memst), 0);
   memst.dwLength := SizeOf(memst);
   if GlobalMemoryStatusEx(memst) then
     DefaultHasher128(@e.h2, @memst, SizeOf(memst));
   if Assigned(GetSystemTimes) then
     GetSystemTimes(ft.usr, ft.p, ft.e);
   DefaultHasher128(@e.h3, @ft, SizeOf(ft));
-  CoCreateGuid(h); // very fast on Windows - used to obfuscate system info
-  e.i[0] := e.i[0] xor h.Lo;
-  e.i[1] := e.i[1] xor h.Hi;
-  CoCreateGuid(h);
-  e.i[2] := e.i[2] xor h.Lo;
-  e.i[3] := e.i[3] xor h.Hi;
-  CoCreateGuid(h);
-  e.i[4] := e.i[4] xor h.Lo;
-  e.i[5] := e.i[5] xor h.Hi;
-  CoCreateGuid(h);
-  e.i[6] := e.i[6] xor h.Lo;
-  e.i[7] := e.i[7] xor h.Hi;
-  QueryPerformanceCounter(h.Lo); // is likely to have changed in-between
-  e.i[7] := e.i[7] xor h.Lo;     // e.h3 xored with raw timestamps
+  for i := 0 to high(e.r) do
+  begin
+    CoCreateGuid(u); // very fast on Windows - used to obfuscate system info
+    XorMemory(e.r[i], u);
+  end;
+  QueryPerformanceCounter(u.Lo); // is likely to have changed in-between
+  e.i[7] := e.i[7] xor u.Lo;     // e.h3 XORed with raw timestamps
 end;
 
 function FillSystemRandom(Buffer: PByteArray; Len: integer;
@@ -5655,7 +5627,6 @@ begin
     CpuSockets := 1; // e.g. on XP prior to SP3
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
-  // writeln(CpuInfoText); writeln(CpuCacheText);
 end;
 
 procedure FinalizeSpecificUnit;

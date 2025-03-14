@@ -2595,7 +2595,7 @@ var
 
 /// a wrapper to the Linux eventfd() syscall
 // - returns 0 if the kernel does not support eventfd2 (before 2.6.27) or if the
-// platform is not validated yet (only Linux x86_64 by now)
+// platform is not validated yet (only Linux i386/x86_64/aarch64 by now)
 // - returns a file descriptor handle on success, to be eventually closed
 function LinuxEventFD(nonblocking, semaphore: boolean): integer;
 
@@ -3266,7 +3266,7 @@ function FileSeek64(Handle: THandle; const Offset: Int64;
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
   out FileTimestampUtc: TUnixMSTime; FileAttr: PInteger = nil): boolean; overload;
 
-/// get low-level file information, in a cross-platform way
+/// get low-level file information with timings, in a cross-platform way
 // - returns true on success
 // - you can specify nil for any returned value if you don't need
 // - here file write/creation time are given as TUnixMSTime values, for better
@@ -3276,8 +3276,9 @@ function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
 function FileInfoByHandle(aFileHandle: THandle; FileId, FileSize: PInt64;
   LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean;
 
-/// get low-level file information, in a cross-platform way
-// - is a wrapper around FileInfoByHandle() function
+/// get low-level file information with timings, in a cross-platform way
+// - is a wrapper around FileInfoByHandle() function - rarely called
+// - please prefer FileInfoByName() overload if FileCreateDateTime is not needed
 // - returns true on success
 function FileInfoByName(const FileName: TFileName; FileId, FileSize: PInt64;
   LastWriteAccess, FileCreateDateTime: PUnixMSTime): boolean; overload;
@@ -3352,33 +3353,30 @@ function FindFirstDirectory(const Path: TFileName; IncludeHidden: boolean;
     out F: TSearchRec): integer;
 
 type
-  /// FPC TFileStream miss a Create(aHandle) constructor like Delphi
-  TFileStreamFromHandle = class(THandleStream)
-  protected
-    fDontReleaseHandle: boolean;
-  public
-    /// explictely close the handle if needed
-    destructor Destroy; override;
-    /// Destroy calls FileClose(Handle) unless this property is true
-    property DontReleaseHandle: boolean
-      read fDontReleaseHandle write fDontReleaseHandle;
-  end;
-
   /// a TFileStream replacement which supports FileName longer than MAX_PATH,
   // and a proper Create(aHandle) constructor in FPC
-  TFileStreamEx = class(TFileStreamFromHandle)
+  TFileStreamEx = class(THandleStream)
   protected
     fFileName : TFileName;
-    function GetSize: Int64; override; // faster (1 API call instead of 3)
+    fDontReleaseHandle: boolean;
+    function GetSize: Int64; override;
   public
     /// open or create the file from its name, depending on the supplied Mode
     // - Mode is typically fmCreate / fmOpenReadShared
     constructor Create(const aFileName: TFileName; Mode: cardinal);
     /// can use this class from a low-level file OS handle
-    constructor CreateFromHandle(aHandle: THandle; const aFileName: TFileName);
+    constructor CreateFromHandle(aHandle: THandle; const aFileName: TFileName;
+      aDontReleaseHandle: boolean = false);
+    /// open for reading via FileOpenSequentialRead()
+    constructor CreateRead(const aFileName: TFileName);
     /// open for writing or create a non-existing file from its name
     // - use fmCreate if aFileName does not exists, or fmOpenWrite otherwise
     constructor CreateWrite(const aFileName: TFileName);
+    /// explictely close the handle if needed
+    destructor Destroy; override;
+    /// Destroy calls FileClose(Handle) unless this property is true
+    property DontReleaseHandle: boolean
+      read fDontReleaseHandle write fDontReleaseHandle;
     /// the file name assigned to this class constructor
     property FileName : TFileName
       read fFilename;
@@ -3402,7 +3400,7 @@ type
 
 /// a wrapper around FileRead() to ensure a whole memory buffer is retrieved
 // - expects Size to be up to 2GB (seems like a big enough memory buffer)
-// - on Windows, will read by 16MB chunks to avoid ERROR_NO_SYSTEM_RESOURCES
+// - on Windows, will read by 16MB chunks max to avoid ERROR_NO_SYSTEM_RESOURCES
 // - will call FileRead() and retry up to Size bytes are filled in the buffer
 // - return true if all memory buffer has been read, or false on error
 function FileReadAll(F: THandle; Buffer: pointer; Size: PtrInt): boolean;
@@ -3421,9 +3419,11 @@ function FileWriteAll(F: THandle; Buffer: pointer; Size: PtrInt): boolean;
 function FileOpenSequentialRead(const FileName: TFileName): integer;
 
 /// returns a TFileStreamFromHandle optimized for one pass file reading
-// - will use FileOpenSequentialRead(), i.e. FILE_FLAG_SEQUENTIAL_SCAN on Windows
+// - wrap TFileStreamEx.CreateRead() to use FileOpenSequentialRead(),
+// i.e. FILE_FLAG_SEQUENTIAL_SCAN on Windows
 // - on POSIX, calls fpOpen(pointer(FileName),O_RDONLY) with no fpFlock() call
 // - is used e.g. by TRestOrmServerFullMemory and TAlgoCompress
+// - returns nil if FileName does not exist, without any exception
 function FileStreamSequentialRead(const FileName: TFileName): THandleStream;
 
 /// try to open the file from its name, as fmOpenReadShared
@@ -3436,6 +3436,11 @@ function FileIsReadable(const aFileName: TFileName): boolean;
 // not compatible e.g. with TAesPkcs7Reader padding - and has a small buffer
 // - returns the number of bytes copied from Source to Dest
 function StreamCopyUntilEnd(Source, Dest: TStream): Int64;
+
+/// a wrapper around TStream.Read() to ensure a whole memory buffer is retrieved
+// - same as TStream.ReadBuffer but returning false with no exception on failure
+// - on Windows, will read by 16MB chunks max to avoid ERROR_NO_SYSTEM_RESOURCES
+function StreamReadAll(S: TStream; Buffer: pointer; Size: PtrInt): boolean;
 
 /// read a File content into a string, using FileSize() to guess its length
 // - content can be binary or text
@@ -3546,8 +3551,10 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 /// creates a directory if not already existing
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is set
+// - you can set NoExpand=true if you now that Directory has already a full path
 function EnsureDirectoryExists(const Directory: TFileName;
-  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil;
+  NoExpand: boolean = false): TFileName; overload;
 
 /// just a wrapper around EnsureDirectoryExists(NormalizeFileName(Directory))
 function NormalizeDirectoryExists(const Directory: TFileName;
@@ -3737,7 +3744,7 @@ type
   end;
 
   /// hold low-level GetMemoryInfo() result about current memory usage
-  // - most fields are in bytes, but percent which is the % of used memory
+  // - most fields are in bytes, except percent which is the % of used memory
   TMemoryInfo = record
     memtotal, memfree, filetotal, filefree,
     vmtotal, vmfree, allocreserved, allocused: QWord;
@@ -3837,10 +3844,15 @@ function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
 // - returned KernelTime includes IdleTime, as with GetSystemTimes() WinAPI
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 
+/// return the system-wide time usage information as 'U:#.## K:#.##' percents
+// - calling RetrieveSystemTimes() on all platforms
+function RetrieveSystemTimesText: TShort23;
+
 /// return the system-wide time usage information
 // - on LINUX, retrieve /proc/loadavg or on OSX/BSD call libc getloadavg()
-// - on Windows, calls RetrieveSystemTimes() and return 'U:user K:kernel' percents
+// - on Windows, calls RetrieveSystemTimesText to return 'U:user K:kernel' text
 function RetrieveLoadAvg: TShort23;
+  {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// retrieve low-level information about current memory usage
 // - as used e.g. by TSynMonitorMemory or GetMemoryInfoText
@@ -3882,9 +3894,9 @@ procedure XorOSEntropy(var e: THash512Rec);
 // - will call /dev/urandom or /dev/random under POSIX, and CryptGenRandom API
 // on Windows then return TRUE, or fallback to mormot.core.base gsl_rng_taus2
 // generator and return FALSE if the system API failed
-// - on POSIX, only up to 32 bytes (256-bits) bits are retrieved from /dev/urandom
-// or /dev/random as stated by "man urandom" Usage - then padded with our L'Ecuyer
-// gsl_rng_taus2 random generator
+// - on POSIX, only up to 256 bytes (2048-bits) are retrieved from /dev/urandom
+// or /dev/random as stated by "man urandom" Usage - then padded with our
+// L'Ecuyer gsl_rng_taus2 random generator
 // - so you may consider that the output Buffer is always filled with random
 // - you should not have to call this procedure, but faster and safer TAesPrng
 // from mormot.crypt.core - also consider the TSystemPrng class
@@ -4038,6 +4050,7 @@ function PosixFileNames(const Folder: TFileName; Recursive: boolean;
 
 /// internal function to avoid linking mormot.core.buffers.pas
 // - will output the value as one number with one decimal and KB/MB/GB/TB suffix
+// - defined here for regression tests purposes
 function _oskb(Size: QWord): shortstring;
 
 type
@@ -5939,6 +5952,71 @@ implementation
 
 { ****************** Some Cross-System Type and Constant Definitions }
 
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
+begin
+  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+end;
+
+procedure _fmt(const Fmt: string; const Args: array of const;
+  var result: RawUtf8); overload;
+begin
+  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+end;
+
+procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
+var
+  n: PtrInt;
+begin
+  n := length(Values);
+  SetLength(Values, n + 1);
+  Values[n] := Value;
+end;
+
+function _GetNextItem(var P: PAnsiChar): RawUtf8;
+var
+  S: PAnsiChar;
+begin
+  result := '';
+  S := P;
+  if S = nil then
+    exit;
+  while S^ <= ' ' do
+    if S^ = #0 then
+      exit
+    else
+      inc(S);
+  P := S;
+  repeat
+    inc(S);
+  until S^ <= ' ';
+  FastSetString(result, P, S - P);
+  P := S;
+end;
+
+function _GetNextCardinal(var P: PAnsiChar): PtrUInt;
+var
+  c: cardinal;
+  S: PAnsiChar;
+begin
+  result := 0;
+  S := P;
+  if S = nil then
+    exit;
+  while not (S^ in ['0'..'9']) do
+    if S^ = #0 then
+      exit
+    else
+      inc(S);
+  repeat
+    c := ord(S^) - 48;
+    if c > 9 then
+      break;
+    result := result * 10 + c;
+    inc(S);
+  until false;
+  P := S;
+end;
+
 function _oskb(Size: QWord): shortstring;
 const
   _U: array[0..3] of AnsiChar = 'TGMK';
@@ -6252,17 +6330,17 @@ const
      '',
      'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
      'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
-     'ARM1176', 'Cortex-A5', 'Cortex-A7', 'Cortex-A8', 'Cortex-A9',
-     'Cortex-A17',{Originally A12} 'Cortex-A15', 'Cortex-A17', 'Cortex-R4',
-     'Cortex-R5', 'Cortex-R7', 'Cortex-R8', 'Cortex-M0', 'Cortex-M1',
-     'Cortex-M3', 'Cortex-M4', 'Cortex-M7', 'Cortex-M0+', 'Cortex-A32',
-     'Cortex-A53', 'Cortex-A35', 'Cortex-A55', 'Cortex-A65', 'Cortex-A57',
-     'Cortex-A72', 'Cortex-A73', 'Cortex-A75', 'Cortex-A76', 'Neoverse-N1',
-     'Cortex-A77', 'Cortex-A76AE', 'Cortex-R52', 'Cortex-M23', 'Cortex-M33',
-     'Neoverse-V1', 'Cortex-A78', 'Cortex-A78AE', 'Cortex-X1', 'Cortex-510',
-     'Cortex-710', 'Cortex-X2', 'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
-     'Cortex-X1C', 'Cortex-A715', 'Cortex-X3', 'Neoverse-V2', 'Cortex-A520',
-     'Cortex-A720', 'Cortex-X4', 'Neoverse-V3AE', 'Neoverse-V3', 'Cortex-X925',
+     'ARM1176',     'Cortex-A5',   'Cortex-A7',   'Cortex-A8',   'Cortex-A9',
+     'Cortex-A17',{originally A12} 'Cortex-A15',  'Cortex-A17',  'Cortex-R4',
+     'Cortex-R5',   'Cortex-R7',   'Cortex-R8',   'Cortex-M0',   'Cortex-M1',
+     'Cortex-M3',   'Cortex-M4',   'Cortex-M7',   'Cortex-M0+',  'Cortex-A32',
+     'Cortex-A53',  'Cortex-A35',  'Cortex-A55',  'Cortex-A65',  'Cortex-A57',
+     'Cortex-A72',  'Cortex-A73',  'Cortex-A75',  'Cortex-A76',  'Neoverse-N1',
+     'Cortex-A77',  'Cortex-A76AE','Cortex-R52',  'Cortex-M23',  'Cortex-M33',
+     'Neoverse-V1', 'Cortex-A78',  'Cortex-A78AE','Cortex-X1',   'Cortex-510',
+     'Cortex-710',  'Cortex-X2',   'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
+     'Cortex-X1C',  'Cortex-A715', 'Cortex-X3',   'Neoverse-V2', 'Cortex-A520',
+     'Cortex-A720', 'Cortex-X4',   'Neoverse-V3AE','Neoverse-V3','Cortex-X925',
      'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'Neoverse-N3',
      'Cortex-A320');
 
@@ -6729,14 +6807,6 @@ begin
 end;
 
 
-{ TFileStreamFromHandle }
-
-destructor TFileStreamFromHandle.Destroy;
-begin
-  if not fDontReleaseHandle then
-    FileClose(Handle); // otherwise file remains opened (FPC RTL inconsistency)
-end;
-
 { TFileStreamEx }
 
 constructor TFileStreamEx.Create(const aFileName: TFileName; Mode: cardinal);
@@ -6750,13 +6820,20 @@ begin
   CreateFromHandle(h, aFileName);
 end;
 
-constructor TFileStreamEx.CreateFromHandle(aHandle: THandle; const aFileName: TFileName);
+constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
+  const aFileName: TFileName; aDontReleaseHandle: boolean);
 begin
   if not ValidHandle(aHandle) then
     raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
       [ClassNameShort(self)^, aFileName, GetErrorText(GetLastError)]);
   inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
   fFileName := aFileName;
+  fDontReleaseHandle := aDontReleaseHandle;
+end;
+
+constructor TFileStreamEx.CreateRead(const aFileName: TFileName);
+begin
+  CreateFromHandle(FileOpenSequentialRead(aFileName), aFileName);
 end;
 
 constructor TFileStreamEx.CreateWrite(const aFileName: TFileName);
@@ -6767,6 +6844,12 @@ begin
   if not ValidHandle(h) then // we may need to create the file
     h := FileCreate(aFileName, fmShareRead);
   CreateFromHandle(h, aFileName);
+end;
+
+destructor TFileStreamEx.Destroy;
+begin
+  if not fDontReleaseHandle then
+    FileClose(Handle); // otherwise file remains opened (FPC RTL inconsistency)
 end;
 
 function TFileStreamEx.GetSize: Int64;
@@ -6825,13 +6908,18 @@ end;
 function TFileStreamNoWriteError.Write(const Buffer; Count: Longint): Longint;
 begin
   FileWriteAll(Handle, @Buffer, Count); // and ignore any I/O error
-  result := Count; //
+  result := Count; // optimistic view: emulate all data was properly written
 end;
 
 
 function FileStreamSequentialRead(const FileName: TFileName): THandleStream;
+var
+  h: THandle;
 begin
-  result := TFileStreamFromHandle.Create(FileOpenSequentialRead(FileName));
+  result := nil;
+  h := FileOpenSequentialRead(FileName);
+  if ValidHandle(h) then
+    result := TFileStreamEx.CreateFromHandle(h, FileName);
 end;
 
 function StreamCopyUntilEnd(Source, Dest: TStream): Int64;
@@ -6864,6 +6952,27 @@ begin
       chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
     {$endif OSWINDOWS}
     read := FileRead(F, Buffer^, chunk);
+    if read <= 0 then
+      exit; // error reading Size bytes
+    inc(PByte(Buffer), read);
+    dec(Size, read);
+  end;
+  result := true;
+end;
+
+function StreamReadAll(S: TStream; Buffer: pointer; Size: PtrInt): boolean;
+var
+  chunk, read: PtrInt;
+begin
+  result := false;
+  while Size > 0 do
+  begin
+    chunk := Size;
+    {$ifdef OSWINDOWS}
+    if chunk > 16 shl 20 then
+      chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
+    {$endif OSWINDOWS}
+    read := S.Read(Buffer^, chunk);
     if read <= 0 then
       exit; // error reading Size bytes
     inc(PByte(Buffer), read);
@@ -7247,24 +7356,8 @@ begin
       end;
 end;
 
-function SortDynArrayFileName(const A, B): integer;
-begin // check extension, then filename
-  result := 0;
-  if @A = @B then
-    exit;
-  {$ifdef OSPOSIX}
-  result := StrComp(PosExtString(pointer(A)), PosExtString(pointer(B)));
-  if result = 0 then
-    result := StrComp(pointer(A), pointer(B)); // fast case-sensitive order
-  {$else}
-  result := StrICompPChar(PosExtString(pointer(A)), PosExtString(pointer(B)));
-  if result = 0 then
-    result := AnsiCompareFileName(string(A), string(B)); // as user-expected
-  {$endif OSPOSIX}
-end;
-
 function EnsureDirectoryExists(const Directory: TFileName;
-  RaiseExceptionOnCreationFailure: ExceptionClass): TFileName;
+  RaiseExceptionOnCreationFailure: ExceptionClass; NoExpand: boolean): TFileName;
 begin
   if Directory = '' then
     if RaiseExceptionOnCreationFailure <> nil then
@@ -7273,7 +7366,11 @@ begin
       result := ''
   else
   begin
-    result := IncludeTrailingPathDelimiter(ExpandFileName(Directory));
+    if NoExpand then
+      result := Directory
+    else
+      result := ExpandFileName(Directory);
+    result := IncludeTrailingPathDelimiter(result);
     if not DirectoryExists(result) then
       if not ForceDirectories(result) then
         if RaiseExceptionOnCreationFailure <> nil then
@@ -7762,6 +7859,25 @@ begin
 end;
 {$endif PUREMORMOT2}
 
+function RetrieveSystemTimesText: TShort23;
+var
+  I, K, U, S: Int64;
+begin // return 'U:usr K:krn' percents on windows
+  result[0] := #0;
+  if not RetrieveSystemTimes(I, K, U) then
+    exit;
+  dec(K, I); // raw KernelTime includes IdleTime with GetSystemTimes() WinAPI
+  S := I + K + U;
+  if S = 0 then
+    exit;
+  U := (U * 1000000) div S;
+  K := (K * 1000000) div S;
+  PCardinal(@result)^ := 2 + ord('U') shl 8 + ord(':') shl 16;
+  AppendShortCurr64(U, result, {fixeddecimals=}2);
+  AppendShort(' K:', result);
+  AppendShortCurr64(K, result, {fixeddecimals=}2);
+end;
+
 function GetMemoryInfoText: TShort31;
 var
   info: TMemoryInfo;
@@ -7772,9 +7888,9 @@ begin
   AppendShort(_oskb(info.memtotal - info.memfree), result);
   AppendShortChar('/', @result);
   AppendShort(_oskb(info.memtotal), result);
-  AppendShort(' (', result);
+  AppendShortTwoChars(' (', @result);
   AppendShortCardinal(info.percent, result);
-  AppendShort('%)', result);
+  AppendShortTwoChars('%)', @result);
 end;
 
 function GetDiskAvailable(aDriveFolderOrFile: TFileName): QWord;
@@ -7790,12 +7906,13 @@ var
   avail, free, total: QWord;
 begin
   GetDiskInfo(Executable.ProgramFilePath, avail, free, total);
-  result := _fmt('Current UTC date: %s (%d)'+ CRLF +'Memory: %s'+ CRLF +
-                 'Current disk free: %s/%s'+ CRLF +'Load: %s'+ CRLF +
-                 'Exe: %s'+ CRLF +'OS: %s'+ CRLF +'Cpu: %s'+ CRLF +'Bios: %s'+ CRLF,
+  _fmt('Current UTC date: %s (%d)'+ CRLF +'Memory: %s'+ CRLF +
+       'Current disk free: %s/%s'+ CRLF +'Load: %s'+ CRLF +
+       'Exe: %s'+ CRLF +'OS: %s'+ CRLF +'Cpu: %s'+ CRLF +'Bios: %s'+ CRLF,
     [FormatDateTime('yyyy"-"mm"-"dd" "hh":"nn":"ss', NowUtc), UnixTimeUtc,
      GetMemoryInfoText, _oskb(avail), _oskb(total), RetrieveLoadAvg,
-     Executable.Version.VersionInfo, OSVersionText, CpuInfoText, BiosInfoText]);
+     Executable.Version.VersionInfo, OSVersionText, CpuInfoText, BiosInfoText],
+     result);
 end;
 
 procedure ConsoleWriteRaw(const Text: RawUtf8; NoLineFeed: boolean);
@@ -7850,7 +7967,7 @@ begin
     exit; // avoid GPF
   p := pointer(ProcName);
   repeat
-    name := GetNextItem(p); // try all alternate names
+    name := _GetNextItem(p); // try all alternate names
     if name = '' then
       break;
     if name[1] = '?' then
@@ -8134,16 +8251,11 @@ procedure SetExecutableVersion(const aVersionText: RawUtf8);
 var
   p: PAnsiChar;
   i: PtrInt;
-  tmp: RawUtf8;
   ver: array[0 .. 3] of integer;
 begin
-  FastSetString(tmp, pointer(aVersionText), length(aVersionText));
-  p := pointer(tmp);
-  for i := 0 to length(tmp) - 1 do
-    if p[i] = '.' then
-      p[i] := ' '; // as expected by GetNextItem
+  p := pointer(aVersionText);
   for i := 0 to 3 do
-    ver[i] := GetCardinal(pointer(GetNextItem(p)));
+    ver[i] := _GetNextCardinal(p);
   SetExecutableVersion(ver[0], ver[1], ver[2], ver[3]);
 end;
 
@@ -8269,7 +8381,7 @@ begin
       if high(v) = 0 then
         param := v[0]
       else if argindex > 0 then
-        param := _fmt('arg%d', [argindex])
+        _fmt('arg%d', [argindex], param)
       else
         param := 'arg'
     else
@@ -8323,7 +8435,7 @@ begin
     until false;
   if def <> '' then
     def := ' (default ' + def + ')';
-  pnames := _fmt('  %0:-20s', [desc + def]);
+  _fmt('  %0:-20s', [desc + def], pnames);
   if (length(pnames) > 22) or
      (length(d) > 80) then
   begin
@@ -8440,7 +8552,8 @@ begin
   end
   else if FileExists(result) then
     exit;
-  _fmt('%s%s %s does not exist%s', [fUnknown, FD[isFolder], result, fLineFeed], fUnknown);
+  fUnknown := _fmt('%s%s %s does not exist%s',
+    [fUnknown, FD[isFolder], result, fLineFeed]);
 end;
 
 function TExecutableCommandLine.Arg(const name, description: RawUtf8): boolean;
@@ -8485,15 +8598,6 @@ begin
   result := Get(UnAmp(name), value, description, default);
 end;
 
-procedure AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
-var
-  n: PtrInt;
-begin
-  n := length(Values);
-  SetLength(Values, n + 1);
-  Values[n] := Value;
-end;
-
 function TExecutableCommandLine.Get(const name: array of RawUtf8;
   out value: TRawUtf8DynArray; const description: RawUtf8): boolean;
 var
@@ -8508,7 +8612,7 @@ begin
     i := Find(name, clkParam, '', '', first);
     if i < 0 then
       break; // no more occurence
-    AddRawUtf8(value, fValues[i]);
+    _AddRawUtf8(value, fValues[i]);
     result := true;
     first := i + 1;
   until first >= length(fValues);
@@ -8810,22 +8914,22 @@ begin
           if j <> 1 then
             if j <> 0 then
             begin
-              AddRawUtf8(fNames[clkParam], copy(s, 1, j - 1));
-              AddRawUtf8(fValues, copy(s, j + 1, MaxInt));
+              _AddRawUtf8(fNames[clkParam], copy(s, 1, j - 1));
+              _AddRawUtf8(fValues, copy(s, j + 1, MaxInt));
             end
             else if (i + 1 = n) or
                     (swlen[i + 1] <> 0) then
-              AddRawUtf8(fNames[clkOption], s)
+              _AddRawUtf8(fNames[clkOption], s)
             else
             begin
-              AddRawUtf8(fNames[clkParam], s);
+              _AddRawUtf8(fNames[clkParam], s);
               inc(i);
-              AddRawUtf8(fValues, fRawParams[i]);
+              _AddRawUtf8(fValues, fRawParams[i]);
             end;
           end;
       end
       else
-        AddRawUtf8(fNames[clkArg], s);
+        _AddRawUtf8(fNames[clkArg], s);
     inc(i);
   until i = n;
   SetLength(fRetrieved[clkArg],    length(fNames[clkArg]));
@@ -10373,15 +10477,6 @@ begin
         exit;
       result := GetTickCount64;
     until result >= endtix;
-end;
-
-function TSynEvent.IsEventFD: boolean;
-begin
-  {$ifdef HASEVENTFD}
-  result := fFD <> 0;
-  {$else}
-  result := false;
-  {$endif HASEVENTFD}
 end;
 
 

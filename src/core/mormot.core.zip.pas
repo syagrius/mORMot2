@@ -1707,7 +1707,7 @@ begin
       [self, {%H-}pointer(aDest), aDestFileName]);
   fFileName := aDestFileName;
   fDestOwned := true;
-  Create(TFileStreamFromHandle.Create(aDest));
+  Create(TFileStreamEx.CreateFromHandle(aDest, aDestFileName));
 end;
 
 constructor TZipWrite.Create(const aDestFileName: TFileName);
@@ -2715,8 +2715,7 @@ begin
   // initialize source stream - released (possibly with handle) on ESynZip below
   if not ValidHandle(aFile) then
     exit;
-  fSource := TFileStreamFromHandle.Create(aFile);
-  TFileStreamFromHandle(fSource).DontReleaseHandle := DontReleaseHandle;
+  fSource := TFileStreamEx.CreateFromHandle(aFile, fFileName, DontReleaseHandle);
   // prepare the internal buffer - contains at least the central directory
   if Size = 0 then
     Size := FileSize(aFile);
@@ -2732,7 +2731,7 @@ begin
     fSource.Seek(0, soBeginning);
     if WorkingMem = SizeOf(TLastHeader) then
     begin
-      fSource.Read(P^, WorkingMem);
+      fSource.ReadBuffer(P^, WorkingMem);
       Create(P, WorkingMem); // void .zip
       exit;
     end;
@@ -2921,7 +2920,7 @@ begin
       dec(tmpLen); // paranoid resize for last file of a very small zip
     until tmpLen = 0;
     fSource.Seek(posi, soBeginning);
-    if PtrUInt(fSource.Read(tmp, tmpLen)) <> tmpLen then
+    if not StreamReadAll(fSource, @tmp, tmpLen) then
       ESynZip.RaiseUtf8('%: data descriptor read error on % %',
         [self, e^.zipName, fFileName]);
     descmin := PtrUInt(@tmp);
@@ -2981,7 +2980,7 @@ begin
       Z_DEFLATED:
         begin
           pointer(tmp) := FastNewString(info.f64.zzipSize);
-          fSource.Read(pointer(tmp)^, info.f64.zzipSize);
+          fSource.ReadBuffer(pointer(tmp)^, info.f64.zzipSize);
           len := UnCompressMem(pointer(tmp), pointer(result),
             info.f64.zzipsize, info.f64.zfullsize);
         end;
@@ -3047,7 +3046,7 @@ begin
       with aInfo.f64 do
       begin
         pointer(tmp) := FastNewString(zzipSize + len); // alloc zip+unziped
-        if fSource.Read(pointer(tmp)^, zzipSize) <> zzipSize then
+        if not StreamReadAll(fSource, pointer(tmp), zzipSize) then
           exit;
         data := @PByteArray(tmp)[zzipsize];
         if UnCompressMem(pointer(tmp), data, zzipsize, len) <> len then
@@ -3167,8 +3166,7 @@ begin
     if not SafeFileName(LocalZipName) then
       ESynZip.RaiseUtf8('%.UnZip(%): unsafe file name ''%''',
         [self, fFileName, LocalZipName]);
-    Dest := EnsureDirectoryExists(
-              EnsureDirectoryExists(DestDir) + ExtractFilePath(LocalZipName));
+    Dest := EnsureDirectoryExists([DestDir, LocalZipName]);
     if Dest = '' then
       exit; // impossible to write in this folder
     Dest := Dest + ExtractFileName(LocalZipName);
@@ -3296,7 +3294,7 @@ begin
       else
       begin
         // use efficient direct streaming decompression/recompression
-        s := FileStreamSequentialRead(aOldLogFileName);
+        s := TFileStreamEx.CreateRead(aOldLogFileName);
         try
           z := EventArchiveZipWrite.AddDeflatedStream(zipname,
              DateTimeToWindowsFileTime(UnixMSTimeToDateTime(ftime)),

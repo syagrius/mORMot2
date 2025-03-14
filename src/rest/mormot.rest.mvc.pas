@@ -297,9 +297,11 @@ type
     function Exists: boolean; virtual; abstract;
     /// retrieve the current session ID
     // - can optionally retrieve the associated record Data parameter
+    // - Invalidate=true would force this cookie to be rejected in the future,
+    // e.g. from Finalize()
     function CheckAndRetrieve(PRecordData: pointer = nil;
-      PRecordTypeInfo: PRttiInfo = nil;
-      PExpires: PUnixTime = nil): integer; virtual; abstract;
+      PRecordTypeInfo: PRttiInfo = nil; PExpires: PUnixTime = nil;
+      Invalidate: boolean = false): integer; virtual; abstract;
     /// retrieve the session information as a JSON object
     // - returned as a TDocVariant, including any associated record Data and
     // optionally its session ID
@@ -307,7 +309,7 @@ type
     // - to be called in overriden TMvcApplication.GetViewInfo method
     // - warning: PSessionID^ should be a 32-bit "integer" variable, not a PtrInt
     function CheckAndRetrieveInfo(PRecordDataTypeInfo: PRttiInfo;
-      PSessionID: PInteger = nil): variant; virtual;
+      PSessionID: PInteger = nil; Invalidate: boolean = false): variant; virtual;
     /// clear the session
     procedure Finalize(PRecordTypeInfo: PRttiInfo = nil); virtual; abstract;
     /// return all session generation information as ready-to-be stored string
@@ -336,12 +338,16 @@ type
   TMvcSessionWithCookies = class(TMvcSessionAbstract)
   protected
     fContext: TBinaryCookieGenerator;
+    function GetCookieName: RawUtf8;
+    procedure SetCookieName(const Value: RawUtf8);
     // overriden e.g. in TMvcSessionWithRestServer using ServiceContext threadvar
     function GetCookie: RawUtf8; virtual; abstract;
     procedure SetCookie(const cookie: RawUtf8); virtual; abstract;
   public
     /// create an instance of this ViewModel implementation class
     constructor Create(Owner: TMvcApplication); override;
+    /// finalize this instance
+    destructor Destroy; override;
     /// will initialize the session cookie
     // - setting an optional record data, which will be stored Base64-encoded
     // - will return the 32-bit internal session ID
@@ -354,10 +360,11 @@ type
     function Exists: boolean; override;
     /// retrieve the session ID from the current cookie
     // - can optionally retrieve the record Data parameter stored in the cookie
+    // - Invalidate=true would force this cookie to be rejected in the future
     // - will return the 32-bit internal session ID, or 0 if the cookie is invalid
     function CheckAndRetrieve(PRecordData: pointer = nil;
-      PRecordTypeInfo: PRttiInfo = nil;
-      PExpires: PUnixTime = nil): integer; override;
+      PRecordTypeInfo: PRttiInfo = nil; PExpires: PUnixTime = nil;
+      Invalidate: boolean = false): integer; override;
     /// clear the session
     // - by deleting the cookie on the client side
     procedure Finalize(PRecordTypeInfo: PRttiInfo = nil); override;
@@ -379,7 +386,7 @@ type
     /// you can customize the cookie name
     // - default is 'mORMot', and cookie is restricted to Path=/RestRoot
     property CookieName: RawUtf8
-      read fContext.CookieName write fContext.CookieName;
+      read GetCookieName write SetCookieName;
   end;
 
   /// implement a ViewModel/Controller sessions in a TRestServer instance
@@ -1202,7 +1209,7 @@ begin
               break;
           end;
           FileName := ViewTemplateFolder + ShortFileName;
-          ContentType := GetMimeContentType(nil, 0, ShortFileName);
+          ContentType := GetMimeContentType('', ShortFileName);
         end
         else
         begin
@@ -1437,8 +1444,8 @@ begin
   TDocVariantData(result).InitJsonInPlace(pointer(json), JSON_MVC);
 end;
 
-function TMvcSessionAbstract.CheckAndRetrieveInfo(
-  PRecordDataTypeInfo: PRttiInfo; PSessionID: PInteger): variant;
+function TMvcSessionAbstract.CheckAndRetrieveInfo(PRecordDataTypeInfo: PRttiInfo;
+  PSessionID: PInteger; Invalidate: boolean): variant;
 var
   rec: TByteToWord; // 512 bytes to store locally any kind of record
   recsize: integer;
@@ -1458,7 +1465,7 @@ begin
     FillCharFast(rec, recsize, 0);
   end;
   try
-    sessionID := CheckAndRetrieve(@rec, PRecordDataTypeInfo);
+    sessionID := CheckAndRetrieve(@rec, PRecordDataTypeInfo, nil, Invalidate);
     if PSessionID <> nil then
       PSessionID^ := sessionID;
     if sessionID <> 0 then
@@ -1480,7 +1487,23 @@ end;
 constructor TMvcSessionWithCookies.Create(Owner: TMvcApplication);
 begin
   inherited Create(Owner);
-  fContext.Init('mORMot');
+  fContext := TBinaryCookieGenerator.Create('mORMot');
+end;
+
+destructor TMvcSessionWithCookies.Destroy;
+begin
+  inherited Destroy;
+  fContext.Free;
+end;
+
+function TMvcSessionWithCookies.GetCookieName: RawUtf8;
+begin
+  result := fContext.CookieName;
+end;
+
+procedure TMvcSessionWithCookies.SetCookieName(const Value: RawUtf8);
+begin
+  fContext.CookieName := Value;
 end;
 
 function TMvcSessionWithCookies.Exists: boolean;
@@ -1489,22 +1512,19 @@ begin
 end;
 
 function TMvcSessionWithCookies.CheckAndRetrieve(PRecordData: pointer;
-  PRecordTypeInfo: PRttiInfo; PExpires: PUnixTime): integer;
+  PRecordTypeInfo: PRttiInfo; PExpires: PUnixTime; Invalidate: boolean): integer;
 var
   cookie: RawUtf8;
 begin
+  result := 0;
   cookie := GetCookie;
   if cookie = '' then
-    // no cookie -> no session
-    result := 0
-  else
-  begin
-    result := fContext.Validate(
-      cookie, PRecordData, PRecordTypeInfo, PExpires);
-    if result = 0 then
-      // delete any invalid/expired cookie on server side
-      Finalize;
-  end;
+    exit; // no cookie -> no session
+  result := fContext.Validate(
+    cookie, PRecordData, PRecordTypeInfo, PExpires, nil, Invalidate);
+  if result <= 0 then
+    // delete any invalid/expired cookie on server side
+    Finalize;
 end;
 
 function TMvcSessionWithCookies.Initialize(PRecordData: pointer;
@@ -1537,12 +1557,12 @@ begin
   if Assigned(fApplication) and
      Assigned(fApplication.OnSessionFinalized) then
   begin
-    info := CheckAndRetrieveInfo(PRecordTypeInfo, @sessionID);
+    info := CheckAndRetrieveInfo(PRecordTypeInfo, @sessionID, {invalidate=}true);
     if sessionID = 0 then
       exit; // nothing to finalize
     fApplication.OnSessionFinalized(self, sessionID, info);
   end;
-  SetCookie(COOKIE_EXPIRED);
+  SetCookie(COOKIE_EXPIRED); // notify the client to delete this cookie
 end;
 
 function TMvcSessionWithCookies.LoadContext(const Saved: RawUtf8): boolean;
@@ -1933,8 +1953,7 @@ function TMvcRunOnRestServer.AddStaticCache(const aFileName: TFileName;
   const aFileContent: RawByteString): RawByteString;
 begin
   if aFileContent <> '' then
-    result := Make([
-      GetMimeContentType(pointer(aFileContent), length(aFileContent), aFileName),
+    result := Make([GetMimeContentType(aFileContent, aFileName),
       #10, aFileContent]) // also cache content-type
   else
     result := '';

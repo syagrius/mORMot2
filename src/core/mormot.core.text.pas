@@ -233,9 +233,17 @@ function CsvToRawUtf8DynArray(const Csv: RawUtf8; const Sep: RawUtf8 = ',';
   const SepEnd: RawUtf8 = ''): TRawUtf8DynArray; overload;
 
 /// return the corresponding CSV text from a dynamic array of UTF-8 strings
-function RawUtf8ArrayToCsv(const Values: array of RawUtf8;
-  const Sep: RawUtf8 = ','; HighValues: integer = -1;
-  Reverse: boolean = false): RawUtf8;
+function RawUtf8ArrayToCsv(const Values: TRawUtf8DynArray;
+  const Sep: RawUtf8 = ','; Reverse: boolean = false): RawUtf8;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// return the corresponding CSV text from a dynamic array of UTF-8 strings
+function RawUtf8ToCsv(const Values: array of RawUtf8;
+  const Sep: RawUtf8 = ','; Reverse: boolean = false): RawUtf8;
+
+/// low-level generate CSV e.g. for RawUtf8ArrayToCsv() and TRawUtf8List.GetText
+procedure PRawUtf8ToCsv(v: PPUtf8Char; n: integer; const sep: RawUtf8;
+  Reverse: boolean; var result: RawUtf8);
 
 /// return the corresponding CSV quoted text from a dynamic array of UTF-8 strings
 // - apply QuoteStr() function to each Values[] item
@@ -1871,7 +1879,8 @@ function MakePath(const Part: array of const; EndWithDelim: boolean = false;
 
 /// just a wrapper around EnsureDirectoryExists(MakePath([Part]))
 function EnsureDirectoryExists(const Part: array of const;
-  RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+  RaiseExceptionOnCreationFailure: ExceptionClass = nil;
+  NoExpand: boolean = false): TFileName; overload;
 
 /// just a wrapper around EnsureDirectoryExists(NormalizeFileName(MakePath([Part])))
 function NormalizeDirectoryExists(const Part: array of const;
@@ -2515,21 +2524,25 @@ function GuidToText(P: PUtf8Char; guid: PByteArray; tab: PWordArray = nil): PUtf
 /// convert a TGuid into 38 chars encoded { text } as RawUtf8
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - if you do not need the embracing { }, use ToUtf8() overloaded function
-function GuidToRawUtf8(const guid: TGuid): RawUtf8;
+function GuidToRawUtf8(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): RawUtf8;
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
 // - if you need the embracing { }, use GuidToRawUtf8() function instead
-function ToUtf8(const guid: TGuid): RawUtf8; overload;
+function ToUtf8(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}guid: TGuid): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8, unless it is GUID_NULL
-function NotNullGuidToUtf8(const guid: TGuid): RawUtf8;
+function NotNullGuidToUtf8(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): RawUtf8;
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
 // - you can set tab = @TwoDigitsHexWBLower to force a lowercase output
-procedure ToUtf8(const guid: TGuid; var text: RawUtf8; tab: PWordArray = nil); overload;
+procedure ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid;
+  var text: RawUtf8; tab: PWordArray = nil); overload;
 
 /// convert one or several TGuid into 36 chars encoded CSV text
 // - will return e.g.
@@ -2541,7 +2554,8 @@ function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar = ',';
 /// convert a TGuid into into 38 chars encoded { text } as RTL string
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - this version is faster than the one supplied by SysUtils
-function GuidToString(const guid: TGuid): string;
+function GuidToString(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): string;
 
 type
   /// stack-allocated ASCII string, used by GuidToShort() function
@@ -2552,18 +2566,20 @@ type
   // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
-function GuidToShort(const guid: TGuid): TGuidShortString; overload;
+function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): TGuidShortString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a TGuid into its standard uppercase text representation with the {}
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
-procedure GuidToShort(const guid: TGuid;
-  out dest: TGuidShortString); overload;
+procedure GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid; out dest: TGuidShortString); overload;
 
 /// convert a TGuid into lowercase '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
-function UuidToShort(const guid: TGuid): TGuidShortString;
+function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): TGuidShortString;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert some text into its TGuid binary value
@@ -3617,48 +3633,52 @@ begin
     result := #0;
 end;
 
-function RawUtf8ArrayToCsv(const Values: array of RawUtf8; const Sep: RawUtf8;
-  HighValues: integer; Reverse: boolean): RawUtf8;
+procedure PRawUtf8ToCsv(v: PPUtf8Char; n: integer; const sep: RawUtf8;
+  Reverse: boolean; var result: RawUtf8);
 var
-  i, len, seplen, L: integer;
-  P: PAnsiChar;
+  len, seplen: PtrInt;
+  p: PAnsiChar;
 begin
   result := '';
-  if HighValues < 0 then
-    HighValues := high(Values);
-  if HighValues < 0 then
+  if (v = nil) or
+     (n <= 0) then
     exit;
-  seplen := length(Sep);
-  len := seplen * HighValues;
-  for i := 0 to HighValues do
-    inc(len, length(Values[i]));
-  FastSetString(result, len); // allocate the result buffer as once
-  P := pointer(result);
-  i := 0;
+  seplen := length(sep);
+  p := FastNewString(seplen * (n - 1) + SumRawUtf8Length(pointer(v), n), CP_UTF8);
+  pointer(result) := p;
   if Reverse then
-  begin
-    i := HighValues;
-    HighValues := 0;
-  end;
+    v := @PPointerArray(v)[n - 1];
   repeat
-    L := length(Values[i]);
-    if L > 0 then
+    if v^ <> nil then
     begin
-      MoveFast(pointer(Values[i])^, P^, L);
-      inc(P, L);
+      len := PStrLen(v^ - _STRLEN)^;
+      MoveFast(v^^, p^, len);
+      inc(p, len);
     end;
-    if i = HighValues then
+    dec(n);
+    if n = 0 then
       break;
-    if seplen > 0 then
-    begin
-      MoveFast(pointer(Sep)^, P^, seplen);
-      inc(P, seplen);
-    end;
     if Reverse then
-      dec(i)
+      dec(v)
     else
-      inc(i);
+      inc(v);
+    if seplen = 0 then
+      continue;
+    MoveFast(pointer(sep)^, p^, seplen);
+    inc(p, seplen);
   until false;
+end;
+
+function RawUtf8ArrayToCsv(const Values: TRawUtf8DynArray; const Sep: RawUtf8;
+  Reverse: boolean): RawUtf8;
+begin
+  PRawUtf8ToCsv(pointer(Values), length(Values), Sep, Reverse, result);
+end;
+
+function RawUtf8ToCsv(const Values: array of RawUtf8; const Sep: RawUtf8;
+  Reverse: boolean): RawUtf8;
+begin
+  PRawUtf8ToCsv(@Values[0], length(Values), Sep, Reverse, result);
 end;
 
 function RawUtf8ArrayToQuotedCsv(const Values: array of RawUtf8;
@@ -4269,13 +4289,14 @@ begin
   if twoStreamIsRawByteString in fCustomOptions then
     TRawByteStringStream(fStream).GetAsText(fInitialStreamPosition, Len, result)
   else if fStream.InheritsFrom(TCustomMemoryStream) then
-    with TCustomMemoryStream(fStream) do
-      FastSetString(result, PAnsiChar(Memory) + fInitialStreamPosition, Len)
+    FastSetString(result, PAnsiChar(TCustomMemoryStream(fStream).Memory) +
+                            fInitialStreamPosition, Len)
   else
   begin
     FastSetString(result, Len);
     fStream.Seek(fInitialStreamPosition, soBeginning);
-    fStream.Read(pointer(result)^, Len);
+    if not StreamReadAll(fStream, pointer(result), Len) then
+      result := '';
   end;
   if reformat <> jsonCompact then
   begin
@@ -9445,9 +9466,10 @@ begin
 end;
 
 function EnsureDirectoryExists(const Part: array of const;
-  RaiseExceptionOnCreationFailure: ExceptionClass): TFileName;
+  RaiseExceptionOnCreationFailure: ExceptionClass; NoExpand: boolean): TFileName;
 begin
-  result := EnsureDirectoryExists(MakePath(Part), RaiseExceptionOnCreationFailure);
+  result := EnsureDirectoryExists(MakePath(Part),
+    RaiseExceptionOnCreationFailure, NoExpand);
 end;
 
 function NormalizeDirectoryExists(const Part: array of const;
@@ -10875,7 +10897,8 @@ begin
   result := P;
 end;
 
-function GuidToRawUtf8(const guid: TGuid): RawUtf8;
+function GuidToRawUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): RawUtf8;
 var
   P: PUtf8Char;
 begin
@@ -10885,19 +10908,22 @@ begin
   GuidToText(P + 1, @guid)^ := '}';
 end;
 
-function ToUtf8(const guid: TGuid): RawUtf8;
+function ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): RawUtf8;
 begin
   ToUtf8(guid, result);
 end;
 
-function NotNullGuidToUtf8(const guid: TGuid): RawUtf8;
+function NotNullGuidToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): RawUtf8;
 begin
   result := '';
   if not IsNullGuid(guid) then
     ToUtf8(guid, result);
 end;
 
-procedure ToUtf8(const guid: TGuid; var text: RawUtf8; tab: PWordArray);
+procedure ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid;
+  var text: RawUtf8; tab: PWordArray);
 begin
   FastSetString(text, 36);
   GuidToText(pointer(text), @guid, tab);
@@ -10929,26 +10955,30 @@ begin
   until false;
 end;
 
-function GuidToShort(const guid: TGuid): TGuidShortString;
+function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): TGuidShortString;
 begin
   GuidToShort(Guid, result);
 end;
 
-procedure GuidToShort(const guid: TGuid; out dest: TGuidShortString);
+procedure GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid; out dest: TGuidShortString);
 begin
   dest[0] := #38;
   dest[1] := '{';
   GuidToText(@dest[2], @guid)^ := '}';
 end;
 
-function UuidToShort(const guid: TGuid): TGuidShortString;
+function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): TGuidShortString;
 begin
   result[0] := #36;
   GuidToText(@result[1], @guid, @TwoDigitsHexWBLower);
 end;
 
 {$ifdef UNICODE}
-function GuidToString(const guid: TGuid): string;
+function GuidToString({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
+  guid: TGuid): string;
 var
   tmp: TGuidShortString;
 begin
@@ -10956,7 +10986,8 @@ begin
   Ansi7ToString(@tmp[1], 38, result);
 end;
 {$else}
-function GuidToString(const guid: TGuid): string;
+function GuidToString(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): string;
 begin
   result := GuidToRawUtf8(guid);
 end;
@@ -11132,11 +11163,18 @@ begin
   if aSize < 0 then
     aSize := aStream.Size - current;
   if (aSize = 0) or
-     (aSize > maxInt) then
+     (aSize > maxInt) then // Delphi uses 32-bit length() even on Win64
     exit;
+  if aStream.InheritsFrom(TCustomMemoryStream) then
+  begin
+    FastSetStringCP(result, PAnsiChar(TCustomMemoryStream(aStream).
+      Memory) + current, aSize, aCodePage);
+    exit;
+  end;
   pointer(result) := FastNewString(aSize, aCodePage);
-  aStream.ReadBuffer(pointer(result)^, aSize);
-  aStream.Position := current;
+  if not StreamReadAll(aStream, pointer(result), aSize) then
+    result := '';
+  aStream.Position := current; // always restore position
 end;
 
 function StreamChangeToRawByteString(aStream: TStream; var aPosition: Int64): RawByteString;
@@ -11151,10 +11189,13 @@ begin
     exit; // nothing new
   pointer(result) := FastNewString(size);
   current := aStream.Position;
-  aStream.Position := aPosition;
-  aStream.ReadBuffer(pointer(result)^, size);
-  aStream.Position := current;
-  aPosition := current;
+  if aPosition <> current then
+    aStream.Position := aPosition;
+  if StreamReadAll(aStream, pointer(result), size) then
+    aPosition := current
+  else
+    result := '';
+  aStream.Position := current; // always restore position
 end;
 
 function RawByteStringToStream(const aString: RawByteString): TStream;
@@ -11173,7 +11214,7 @@ begin
      (L > MaxAllowedSize) then
     exit;
   FastSetString(result, L);
-  if S.Read(pointer(result)^, L) <> L then
+  if not StreamReadAll(S, pointer(result), L) then
     result := '';
 end;
 
