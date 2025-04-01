@@ -260,6 +260,10 @@ function IsValidUtf8WithoutControlChars(source: PUtf8Char): boolean; overload;
 // - supplied input is a RawUtf8 variable
 function IsValidUtf8WithoutControlChars(const source: RawUtf8): boolean; overload;
 
+/// check if any forbidden 7-bit char appears in the supplied text
+// - is a wrapper around strcspn()
+function ContainsChars(const text, forbidden: RawUtf8): boolean;
+
 /// will truncate the supplied UTF-8 value if its length exceeds the specified
 // UTF-16 Unicode characters count
 // - count may not match the UCS-4 CodePoint, in case of UTF-16 surrogates
@@ -1686,12 +1690,12 @@ function UpperCaseU(const S: RawUtf8): RawUtf8;
 function LowerCaseU(const S: RawUtf8): RawUtf8;
 
 /// fast conversion of the supplied text into 8-bit case sensitivity
-// - convert the text in-place, returns the resulting length
+// - convert the text from P into D, returns the resulting length
 // - it will decode the supplied UTF-8 content to handle more than 7-bit
 // of ascii characters during the conversion (leaving not WinAnsi characters
 // untouched)
 // - will not set the last char to #0 (caller must do that if necessary)
-function ConvertCaseUtf8(P: PUtf8Char; const Table: TNormTableByte): PtrInt;
+function ConvertCaseUtf8(P, D: PUtf8Char; const Table: TNormTableByte): PtrInt;
 
 /// check if the supplied text has some case-insentitive 'a'..'z','A'..'Z' chars
 // - will therefore be correct with true UTF-8 content, but only for 7-bit
@@ -1874,6 +1878,12 @@ function TrimOneChar(const text: RawUtf8; exclude: AnsiChar): RawUtf8;
 /// returns the supplied text content, without any other char than specified
 // - specify a custom char set to be included, e.g. as ['A'..'Z']
 function OnlyChar(const text: RawUtf8; const only: TSynAnsicharSet): RawUtf8;
+
+/// check if any of the supplied chars appears in the text
+function HasAnyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+
+/// check if any other than the supplied chars appears in the text
+function HasOnlyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
 
 /// returns the supplied text content, without any control char
 // - here control chars have an ASCII code in [#0 .. ' '], i.e. text[] <= ' '
@@ -3289,6 +3299,14 @@ begin
     end;
   end;
   result := true;
+end;
+
+function ContainsChars(const text, forbidden: RawUtf8): boolean;
+begin
+  result := (text <> '') and
+            (forbidden <> '') and
+            (strcspn(pointer(text), pointer(forbidden)) <>
+               PStrLen(PAnsiChar(pointer(text)) - _STRLEN)^);
 end;
 
 function Utf8ToUnicodeLength(source: PUtf8Char): PtrUInt;
@@ -5454,10 +5472,7 @@ function Utf8DecodeToUnicodeRawByteString(P: PUtf8Char; L: integer): RawByteStri
 begin
   if (P <> nil) and
      (L <> 0) then
-  begin
-    FastNewRawByteString(result, L * 3);
-    FakeSetLength(result, Utf8ToWideChar(pointer(result), P, L));
-  end
+    FakeSetLength(result, Utf8ToWideChar(FastNewRawByteString(result, L * 3), P, L))
   else
     result := '';
 end;
@@ -5522,8 +5537,7 @@ begin
   if (c < 0) or
      (z < c) then
     c := z;
-  FastSetString(result, len shl 1);
-  d := pointer(result);
+  d := FastSetString(result, len shl 1);
   MoveFast(s^, d^, c);
   inc(s, c);
   inc(d, c);
@@ -6724,9 +6738,9 @@ begin
   result := AnsiICompW(PWideChar(A), PWideChar(B));
 end;
 
-function ConvertCaseUtf8(P: PUtf8Char; const Table: TNormTableByte): PtrInt;
+function ConvertCaseUtf8(P, D: PUtf8Char; const Table: TNormTableByte): PtrInt;
 var
-  d, s: PUtf8Char;
+  s: PUtf8Char;
   c: PtrUInt;
   extra, i: PtrInt;
   {$ifdef CPUX86NOTPIC}
@@ -6741,7 +6755,6 @@ begin
   {$ifndef CPUX86NOTPIC}
   utf8 := @UTF8_TABLE;
   {$endif CPUX86NOTPIC}
-  d := P;
   repeat
     c := byte(P[0]);
     inc(P);
@@ -6749,7 +6762,7 @@ begin
       break;
     if c <= 127 then
     begin
-      d[result] := AnsiChar(Table[c]);
+      D[result] := AnsiChar(Table[c]);
       inc(result);
     end
     else
@@ -6773,7 +6786,7 @@ begin
       if (c <= 255) and
          (Table[c] <= 127) then
       begin
-        d[result] := AnsiChar(Table[c]);
+        D[result] := AnsiChar(Table[c]);
         inc(result);
         inc(P, extra);
         continue;
@@ -6781,7 +6794,7 @@ begin
       s := P - 1;
       inc(P, extra);
       inc(extra);
-      MoveByOne(s, d + result, extra);
+      MoveByOne(s, D + result, extra);
       inc(result, extra);
     end;
   until false;
@@ -6792,10 +6805,9 @@ var
   ls, ld: PtrInt;
 begin
   ls := length(S);
-  FastSetString(result, pointer(S), ls);
-  ld := ConvertCaseUtf8(pointer(result), NormToUpperByte);
+  ld := ConvertCaseUtf8(pointer(S), FastSetString(result, ls), NormToUpperByte);
   if ls <> ld then
-    SetLength(result, ld);
+    FakeLength(result, ld);
 end;
 
 function LowerCaseU(const S: RawUtf8): RawUtf8;
@@ -6803,10 +6815,9 @@ var
   ls, ld: PtrInt;
 begin
   ls := length(S);
-  FastSetString(result, pointer(S), ls);
-  ld := ConvertCaseUtf8(pointer(result), NormToLowerByte);
+  ld := ConvertCaseUtf8(pointer(S), FastSetString(result, ls), NormToLowerByte);
   if ls <> ld then
-    SetLength(result, ld);
+    FakeLength(result, ld);
 end;
 
 function Utf8IComp(u1, u2: PUtf8Char): PtrInt;
@@ -8081,8 +8092,7 @@ begin
     if text[i] <= ' ' then
     begin
       n := i - 1;
-      FastSetString(result, len);
-      p := pointer(result);
+      p := FastSetString(result, len);
       if n > 0 then
         MoveFast(pointer(text)^, p^, n);
       for j := i + 1 to len do
@@ -8107,8 +8117,7 @@ begin
     if text[i] in exclude then
     begin
       n := i - 1;
-      FastSetString(result, len - 1);
-      p := pointer(result);
+      p := FastSetString(result, len - 1);
       if n > 0 then
         MoveFast(pointer(text)^, p^, n);
       for j := i + 1 to len do
@@ -8136,8 +8145,7 @@ begin
     result := text; // no exclude char found
     exit;
   end;
-  FastSetString(result, len - 1);
-  p := pointer(result);
+  p := FastSetString(result, len - 1);
   MoveFast(pointer(text)^, p^, first);
   inc(p, first);
   for i := first + 1 to len do
@@ -8160,6 +8168,36 @@ begin // reverse bits in local stack copy before calling TrimChar()
   for i := 0 to (SizeOf(only) shr POINTERSHR) - 1 do
     exclude[i] := not PPtrIntArray(@only)[i];
   result := TrimChar(text, TSynAnsicharSet(exclude));
+end;
+
+function HasAnyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+var
+  p: PUtf8Char;
+begin
+  result := true;
+  p := pointer(text);
+  if p <> nil then
+    repeat
+      if p^ in chars then
+        exit;
+      inc(p);
+    until p^ = #0;
+  result := false;
+end;
+
+function HasOnlyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+var
+  p: PUtf8Char;
+begin
+  result := false;
+  p := pointer(text);
+  if p <> nil then
+    repeat
+      if not (p^ in chars) then
+        exit;
+      inc(p);
+    until p^ = #0;
+  result := true;
 end;
 
 procedure FillZero(var secret: RawByteString);
@@ -8224,10 +8262,9 @@ begin
       break;
     AddInteger(pos, posCount, found);
   until false;
-  FastSetString(result, Length(S) + (newlen - oldlen) * posCount); // alloc once
+  dst := FastSetString(result, Length(S) + (newlen - oldlen) * posCount);
   last := 1;
   src := pointer(S);
-  dst := pointer(result);
   for i := 0 to posCount - 1 do
   begin
     sharedlen := pos[i] - last;
@@ -8314,31 +8351,30 @@ begin
   result := Source;
 end;
 
-function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
-
-  procedure Process(s, d, t: PAnsiChar; tlen: PtrInt);
-  begin
-    repeat
-      if s^ = #0 then
-        break
-      else if s^ <> #9 then
+procedure StringReplaceTabsProcess(s, d, t: PAnsiChar; tlen: PtrInt);
+begin
+  repeat
+    if s^ = #0 then
+      break
+    else if s^ <> #9 then
+    begin
+      d^ := s^;
+      inc(d);
+      inc(s);
+    end
+    else
+    begin
+      if tlen > 0 then
       begin
-        d^ := s^;
-        inc(d);
-        inc(s);
-      end
-      else
-      begin
-        if tlen > 0 then
-        begin
-          MoveByOne(t, d, tlen);
-          inc(d, tlen);
-        end;
-        inc(s);
+        MoveByOne(t, d, tlen);
+        inc(d, tlen);
       end;
-    until false;
-  end;
+      inc(s);
+    end;
+  until false;
+end;
 
+function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
 var
   len, i, n, ttl: PtrInt;
 begin
@@ -8354,8 +8390,8 @@ begin
     result := Source;
     exit;
   end;
-  FastSetString(result, len + n * pred(ttl));
-  Process(pointer(Source), pointer(result), pointer(TabText), ttl);
+  StringReplaceTabsProcess(pointer(Source),
+    FastSetString(result, len + n * pred(ttl)), pointer(TabText), ttl);
 end;
 
 function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
@@ -8363,10 +8399,7 @@ begin
   if Count <= 0 then
     FastAssignNew(result)
   else
-  begin
-    FastSetString(result, Count);
-    FillCharFast(pointer(result)^, Count, byte(Ch));
-  end;
+    FillCharFast(FastSetString(result, Count)^, Count, byte(Ch));
 end;
 
 function QuotedStr(const S: RawUtf8; Quote: AnsiChar): RawUtf8;
@@ -8409,8 +8442,7 @@ begin
     for i := quote1 to PLen - 1 do
       if P[i] = Quote then
         inc(nquote);
-  FastSetString(result, PLen + nquote + 2);
-  r := pointer(result);
+  r := FastSetString(result, PLen + nquote + 2);
   r^ := Quote;
   inc(r);
   if nquote = 0 then
@@ -8716,7 +8748,7 @@ begin
       while p^ in [#9, ' '] do // trim left
         inc(p);
       len := 0;
-      while p[len] > #13 do      // end of line/value
+      while p[len] > #13 do // end of line/value
         inc(len);
       while p[len - 1] = ' ' do  // trim right
         dec(len);
@@ -10605,8 +10637,7 @@ begin
   if (u4 = nil) or
      (L <= 0) then
     exit;
-  FastSetString(u, L * 6); // prepare for the worse (paranoid)
-  p := pointer(u);
+  p := FastSetString(u, L * 6); // prepare for the worse (paranoid)
   repeat
     inc(p, Ucs4ToUtf8(u4^, p));
     inc(u4);

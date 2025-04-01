@@ -477,7 +477,7 @@ begin
     if Pos + len > max then
       exit;
     AppendShortBuffer(pointer(@p[Pos]), len, @tmp);
-    AppendShortChar('.', @tmp);
+    AppendShortCharSafe('.', @tmp);
     inc(Pos, len);
   until false;
   if tmp[ord(tmp[0])] = '.' then
@@ -681,8 +681,7 @@ begin
       len := bswap16(lenw);
       if len <= length(Request) then
         exit;
-      FastNewRawByteString(answer, len);
-      hdr := pointer(answer);
+      hdr := FastNewRawByteString(answer, len);
       if (sock.RecvAll(TimeOutMS, pointer(answer), len) <> nrOk) or
          (hdr^.Xid <> PDnsHeader(Request)^.Xid) or
          not hdr^.IsResponse or

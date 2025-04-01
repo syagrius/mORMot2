@@ -42,7 +42,7 @@ function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
 procedure _fmt(const Fmt: string; const Args: array of const;
   var result: RawUtf8); overload; forward;
 procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8); forward;
-function _GetNextItem(var P: PAnsiChar): RawUtf8; forward;
+function _GetNextSpaced(var P: PAnsiChar): RawUtf8; forward;
 function _GetNextCardinal(var P: PAnsiChar): PtrUInt; forward;
 function PosExtString(Str: PChar): PChar; forward;
 
@@ -1325,6 +1325,15 @@ begin
             not FpS_ISDIR(st.st_mode);
 end;
 
+function DirectoryExists(const FolderName: TFileName): boolean;
+var
+  st: TStat;
+begin
+  result := (FolderName <> '') and
+            (fpStat(pointer(FolderName), st) = 0) and
+            FpS_ISDIR(st.st_mode);
+end;
+
 function FileCreate(const aFileName: TFileName; aMode, aRights: integer): THandle;
 begin
   if aFileName = '' then
@@ -1798,6 +1807,52 @@ begin
 end;
 
 
+{$ifdef OSLINUXANDROID}
+// https://www.cyberciti.biz/tips/tell-what-filesystems-linux-kernel-can-handle.html
+
+var
+  _ProcFileSystems: TRawUtf8DynArray; // from /proc/filesystems without "nodev"
+  __ProcFileSystemsTested: boolean;
+
+function IsProcFileSystem(const typ: RawUtf8): boolean; inline;
+begin
+  result := FindNonVoidRawUtf8(pointer(_ProcFileSystems),
+    pointer(typ), length(typ), length(_ProcFileSystems)) >= 0;
+end;
+
+function LoadProcFileSystems: boolean;
+var
+  fs, s: RawUtf8;
+  p: PUtf8Char;
+begin
+  __ProcFileSystemsTested := true;
+  result := false;
+  fs := StringFromFileNoSize('/proc/filesystems');
+  p := pointer(fs);
+  if p = nil then
+    exit;
+  repeat
+    while p^ = ' ' do
+      inc(p);
+    s := _GetNextSpaced(p);
+    if (s <> '') and
+       (s <> 'nodev') and
+       (s <> 'squashfs') and
+       (s <> 'nullfs') then
+      _AddRawUtf8(_ProcFileSystems, s);
+    p := GotoNextLine(p);
+  until p = nil;
+  if _ProcFileSystems = nil then
+    exit;
+  // add some FS which may be marked as nodev but could be considered as "real"
+  _AddRawUtf8(_ProcFileSystems, 'zfs');
+  _AddRawUtf8(_ProcFileSystems, 'cifs');
+  _AddRawUtf8(_ProcFileSystems, 'drvfs');
+  result := true;
+end;
+
+{$endif OSLINUXANDROID}
+
 {$ifdef OSLINUX} { the systemd API is Linux-specific }
 
 const
@@ -1821,7 +1876,7 @@ const
   // other archs (like aarch64) are properly defined - see https://syscall.sh
 
 var
-  __ProcFileSystemsTested, __LinuxGetRandomFailed, __LinuxEventFdFailed: boolean;
+  __LinuxGetRandomFailed, __LinuxEventFdFailed: boolean;
 
 
 { TSystemD }
@@ -1958,48 +2013,6 @@ end;
 function LinuxEventFDWait(fd: integer; ms: integer): boolean;
 begin
   result := WaitReadPending(fd, ms);
-end;
-
-// https://www.cyberciti.biz/tips/tell-what-filesystems-linux-kernel-can-handle.html
-
-var
-  _ProcFileSystems: TRawUtf8DynArray; // from /proc/filesystems without "nodev"
-
-function IsProcFileSystem(const typ: RawUtf8): boolean; inline;
-begin
-  result := FindNonVoidRawUtf8(pointer(_ProcFileSystems),
-    pointer(typ), length(typ), length(_ProcFileSystems)) >= 0;
-end;
-
-function LoadProcFileSystems: boolean;
-var
-  fs, s: RawUtf8;
-  p: PUtf8Char;
-begin
-  __ProcFileSystemsTested := true;
-  result := false;
-  fs := StringFromFileNoSize('/proc/filesystems');
-  p := pointer(fs);
-  if p = nil then
-    exit;
-  repeat
-    while p^ = ' ' do
-      inc(p);
-    s := _GetNextItem(p);
-    if (s <> '') and
-       (s <> 'nodev') and
-       (s <> 'squashfs') and
-       (s <> 'nullfs') then
-      _AddRawUtf8(_ProcFileSystems, s);
-    p := GotoNextLine(p);
-  until p = nil;
-  if _ProcFileSystems = nil then
-    exit;
-  // add some FS which may be marked as nodev but could be considered as "real"
-  _AddRawUtf8(_ProcFileSystems, 'zfs');
-  _AddRawUtf8(_ProcFileSystems, 'cifs');
-  _AddRawUtf8(_ProcFileSystems, 'drvfs');
-  result := true;
 end;
 
 {$endif OSLINUX}
@@ -2263,7 +2276,7 @@ end;
 function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
 begin
   result := false;
-  folder := EnsureDirectoryExists(parent + sub);
+  folder := EnsureDirectoryExists(Join([parent, sub]));
   if folder = '' then
     exit;
   if FileIsWritable(folder) then
@@ -2351,7 +2364,7 @@ begin
           if (PosEx('-----BEGIN', files[f]) <> 0) and
              IsAnsiCompatible(files[f]) and
              (PosEx(files[f], result) = 0) then // append PEM files once
-            result := result + #10 + files[f];
+            result := Join([result, #10, files[f]]);
       end;
   end;
 end;
@@ -2525,7 +2538,7 @@ var
   begin
     // read all the file or directory names of this folder
     subcount := 0;
-    addedpath := root + subpath;
+    Join([root, subpath], RawUtf8(addedpath));
     dir := FpOpendir(pointer(addedpath)); // faster than FindFirst()
     if dir = nil then
       exit;
@@ -2647,13 +2660,15 @@ begin
   mib[0] := node;
   mib[1] := id;
   result := len;
-  fpsysctl(pointer(@mib), 2, dest, @result, nil, 0);
+  if fpsysctl(pointer(@mib), 2, dest, @result, nil, 0) <> 0 then
+    result := 0;
 end;
 
 function bsdsysctl(name: PAnsiChar; dest: pointer; len: cint): cint; overload;
 begin
   result := len;
-  FPsysctlbyname(name, dest, @result, nil, 0);
+  if FPsysctlbyname(name, dest, @result, nil, 0) <> 0 then
+    result := 0;
 end;
 
 function fpsysctlhwint(hwid: cint): Int64;
@@ -2665,8 +2680,8 @@ end;
 function fpsysctlhwstr(hwid: cint; var temp: ShortString): PUtf8Char;
 begin
   FillCharFast(temp, SizeOf(temp), 0); // ShortString as 0-terminated buffer
-  bsdsysctl(CTL_HW, hwid, @temp, SizeOf(temp));
-  if temp[0] <> #0 then
+  if (bsdsysctl(CTL_HW, hwid, @temp, SizeOf(temp)) <> 0) and
+     (temp[0] <> #0) then
     result := @temp
   else
     result := nil;
@@ -2675,8 +2690,8 @@ end;
 function fpsysctlbynamestr(name: PAnsiChar; var temp: ShortString): PUtf8Char;
 begin
   FillCharFast(temp, SizeOf(temp), 0); // ShortString as 0-terminated buffer
-  bsdsysctl(name, @temp, SizeOf(temp));
-  if temp[0] <> #0 then
+  if (bsdsysctl(name, @temp, SizeOf(temp)) <> 0) and
+     (temp[0] <> #0) then
     result := @temp
   else
     result := nil;
@@ -2710,6 +2725,35 @@ begin
   result := info.memtotal <> 0;// avoid div per 0 exception
   if result then
     info.percent := ((info.memtotal - info.memfree) * 100) div info.memtotal;
+end;
+
+type
+  // emulate sysinfo() Linux syscall on BSD/Mac
+  TSysInfo = packed record
+    uptime: cardinal;                    // Seconds since boot
+    loads: array[0 .. 2] of cardinal;    // 1, 5, and 15 minute load averages
+    totalram: cardinal;                  // Total usable main memory size
+    freeram: cardinal;                   // Available memory size
+    bufferram: cardinal;                 // Memory used by buffers
+    totalswap: cardinal;                 // Total swap space size
+    freeswap: cardinal;                  // swap space still available
+    mem_unit: cardinal;                  // Memory unit size in bytes
+  end;
+
+function RetrieveSysInfo(var si: TSysInfo): boolean;
+var
+  avg: TLoadAvg;
+  i: PtrInt;
+begin
+  FillCharFast(si, SizeOf(si), 0);
+  si.uptime := GetUptimeSec;
+  if getloadavg(avg, 3) = 3 then
+    for i := 0 to 2 do
+      si.loads[i] := Trunc(avg[i] * 65536.0);
+  si.totalram := SystemMemorySize shr 12;
+  si.freeram := (SystemMemorySize - fpsysctlhwint(HW_USERMEM)) shr 12;
+  si.mem_unit := 1 shl 12; // 4096
+  result := true; // bufferram and totalswap/freeswap are left with 0
 end;
 
 {$ifdef OSFREEBSD}
@@ -2881,7 +2925,7 @@ begin
   guid.Hi := mach_continuous_time;
   {$else}
   CreateGuid(guid.guid); // use e.g. FreeBSD syscall or /dev/urandom
-  XorMemory(e.h2, guid);
+  XorMemory(e.r[2], guid);
   BsdProcTimes(times);
   {$endif OSDARWIN}
   QueryPerformanceMicroSeconds(us); // should have changed in-between
@@ -2968,6 +3012,34 @@ begin
     result := -1;
 end;
 
+function StringFromFileNoSize(const FileName: TFileName): RawByteString;
+var
+  h: THandle;
+  pos, read: PtrInt;
+  tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
+begin
+  result := '';
+  if FileName = '' then
+    exit;
+  h := FpOpen(pointer(FileName), O_RDONLY); // no fpFlock() call
+  if PtrInt(h) <= 0 then
+    exit;
+  pos := 0;
+  repeat
+    read := FileRead(h, tmp[pos], SizeOf(tmp) - pos); // try to fill the buffer
+    if read <= 0 then
+      break; // end of input
+    inc(pos, read);
+    if pos < SizeOf(tmp) then // is likely to flush before 32KB of output
+      continue;
+    AppendBufferToUtf8(@tmp, pos, RawUtf8(result)); // in-place resize
+    pos := 0;
+  until false;
+  if pos <> 0 then
+    AppendBufferToUtf8(@tmp, pos, RawUtf8(result));
+  FileClose(h);
+end;
+
 function LoadProcFile(fn: PAnsiChar; var dest: TSynTempBuffer): PtrInt;
 var
   h: THandle;
@@ -2982,7 +3054,7 @@ begin
   FileClose(h);
 end;
 
-procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8); overload;
+procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8);
 var
   buf: TSynTempBuffer; // reading up to 4KB of content is enough
   p: PAnsiChar;
@@ -3004,7 +3076,7 @@ begin
     result := '';
 end;
 
-function LoadProcFileTrimed(fn: PAnsiChar): RawUtf8; overload; inline;
+function LoadProcFileTrim(fn: PAnsiChar): RawUtf8;
 begin
   LoadProcFileTrimed(fn, result);
 end;
@@ -3085,6 +3157,9 @@ var
   tmp: TSynTempBuffer;
   n: AnsiChar;
 begin
+  result := '';
+  if PID = 0 then
+    exit;
   fn := '/proc/';
   AppendShortCardinal(PID, fn);
   n := fn[0];
@@ -3103,6 +3178,11 @@ begin
   FastSetString(result, pointer(@tmp), StrLen(pointer(@tmp)));
   if result <> '' then
     tryprocexe := false; // no need to try again next time
+end;
+
+function IsNotCurrentExeDaemonized(PID: cardinal): boolean;
+begin
+  result := PosEx(Executable.ProgramName, EnumProcessName(PID)) = 0;
 end;
 
 function GetParentProcess(PID: cardinal): cardinal;
@@ -3131,6 +3211,11 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(TwoDigits(si.loads[2] / 65536.0), result);
 end; // we didn't use AppendShortCurr64() because of expected rounding
+
+function RetrieveSysInfo(var si: TSysInfo): boolean;
+begin // single syscall gives enough information on Linux
+  result := SysInfo(@si) = 0;
+end;
 
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 var
@@ -3289,7 +3374,32 @@ begin
   result := __IsDebuggerPresent;
 end;
 
-{$ifndef OSDARWIN}
+{$ifdef OSDARWIN}
+{$if defined(cpuarm) or defined(cpuaarch64) or defined(iphonesim)}
+const // FPC RTL defined wrong field lengths for TStatfs in darwin/ptypes.inc
+  MFSTYPENAMELEN = 16;
+
+type // see https://keith.github.io/xcode-man-pages/statfs.2.html
+  TStatfs = record
+    bsize: cuint32;
+    iosize: cint32;
+    blocks: cuint64;
+    bfree: cuint64;
+    bavail: cuint64;
+    files: cuint64;
+    ffree: cuint64;
+    fsid: fsid_t;
+    owner: uid_t;
+    ftype: cuint32;
+    fflags: cuint32;
+    fssubtype: cuint32;
+    fstypename:  array[0 .. MFSTYPENAMELEN - 1] of AnsiChar;
+    mountpoint:  array[0 .. PATH_MAX - 1]       of AnsiChar;
+    mntfromname: array[0 .. PATH_MAX - 1]       of AnsiChar;
+    reserved:    array[0 .. 7] of cuint32;
+  end;
+{$ifend}
+{$else}
 // on POSIX systems, /dev/mem may be available from root
 // but sometimes even root can't access it on hardened systems
 function ReadSystemMemory(address, size: PtrUInt): RawByteString;
@@ -3445,31 +3555,6 @@ begin
     SharedRandom.Fill(Buffer, Len);
 end;
 
-{$if defined(cpuarm) or defined(cpuaarch64) or defined(iphonesim)}
-const // FPC RTL defined wrong field lengths for TStatfs in darwin/ptypes.inc
-  MFSTYPENAMELEN = 16;
-
-type // see https://keith.github.io/xcode-man-pages/statfs.2.html
-  TStatfs = record
-    bsize: cuint32;
-    iosize: cint32;
-    blocks: cuint64;
-    bfree: cuint64;
-    bavail: cuint64;
-    files: cuint64;
-    ffree: cuint64;
-    fsid: fsid_t;
-    owner: uid_t;
-    ftype: cuint32;
-    fflags: cuint32;
-    fssubtype: cuint32;
-    fstypename:  array[0 .. MFSTYPENAMELEN - 1] of AnsiChar;
-    mountpoint:  array[0 .. PATH_MAX - 1]       of AnsiChar;
-    mntfromname: array[0 .. PATH_MAX - 1]       of AnsiChar;
-    reserved:    array[0 .. 7] of cuint32;
-  end;
-{$ifend}
-
 function GetDiskInfo(var aDriveFolderOrFile: TFileName;
   out aAvailableBytes, aFreeBytes, aTotalBytes: QWord): boolean;
 var
@@ -3486,11 +3571,11 @@ end;
 
 function IsRealFileSystem(const typ: RawUtf8): boolean;
 begin
-  {$ifdef OSLINUX}
+  {$ifdef OSLINUXANDROID}
   if _ProcFileSystems <> nil then   // caller made LoadProcFileSystems once
     result := IsProcFileSystem(typ) // from /proc/filesystems
   else
-  {$endif OSLINUX}
+  {$endif OSLINUXANDROID}
     // generic / best guess fallback list
     result := not IdemPChars(typ, ['AUTOFS', 'PROC', 'SUBFS', 'DEBUGFS',
       'DEVPTS', 'FUSECTL', 'MQUEUE', 'RPC-PIPEFS', 'SYSFS', 'DEVFS', 'KERNFS',
@@ -3597,11 +3682,14 @@ begin
   p := pointer(mounts);
   if p = nil then // e.g. Darwin has no /etc/mtab :(
     exit;
+  {$ifdef OSLINUXANDROID}
   if not __ProcFileSystemsTested then
     LoadProcFileSystems; // read once from /proc/filesystems
+  {$endif OSLINUXANDROID}
   n := 0;
   repeat
-    AddDiskPartition(_GetNextItem(p), _GetNextItem(p), _GetNextItem(p), result, n);
+    AddDiskPartition(
+      _GetNextSpaced(p), _GetNextSpaced(p), _GetNextSpaced(p), result, n);
     p := GotoNextLine(p);
   until p = nil;
   SetLength(result, n);
@@ -3955,28 +4043,41 @@ begin
             (chroot('.') = 0);
 end;
 
-function RunUntilSigTerminatedPidFile(ensureWritable: boolean): TFileName;
+function RunUntilSigTerminatedPidFile: TFileName;
 var
-  pidpath: TFileName;
+  crc: cardinal;
 begin
-  pidpath := RunUntilSigTerminatedPidFilePath;
-  if pidpath = '' then
-    pidpath := Executable.ProgramFilePath;
-  if not ensureWritable then
+  result := RunUntilSigTerminatedPidFileName;
+  if result <> '' then
+    exit;
+  // guess the folder to use for this daemon
+  result := RunUntilSigTerminatedPidFilePath;
+  if result = '' then
+    if FileIsWritable(Executable.ProgramFilePath) then // fpaccess is enough
+      result := Executable.ProgramFilePath
+    else if FileIsWritable('/run') then
+      result := '/run/' // favor tmpfs for transient file
+    else
+      result := GetSystemPath(spTemp)
+  else
+    result := IncludeTrailingPathDelimiter(result); // fixed user-supplied path
+  // compute the geniune /run/.[ProgramName]-[ProgramFilePathHash].pid name
+  crc := RunUntilSigTerminatedPidFileGenuine;
+  if (crc = 0) and
+     (result = Executable.ProgramFilePath) then // no [ProgramFilePathHash]
+    result := Format('%s.%s.pid', [result, Executable.ProgramName])
+  else
   begin
-    result := Format('%s.%s.pid', [pidpath, Executable.ProgramName]);
-    if FileExists(result) then
-      exit;
+    if crc = 0 then // allow several executable instances in several folders
+      crc := crc32cHash(Executable.ProgramFilePath);
+    result := Format('%s.%s%x.pid', [result, Executable.ProgramName, crc]);
   end;
-  if not FileIsWritable(pidpath) then
-    // if the executable folder is not writable, use the temporary folder
-    pidpath := GetSystemPath(spTemp);
-  result := Format('%s.%s.pid', [pidpath, Executable.ProgramName]);
+  RunUntilSigTerminatedPidFileName := result;
 end;
 
 function RunUntilSigTerminatedState: TServiceState;
 begin
-  if FileExists(RunUntilSigTerminatedPidFile(false)) then
+  if FileExists(RunUntilSigTerminatedPidFile) then
     result := ssRunning
   else
     result := ssStopped;
@@ -3984,40 +4085,47 @@ end;
 
 function RunUntilSigTerminatedForKill(waitseconds: integer): boolean;
 var
-  pid: PtrInt;
-  pidfilename: TFileName;
+  pid, pidnew: PtrInt;
+  pidfile: TFileName;
   tix: Int64;
 begin
   result := false;
-  pidfilename := RunUntilSigTerminatedPidFile;
-  pid := GetInteger(pointer(StringFromFile(pidfilename)));
-  if pid <= 0 then
+  pidfile := RunUntilSigTerminatedPidFile;
+  pid := GetInteger(pointer(StringFromFile(pidfile)));
+  if (pid <= 0) or
+     (pid = PtrInt(FpGetpid)) then
     exit;
-  if fpkill(pid, SIGTERM) <> 0 then // polite quit
-    if fpgeterrno <> ESysESRCH then
-      exit
-    else
-      // ESysESRCH = no such process -> try to delete the .pid file
-      if DeleteFile(pidfilename) then
-      begin
-        result := true; // process crashed or hard reboot -> nothing to kill
-        exit;
-      end;
-  if waitseconds <= 0 then
+  {$ifdef OSLINUX} // BSD does not implement this (yet)
+  if IsNotCurrentExeDaemonized(pid) then
+    result := DeleteFile(pidfile) // this daemon does not exist any more
+  else
+  {$endif OSLINUX}
+  if fpkill(pid, SIGTERM) <> 0 then  // polite/weak quit failed
   begin
-    result := true;
-    exit;
+    if fpgeterrno = ESysESRCH then   // ESysESRCH = no such process
+      result := DeleteFile(pidfile); // crashed and not restarted -> clean
+  end
+  else if waitseconds <= 0 then
+    result := true // TERM sent and no wait needed
+  else
+  begin
+    tix := GetTickCount64 + waitseconds * MilliSecsPerSec;
+    repeat
+      // RunUntilSigTerminated() below should eventually delete the .pid file
+      SleepHiRes(10);
+      pidnew := GetInteger(pointer(StringFromFile(pidfile)));
+      result := (pidnew = 0) or (pidnew <> pid); // stopped or restarted
+      if result then
+        exit;
+    until GetTickCount64 > tix;
+    // timeout: murder with finesse
+    if {$ifdef OSLINUX}
+       IsNotCurrentExeDaemonized(pid) or
+       {$endif OSLINUX}
+       ((fpkill(pid, SIGKILL) <> 0) and
+        (fpgeterrno = ESysESRCH)) then
+      DeleteFile(pidfile); // process crashed and not reboot -> clean
   end;
-  tix := GetTickCount64 + waitseconds * MilliSecsPerSec;
-  repeat
-    // RunUntilSigTerminated() below should delete the .pid file
-    SleepHiRes(10);
-    if not FileExists(pidfilename) then
-      result := true;
-  until result or
-        (GetTickCount64 > tix);
-  if not result then
-    fpkill(pid, SIGKILL); // murder with finesse
 end;
 
 procedure CleanAfterFork;
@@ -4417,7 +4525,8 @@ end;
 function _GetSystemMacAddress: TRawUtf8DynArray;
 var
   SR: TSearchRec;
-  fn: TFileName;
+  fn: shortstring;
+  fnl: AnsiChar;
   f: RawUtf8;
 begin
   result := nil;
@@ -4428,12 +4537,17 @@ begin
        not IdemPChar(pointer(SR.Name), 'DOCKER') and
        SearchRecValidFolder(SR) then
     begin
-      fn := '/sys/class/net/' + SR.Name;
-      f := StringFromFileNoSize(fn + '/flags');
+      fn := '/sys/class/net/';
+      AppendShortAnsi7String(SR.Name, fn);
+      fnl := fn[0];
+      AppendShort('/flags'#0, fn);
+      LoadProcFileTrimed(@fn[1], f);
       if (length(f) > 2) and // e.g. '0x40' or '0x1043'
          (ParseHex0x(pointer(f)) and {IFF_LOOPBACK:}8 = 0) then
       begin
-        f := TrimU(StringFromFileNoSize(fn + '/address'));
+        fn[0] := fnl;
+        AppendShort('/address'#0, fn);
+        LoadProcFileTrimed(@fn[1], f);
         if f <> '' then
           _AddRawUtf8(result, f);
       end;
@@ -4459,31 +4573,31 @@ var
 {$endif OSLINUX}
 begin
   {$ifdef OSLINUX}
-  txt := TrimU(LoadProcFileTrimed('/sys/class/dmi/id/sys_vendor') + ' ' +
-               LoadProcFileTrimed('/sys/class/dmi/id/product_name'));
+  txt := TrimU(Join([LoadProcFileTrim('/sys/class/dmi/id/sys_vendor'),
+                  ' ', LoadProcFileTrim('/sys/class/dmi/id/product_name')]));
   if txt <> '' then
   begin // e.g. 'QEMU KVM Virtual Machine' or 'LENOVO 20HES23B0U'
     LoadProcFileTrimed('/sys/class/dmi/id/product_version', prod);
     if prod <> '' then
-      txt := txt + ' ' + prod;
+      txt := Join([txt, ' ', prod]);
   end
   else
     // return e.g. 'Raspberry Pi 3 Model B Rev 1.2'
     LoadProcFileTrimed('/proc/device-tree/model', txt);
   {$else}
-  txt := TrimU(RawUtf8(GetSystemProperty('ro.product.brand') + ' ' +
-                       GetSystemProperty('ro.product.name') + ' ' +
-                       GetSystemProperty('ro.product.device')));
+  txt := TrimU(Join([GetSystemProperty('ro.product.brand'), ' ',
+                       GetSystemProperty('ro.product.name'), ' ',
+                       GetSystemProperty('ro.product.device')]));
   {$endif OSLINUX}
   if __BiosInfoHardwareFromCpuInfo <> '' then // e.g. 'Hardware : BCM2709' on RPi3
     if txt = '' then
       txt := __BiosInfoHardwareFromCpuInfo
     else
-      txt := txt + ' (' + __BiosInfoHardwareFromCpuInfo + ')'
+      txt := Join([txt, ' (', __BiosInfoHardwareFromCpuInfo, ')'])
   else if txt = '' then
     {$ifdef CPUARM3264}
     if CpuArmModel <> '' then
-      txt := 'Unamed ' + CpuArmModel + ' system'
+      Join(['Unamed ', CpuArmModel, ' system'], txt)
     else
     {$endif CPUARM3264}
       txt := 'Generic ' + CPU_ARCH_TEXT + ' system';
@@ -4586,7 +4700,8 @@ var
   act, aci: TIntegerDynArray;
   i: PtrInt;
   {$endif CPUARM3264}
-  tp: timespec;
+  tpfail: byte;
+  tp: array[0..2] of timespec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
   temp1, temp2: ShortString;
@@ -4625,6 +4740,7 @@ begin
   CpuCache[2].Size     := fpsysctlhwint(HW_L2CACHESIZE);
   CpuCache[3].LineSize := fpsysctlhwint(HW_CACHELINE);
   CpuCache[3].Size     := fpsysctlhwint(HW_L3CACHESIZE);
+  crc32c128(@StartupRandom, @CpuCache, SizeOf(CpuCache));
   CpuCacheSize := CpuCache[3].Size;
   if CpuCacheSize = 0 then
     CpuCacheSize := CpuCache[2].Size;
@@ -4646,6 +4762,7 @@ begin
   GetSystemMacAddress := _GetSystemMacAddress;
   if Sysinfo(@si) = 0 then
     SystemMemorySize := si.totalram * si.mem_unit;
+  crc32c128(@StartupRandom, @si, SizeOf(si));
   // https://www.freedesktop.org/software/systemd/man/latest/os-release.html
   FindFileValue('/etc/os-release', 'PRETTY_NAME=', release); // new "standard"
   if release = '' then // oldest Linux Standard Base location
@@ -4662,7 +4779,7 @@ begin
        (FindNext(SR) = 0) then
       release := SR.Name;
     release := Split(release, '-');
-    dist := Split(StringFromFileNoSize('/etc/' + SR.Name), #10);
+    dist := Split(StringFromFileNoSize(Join(['/etc/', SR.Name])), #10);
     if (dist <> '') and
        (PosExChar('=', dist) = 0) and
        (PosExChar(' ', dist) > 0) then
@@ -4691,6 +4808,7 @@ begin
   cache := nil;
   SystemInfo.dwNumberOfProcessors := 0;
   CpuInfoLinux := StringFromFileNoSize('/proc/cpuinfo'); // too big for LoadProcFile
+  crc32c128(@StartupRandom, pointer(CpuInfoLinux), length(CpuInfoLinux));
   procid := -1;
   cpuinfo := pointer(CpuInfoLinux);
   while cpuinfo <> nil do
@@ -4780,13 +4898,14 @@ begin
     CpuSockets := 1;
   if fpuname(uts) < 0 then
     FillChar(uts, SizeOf(uts), 0);
+  crc32c128(@StartupRandom, @uts, SizeOf(uts));
   SystemInfo.uts.release := uts.Release;
   SystemInfo.uts.sysname := uts.SysName;
   SystemInfo.uts.version := uts.Version;
   SystemInfo.uts.nodename := uts.NodeName;
-  OSVersionText := SystemInfo.uts.sysname + ' ' + SystemInfo.uts.release;
+  OSVersionText := Join([SystemInfo.uts.sysname, ' ', SystemInfo.uts.release]);
   if SystemInfo.release <> '' then
-    OSVersionText := SystemInfo.release + ' - ' + OSVersionText;
+    OSVersionText := Join([SystemInfo.release, ' - ', OSVersionText]);
   P := @uts.release[0];
   KernelRevision := _GetNextCardinal(P) shl 16 +
                     _GetNextCardinal(P) shl 8 +
@@ -4794,7 +4913,7 @@ begin
   OSVersion32.os := OS_KIND;
   MoveByOne(@KernelRevision, @OSVersion32.utsrelease, 3); // 24-bit
   {$ifdef OSANDROID}
-  OSVersionText := 'Android (' + OSVersionText + ')';
+  OSVersionText := Join(['Android (', OSVersionText, ')']);
   {$else}
   {$ifdef OSLINUX}
   if SystemInfo.dwNumberOfProcessors = 0 then // e.g. QEMU limited /proc/cpuinfo
@@ -4821,29 +4940,32 @@ begin
   @LeaveCriticalSection    := @tm.LeaveCriticalSection;
   {$endif NODIRECTTHREADMANAGER}
   {$ifdef OSDARWIN}
-  OSVersionText := ToText(OSVersion32) + ' (' + OSVersionText + ')';
+  OSVersionText := Join([ToText(OSVersion32), ' (', OSVersionText, ')']);
   mach_timebase_info(mach_timeinfo);
   mach_timecoeff := mach_timeinfo.Numer / mach_timeinfo.Denom;
   mach_timenanosecond := (mach_timeinfo.Numer = 1) and
                          (mach_timeinfo.Denom = 1);
   {$else}
   // try Linux kernel 2.6.32+ or FreeBSD 8.1+ fastest clocks
-  if clock_gettime(CLOCK_REALTIME_COARSE, @tp) = 0 then
-    CLOCK_REALTIME_FAST := CLOCK_REALTIME_COARSE;
-  if clock_gettime(CLOCK_MONOTONIC_COARSE, @tp) = 0 then
-    CLOCK_MONOTONIC_FAST := CLOCK_MONOTONIC_COARSE;
+  tpfail := 0;
+  if clock_gettime(CLOCK_REALTIME_COARSE, @tp[0]) = 0 then
+    CLOCK_REALTIME_FAST := CLOCK_REALTIME_COARSE
+  else if clock_gettime(CLOCK_REALTIME_FAST, @tp[0]) <> 0 then
+    tpfail := 1;
+  if clock_gettime(CLOCK_MONOTONIC_COARSE, @tp[1]) = 0 then
+    CLOCK_MONOTONIC_FAST := CLOCK_MONOTONIC_COARSE
+  else if clock_gettime(CLOCK_MONOTONIC_FAST,  @tp[1]) <> 0 then
+    tpfail := 2;
   {$ifdef OSLINUX}
-  if clock_gettime(CLOCK_MONOTONIC_RAW, @tp) = 0 then
-    CLOCK_MONOTONIC_HIRES := CLOCK_MONOTONIC_RAW;
+  if clock_gettime(CLOCK_MONOTONIC_RAW, @tp[2]) = 0 then
+    CLOCK_MONOTONIC_HIRES := CLOCK_MONOTONIC_RAW
+  else if clock_gettime(CLOCK_MONOTONIC_HIRES, @tp[2]) <> 0 then
+    tpfail := 3;
   {$endif OSLINUX}
-  if clock_gettime(CLOCK_BOOTTIME, @tp) = 0 then
-    CLOCK_UPTIME := CLOCK_BOOTTIME;
-  if (clock_gettime(CLOCK_REALTIME_FAST, @tp) <> 0) or // paranoid check
-     (clock_gettime(CLOCK_MONOTONIC_FAST, @tp) <> 0) or
-     (clock_gettime(CLOCK_MONOTONIC_HIRES, @tp) <> 0) then
-    raise EOSException.CreateFmt(
-      'clock_gettime() not supported by %s kernel - errno=%d',
-      [PAnsiChar(@uts.release), fpgeterrno]);
+  if tpfail <> 0 then
+    raise EOSException.CreateFmt('clock_gettime(%d) failed on %s - errno=%d',
+      [tpfail, OSVersionText, fpgeterrno]);
+  crc32c128(@StartupRandom, @tp, SizeOf(tp)); // 3 nanoseconds timestamps
   // direct access to the pthread library if possible (Linux only)
   {$ifdef OSPTHREADSLIB}
   // mutex_lock() is blocking when dlopen run from a .so: cthreads uses both

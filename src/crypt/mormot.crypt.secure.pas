@@ -308,6 +308,9 @@ type
   // - they are increasing over time (so are much easier to store/shard/balance
   // than UUID/GUID), and contain generation time and a 16-bit process ID
   // - mapped by TSynUniqueIdentifierBits memory structure
+  // - bits 0..14 map a 15-bit increasing counter (collision-free)
+  // - bits 15..30 map a 16-bit process identifier
+  // - bits 31..63 map a 33-bit UTC time, encoded as seconds since Unix epoch
   // - may be used on client side for something similar to a MongoDB ObjectID,
   // but compatible with TOrm.ID: TID properties
   TSynUniqueIdentifier = type TID;
@@ -315,9 +318,17 @@ type
   /// 16-bit unique process identifier, used to compute TSynUniqueIdentifier
   // - each TSynUniqueIdentifierGenerator instance is expected to have
   // its own unique process identifier, stored as a 16-bit integer 0..65535 value
+  // - when used with TSynUnique53, should be kept in [0..255] range
   TSynUniqueIdentifierProcess = type word;
 
-  {$A-}
+  /// 53-bit integer unique identifier, as computed by TSynUniqueIdentifierGenerator
+  // - could be used as JavaScript-compatible TID value e.g. for TOrm.ID
+  // - bits 0..14 map a 15-bit increasing counter (collision-free)
+  // - bits 15..22 map a 8-bit process identifier (0..255)
+  // - bits 23..53 map a 31-bit UTC time, encoded as seconds since 1/1/2025,
+  // therefore valid until 2093
+  TSynUnique53 = type Int53;
+
   /// map 64-bit integer unique identifier internal memory structure
   // - as stored in TSynUniqueIdentifier = TID = Int64 values, and computed by
   // TSynUniqueIdentifierGenerator
@@ -329,6 +340,9 @@ type
   {$else}
   TSynUniqueIdentifierBits = object
   {$endif USERECORDWITHMETHODS}
+  private
+    function GetJavaScriptID: TSynUnique53;
+    procedure SetJavaScriptID(const aJavaScriptID: TSynUnique53);
   public
     /// the actual 64-bit storage value
     // - in practice, only first 63 bits are used
@@ -338,6 +352,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// extract the 16-bit unique process identifier
     // - as specified to TSynUniqueIdentifierGenerator constructor
+    // - will be in range (0..255) when stored in a TSynUnique53 identifier
     function ProcessID: TSynUniqueIdentifierProcess;
       {$ifdef HASINLINE}inline;{$endif}
     /// extract the UTC generation timestamp as seconds since the Unix epoch
@@ -387,13 +402,15 @@ type
     // ! {"Created":"2016-04-19T15:27:58","Identifier":1,"Counter":1,
     // ! "Value":3137644716930138113,"Hex":"2B8B273F00008001"}
     procedure ToVariant(out Result: variant);
+    /// convert to/from a JavaScript-compatible 53-bit integer value
+    // - would accept only ProcessID in (0..255) range, or raise ESynCrypto
+    property JavaScriptID: TSynUnique53
+      read GetJavaScriptID write SetJavaScriptID;
   end;
-  {$A+}
 
   /// points to a 64-bit integer identifier, as computed by TSynUniqueIdentifierGenerator
   // - may be used to access the identifier internals, from its stored
   // Int64 or TSynUniqueIdentifier value
-
   PSynUniqueIdentifierBits = ^TSynUniqueIdentifierBits;
 
   /// a 24 chars cyphered hexadecimal string, mapping a TSynUniqueIdentifier
@@ -413,8 +430,7 @@ type
   TSynUniqueIdentifierGenerator = class(TSynPersistent)
   protected
     fSafe: TLightLock;
-    fUnixCreateTime: cardinal;
-    fLatestCounterOverflowUnixCreateTime: cardinal;
+    fLastUnixCreateTime: cardinal;
     fIdentifier: TSynUniqueIdentifierProcess;
     fIdentifierShifted: cardinal;
     fLastCounter: cardinal;
@@ -471,6 +487,10 @@ type
     // - may be called at server shutdown, if you expect a lot of collisions,
     // and want to ensure the "fake" timestamp match the time at server restart
     procedure WaitForSafeCreateTime(TimeOutSeconds: integer = 30);
+    /// persist the current state (counter and create time) into a single value
+    function SaveTo: Int64;
+    /// read the current state (counter and create time) from a SaveTo value
+    procedure LoadFrom(aSaved: Int64);
     /// some 32-bit value, derivated from aSharedObfuscationKey as supplied
     // to the class constructor
     // - FromObfuscated and ToObfuscated methods will validate their hexadecimal
@@ -493,10 +513,11 @@ type
     property Collisions: cardinal
       read fCollisions;
     /// low-level access to the last generated timestamp
-    // - you may need to persist this value if a lot of Collisions happened, and
-    // the timestamp was faked - you may also call WaitForSafeCreateTime
     property LastUnixCreateTime: cardinal
-      read fUnixCreateTime write fUnixCreateTime;
+      read fLastUnixCreateTime;
+    /// low-level access to the last generated counter
+    property LastCounter: cardinal
+      read fLastCounter;
   end;
 
   /// hold a dynamic array of TSynUniqueIdentifierGenerator instances
@@ -1396,7 +1417,6 @@ type
 
   /// TBinaryCookieGenerator execution context - to be persisted on disk
   TBinaryCookieContext = packed record
-  public
     /// identify this data structure on disk - should equal 1 now
     Version: cardinal;
     /// 31-bit increasing counter, to implement unique session ID
@@ -1405,7 +1425,9 @@ type
     SessionSequenceStart: TBinaryCookieGeneratorSessionID;
     /// 32-bit random salt used for anti-fuzzing via crc32c()
     CrcSalt: cardinal;
-    /// identify deleted cookies as 32-bit low = id, 32-bit high = expires
+    /// identify deleted cookies as 32-bit low = sessionid, 32-bit high = expires
+    // - used to avoid cookie replay attacks
+    // - so to clean up, we just remove the smallest items against current time
     Invalid: TInt64DynArray;
     /// 128-bit secret information, used for AES-GCM encoding of the cookie
     CryptKey: THash128;
@@ -1423,7 +1445,7 @@ type
     fContext: TBinaryCookieContext;
     fCookieName: RawUtf8;
     fDefaultTimeOutMinutes: cardinal;
-    fInvalidCount: integer; // how many items are currently in f
+    fInvalidCount: integer; // how many items are currently in fContext.Invalid[]
     fNextUnixTimeMinimalInvalidateCheck: cardinal;
     fAes: TAesGcmEngine;
   public
@@ -1446,10 +1468,11 @@ type
     ///  decode a base64uri cookie and optionally fill an associated record
     // - return the associated session/sequence number, 0 on error
     // - Invalidate=true would force this cookie to be rejected in the future,
-    // by adding it into an internal in-memory list
+    // adding it into an internal in-memory list, and avoid cookie replay attacks
     function Validate(const Cookie: RawUtf8; PRecordData: pointer = nil;
       PRecordTypeInfo: PRttiInfo = nil; PExpires: PUnixTime = nil;
-      PIssued: PUnixTime = nil; Invalidate: boolean = false; Now32: cardinal = 0): TBinaryCookieGeneratorSessionID;
+      PIssued: PUnixTime = nil; Invalidate: boolean = false;
+      Now32: TUnixTimeMinimal = 0): TBinaryCookieGeneratorSessionID;
     /// allow currently available cookies to be recognized after server restart
     function Save: RawUtf8;
     /// unserialize the cookie generation context as serialized by Save
@@ -4522,10 +4545,10 @@ begin
       #0:
         break;
       'A' .. 'Z', '0' .. '9', 'a' .. 'z':
-        AppendShortChar(P^, @tmp);
+        AppendShortCharSafe(P^, @tmp, #15);
       '_':
         if not onlyalphanum then
-          AppendShortChar('_', @tmp);
+          AppendShortCharSafe('_', @tmp, #15);
       '-', '/':
         if not onlyalphanum then
           if ((tmp[0] = #4) and // '.sha3-256' -> 'sha3_256'
@@ -4534,7 +4557,7 @@ begin
              ((tmp[0] = #6) and // '.sha512-256' -> 'sha512_256'
               (PCardinal(@tmp[1])^ and $ffdfdfdf =
                 ord('S') + ord('H') shl 8 + ord('A') shl 16 + ord('5') shl 24)) then
-            AppendShortChar('_', @tmp);
+            AppendShortCharSafe('_', @tmp, #15);
     end;
     inc(P);
   until false;
@@ -4836,7 +4859,7 @@ procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
 var
   ha: RawUtf8;
 begin
-  Make([UserName, ':', Password], ha);
+  Join([UserName, ':', Password], ha);
   Result := BinToBase64(ha, Prefix, '', false);
   FillZero(ha);
 end;
@@ -5874,6 +5897,23 @@ begin
   Value := aUnixTime shl 31;
 end;
 
+const
+  SYNID_53_UNIXMINIMAL = 1735689600; // Wed Jan 01 2025 00:00:00 UTC
+
+function TSynUniqueIdentifierBits.GetJavaScriptID: TSynUnique53;
+begin
+  if ProcessID > 255 then
+    ESynCrypto.RaiseUtf8('TSynUniqueIdentifierBits.AsJavaScriptID: ProcessID=%',
+      [ProcessID]);
+  result := (Value and $7fffff) + Int64((Value shr 31) - SYNID_53_UNIXMINIMAL) shl 23;
+end;
+
+procedure TSynUniqueIdentifierBits.SetJavaScriptID(const aJavaScriptID: TSynUnique53);
+begin
+  Value := (aJavaScriptID and $7fffff) +
+           ((aJavaScriptID shr 23) + SYNID_53_UNIXMINIMAL) shl 31;
+end; // in the far future, may overlap to go upon year 2093 (as was done for Y2K)
+
 
 { TSynUniqueIdentifierGenerator }
 
@@ -5889,22 +5929,22 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    if currentTime > fUnixCreateTime then // time may have been tweaked: compare
+    if currentTime > fLastUnixCreateTime then // time may have been tweaked
     begin
-      fUnixCreateTime := currentTime;
+      fLastUnixCreateTime := currentTime;
       fLastCounter := 0; // reset
     end;
     if fLastCounter = $7fff then
     begin
       // collide if more than 32768 per second (unlikely) -> tweak the timestamp
-      inc(fUnixCreateTime);
+      inc(fLastUnixCreateTime);
       inc(fCollisions);
       fLastCounter := 0;
     end
     else
       inc(fLastCounter);
     result.Value := Int64(fLastCounter or fIdentifierShifted) or
-                    (Int64(fUnixCreateTime) shl 31);
+                    (Int64(fLastUnixCreateTime) shl 31);
     inc(fComputedCount);
   {$ifdef HASFASTTRYFINALLY}
   finally
@@ -5992,8 +6032,8 @@ end;
 
 type // compute a 24 hexadecimal chars (96 bits) obfuscated pseudo file name
   TSynUniqueIdentifierObfuscatedBits = packed record
-    crc: cardinal;
-    id: TSynUniqueIdentifierBits;
+    crc: cardinal;                 // 32-bit
+    id: TSynUniqueIdentifierBits;  // 64-bit
   end;
 
 function TSynUniqueIdentifierGenerator.ToObfuscated(
@@ -6078,10 +6118,21 @@ var
 begin
   tix := GetTickCount64 + TimeOutSeconds * 1000;
   repeat
-    if UnixTimeUtc >= fUnixCreateTime then
+    if UnixTimeUtc >= fLastUnixCreateTime then
       break;
     SleepHiRes(100);
   until GetTickCount64 > tix;
+end;
+
+function TSynUniqueIdentifierGenerator.SaveTo: Int64;
+begin
+  result := (Int64(fLastUnixCreateTime) shl 15) + fLastCounter;
+end;
+
+procedure TSynUniqueIdentifierGenerator.LoadFrom(aSaved: Int64);
+begin
+  fLastCounter := aSaved and $7fff;
+  fLastUnixCreateTime := aSaved shr 15;
 end;
 
 
@@ -6247,11 +6298,11 @@ type
   // map the binary layout of our Base64 serialized cookies
   TCookieContent = packed record
     head: packed record   // 256-bit header (minimum cookie size if no record)
-      crc: cardinal;      // = 32-bit naive anti-fuzzing crc32c
-      session: cardinal;  // = jti claim sequence
-      expires: cardinal;  // = exp claim - should be just after session
-      issued: cardinal;   // = iat claim (UnixTimeMinimalUtc)
-      gmac: THash128;     // = 128-bit AES-GCM tag
+      crc: cardinal;             // = 32-bit naive anti-fuzzing crc32c
+      session: cardinal;         // = jti claim sequence (genuine number)
+      expires: TUnixTimeMinimal; // = exp claim - after session for Invalidate[]
+      issued: TUnixTimeMinimal;  // = iat claim (UnixTimeMinimalUtc)
+      gmac: THash128;            // = 128-bit AES-GCM tag
     end;
     data: array[0..2047] of byte; // optional AES-CTR record serialization
   end;
@@ -6288,7 +6339,7 @@ begin
     fSafe.Lock;
     try
       inc(fContext.SessionSequence);
-      result := fContext.SessionSequence;
+      inc(result, fContext.SessionSequence); // inc() to circumvent Delphi hint
       cc.head.session := result;
       fAes.Reset(@cc.head.session, 12); // IV should be unique, not random
       fAes.Add_AAD(@cc.head.session, 3 * SizeOf(cardinal));
@@ -6308,7 +6359,7 @@ end;
 
 function TBinaryCookieGenerator.Validate(const Cookie: RawUtf8;
   PRecordData: pointer; PRecordTypeInfo: PRttiInfo; PExpires, PIssued: PUnixTime;
-  Invalidate: boolean; Now32: cardinal): TBinaryCookieGeneratorSessionID;
+  Invalidate: boolean; Now32: TUnixTimeMinimal): TBinaryCookieGeneratorSessionID;
 var
   clen, len: integer;
   ccend: PAnsiChar;
@@ -6339,7 +6390,7 @@ begin
        not fAes.Add_AAD(@cc.head.session, 3 * SizeOf(cardinal)) or
        not fAes.Decrypt(@cc.data, @cc.data, len, @cc.head.gmac, SizeOf(THash128)) then
       exit;
-    if Invalidate then // expired cookies are stored as 64-bit session + expire
+    if Invalidate then // expired cookies are stored as 64-bit session + expires
     begin
       if AddSortedInt64(fContext.Invalid, fInvalidCount, PInt64(@cc.head.session)^) < 0 then
         exit; // this session was already invalidated
@@ -6347,13 +6398,13 @@ begin
     else if fInvalidCount <> 0 then
     begin
       if Now32 >= fNextUnixTimeMinimalInvalidateCheck then
-      begin // cleanup of clearly deprecated invalid sessions once per minute
+      begin // cleanup of deprecated invalid sessions once per minute
         fNextUnixTimeMinimalInvalidateCheck := Now32 + SecsPerMin;
         RemoveSortedInt64SmallerThan(fContext.Invalid, fInvalidCount, Int64(Now32) shl 32);
       end;
       if FastFindInt64Sorted(pointer(fContext.Invalid), fInvalidCount - 1,
            PInt64(@cc.head.session)^) >= 0 then // branchless O(log(n)) search
-        exit;
+        exit; // this cookie was marked as closed/invalid
     end;
   finally
     fSafe.UnLock;
@@ -6388,7 +6439,7 @@ begin
       TypeInfo(TBinaryCookieContext), false, @JSON_[mFast]) and
     (fContext.Version = 1) and
     (fContext.SessionSequenceStart <> 0) and
-    (fContext.SessionSequence > fContext.SessionSequenceStart) and
+    (fContext.SessionSequence >= fContext.SessionSequenceStart) and
     (fContext.CrcSalt <> 0) and
     not IsZero(fContext.CryptKey);
   fInvalidCount := length(fContext.Invalid);
@@ -6547,8 +6598,7 @@ end;
 
 function TCryptRandom.Get(len: PtrInt): RawByteString;
 begin
-  FastNewRawByteString(result, len);
-  Get(pointer(result), len);
+  Get(FastNewRawByteString(result, len), len);
 end;
 
 function TCryptRandom.GetBytes(len: PtrInt): TBytes;
@@ -7975,12 +8025,12 @@ var
   var
     F: TSearchRec;
   begin
-    if FindFirst(DirName + Mask, faAnyfile - faDirectory, F) = 0 then
+    if FindFirst(MakePath([DirName, Mask]), faAnyfile - faDirectory, F) = 0 then
     begin
       repeat
         if SearchRecValidFile(F, {includehidden=}true) and
            (F.Size < 65535) then // certificate files are expected to be < 64KB
-          AddRawUtf8(result, n, AddFromFile(DirName + F.Name));
+          AddRawUtf8(result, n, AddFromFile(MakePath([DirName, F.Name])));
       until FindNext(F) <> 0;
       FindClose(F);
     end;
@@ -7989,7 +8039,7 @@ var
     begin
       repeat
         if SearchRecValidFolder(F, {includehidden=}true) then
-          SearchFolder(IncludeTrailingPathDelimiter(DirName + F.Name));
+          SearchFolder(MakePath([DirName, F.Name]));
       until FindNext(F) <> 0;
       FindClose(F);
     end;
@@ -7997,7 +8047,7 @@ var
 
 begin
   n := 0;
-  SearchFolder(IncludeTrailingPathDelimiter(Folder));
+  SearchFolder(Folder);
   SetLength(result, n);
 end;
 
@@ -9663,8 +9713,7 @@ begin
   for i := 0 to high(Content) do
     inc(len, length(Content[i]));
   al := AsnEncLen(len, @tmp);
-  FastNewRawByteString(result, al + len + 1);
-  p := pointer(result);
+  p := FastNewRawByteString(result, al + len + 1);
   p^ := AsnType;         // type
   inc(p);
   MoveFast(tmp, p^, al); // encoded length
@@ -9844,7 +9893,7 @@ begin
       dec(x, y * 40);
       AppendShortCardinal(y, tmp);
     end;
-    AppendShortChar('.', @tmp);
+    AppendShortCharSafe('.', @tmp);
     AppendShortCardinal(x, tmp);
   end;
   FastSetString(result, @tmp[1], ord(tmp[0]));

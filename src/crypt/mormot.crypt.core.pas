@@ -1550,7 +1550,7 @@ procedure CompressShaAesSetKey(const Key: RawByteString;
 
 /// encrypt data content using the DEPRECATED AES-256/CFB algorithm, after SynLZ
 // - DO NOT USE: since HTTP compression is optional, this scheme is not safe
-// - as expected by THttpSocket.RegisterCompress()
+// - as expected by THttpClientSocket/THttpServerGeneric.RegisterCompress
 // - will return 'synshaaes' as ACCEPT-ENCODING: header parameter
 // - will use global CompressShaAesKey / CompressShaAesClass variables to be set
 // according to the expected algorithm and Key e.g. via a call to CompressShaAesSetKey()
@@ -2887,6 +2887,10 @@ function Sha256(const s: RawByteString): RawUtf8; overload;
 // - result is returned in hexadecimal format
 function Sha256(Data: pointer; Len: integer): RawUtf8; overload;
 
+/// direct SHA-256 hash calculation of some appended string-encoded binary values
+// - result is returned in hexadecimal format
+function Sha256U(const s: array of RawByteString): RawUtf8;
+
 /// compute the hexadecimal representation of a SHA-256 digest
 function Sha256DigestToString(const D: TSha256Digest): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
@@ -3157,13 +3161,13 @@ type
   end;
 
   TShaContext = packed record
-    // Working hash (TSha256.Init expect this field to be the first)
+    // current hash state (TSha256.Init expect this field to be the first)
     Hash: TShaHash;
-    // 64bit msg length
+    // 64-bit msg length
     MLen: QWord;
-    // Block buffer
+    // 512-bit block buffer
     Buffer: array[0..63] of byte;
-    // Index in buffer
+    // current position in buffer
     Index: integer;
   end;
 
@@ -6157,8 +6161,7 @@ begin
     inc(p);
     dec(len, SizeOf(p^));
   end;
-  FastSetString(RawUtf8(result), len); // assume CP_UTF8 for FPC RTL bug
-  DecryptCts(p, pointer(result), len);
+  DecryptCts(p, FastSetString(RawUtf8(result), len), len);
 end;
 
 
@@ -7569,8 +7572,7 @@ end;
 
 function TAesPrngAbstract.FillRandom(Len: integer): RawByteString;
 begin
-  FastNewRawByteString(result, Len);
-  FillRandom(pointer(result), Len);
+  FillRandom(FastNewRawByteString(result, Len), Len);
 end;
 
 function TAesPrngAbstract.FillRandomBytes(Len: integer): TBytes;
@@ -7585,10 +7587,9 @@ function TAesPrngAbstract.FillRandomHex(Len: integer): RawUtf8;
 var
   bin: pointer;
 begin
-  FastSetString(result, Len * 2);
+  bin := @PByteArray(FastSetString(result, Len * 2))[Len];
   if Len = 0 then
     exit;
-  bin := @PByteArray(result)[Len]; // temporary store random bytes at the end
   FillRandom(bin, Len);
   BinToHexLower(bin, pointer(result), Len);
 end;
@@ -7849,6 +7850,7 @@ begin
     // XOR with some userland entropy - it won't hurt
     sha3.Init(SHAKE_256); // used in XOF mode for variable-length output
     // system/process information used as salt/padding from mormot.core.os
+    sha3.Update(@StartupRandom, SizeOf(StartupRandom));
     sha3.Update(Executable.Host);
     sha3.Update(Executable.User);
     sha3.Update(Executable.ProgramFullSpec);
@@ -7857,9 +7859,6 @@ begin
     sha3.Update(@SystemInfo, SizeOf(SystemInfo));
     sha3.Update(RawSmbios.Data); // may be '' if has not been retrieved yet
     sha3.Update(@CpuCache, SizeOf(CpuCache));
-    {$ifdef CPUINTELARM}
-    sha3.Update(@CpuFeatures, SizeOf(CpuFeatures));
-    {$endif CPUINTELARM}
     // 256 random bytes salt, set at startup to avoid hash flooding of AesNiHash
     {$ifdef USEAESNIHASH}
     sha3.Update(AESNIHASHKEYSCHED_);
@@ -8162,8 +8161,7 @@ begin
     2:
       inc(blen, 3);
   end;
-  FastSetString(result, blen);
-  RawBase64Uri(pointer(result), P, bdiv, bmod);
+  RawBase64Uri(FastSetString(result, blen), P, bdiv, bmod);
 end;
 
 procedure read_h;
@@ -9393,11 +9391,11 @@ end;
 function TSha3.Cypher(const Key, Source: RawByteString;
   Algo: TSha3Algo): RawByteString;
 var
-  len: integer;
+  len: PtrInt;
 begin
   len := length(Source);
-  FastNewRawByteString(result, len);
-  Cypher(pointer(Key), pointer(Source), pointer(result), length(Key), len);
+  Cypher(pointer(Key), pointer(Source),
+    FastNewRawByteString(result, len), length(Key), len);
 end;
 
 procedure TSha3.InitCypher(Key: pointer; KeyLen: integer; Algo: TSha3Algo);
@@ -9420,11 +9418,10 @@ end;
 
 function TSha3.Cypher(const Source: RawByteString): RawByteString;
 var
-  len: integer;
+  len: PtrInt;
 begin
   len := length(Source);
-  FastNewRawByteString(result, len);
-  Cypher(pointer(Source), pointer(result), len);
+  Cypher(pointer(Source), FastNewRawByteString(result, len), len);
 end;
 
 procedure TSha3.Done;
@@ -11071,8 +11068,7 @@ end;
 
 function AesBlockToString(const block: TAesBlock): RawUtf8;
 begin
-  FastSetString(result, 32);
-  mormot.core.text.BinToHex(@block, pointer(result), 16);
+  mormot.core.text.BinToHex(@block, FastSetString(result, 32), 16);
 end;
 
 function Md5(const s: RawByteString): RawUtf8;
@@ -11162,6 +11158,20 @@ var
   Digest: TSha256Digest;
 begin
   SHA.Full(Data, Len, Digest);
+  result := Sha256DigestToString(Digest);
+  FillZero(Digest);
+end;
+
+function Sha256U(const s: array of RawByteString): RawUtf8;
+var
+  i: PtrInt;
+  SHA: TSha256;
+  Digest: TSha256Digest;
+begin
+  SHA.Init;
+  for i := 0 to high(s) do
+    SHA.Update(s[i]);
+  SHA.Final(Digest);
   result := Sha256DigestToString(Digest);
   FillZero(Digest);
 end;
@@ -11826,6 +11836,7 @@ begin
   begin
     // 128-bit aeshash as implemented in Go runtime, using aesenc opcode
     GetMemAligned(AESNIHASHKEYSCHED_, nil, 16 * 16, AESNIHASHKEYSCHED);
+    XorBlock16(AESNIHASHKEYSCHED, @StartupRandom); // some mormot.core.os salt
     RandomBytes(AESNIHASHKEYSCHED, 16 * 16); // genuine to avoid hash flooding
     AesNiHash32      := @_AesNiHash32;
     AesNiHash64      := @_AesNiHash64;

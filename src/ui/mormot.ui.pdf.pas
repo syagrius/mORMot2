@@ -1563,7 +1563,7 @@ type
       read GetDefaultPageLandscape write SetDefaultPageLandscape;
     /// the default page size, used for every new page creation (i.e. AddPage method call)
     // - a write to this property this will reset the default paper orientation
-    // to Portrait: you must explicitely set DefaultPageLandscape to true, if needed
+    // to Portrait: you must explicitly set DefaultPageLandscape to true, if needed
     property DefaultPaperSize: TPdfPaperSize
       read fDefaultPaperSize write SetDefaultPaperSize;
     /// the compression method used for page content storage
@@ -7872,9 +7872,9 @@ begin
   if MimeType <> '' then
     StringToUtf8(MimeType, mime)
   else if Pos('.', Description) <> 0 then
-    mime := GetMimeContentType(pointer(Buffer), length(Buffer), Description)
+    mime := GetMimeContentType(Buffer, Description)
   else
-    mime := GetMimeContentType(pointer(Buffer), length(Buffer));
+    mime := GetMimeContentType(Buffer);
   str.Attributes.AddItem('Subtype', mime);
   // file Params attribute
   parms := TPdfDictionary.Create(fXref);

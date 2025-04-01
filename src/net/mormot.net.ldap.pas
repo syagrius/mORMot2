@@ -40,8 +40,8 @@ uses
   mormot.core.variants,
   mormot.core.data,
   mormot.core.log,
-  mormot.lib.sspi, // do-nothing units on non compliant OS
-  mormot.lib.gssapi,
+  mormot.lib.sspi,   // void unit on POSIX
+  mormot.lib.gssapi, // void unit on Windows
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.net.sock,
@@ -2546,7 +2546,7 @@ begin
     FastSetRawByteString(response, @tmp, len);
     if not RawLdapSearchParse(response, id, ['netlogon'], [@v]) then
       exit;
-    Info.IP := addr.IPWithPort;
+    addr.IPWithPort(Info.IP);
     Info.RawLogonType := PCardinalArray(v)[0];
     case Info.RawLogonType of
       23:
@@ -2642,7 +2642,7 @@ begin
   if DistinguishedName <> nil then
     DistinguishedName^ := domain;
   if Spn <> nil then
-    Spn^ := NetConcat(['LDAP/', Split(result, ':'), '@', UpperCase(domain)]);
+    Join(['LDAP/', Split(result, ':'), '@', UpperCase(domain)], Spn^);
 end;
 
 function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer;
@@ -3363,7 +3363,7 @@ var
   u8: SpiUtf8;
 begin
   try
-    u8 := NetConcat(['"', aPassword, '"']);
+    u8 := Join(['"', aPassword, '"']);
     result := Utf8DecodeToUnicodeRawByteString(u8);
   finally
     FillZero(u8);
@@ -5193,11 +5193,11 @@ begin
   if (self = nil) or
      (fTargetHost = '') then
     exit;
-  result := NetConcat([LDAP_DEFAULT_SCHEME[fTls], fTargetHost]);
+  Join([LDAP_DEFAULT_SCHEME[fTls], fTargetHost], result);
   if fTargetPort <> LDAP_DEFAULT_PORT[fTls] then
-    result := NetConcat([result, ':', fTargetPort]);
+    Append(result, ':', fTargetPort);
   if fKerberosDN <> '' then
-    result := NetConcat([result, '/', fKerberosDN]);
+    Append(result, '/', fKerberosDN);
 end;
 
 procedure TLdapClientSettings.SetTargetUri(const uri: RawUtf8);
@@ -5422,7 +5422,7 @@ begin
     end
   else
     // try the LDAP server as specified in TLdapClient settings
-    AddRawUtf8(dc, NetConcat([fSettings.TargetHost, ':', fSettings.TargetPort]));
+    AddRawUtf8(dc, Join([fSettings.TargetHost, ':', fSettings.TargetPort]));
   fSeq := 0;
   for i := 0 to high(dc) do
     try
@@ -5503,6 +5503,8 @@ begin
     'supportedExtension',
     'vendorName',
     'ldapServiceName']);
+  if root = nil then
+    exit;
   fRootDN         := root.Attributes.GetByName('rootDomainNamingContext');
   fDefaultDN      := root.Attributes.GetByName('defaultNamingContext');
   fNamingContexts := root.Attributes.Find('namingContexts').GetAllReadable;
@@ -5717,26 +5719,33 @@ end;
 
 procedure TLdapClient.ReceivePacketFillSockBuffer;
 var
-  saslLen: integer;
+  saslLen, len, err: integer;
   ciphered: RawByteString;
+  res: TNetResult;
 begin
   fSockBufferPos := 0;
+  fSockBuffer := '';
   if fSecContextEncrypt in fFlags then
   begin
     // through Kerberos encryption (sealing)
     saslLen := 0;
-    fSock.SockRecv(@saslLen, 4); // SASL Buffer Length prefix
-    ciphered := fSock.SockRecv(bswap32(saslLen));
-    fSockBuffer := SecDecrypt(fSecContext, ciphered);
+    len := SizeOf(saslLen);
+    if fSock.TrySockRecv(@saslLen, len, {stopbeforelen=}false, @res, @err) then
+    begin
+      saslLen := bswap32(saslLen); // SASL Buffer Length prefix
+      if saslLen > 16 shl 20 then  // 16MB chunk seems big enough: usually 64KB
+        res := nrTooManyConnections
+      else if fSock.TrySockRecv(FastNewRawByteString(ciphered, saslLen),
+                saslLen, {stopbeforelen=}false, @res, @err) then
+        fSockBuffer := SecDecrypt(fSecContext, ciphered);
+    end;
   end
   else
-  begin
     // get as much as possible unciphered data from socket
-    fSockBuffer := fSock.SockReceiveString;
-    if fSockBuffer = '' then
-      ELdap.RaiseUtf8('%.ReceivePacket: no response from %:%',
-        [self, fSettings.TargetHost, fSettings.TargetPort]);
-  end;
+    fSockBuffer := fSock.SockReceiveString(@res, @err);
+  if fSockBuffer = '' then
+    ELdap.RaiseUtf8('%.ReceivePacket: error #% % from %:%', [self,
+      err, ToText(res)^, fSettings.TargetHost, fSettings.TargetPort]);
   {$ifdef ASNDEBUG}
   writeln('Packet received bytes = ', length(fSockBuffer));
   {$endif ASNDEBUG}
@@ -6910,8 +6919,8 @@ begin
   if not Connected or
      not LdapEscapeName(ComputerName, cSafe) then
     exit;
-  cDn := NormalizeDN(NetConcat(['CN=', cSafe, ',', ComputerParentDN]));
-  cSam := NetConcat([UpperCase(cSafe), '$']); // traditional upper with ending $
+  cDn := NormalizeDN(Join(['CN=', cSafe, ',', ComputerParentDN]));
+  cSam := Join([UpperCase(cSafe), '$']); // traditional upper with ending $
   // Search Computer object in the domain
   cExisting := SearchFirstFmt([atSAMAccountName], '(sAMAccountName=%)', [cSam]);
   // If the search failed, we exit with the error message
@@ -7613,9 +7622,9 @@ begin
   u := aUser;
   if PosExChar('@', u) = 0 then
     if fLdapSettings.KerberosDN = '' then
-      u := NetConcat([u, '@', fRealm])
+      Append(u, '@', fRealm)
     else
-      u := NetConcat([u, '@', fLdapSettings.KerberosDN]);
+      Append(u, '@', fLdapSettings.KerberosDN);
   // try to use those credentials to bind to the LDAP server
   client := TLdapClient.Create(fLdapSettings);
   try

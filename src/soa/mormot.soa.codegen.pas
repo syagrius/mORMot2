@@ -1013,10 +1013,10 @@ begin
           'uri', uri,
           'interfaceUri',         InterfaceUri,
           'interfaceMangledUri',  InterfaceMangledUri,
-          'interfaceName',        InterfaceFactory.InterfaceTypeInfo^.RawName,
+          'interfaceName',        InterfaceFactory.InterfaceRtti.Name,
           'camelName',            LowerCamelCase(InterfaceFactory.InterfaceUri),
           'snakeName',            SnakeCase(InterfaceFactory.InterfaceUri),
-          'GUID',                 GuidToRawUtf8(InterfaceFactory.InterfaceIID),
+          'GUID',                 GuidToRawUtf8(InterfaceFactory.InterfaceGuid^),
           'contractExpected',     UnQuoteSqlString(ContractExpected),
           'instanceCreation',     ord(InstanceCreation),
           'instanceCreationName', GetEnumNameTrimed(
@@ -1060,7 +1060,7 @@ begin
     for i := 0 to interfaces.Count - 1 do
       services.AddItem(_ObjFast([
         'interfaceName',
-          TInterfaceFactory(interfaces.List[i]).InterfaceTypeInfo^.RawName,
+          TInterfaceFactory(interfaces.List[i]).InterfaceRtti.Name,
         'methods', ContextFromMethods(interfaces.List[i])]));
   finally
     interfaces.Safe.ReadUnLock;
@@ -1162,9 +1162,9 @@ begin
       if ArgsOutNotResultLast > 0 then
         _ObjAddProp('hasOutNotResultParams', true, result);
     end;
-    if ArgsResultIsServiceCustomAnswer then
+    if imfResultIsServiceCustomAnswer in Flags then
       _ObjAddProp('resultIsServiceCustomAnswer', true, result);
-    if IsInherited then
+    if imfIsInherited in Flags then
       _ObjAddProp('isInherited', true, result);
   end;
 end;
@@ -1198,7 +1198,7 @@ var
   m: PtrInt;
   methods: TDocVariantData; // circumvent FPC -O2 memory leak
 begin
-  AddUnit(int.InterfaceTypeInfo^.InterfaceUnitName^, nil);
+  AddUnit(int.InterfaceRtti.Info^.InterfaceUnitName^, nil);
   {%H-}methods.InitFast;
   for m := 0 to int.MethodsCount - 1 do
     methods.AddItem(ContextFromMethod(int.Methods[m]));
@@ -1384,8 +1384,7 @@ begin
     exit;
   templateFound := -1;
   for i := 0 to high(Path) do
-    if FindFirst(IncludeTrailingPathDelimiter(Path[i]) + '*.mustache',
-        faAnyFile, SR) = 0 then
+    if FindFirst(MakePath([Path[i], '*.mustache']), faAnyFile, SR) = 0 then
     begin
       templateFound := i;
       break;
@@ -1464,8 +1463,7 @@ begin
     // download as file
     head := HEADER_CONTENT_TYPE + 'application/' + LowerCase(templateExt);
   templateName := templateName + '.' + templateExt + '.mustache';
-  template := RawUtf8FromFile(
-    IncludeTrailingPathDelimiter(Path[templateFound]) + Utf8ToString(templateName));
+  template := RawUtf8FromFile(MakePath([Path[templateFound], templateName]));
   if template = '' then
   begin
     Ctxt.Error(templateName, HTTP_NOTFOUND);
@@ -1613,7 +1611,7 @@ begin
   ComputeSearchPath(Path, SearchPath);
   for i := 0 to High(SearchPath) do
   begin
-    result := IncludeTrailingPathDelimiter(SearchPath[i]) + TemplateName;
+    result := MakePath([SearchPath[i], TemplateName]);
     if FileExists(result) then
       exit;
   end;
@@ -2037,7 +2035,8 @@ procedure TServiceClientCommandLine.ShowMethod(service: TInterfaceFactory;
     line, typ: RawUtf8;
   begin
     ToConsole('%', [IN_OUT[input]], ccDarkGray, {nolinefeed=}true);
-    if not input and method^.ArgsResultIsServiceCustomAnswer then
+    if (not input) and
+       (imfResultIsServiceCustomAnswer in method^.Flags) then
       line := ' is undefined'
     else
     begin

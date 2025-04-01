@@ -231,17 +231,20 @@ procedure CsvToRawUtf8DynArray(const Csv, Sep, SepEnd: RawUtf8;
 /// convert the strings in the specified CSV text into a dynamic array of UTF-8 strings
 function CsvToRawUtf8DynArray(const Csv: RawUtf8; const Sep: RawUtf8 = ',';
   const SepEnd: RawUtf8 = ''): TRawUtf8DynArray; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// return the corresponding CSV text from a dynamic array of UTF-8 strings
 function RawUtf8ArrayToCsv(const Values: TRawUtf8DynArray;
   const Sep: RawUtf8 = ','; Reverse: boolean = false): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// return the corresponding CSV text from a dynamic array of UTF-8 strings
-function RawUtf8ToCsv(const Values: array of RawUtf8;
-  const Sep: RawUtf8 = ','; Reverse: boolean = false): RawUtf8;
+/// return the corresponding CSV text from an array of UTF-8 strings
+// - using a Python-like friendly syntax
+// - we could not use plain Join() overload due to a Delphi compiler limitation
+function JoinCsv(const Sep: RawUtf8; const Values: array of RawUtf8;
+  Reverse: boolean = false): RawUtf8;
 
-/// low-level generate CSV e.g. for RawUtf8ArrayToCsv() and TRawUtf8List.GetText
+/// low-level CSV generator e.g. for Join(), RawUtf8ArrayToCsv() and TRawUtf8List.GetText
 procedure PRawUtf8ToCsv(v: PPUtf8Char; n: integer; const sep: RawUtf8;
   Reverse: boolean; var result: RawUtf8);
 
@@ -745,6 +748,7 @@ type
     /// append some chars to the buffer in one line
     // - P should be ended with a #0
     // - will write #1..#31 chars as spaces (so content will stay on the same line)
+    // - this method is slightly faster than its overload with explicit Len param
     procedure AddOnSameLine(P: PUtf8Char); overload;
     /// append some chars to the buffer in one line
     // - will write #0..#31 chars as spaces (so content will stay on the same line)
@@ -1877,14 +1881,28 @@ procedure AppendLine(var Text: RawUtf8; const Args: array of const;
 function MakePath(const Part: array of const; EndWithDelim: boolean = false;
   Delim: AnsiChar = PathDelim): TFileName;
 
-/// just a wrapper around EnsureDirectoryExists(MakePath([Part]))
+/// a wrapper around ExpandFileName(MakePath(Part))
+function MakeExpandedPath(const Part: array of const;
+  EndWithDelim: boolean = false): TFileName;
+
+/// a wrapper around EnsureDirectoryExists(MakePath(Part))
 function EnsureDirectoryExists(const Part: array of const;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil;
   NoExpand: boolean = false): TFileName; overload;
 
-/// just a wrapper around EnsureDirectoryExists(NormalizeFileName(MakePath([Part])))
+/// a wrapper around EnsureDirectoryExists(NormalizeFileName(MakePath(Part)))
 function NormalizeDirectoryExists(const Part: array of const;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
+
+/// a wrapper around FileExists(MakePath(Part))
+// - can optionally set the file name into a variable if it did exist
+function FileExistsMake(const Part: array of const;
+  SetIfFound: PFileName = nil): boolean;
+
+/// a wrapper around DirectoryExists(MakePath(Part))
+// - can optionally set the file name into a variable if it did exist
+function DirectoryExistsMake(const Part: array of const;
+  SetIfFound: PFileName = nil): boolean;
 
 /// MakePath() variant which can handle the file extension specifically
 function MakeFileName(const Part: array of const; LastIsExt: boolean = true): TFileName;
@@ -2166,30 +2184,30 @@ type
   THttpCookies = object
   {$endif USERECORDWITHMETHODS}
   private
-    fParsed: boolean;
     fCookies: THttpCookieDynArray; // only if InCookie[] is used
   public
-    /// reset the internal list and Parsed status
+    /// reset the internal list
     procedure Clear;
     /// parse the cookies from request HTTP headers on server side
     // - e.g. 'Cookie: name=value; name2=value2; name3=value3'
     // - will first clear all existing cookies, then decode from headers
-    procedure ParseServer(const InHead: RawUtf8);
+    procedure ParseServer(Head: PUtf8Char);
     /// retrieve a cookie name/value pair in the internal storage
     function FindCookie(const CookieName: RawUtf8): PHttpCookie;
     /// retrieve a cookie value from its name
-    // - should always previously check "if not Parsed then Parse()"
+    // - should always previously check "if not ###Parsed then Parse()"
     function GetCookie(const CookieName: RawUtf8): RawUtf8;
       {$ifdef HASINLINE} inline; {$endif}
+    /// retrieve a cookie value from its name
+    // - should always previously check "if not ###Parsed then Parse()"
+    procedure RetrieveCookie(const CookieName: RawUtf8; out Value: RawUtf8);
+      {$ifdef HASINLINE} inline; {$endif}
     /// set or change a cookie value from its name
-    // - should always previously check "if not Parsed then Parse()"
+    // - should always previously check "if not ###Parsed then Parse()"
     procedure SetCookie(const CookieName, CookieValue: RawUtf8);
-    /// false if ParseServer() should be called with the HTTP header
-    property Parsed: boolean
-      read fParsed;
     /// retrieve an incoming HTTP cookie value
     // - cookie name are case-sensitive
-    // - should always previously check "if not Parsed then Parse()"
+    // - should always previously check "if not ###Parsed then Parse()"
     property Cookie[const CookieName: RawUtf8]: RawUtf8
       read GetCookie write SetCookie; default;
     /// direct access to the internal name/value pairs list
@@ -2201,7 +2219,15 @@ type
 const
   /// server can use this cookie value to delete a cookie on the browser side
   COOKIE_EXPIRED = '; Expires=Sat, 01 Jan 2010 00:00:01 GMT';
-
+var
+  /// maximum number of cookies allowed by THttpCookies.ParseServer
+  // - used as Deny-Of-Service (DOS) Attack detection threshold
+  // - typically no more than 50 cookies per domain
+  COOKIE_MAXCOUNT_DOSATTACK: integer = 128;
+  /// maximum total size of cookies allowed by THttpCookies.ParseServer
+  // - used asDeny-Of-Service (DOS) Attack detection threshold
+  // - usually no more than 4KB per cookie, but seems to be 4KB in total for IE
+  COOKIE_MAXSIZE_DOSATTACK: integer = 4096;
 
 /// retrieve the HTTP reason text from its integer code as PRawUtf8
 // - e.g. StatusCodeToText(200)^='OK'
@@ -3190,18 +3216,18 @@ begin
       while (j + 1 < BitsCount) and
             GetBitPtr(@Bits, j + 1) do
         inc(j);
-      result := result + UInt32ToUtf8(i + 1);
+      Append(result, UInt32ToUtf8(i + 1));
       if j = i then
-        result := result + ','
+        AppendShortToUtf8(',', result)
       else if j = i + 1 then
-        result := result + ',' + UInt32ToUtf8(j + 1) + ','
+        Append(result, [',', j + 1, ','])
       else
-        result := result + '-' + UInt32ToUtf8(j + 1) + ',';
+        Append(result, ['-', j + 1, ',']);
       i := j + 1;
     end
     else
       inc(i);
-  result := result + '0'; // '0' marks end of list
+  AppendShortToUtf8('0', result); // '0' marks end of list
 end;
 
 function GetNextItemCardinalW(var P: PWideChar; Sep: WideChar): PtrUInt;
@@ -3573,7 +3599,7 @@ begin
   begin
     GetNextItem(Csv, Sep, s);
     if s <> '' then
-      result := result + ',' + Prefix + s;
+      Append(result, [',', Prefix, s]);
   end;
 end;
 
@@ -3643,6 +3669,11 @@ begin
   if (v = nil) or
      (n <= 0) then
     exit;
+  if n = 1 then
+  begin
+    result := PRawUtf8(v)^;
+    exit;
+  end;
   seplen := length(sep);
   p := FastNewString(seplen * (n - 1) + SumRawUtf8Length(pointer(v), n), CP_UTF8);
   pointer(result) := p;
@@ -3675,7 +3706,7 @@ begin
   PRawUtf8ToCsv(pointer(Values), length(Values), Sep, Reverse, result);
 end;
 
-function RawUtf8ToCsv(const Values: array of RawUtf8; const Sep: RawUtf8;
+function JoinCsv(const Sep: RawUtf8; const Values: array of RawUtf8;
   Reverse: boolean): RawUtf8;
 begin
   PRawUtf8ToCsv(@Values[0], length(Values), Sep, Reverse, result);
@@ -3744,8 +3775,7 @@ begin
   inc(len, (n - 1) + length(pref) + length(suf));
   if inlin then
     inc(len, n * 4); // :( ): markers
-  FastSetString(result, len);
-  P := pointer(result);
+  P := FastSetString(result, len);
   if pref <> '' then
   begin
     L := length(pref);
@@ -4230,6 +4260,10 @@ begin // don't mess with twoFlushToStreamNoAutoResize: it may not be final
   if len > 0 then
     WriteToStream(fTempBuf, len);
   B := fTempBuf - 1;
+  {$ifdef HASCODEPAGE}
+  if twoStreamIsRawByteString in fCustomOptions then
+    TRawByteStringStream(fStream).EnsureDataStringIsUtf8;
+  {$endif HASCODEPAGE}
 end;
 
 procedure TTextWriter.FlushToStream;
@@ -5121,58 +5155,49 @@ end;
 
 procedure TTextWriter.AddOnSameLine(P: PUtf8Char);
 var
-  D: PUtf8Char;
-  c: AnsiChar;
-begin
-  if P = nil then
-    exit;
-  D := B + 1;
-  if P^ <> #0 then
+  l: PtrInt;
+begin // mostly used for TSynLog RawUtf8 append
+  if (P <> nil) and
+     (P^ <> #0) then
     repeat
-      if D >= BEnd then
+      if P^ >= ' ' then
       begin
-        B := D - 1;
-        FlushToStream;
-        D := B + 1;
+        l := 0;
+        repeat
+          inc(l);
+        until P[l] < ' ';
+        AddNoJsonEscape(P, l); // efficient MoveFast()
+        inc(P, l);
+        if P^ = #0 then
+          exit; // most common case
       end;
-      c := P^;
-      if c < ' ' then
-        if c = #0 then
-          break
-        else
-          c := ' ';
-      D^ := c;
+      Add(' '); // properly inlined
       inc(P);
-      inc(D);
     until false;
-  B := D - 1;
 end;
 
 procedure TTextWriter.AddOnSameLine(P: PUtf8Char; Len: PtrInt);
 var
-  D: PUtf8Char;
-  c: AnsiChar;
-begin
-  if (P = nil) or
-     (Len <= 0) then
-    exit;
-  D := B + 1;
-  repeat
-    if D >= BEnd then
-    begin
-      B := D - 1;
-      FlushToStream;
-      D := B + 1;
-    end;
-    c := P^;
-    if c < ' ' then
-      c := ' ';
-    D^ := c;
-    inc(D);
-    inc(P);
-    dec(Len);
-  until Len = 0;
-  B := D - 1;
+  i, s: PtrInt;
+begin // mostly used for TSynLog shortstring append
+  i := 0;
+  if (P <> nil) and
+     (i < Len) then
+    repeat
+      if P[i] >= ' ' then
+      begin
+        s := i;
+        repeat
+          inc(i);
+        until (i = Len) or
+              (P[i] < ' ');
+        AddNoJsonEscape(P + s, i - s); // efficient MoveFast()
+        if i = Len then
+          exit; // most common case
+      end;
+      Add(' ');
+      inc(i);
+    until i = Len;
 end;
 
 procedure TTextWriter.AddOnSameLineW(P: PWord; Len: PtrInt);
@@ -5188,7 +5213,7 @@ begin
     PEnd := PtrUInt(P) + PtrUInt(Len) * SizeOf(WideChar);
   while (Len = 0) or
         (PtrUInt(P) < PEnd) do
-  begin
+  begin // AddNoJsonEscapeW() is actually not faster than this loop
     if B >= BEnd then
       FlushToStream;
     // escape chars, so that all content will stay on the same text line
@@ -5219,7 +5244,7 @@ begin
   {$ifdef UNICODE}
   AddOnSameLineW(pointer(Text), length(Text));
   {$else}
-  AddOnSameLine(pointer(Text), length(Text));
+  AddOnSameLine(pointer(Text)); // faster with no Len
   {$endif UNICODE}
 end;
 
@@ -7980,7 +8005,8 @@ begin
   vt := TVarData(V).VType;
   with TVarData(V) do
     case vt of
-      varEmpty, varNull:
+      varEmpty,
+      varNull:
         result := NULL_STR_VAR;
       varSmallint:
         Int32ToUtf8(VSmallInt, result);
@@ -8204,18 +8230,16 @@ end;
 
 function Int18ToChars3(Value: cardinal): RawUtf8;
 begin
-  FastSetString(result, 3);
-  PCardinal(result)^ := ((Value shr 12) and $3f) or
-                        ((Value shr 6) and $3f) shl 8 or
-                        (Value and $3f) shl 16 + $202020;
+  PCardinal(FastSetString(result, 3))^ := ((Value shr 12) and $3f) or
+                                          ((Value shr 6) and $3f) shl 8 or
+                                          (Value and $3f) shl 16 + $202020;
 end;
 
 procedure Int18ToChars3(Value: cardinal; var result: RawUtf8);
 begin
-  FastSetString(result, 3);
-  PCardinal(result)^ := ((Value shr 12) and $3f) or
-                        ((Value shr 6) and $3f) shl 8 or
-                        (Value and $3f) shl 16 + $202020;
+  PCardinal(FastSetString(result, 3))^ := ((Value shr 12) and $3f) or
+                                          ((Value shr 6) and $3f) shl 8 or
+                                          (Value and $3f) shl 16 + $202020;
 end;
 
 function Chars3ToInt18(P: pointer): cardinal;
@@ -8228,17 +8252,15 @@ end;
 
 function UInt3DigitsToUtf8(Value: cardinal): RawUtf8;
 begin
-  FastSetString(result, 3);
-  PWordArray(result)[0] := TwoDigitLookupW[Value div 10];
+  PWord(FastSetString(result, 3))^ := TwoDigitLookupW[Value div 10];
   PByteArray(result)[2] := (Value mod 10) + 48;
 end;
 
 function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
 begin
-  FastSetString(result, 4);
   if Value > 9999 then
     Value := 9999;
-  YearToPChar(Value, pointer(result));
+  YearToPChar(Value, FastSetString(result, 4));
 end;
 
 function UInt4DigitsToShort(Value: cardinal): TShort4;
@@ -8436,12 +8458,11 @@ end;
 procedure PrepareTempUtf8(var Res: TTempUtf8; Len: PtrInt);
   {$ifdef FPC} inline; {$endif} // Delphi XE8 fails to inline this anyway :(
 begin
+  if Len > SizeOf(Res.Temp) then // memory allocation needed
+    Res.Text := FastSetString(RawUtf8(Res.TempRawUtf8), Len) // new RawUtf8
+  else
+    Res.Text := @Res.Temp; // use stack buffer
   Res.Len := Len;
-  Res.Text := @Res.Temp;
-  if Len <= SizeOf(Res.Temp) then // no memory allocation needed
-    exit;
-  FastSetString(RawUtf8(Res.TempRawUtf8), Len); // new RawUtf8
-  Res.Text := Res.TempRawUtf8;
 end;
 
 procedure DoubleToTempUtf8(V: double; var Res: TTempUtf8);
@@ -9175,8 +9196,7 @@ begin
   {$ifndef UNICODE}
   if Unicode_CodePage = CP_UTF8 then // e.g. on POSIX or Windows + Lazarus
   begin
-    FastSetString(RawUtf8(result), L);
-    Write(pointer(result)); // here string=UTF8String=RawUtf8
+    Write(FastSetString(RawUtf8(result), L)); // here string=UTF8String=RawUtf8
     exit;
   end;
   {$endif UNICODE}
@@ -9199,8 +9219,7 @@ begin
   else
   begin
     f.Parse(Format, @Args[0], length(Args)); // handle all supplied Args[]
-    FastSetString(result, f.L);
-    f.Write(pointer(result));
+    f.Write(FastSetString(result, f.L));
   end;
 end;
 
@@ -9432,8 +9451,7 @@ begin
     exit;
   end;
   {%H-}f.DoAdd(@Args[0], length(Args));
-  FastSetString(result, f.L);
-  f.Write(pointer(result));
+  f.Write(FastSetString(result, f.L));
 end;
 
 procedure Make(const Args: array of const; var Result: RawUtf8;
@@ -9444,8 +9462,7 @@ begin
   {%H-}f.DoAdd(@Args[0], length(Args));
   if IncludeLast <> '' then
     f.Add(IncludeLast);
-  FastSetString(result, f.L);
-  f.Write(pointer(result));
+  f.Write(FastSetString(result, f.L));
 end;
 
 function MakeString(const Args: array of const): string;
@@ -9465,6 +9482,11 @@ begin
   f.WriteString(string(result));
 end;
 
+function MakeExpandedPath(const Part: array of const; EndWithDelim: boolean): TFileName;
+begin
+  result := ExpandFileName(MakePath(Part, EndWithDelim));
+end;
+
 function EnsureDirectoryExists(const Part: array of const;
   RaiseExceptionOnCreationFailure: ExceptionClass; NoExpand: boolean): TFileName;
 begin
@@ -9477,6 +9499,30 @@ function NormalizeDirectoryExists(const Part: array of const;
 begin
   result := EnsureDirectoryExists(NormalizeFileName(MakePath(Part)),
     RaiseExceptionOnCreationFailure);
+end;
+
+function FileExistsMake(const Part: array of const;
+  SetIfFound: PFileName): boolean;
+var
+  filename: TFileName;
+begin
+  filename := MakePath(Part);
+  result := FileExists(filename);
+  if result and
+     (SetIfFound <> nil) then
+    SetIfFound^ := filename;
+end;
+
+function DirectoryExistsMake(const Part: array of const;
+  SetIfFound: PFileName): boolean;
+var
+  folder: TFileName;
+begin
+  folder := MakePath(Part);
+  result := DirectoryExists(folder);
+  if result and
+     (SetIfFound <> nil) then
+    SetIfFound^ := folder;
 end;
 
 function MakeFileName(const Part: array of const; LastIsExt: boolean): TFileName;
@@ -9509,8 +9555,7 @@ var
   f: TFormatUtf8;
 begin
   f.DoDelim(@Value[0], length(Value), EndWithComma, Comma);
-  FastSetString(result, f.L);
-  f.Write(pointer(result));
+  f.Write(FastSetString(result, f.L));
 end;
 
 function StringToConsole(const S: string): RawByteString;
@@ -10092,34 +10137,32 @@ end;
 
 { THttpCookies }
 
-const
-  // Deny-Of-Service (DOS) Attack detection threshold
-  COOKIE_MAXCOUNT_DOSATTACK = 128;
-
 procedure THttpCookies.Clear;
 begin
-  fParsed := false;
   fCookies := nil;
 end;
 
-procedure THttpCookies.ParseServer(const InHead: RawUtf8);
+procedure THttpCookies.ParseServer(Head: PUtf8Char);
 var
-  count, plen: PtrInt;
-  h, p: PUtf8Char;
+  count, plen, total: PtrInt;
+  p: PUtf8Char;
   name, value: RawUtf8;
   new: PHttpCookie;
 begin
-  fParsed := true;
   fCookies := nil; // first Clear any previous cookie
   count := 0;
-  h := pointer(InHead);
-  while h <> nil do
+  total := 0;
+  while Head <> nil do
   begin
     // find all 'Cookie: name=value; name2=value2; name3=value3' lines
-    p := FindNameValuePointer(h, 'COOKIE:', plen, #0);
+    p := FindNameValuePointer(Head, 'COOKIE:', plen, #0);
     if p = nil then
       break;
-    h := GotoNextLine(p + plen);
+    inc(total, plen);
+    if total > COOKIE_MAXSIZE_DOSATTACK then
+      ESynException.RaiseUtf8('RetrieveCookies got % cookies (>%)',
+        [KB(total), KB(COOKIE_MAXSIZE_DOSATTACK)]);
+    Head := GotoNextLine(p + plen);
     // parse each line pairs
     repeat
       if IdemPChar(p, '__SECURE-') then
@@ -10129,15 +10172,14 @@ begin
       if (name = '') and
          (value = '') then
         break;
+      if count >= COOKIE_MAXCOUNT_DOSATTACK then
+        raise ESynException.CreateU('RetrieveCookies overflow: DOS attempt?');
       if count = length(fCookies) then
         SetLength(fCookies, NextGrow(count));
       new := @fCookies[count];
       new^.Name := name;
       new^.Value := value;
       inc(count);
-      if count > COOKIE_MAXCOUNT_DOSATTACK then
-        ESynException.RaiseUtf8('RetrieveCookies overflow (%): DOS attempt?',
-          [KB(InHead)]);
     until p = nil; // next 'name2=value2; ...' pair
   end;
   if count <> 0 then
@@ -10181,13 +10223,20 @@ begin
 end;
 
 function THttpCookies.GetCookie(const CookieName: RawUtf8): RawUtf8;
+begin
+  RetrieveCookie(CookieName, result);
+end;
+
+procedure THttpCookies.RetrieveCookie(const CookieName: RawUtf8;
+  out Value: RawUtf8);
 var
   c: PHttpCookie;
 begin
-  result := '';
+  if @self = nil then
+    exit;
   c := FindCookie(CookieName);
   if c <> nil then
-    result := c^.Value;
+    Value := c^.Value;
 end;
 
 
@@ -10218,14 +10267,12 @@ var
   L: integer;
 begin
   L := length(Bin);
-  FastSetString(result, L * 2);
-  mormot.core.text.BinToHex(pointer(Bin), pointer(result), L);
+  mormot.core.text.BinToHex(pointer(Bin), FastSetString(result, L * 2), L);
 end;
 
 function BinToHex(Bin: PAnsiChar; BinBytes: PtrInt): RawUtf8;
 begin
-  FastSetString(result, BinBytes * 2);
-  mormot.core.text.BinToHex(Bin, pointer(result), BinBytes);
+  mormot.core.text.BinToHex(Bin, FastSetString(result, BinBytes * 2), BinBytes);
 end;
 
 function HexToBin(Hex: PAnsiChar; HexLen: PtrInt;
@@ -10406,8 +10453,7 @@ end;
 
 function BinToHexDisplay(Bin: PAnsiChar; BinBytes: PtrInt): RawUtf8;
 begin
-  FastSetString(result, BinBytes * 2);
-  BinToHexDisplay(Bin, pointer(result), BinBytes);
+  BinToHexDisplay(Bin, FastSetString(result, BinBytes * 2), BinBytes);
 end;
 
 procedure BinToHexLower(Bin, Hex: PAnsiChar; BinBytes: PtrInt);
@@ -10437,8 +10483,7 @@ end;
 
 procedure BinToHexLower(Bin: PAnsiChar; BinBytes: PtrInt; var result: RawUtf8);
 begin
-  FastSetString(result, BinBytes * 2);
-  BinToHexLower(Bin, pointer(result), BinBytes);
+  BinToHexLower(Bin, FastSetString(result, BinBytes * 2), BinBytes);
 end;
 
 function BinToHexLower(Bin: PAnsiChar; BinBytes: PtrInt): RawUtf8;
@@ -10481,8 +10526,7 @@ end;
 
 function BinToHexDisplayLower(Bin: PAnsiChar; BinBytes: PtrInt): RawUtf8;
 begin
-  FastSetString(result, BinBytes * 2);
-  BinToHexDisplayLower(Bin, pointer(result), BinBytes);
+  BinToHexDisplayLower(Bin, FastSetString(result, BinBytes * 2), BinBytes);
 end;
 
 function BinToHexDisplayLowerShort(Bin: PAnsiChar; BinBytes: PtrInt): ShortString;
@@ -10538,8 +10582,8 @@ end;
 
 procedure PointerToHex(aPointer: pointer; var result: RawUtf8);
 begin
-  FastSetString(result, SizeOf(pointer) * 2);
-  BinToHexDisplay(@aPointer, pointer(result), SizeOf(pointer));
+  BinToHexDisplay(@aPointer,
+    FastSetString(result, SizeOf(pointer) * 2), SizeOf(pointer));
 end;
 
 function PointerToHex(aPointer: pointer): RawUtf8;
@@ -10549,26 +10593,26 @@ end;
 
 function CardinalToHex(aCardinal: cardinal): RawUtf8;
 begin
-  FastSetString(result, SizeOf(aCardinal) * 2);
-  BinToHexDisplay(@aCardinal, pointer(result), SizeOf(aCardinal));
+  BinToHexDisplay(@aCardinal,
+    FastSetString(result, SizeOf(aCardinal) * 2), SizeOf(aCardinal));
 end;
 
 function CardinalToHexLower(aCardinal: cardinal): RawUtf8;
 begin
-  FastSetString(result, SizeOf(aCardinal) * 2);
-  BinToHexDisplayLower(@aCardinal, pointer(result), SizeOf(aCardinal));
+  BinToHexDisplayLower(@aCardinal,
+    FastSetString(result, SizeOf(aCardinal) * 2), SizeOf(aCardinal));
 end;
 
 function Int64ToHex(aInt64: Int64): RawUtf8;
 begin
-  FastSetString(result, SizeOf(Int64) * 2);
-  BinToHexDisplay(@aInt64, pointer(result), SizeOf(Int64));
+  BinToHexDisplay(@aInt64,
+    FastSetString(result, SizeOf(Int64) * 2), SizeOf(Int64));
 end;
 
 procedure Int64ToHex(aInt64: Int64; var result: RawUtf8);
 begin
-  FastSetString(result, SizeOf(Int64) * 2);
-  BinToHexDisplay(@aInt64, pointer(result), SizeOf(Int64));
+  BinToHexDisplay(@aInt64,
+    FastSetString(result, SizeOf(Int64) * 2), SizeOf(Int64));
 end;
 
 function PointerToHexShort(aPointer: pointer): TShort16;
@@ -10607,8 +10651,7 @@ var
   L: PtrInt;
 begin
   L := DisplayMinChars(@aInt64, SizeOf(Int64));
-  FastSetString(result, L * 2);
-  BinToHexDisplayLower(@aInt64, pointer(result), L);
+  BinToHexDisplayLower(@aInt64, FastSetString(result, L * 2), L);
 end;
 
 procedure Int64ToHexShort(aInt64: Int64; out result: TShort16);
@@ -10902,8 +10945,7 @@ function GuidToRawUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 var
   P: PUtf8Char;
 begin
-  FastSetString(result, 38);
-  P := pointer(result);
+  P := FastSetString(result, 38);
   P^ := '{';
   GuidToText(P + 1, @guid)^ := '}';
 end;
@@ -10925,8 +10967,7 @@ end;
 procedure ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid;
   var text: RawUtf8; tab: PWordArray);
 begin
-  FastSetString(text, 36);
-  GuidToText(pointer(text), @guid, tab);
+  GuidToText(FastSetString(text, 36), @guid, tab);
 end;
 
 function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar;
@@ -10940,9 +10981,8 @@ begin
   n := length(guid);
   if n = 0 then
     exit;
-  FastSetString(result, (37 * n) - 1);
+  p := FastSetString(result, (37 * n) - 1);
   g := @guid[0];
-  p := pointer(result);
   repeat
     GuidToText(p, pointer(g), tab);
     dec(n);
@@ -11207,14 +11247,11 @@ function ReadStringFromStream(S: TStream; MaxAllowedSize: integer): RawUtf8;
 var
   L: integer;
 begin
-  result := '';
   L := 0;
   if (S.Read(L, 4) <> 4) or
      (L <= 0) or
-     (L > MaxAllowedSize) then
-    exit;
-  FastSetString(result, L);
-  if not StreamReadAll(S, pointer(result), L) then
+     (L > MaxAllowedSize) or
+     not StreamReadAll(S, FastSetString(result, L), L) then
     result := '';
 end;
 

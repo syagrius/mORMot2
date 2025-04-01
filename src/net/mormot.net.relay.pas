@@ -578,7 +578,7 @@ begin
     ip := Sender.RemoteIP;
     if Frame.opcode = focContinuation then
       // propagate to Private Relay
-      Frame.payload := Make([ip, #13, Name, #13, UpgradeUri]);
+      Frame.payload := Join([ip, #13, Name, #13, UpgradeUri]);
     if not fOwner.EncapsulateAndSend(
         fOwner.fServerConnected, ip, Frame, Sender.Protocol.ConnectionID) and
        (Frame.opcode <> focConnectionClose) then
@@ -911,14 +911,15 @@ begin
   log := fLog.Enter('Create: bind clients on %, server on %, encrypted=% %',
     [aClientsPort, aServerPort, BOOL_STR[aServerKey <> ''], aServerJwt], self);
   fServerJwt := aServerJwt;
-  fServer := TWebSocketServer.Create(aServerPort, nil, nil, 'relayserver');
+  fServer := TWebSocketServer.Create(aServerPort, nil, nil, 'relayserver',
+    {threadpool=}2, {keepalive=}30000, {options=}[], aLog);
   fServer.WaitStarted;
   if fServerJwt <> nil then
     fServer.OnBeforeBody := OnServerBeforeBody;
   fServer.OnRequest := OnServerRequest;
   fServer.WebSocketProtocols.Add(TRelayServerProtocol.Create(self, aServerKey));
   fClients := TWebSocketServer.Create(aClientsPort, nil, nil, 'relayclients',
-    aClientsThreadPoolCount, aClientsKeepAliveTimeOut);
+    aClientsThreadPoolCount, aClientsKeepAliveTimeOut, {opt=}[], aLog);
   fClients.WaitStarted;
   fClients.WebSocketProtocols.Add(TSynopseServerProtocol.Create(self));
   fClients.OnRequest := OnClientsRequest;

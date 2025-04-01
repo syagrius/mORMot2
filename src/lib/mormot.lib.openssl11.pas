@@ -15,23 +15,35 @@ unit mormot.lib.openssl11;
    - TLS / HTTPS Encryption Layer using OpenSSL for mormot.net.sock / TCrtSocket
 
     In respect to OpenSSL 1.0.x, the new 1.1 API hides most structures
-   behind getter/setter functions, and doesn't require complex initialization.
-    OpenSSL 1.1 features TLS 1.3, and is a LTS revision (until 2023-09-11).
-    OpenSSL 3.x is also supported on some platforms, as the next major version.
+   behind getter/setter functions, and does not require complex initialization.
+    OpenSSL 1.1 features TLS 1.3, but is now deprecated.
+    OpenSSL 3.x is supported as the current major version.
     OpenSSL 1.1 / 3.x API adaptation is done at runtime by dynamic loading.
 
   *****************************************************************************
 
-  Warning: on Windows, you need to define the USE_OPENSSL conditional in YOUR
-   project options to have this code actually link the OpenSSL library, or
-   FORCE_OPENSSL if you want to enable OpenSSL automatic loading.
-   Otherwise, it will fallback to the SChannel layer for TLS support.
-  We did not enable OpenSSL by default, because it is very likely that your
-   executable may find some obsolete dll in your Windows path, if it can't find
-   any suitable dll in its own folder.
+  Warning:
+   On Windows, the USE_OPENSSL conditional is defined, but the OpenSSL
+     lib*.dll will be loaded at runtime, only if needed, and silently fail if
+     they are not available or in an unexpected version.
+   Therefore, the SChannel layer will be used for TLS support by default, until
+     OpenSslInitialize or OpenSslIsAvailable are called and succeeded.
+   We did not enable OpenSSL by default on Windows, because from experience,
+     it is very likely that your executable may find some obsolete dll in your
+     Windows path, if it can't find any suitable dll in its own folder.
 
-  Legal Notice: as stated by our LICENSE.md terms, make sure that you comply
-   to any restriction about the use of cryptographic software in your country.
+   On POSIX, this unit will always try to load OpenSSL at startup, as if
+     FORCE_OPENSSL conditional was defined.
+   On Darwin/MacOS, the .dylib supplied by the system are unstable and should
+     not be used. Try instead e.g. https://synopse.info/files/OpenSSLMacX64.tgz
+     (for x64) or https://synopse.info/files/OpenSSLMacA64.tgz (for arm).
+
+   This unit will only enable direct low-level OpenSSL APIs and TLS: you need
+     to call explicitly RegisterOpenSsl to enable mormot.crypt.openssl.pas
+     algorithms in mORMot high-level classes and wrappers.
+
+   Legal Notice: as stated by our LICENSE.md terms, make sure that you comply
+     to any restriction about the use of cryptographic software in your country.
 }
 
 
@@ -39,7 +51,7 @@ unit mormot.lib.openssl11;
 // define this conditional to publish the whole (huge) OpenSSL API - unsupported
 // - as stored in mormot.lib.openssl11.full.inc separated file
 // - by default, only the API features needed by mORMot are published
-// - full API increases compilation time, but is kept as reference
+// - full API increases compilation time, is unsupported, but kept as reference
 // - the full API libraries will be directly/statically linked, not dynamically:
 // if you have "cannot find -lcrypto" errors at linking, run e.g. the following:
 //     cd /usr/lib/x86_64-linux-gnu
@@ -52,11 +64,10 @@ unit mormot.lib.openssl11;
 // you may try to define it if you don't check memory leaks (at you own risk)
 
 {.$define NOOPENSSL1}
-// define this to disable OpenSSL 1.1 API
+// define this to disable OpenSSL 1.1 API - safer on any recent system
 
 {.$define NOOPENSSL3}
-// define this to disable OpenSSL 3.x API - only Linux and Windows by now
-// on dynamic linking, will fallback to 1.1 if 3.x is not available
+// define this to disable OpenSSL 3.x API - not a good idea
 
 
 {$ifdef FPCMM_REPORTMEMORYLEAKS}
@@ -128,15 +139,15 @@ const
   {$ifdef OSWINDOWS}
     {$ifdef CPU32}
     LIB_CRYPTO1 = 'libcrypto-1_1.dll';
-    LIB_SSL1 = 'libssl-1_1.dll';
+    LIB_SSL1    = 'libssl-1_1.dll';
     LIB_CRYPTO3 = 'libcrypto-3.dll';
-    LIB_SSL3 = 'libssl-3.dll';
+    LIB_SSL3    = 'libssl-3.dll';
     _PU = '';
     {$else}
     LIB_CRYPTO1 = 'libcrypto-1_1-x64.dll';
-    LIB_SSL1 = 'libssl-1_1-x64.dll';
+    LIB_SSL1    = 'libssl-1_1-x64.dll';
     LIB_CRYPTO3 = 'libcrypto-3-x64.dll';
-    LIB_SSL3 = 'libssl-3-x64.dll';
+    LIB_SSL3    = 'libssl-3-x64.dll';
     _PU = '';
     {$endif CPU32}
   {$else}
@@ -144,12 +155,12 @@ const
       {$define NOOPENSSL3} // unsupported yet
       {$ifdef CPU32}
       LIB_CRYPTO1 = 'libcrypto-android32.a';
-      LIB_SSL1 = 'libssl-android32.a';
+      LIB_SSL1    = 'libssl-android32.a';
       _PU = '';
       {$define OPENSSLSTATIC}
       {$else}
       LIB_CRYPTO1 = 'libcrypto-android64.a';
-      LIB_SSL1 = 'libssl-android64.a';
+      LIB_SSL1    = 'libssl-android64.a';
       _PU = '';
       {$define OPENSSLSTATIC}
       {$endif CPU32}
@@ -159,43 +170,45 @@ const
           // from https://github.com/grijjy/DelphiOpenSsl
           {$ifdef CPUX86}
           LIB_CRYPTO1 = 'libssl-merged-osx32.dylib';
-          LIB_SSL1 = 'libssl-merged-osx32.dylib';
+          LIB_SSL1    = 'libssl-merged-osx32.dylib';
           _PU = '_';
           {$endif CPUX86}
           {$ifdef CPUX64}
           LIB_CRYPTO1 = 'libssl-merged-osx64.dylib';
-          LIB_SSL1 = 'libssl-merged-osx64.dylib';
+          LIB_SSL1    = 'libssl-merged-osx64.dylib';
           _PU = '_';
           {$endif CPUX64}
           {$ifdef CPUX64_static}
           LIB_CRYPTO1 = 'libcrypto-osx64.a';
-          LIB_SSL1 = 'libssl-osx64.a';
+          LIB_SSL1    = 'libssl-osx64.a';
           _PU = '';
           {$define OPENSSLSTATIC}
           {$endif CPUX64_static}
         {$else}
           // regular OpenSSL 1.1 dylib - to be supplied
           LIB_CRYPTO1 = 'libcrypto.1.1.dylib'; // typically ARM64
-          LIB_SSL1 = 'libssl.1.1.dylib';
+          LIB_SSL1    = 'libssl.1.1.dylib';
           _PU = '';
         {$endif CPUINTEL}
         // regular OpenSSL 3 from https://synopse.info/files/OpenSSLMacX64.tgz
         // the system dylib fails as "xxx is loading libcrypto in an unsafe way"
-        // because Apple deprecates its OS lib since 10.7 days (2011) so we
-        // won't try to load plain libcrypto/libssl.dylib
+        // because Apple deprecates its OpenSSL API since 10.7 days (2011) in
+        // favor of its own "Cryptographic Services", so we won't try to load
+        // plain libcrypto/libssl.dylib but search for modern custom .dylib
         LIB_CRYPTO3 = 'libcrypto.3.dylib';
-        LIB_SSL3 = 'libssl.3.dylib';
+        LIB_SSL3    = 'libssl.3.dylib';
       {$else}
         {$ifdef OSLINUX}
         // specific versions on Linux
         LIB_CRYPTO1 = 'libcrypto.so.1.1';
-        LIB_SSL1 = 'libssl.so.1.1';
+        LIB_SSL1    = 'libssl.so.1.1';
         LIB_CRYPTO3 = 'libcrypto.so.3';
-        LIB_SSL3 = 'libssl.so.3';
-        {$else}
-        {$define NOOPENSSL3} // unsupported yet
-        LIB_CRYPTO1 = 'libcrypto.so'; // should redirect to 1.1
-        LIB_SSL1 = 'libssl.so';
+        LIB_SSL3    = 'libssl.so.3';
+        {$else} // not tested on OpenBSD/FreeBSD yet
+        LIB_CRYPTO1 = 'libcrypto.so'; // should redirect to 1.1 or 3
+        LIB_SSL1    = 'libssl.so';
+        LIB_CRYPTO3 = 'libcrypto.so.3';
+        LIB_SSL3    = 'libssl.so.3';
         {$endif OSLINUX}
         _PU = '';
       {$endif OSDARWIN}
@@ -279,10 +292,12 @@ const
   {$endif NOOPENSSL3}
 
 /// return TRUE if OpenSSL 1.1 / 3.x library can be used
-// - will load and initialize it, calling OpenSslInitialize if necessary,
-// catching any exception during the process
-// - return always true if OPENSSLFULLAPI or OPENSSLSTATIC conditionals have
-// been defined, since they link the library at compile or startup time
+// - will load and initialize it, calling OpenSslInitialize if necessary with
+// the global/default search paths, catching any exception during the process
+// - always return true if OPENSSLFULLAPI or OPENSSLSTATIC conditionals are set
+// - on success, returns true and register OpenSSL for TLS support - but
+// you need to call explicitly RegisterOpenSsl to enable mormot.crypt.openssl
+// algorithms in mORMot high-level wrappers
 // - you should never call any OpenSSL function if false is returned
 function OpenSslIsAvailable: boolean;
   {$ifdef HASINLINE} inline; {$endif}
@@ -301,7 +316,9 @@ function OpenSslIsLoaded: boolean;
 // then within the executable folder, and then in the system path
 // - do nothing if the library has already been loaded or if
 // OPENSSLFULLAPI or OPENSSLSTATIC conditionals have been defined
-// - you would typically call RegisterOpenSsl after this lower level function
+// - on success, returns true and register OpenSSL for TLS support - but
+// you need to call explicitly RegisterOpenSsl to enable mormot.crypt.openssl
+// algorithms in mORMot high-level wrappers
 function OpenSslInitialize(
    const libcryptoname: TFileName = '';
    const libsslname: TFileName = '';
@@ -1313,7 +1330,7 @@ type
     function Extract(index: integer): pointer;
     /// low-level method needing an explicit result typecast e.g. to PX509DynArray
     function ToDynArray: TPointerDynArray;
-    /// note: instances should be released explicitely before or call e.g. FreeX509
+    /// note: instances should be released explicitly before or call e.g. FreeX509
     procedure Free;
     /// make PX509/_CRL/_EXTENSION.Free to all items, then free the stack
     procedure FreeX509;
@@ -2720,8 +2737,7 @@ type
 /// OpenSSL TLS layer communication factory - as expected by mormot.net.sock.pas
 // - on non-Windows systems, this unit initialization will register OpenSSL for TLS
 // - on Windows systems, SChannel will be kept as default so you would need to
-// set the FORCE_OPENSSL conditional, or register OpenSSL for TLS mannually:
-// ! @NewNetTls := @NewOpenSslNetTls;
+// set the FORCE_OPENSSL conditional, or call OpenSslInitialize() explicitly
 function NewOpenSslNetTls: INetTls;
 
 var
@@ -2906,7 +2922,7 @@ type
   end;
 
 const
-  LIBSSL_ENTRIES: array[0..55] of RawUtf8 = (
+  LIBSSL_ENTRIES: array[0..56] of PAnsiChar = (
     'SSL_CTX_new',
     'SSL_CTX_free',
     'SSL_CTX_set_timeout',
@@ -2962,7 +2978,8 @@ const
     'SSL_get_verify_result',
     'SSL_set_hostflags',
     'SSL_set1_host',
-    'SSL_add1_host');
+    'SSL_add1_host',
+    nil);
 
 var
   libssl: TLibSsl;
@@ -3610,7 +3627,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..336] of RawUtf8 = (
+  LIBCRYPTO_ENTRIES: array[0..337] of PAnsiChar = (
     'CRYPTO_malloc',
     'CRYPTO_set_mem_functions',
     'CRYPTO_free',
@@ -3947,7 +3964,8 @@ const
     'PEM_write_bio_PUBKEY',
     'OpenSSL_version_num',
     'OpenSSL_version',
-    'X509_print');
+    'X509_print',
+    nil);
 
 var
   libcrypto: TLibCrypto;
@@ -5810,23 +5828,23 @@ end;
 function OpenSslInitialize(const libcryptoname, libsslname: TFileName;
   const libprefix: RawUtf8): boolean;
 var
-  P: PPointerArray;
-  api: PtrInt;
-  libenv, libsys1, libsys3, libexe1, libexe3: TFileName;
+  error: string;
+  libenv, libsys1, libsys3, libexe1, libexe3, libpath, libexact, libname: TFileName;
 begin
   result := true;
   if openssl_initialized = osslAvailable then
     // set it once, but allow to retry with specific alternate libnames
     exit;
+  result := false;
   GlobalLock;
   try
     // paranoid thread-safe double check
     if openssl_initialized = osslAvailable then
       exit;
     // read and validate OPENSSL_LIBPATH environment variable
-    libenv := GetEnvironmentVariable('OPENSSL_LIBPATH');
+    libenv := OpenSslDefaultPath; // priority to the global variable
     if libenv = '' then
-      libenv := OpenSslDefaultPath;
+      libenv := GetEnvironmentVariable('OPENSSL_LIBPATH');
     if libenv <> '' then
       if DirectoryExists(libenv) then
         libenv := IncludeTrailingPathDelimiter(libenv)
@@ -5834,9 +5852,9 @@ begin
         libenv := ''; // search anywhere within system path
     // initialize library loaders
     libcrypto := TLibCrypto.Create;
-    libssl := TLibSsl.Create;
+    libssl    := TLibSsl.Create;
     try
-      // attempt to load libcrypto
+      // try to guess the potential libcrypto library names
       if libcryptoname = '' then
       begin
         {$ifndef NOOPENSSL1}
@@ -5852,7 +5870,8 @@ begin
         libsys3 := libenv + LIB_CRYPTO3;
         {$endif NOOPENSSL3}
       end;
-      libcrypto.TryLoadLibrary([
+      // attempt to load libcrypto
+      if not libcrypto.TryLoadResolve([
         // first try the exact supplied crypto library name
         libcryptoname,
         // try with the global variable
@@ -5865,84 +5884,76 @@ begin
         libsys1
         {$ifdef OSPOSIX}
         {$ifndef OSDARWIN}
-        // generic library name on most UNIX
+        // generic library name on most UNIX (but MacOS)
         , 'libcrypto.so'
         {$endif OSDARWIN}
         {$endif OSPOSIX}
-        ], EOpenSsl);
-      P := @@libcrypto.CRYPTO_malloc;
-      for api := low(LIBCRYPTO_ENTRIES) to high(LIBCRYPTO_ENTRIES) do
-        libcrypto.Resolve(libprefix, LIBCRYPTO_ENTRIES[api], @P[api], EOpenSsl);
-      if not Assigned(libcrypto.X509_print) then // last known entry
+        ], libprefix, @LIBCRYPTO_ENTRIES, @@libcrypto.CRYPTO_malloc, nil, @error) then
+        exit; // silent failure on missing library or entry
+      // validate the loaded libcrypto
+      if not Assigned(libcrypto.X509_print) then // last known entry (paranoid)
         raise EOpenSsl.Create('OpenSslInitialize: incorrect libcrypto API');
-      // attempt to load libssl
-      if libsslname = '' then
+      OpenSslVersion := libcrypto.OpenSSL_version_num;
+      OpenSslVersionHexa := IntToHex(OpenSslVersion, 8);
+      OpenSslVersionText := RawUtf8(libcrypto.OpenSSL_version(OPENSSL_VERSION_));
+      if OpenSslVersion and $ffffff00 < LIB_MIN then // paranoid check
       begin
-        {$ifndef NOOPENSSL1}
-        libexe1 := Executable.ProgramFilePath + LIB_SSL1;
-        if not FileExists(libexe1) then
-          libexe1 := '';
-        libsys1 := libenv + LIB_SSL1;
-        {$endif NOOPENSSL1}
-        {$ifndef NOOPENSSL3}
-        libexe3 := Executable.ProgramFilePath + LIB_SSL3;
-        if not FileExists(libexe3) then
-          libexe3 := '';
-        libsys3 := libenv + LIB_SSL3;
-        {$endif NOOPENSSL3}
+        error := Format('Incorrect %s version in %s - expects ' + LIB_TXT,
+          [OpenSslVersionText, libcrypto.LibraryPath]);
+        exit;
       end;
-      libssl.TryLoadLibrary([
+      // guess libssl names of the same version or name pattern from libcrypto
+      libpath := ExtractFilePath(libcrypto.LibraryPath);
+      if OpenSslVersion < OPENSSL3_VERNUM then
+        libexact := libpath + LIB_SSL1
+      else
+        libexact := libpath + LIB_SSL3;
+      libname := libpath + StringReplace(ExtractFileName(libcrypto.LibraryPath),
+        'libcrypto', 'libssl', [rfReplaceAll {$ifdef OSWINDOWS}, rfIgnoreCase{$endif}]);
+      // attempt to load libssl
+      if not libssl.TryLoadResolve([
         // first try the exact supplied ssl library name
         libsslname,
         // try with the global variable
         OpenSslDefaultSsl,
-        // try from executable folder
-        libexe3,
-        libexe1,
-        // try the library from OPENSSL_LIBPATH or somewhere in the system
-        libsys3,
-        libsys1
-        {$ifndef OSDARWIN}
+        // try same version and/or name in the libcrypto folder
+        libexact,
+        libname
         {$ifdef OSPOSIX}
-          // generic library name on most UNIX
-          , 'libssl.so'
-        {$endif OSPOSIX}
+        {$ifndef OSDARWIN}
+        // generic library name on most UNIX
+        , 'libssl.so'
         {$endif OSDARWIN}
-        ], EOpenSsl);
-      P := @@libssl.SSL_CTX_new;
-      for api := low(LIBSSL_ENTRIES) to high(LIBSSL_ENTRIES) do
-        libssl.Resolve(libprefix, LIBSSL_ENTRIES[api], @P[api], EOpenSsl);
-      if not Assigned(libssl.SSL_add1_host) then // last known entry
+        {$endif OSPOSIX}
+        ], libprefix, @LIBSSL_ENTRIES, @@libssl.SSL_CTX_new, nil, @error) then
+        exit; // silent failure on missing library or entry
+      if not Assigned(libssl.SSL_add1_host) then // last known entry (paranoid)
         raise EOpenSsl.Create('OpenSslInitialize: incorrect libssl API');
       // nothing is to be initialized with OpenSSL 1.1.*
       {$ifdef OPENSSLUSERTLMM}
       if libcrypto.CRYPTO_set_mem_functions(@rtl_malloc, @rtl_realloc, @rtl_free) = 0 then
         raise EOpenSsl.Create('CRYPTO_set_mem_functions() failure');
       {$endif OPENSSLUSERTLMM}
-      OpenSslVersion := libcrypto.OpenSSL_version_num;
-      OpenSslVersionHexa := IntToHex(OpenSslVersion, 8);
-      OpenSslVersionText := RawUtf8(libcrypto.OpenSSL_version(OPENSSL_VERSION_));
-      if OpenSslVersion and $ffffff00 < LIB_MIN then // paranoid check
-        raise EOpenSsl.CreateFmt(
-          'Incorrect %s version in %s - expects ' + LIB_TXT,
-          [OpenSslVersionText, libcrypto.LibraryPath]);
       OpenSslExIndexSsl := SSL_get_ex_new_index(0, nil, nil, nil, nil);
-      openssl_initialize_errormsg := ''; // no error with these lib paths
+      result := true; // if we reached here, everything is OK
     except
-      on E: Exception do
-      begin
-        FreeAndNil(libssl);
-        FreeAndNil(libcrypto);
-        openssl_initialize_errormsg := E.Message;
-      end;
+      on E: Exception do // EOpenSsl above are logic error and should be logged
+        error := E.Message;
     end;
   finally
-    if libssl = nil then // flag should be set the last
-      openssl_initialized := osslNotAvailable
+    if result then
+    begin
+      @NewNetTls := @NewOpenSslNetTls; // favor OpenSSL for TLS from now on
+      openssl_initialized := osslAvailable; // flag should be set the last
+    end
     else
-      openssl_initialized := osslAvailable;
+    begin
+      FreeAndNil(libcrypto);
+      FreeAndNil(libssl);
+      openssl_initialized := osslNotAvailable
+    end;
     GlobalUnLock;
-    result := libssl <> nil;
+    openssl_initialize_errormsg := error;
   end;
 end;
 
@@ -11107,7 +11118,6 @@ function OpenSslInitialize(const libcryptoname: string = '';
   const libsslname: string = ''; const libprefix: Utf8String = ''): boolean;
 function OpenSslIsAvailable: boolean;
 function OpenSslIsLoaded: boolean;
-procedure RegisterOpenSsl;
 
 
 implementation
@@ -11126,10 +11136,6 @@ end;
 function OpenSslIsLoaded: boolean;
 begin
   result := false;
-end;
-
-procedure RegisterOpenSsl;
-begin
 end;
 
 {$endif USE_OPENSSL}

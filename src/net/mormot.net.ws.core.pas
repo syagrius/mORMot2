@@ -2269,8 +2269,7 @@ begin
     inc(len, ToVarUInt32LengthWithData(it^.Len));
     inc(it);
   end;
-  FastNewRawByteString(frame.payload, len);
-  P := AppendRawUtf8ToBuffer(pointer(frame.payload), Head);
+  P := AppendRawUtf8ToBuffer(FastNewRawByteString(frame.payload, len), Head);
   P^ := FRAME_HEAD_SEP;
   inc(P);
   it := @item;
@@ -2849,7 +2848,7 @@ begin
   // return the 101 header and switch protocols
   ComputeChallenge(key, Digest);
   if {%H-}extout <> '' then
-    extout := Make(['Sec-WebSocket-Extensions: ', extout, #13#10]);
+    extout := Join(['Sec-WebSocket-Extensions: ', extout, #13#10]);
   FormatUtf8('HTTP/1.1 101 Switching Protocols'#13#10 +
              'Upgrade: websocket'#13#10 +
              'Connection: Upgrade'#13#10 +

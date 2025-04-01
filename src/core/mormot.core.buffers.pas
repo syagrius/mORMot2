@@ -581,6 +581,7 @@ const
 
 /// fast concatenation of several AnsiStrings
 function RawByteStringArrayConcat(const Values: array of RawByteString): RawByteString;
+  {$ifdef FPC}inline;{$endif}
 
 /// creates a TBytes from a RawByteString memory buffer
 procedure RawByteStringToBytes(const buf: RawByteString; out bytes: TBytes);
@@ -838,7 +839,7 @@ type
   // - big speed up if data is written in small blocks
   // - also handle optimized storage of any integer/Int64/RawUtf8 values
   // - use TFileBufferReader or TFastReader for decoding of the stored binary
-  TBufferWriter = class
+  TBufferWriter = class(TSynPersistent)
   protected
     fPos: PtrInt;
     fBufLen, fBufLen16: PtrInt;
@@ -1756,7 +1757,8 @@ type
     mtPdf,
     mtSQlite3,
     mtXcomp,
-    mtDicom);
+    mtDicom,
+    mtZstd);
   PMimeType = ^TMimeType;
 
 const
@@ -1799,7 +1801,8 @@ const
     'application/pdf',               // mtPdf
     'application/x-sqlite3',         // mtSQlite3
     'application/x-compress',        // mtXcomp
-    'application/dicom');            // mtDicom
+    'application/dicom',             // mtDicom
+    'application/zstd');             // mtZstd RFC 8878
 
 /// retrieve the MIME content type from its file name
 function GetMimeContentTypeFromExt(const FileName: TFileName;
@@ -5494,8 +5497,7 @@ begin
   len := DecompressHeader(Comp, CompLen, Load);
   if len = 0 then
     exit;
-  FastSetString(RawUtf8(result), len + BufferOffset); // CP_UTF8 for FPC RTL bug
-  dec := pointer(result);
+  dec := FastSetString(RawUtf8(result), len + BufferOffset); // CP_UTF8 for FPC
   if not DecompressBody(Comp, dec + BufferOffset, CompLen, len, Load) then
     result := '';
 end;
@@ -6174,21 +6176,8 @@ end;
 
 
 function RawByteStringArrayConcat(const Values: array of RawByteString): RawByteString;
-var
-  i, L: PtrInt;
-  P: PAnsiChar;
 begin
-  L := 0;
-  for i := 0 to high(Values) do
-    inc(L, length(Values[i]));
-  FastNewRawByteString(result{%H-}, L);
-  P := pointer(result);
-  for i := 0 to high(Values) do
-  begin
-    L := length(Values[i]);
-    MoveFast(pointer(Values[i])^, P^, L);
-    inc(P, L);
-  end;
+  Join(Values, RawUtf8(result)); // better explicit CP_UTF8 for FPC bug
 end;
 
 procedure RawByteStringToBytes(const buf: RawByteString; out bytes: TBytes);
@@ -6586,10 +6575,8 @@ var
 begin
   result := '';
   len := length(s);
-  if len = 0 then
-    exit;
-  FastSetString(result, BinToBase64Length(len));
-  Base64Encode(pointer(result), pointer(s), len);
+  if len <> 0 then
+    Base64Encode(FastSetString(result, BinToBase64Length(len)), pointer(s), len);
 end;
 
 function BinToBase64Short(Bin: PAnsiChar; BinBytes: integer): ShortString;
@@ -6615,8 +6602,7 @@ var
 begin
   outlen := BinToBase64Length(len);
   inc(outlen, 2 * (outlen shr 6) + 2); // one CRLF per line
-  FastSetString(result{%H-}, PtrInt(outlen) + length(Prefix) + length(Suffix));
-  p := pointer(result);
+  p := FastSetString(result{%H-}, PtrInt(outlen) + length(Prefix) + length(Suffix));
   if Prefix <> '' then
   begin
     MoveFast(pointer(Prefix)^, p^, PStrLen(PAnsiChar(pointer(Prefix)) - _STRLEN)^);
@@ -6663,16 +6649,14 @@ end;
 function BinToBase64(Bin: PAnsiChar; BinBytes: integer): RawUtf8;
 begin
   result := '';
-  if BinBytes = 0 then
-    exit;
-  FastSetString(result, BinToBase64Length(BinBytes));
-  Base64Encode(pointer(result), Bin, BinBytes);
+  if BinBytes <> 0 then
+    Base64Encode(FastSetString(result, BinToBase64Length(BinBytes)), Bin, BinBytes);
 end;
 
 function BinToBase64(const data, Prefix, Suffix: RawByteString; WithMagic: boolean): RawUtf8;
 var
   lendata, lenprefix, lensuffix, len: integer;
-  res: PByteArray absolute result;
+  res: PByteArray;
 begin
   result := '';
   lendata := length(data);
@@ -6683,7 +6667,7 @@ begin
   len := ((lendata + 2) div 3) * 4 + lenprefix + lensuffix;
   if WithMagic then
     inc(len, 3);
-  FastSetString(result, len);
+  res := FastSetString(result, len);
   if lenprefix > 0 then
     MoveFast(pointer(Prefix)^, res^, lenprefix);
   if WithMagic then
@@ -6712,8 +6696,7 @@ begin
   Result := '';
   if DataLen <= 0 then
     exit;
-  FastSetString(Result, ((DataLen + 2) div 3) * 4 + 3);
-  PInteger(pointer(Result))^ := JSON_BASE64_MAGIC_C;
+  PInteger(FastSetString(Result, ((DataLen + 2) div 3) * 4 + 3))^ := JSON_BASE64_MAGIC_C;
   Base64Encode(PAnsiChar(pointer(Result)) + 3, Data, DataLen);
 end;
 
@@ -6839,11 +6822,8 @@ var
 begin
   result := false;
   resultLen := Base64LengthAdjust(sp, len);
-  if resultLen <> 0 then
-  begin
-    FastNewRawByteString(data, resultLen);
-    result := Base64DecodeMain(sp, pointer(data), len); // may use AVX2
-  end;
+  if resultLen <> 0 then // may use AVX2
+    result := Base64DecodeMain(sp, FastNewRawByteString(data, resultLen), len);
   if not result then
     data := '';
 end;
@@ -6947,19 +6927,15 @@ var
 begin
   result := '';
   len := length(s);
-  if len = 0 then
-    exit;
-  FastSetString(result, BinToBase64uriLength(len));
-  Base64uriEncode(pointer(result), pointer(s), len);
+  if len <> 0 then
+    Base64uriEncode(FastSetString(result, BinToBase64uriLength(len)), pointer(s), len);
 end;
 
 function BinToBase64uri(Bin: PAnsiChar; BinBytes: integer): RawUtf8;
 begin
   result := '';
-  if BinBytes <= 0 then
-    exit;
-  FastSetString(result, BinToBase64uriLength(BinBytes));
-  Base64uriEncode(pointer(result), Bin, BinBytes);
+  if BinBytes > 0 then
+    Base64uriEncode(FastSetString(result, BinToBase64uriLength(BinBytes)), Bin, BinBytes);
 end;
 
 function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer): ShortString;
@@ -7016,10 +6992,8 @@ begin
   result := false;
   resultLen := Base64uriToBinLength(len);
   if resultLen <> 0 then
-  begin
-    FastNewRawByteString(bin, resultLen);
-    result := Base64AnyDecode(ConvertBase64UriToBin, sp, pointer(bin), len);
-  end;
+    result := Base64AnyDecode(ConvertBase64UriToBin, sp,
+      FastNewRawByteString(bin, resultLen), len);
   if not result then
     bin := '';
 end;
@@ -7490,8 +7464,8 @@ begin
   if (B32Len > 0) and
      ((B32Len and 7) = 0) then
   begin
-    FastNewRawByteString(result, (B32Len shr 3) * 5);
-    p := Base32Decode(@ConvertBase32ToBin, B32, pointer(result), B32Len);
+    p := Base32Decode(@ConvertBase32ToBin, B32,
+      FastNewRawByteString(result, (B32Len shr 3) * 5), B32Len);
     if p <> nil then
     begin
       FakeLength(result, p - pointer(result));
@@ -7684,8 +7658,8 @@ var
     if (boundary <> '') and
        (boundary[1] = '"') then
       TrimChars(boundary, 1, 1); // "boundary" -> boundary
-    Make(['--', boundary, '--'#13#10], endBoundary);
-    boundary := Make(['--', boundary, #13#10]);
+    Join(['--', boundary, '--'#13#10], endBoundary);
+    boundary := Join(['--', boundary, #13#10]);
     result := true;
   end;
 
@@ -8295,7 +8269,7 @@ function IncludeTrailingUriDelimiter(const URI: RawByteString): RawByteString;
 begin
   if (URI <> '') and
      (Uri[length(URI)] <> '/') then
-    result := URI + '/'
+    Join([URI, '/'], RawUtf8(result))
   else
     result := URI;
 end;
@@ -8383,8 +8357,7 @@ begin
     // decode value content
     if len <> 0 then
     begin
-      FastSetString(Value, len);
-      V := pointer(Value);
+      V := FastSetString(Value, len);
       U := Beg;
       repeat
         if (U^ = '%') and
@@ -8454,8 +8427,7 @@ begin
   if len = 0 then
     exit;
   // decode name content
-  FastSetString(Name, len);
-  V := pointer(Name);
+  V := FastSetString(Name, len);
   U := Beg;
   repeat
     if (U^ = '%') and
@@ -8713,15 +8685,16 @@ end;
 { *********** Basic MIME Content Types Support }
 
 const
-  MIME_MAGIC: array[0..18] of cardinal = (
+  MIME_MAGIC: array[0 .. 19] of cardinal = (
      $04034b50 + 1, $46445025 + 1, $21726152 + 1, $afbc7a37 + 1,
      $694c5153 + 1, $75b22630 + 1, $9ac6cdd7 + 1, $474e5089 + 1,
      $38464947 + 1, $46464f77 + 1, $a3df451a + 1, $002a4949 + 1,
      $2a004d4d + 1, $2b004d4d + 1, $46464952 + 1, $e011cfd0 + 1,
-     $5367674f + 1, $1c000000 + 1, $4d434944 + 1);
+     $5367674f + 1, $1c000000 + 1, $4d434944 + 1, $fd2fb528 + 1);
   MIME_MAGIC_TYPE: array[0..high(MIME_MAGIC)] of TMimeType = (
      mtZip, mtPdf, mtRar, mt7z, mtSQlite3, mtWma, mtWmv, mtPng, mtGif, mtFont,
-     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4, mtDicom);
+     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4,
+     mtDicom, mtZstd);
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8936,7 +8909,7 @@ begin
 end;
 
 const
-  MIME_COMPRESSED: array[0..38] of cardinal = ( // may use SSE2
+  MIME_COMPRESSED: array[0..39] of cardinal = ( // may use SSE2
     $04034b50, // 'application/zip' = 50 4B 03 04
     $474e5089, // 'image/png' = 89 50 4E 47 0D 0A 1A 0A
     $e0ffd8ff, $e1ffd8ff, // 'image/jpeg' FF D8 FF E0/E1
@@ -8965,7 +8938,8 @@ const
     $b7010000, $ba010000, // mpeg = 00 00 01 Bx
     $cececece, // jceks = CE CE CE CE
     $dbeeabed, // .rpm package file
-    $e011cfd0); // msi = D0 CF 11 E0 A1 B1 1A E1
+    $e011cfd0, // msi = D0 CF 11 E0 A1 B1 1A E1
+    $fd2fb528); // Zstandard frame
 
 function IsContentCompressed(Content: pointer; Len: PtrInt): boolean;
 begin
@@ -9006,10 +8980,9 @@ const
     'SVG',
     'X-ICO',
     nil);
-  _CONTENT_APP: array[0..4] of PUtf8Char = (
+  _CONTENT_APP: array[0..3] of PUtf8Char = (
     'JSON',
     'JAVASCRIPT',
-    'VND.API+JSON',
     'XML',
     nil);
 
@@ -9018,10 +8991,19 @@ begin
   case IdemPPChar(ContentType, @_CONTENT) of
     0: // text/*
       result := true;
-    1: // image/*
+    1: // image/[svg/x-ico]
       result := IdemPPChar(ContentType + 6, @_CONTENT_IMG) >= 0;
-    2: // application/*
-      result := IdemPPChar(ContentType + 12, @_CONTENT_APP) >= 0;
+    2: // application/[json/javascript/xml]
+      begin
+        result := true;
+        inc(ContentType, 12);
+        if IdemPPChar(ContentType, @_CONTENT_APP) >= 0 then
+          exit;
+        // detect e.g. application/atom+xml or application/vnd.api+json
+        ContentType := PosChar(ContentType, '+');
+        result := (ContentType <> nil) and
+                  (IdemPPChar(ContentType + 1, @_CONTENT_APP) >= 0);
+      end
   else
     result := false;
   end;
@@ -9370,7 +9352,7 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(itemname, result);
   if itemcount > 1 then
-    AppendShortChar('s', @result);
+    AppendShortCharSafe('s', @result);
 end;
 
 function EscapeBuffer(s: PAnsiChar; slen: integer;
@@ -11578,7 +11560,7 @@ begin
   for e := succ(low(e)) to high(e) do
   begin
     LowerCaseSelf(EMOJI_TEXT[e]);
-    EMOJI_TAG[e] := ':' + EMOJI_TEXT[e] + ':';
+    Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
     SetLength(EMOJI_UTF8[e], 4); // order matches U+1F600 to U+1F64F codepoints
     Ucs4ToUtf8(ord(e) + $1f5ff, pointer(EMOJI_UTF8[e]));
   end;

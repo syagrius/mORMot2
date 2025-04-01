@@ -146,13 +146,14 @@ end;
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
   i: PtrInt;
+  R: PByteArray;
 begin
   if Len > 0 then
     if IsAnsiCompatibleW(P, Len) then
     begin
-      FastSetString(res, Len);
+      R := FastSetString(res, Len);
       for i := 0 to Len - 1 do
-        PByteArray(res)[i] := PWordArray(P)[i]; // fast direct conversion
+        R[i] := PWordArray(P)[i]; // fast direct conversion
     end
     else
       DoWin32PWideCharToUtf8(P, Len, res); // use RTL UnicodeToUtf8()
@@ -296,7 +297,7 @@ function LibraryResolve(Lib: TLibHandle; ProcName: PAnsiChar): pointer;
 
 function LibraryError: string;
 begin
-  result := IntToStr(GetLastError); // enough for basic troubleshouting
+  result := WinLastError('LoadLibrary');
 end;
 
 procedure FileTimeToInt64(const FT: TFileTime; out I64: Int64);
@@ -1947,9 +1948,12 @@ type
     ContextRecord: pointer;
   end;
 
-var
-  AddVectoredExceptionHandler: function(FirstHandler: cardinal;
-    VectoredHandler: pointer): PtrInt; stdcall;
+var // to register SynLogVectoredHandler once
+  AddVectoredExceptionHandlerCalled: boolean;
+  // RemoveVectoredContinueHandler() is available under 64 bit editions only
+
+function AddVectoredExceptionHandler(FirstHandler: cardinal;
+  VectoredHandler: pointer): PtrInt; stdcall; external kernel32;
 
 function SynLogVectoredHandler(ExceptionInfo: PExceptionInfo): PtrInt; stdcall;
 const
@@ -2037,12 +2041,6 @@ var
   // PROCESS_QUERY_INFORMATION (XP) / PROCESS_QUERY_LIMITED_INFORMATION (Vista+)
   OpenProcessAccess: DWord;
 
-  // late-binding of Windows API entries not available on XP
-  GetSystemTimes: function(
-    var lpIdleTime, lpKernelTime, lpUserTime: TFileTime): BOOL; stdcall;
-  GetProcessTimes: function(hProcess: THandle;
-    var lpCreationTime, lpExitTime, lpKernelTime,
-        lpUserTime: TFileTime): BOOL; stdcall;
   // Vista+/WS2008+ (use GetModuleFileNameEx on XP)
   QueryFullProcessImageNameW: function(hProcess: THandle; dwFlags: DWord;
     lpExeName: PWideChar; lpdwSize: PDWord): BOOL; stdcall;
@@ -2221,9 +2219,15 @@ type
   end;
 
 const
-  TH32CS_SNAPPROCESS  = $00000002;
-  TH32CS_SNAPTHREAD = $00000004;
+  TH32CS_SNAPPROCESS = $00000002;
+  TH32CS_SNAPTHREAD  = $00000004;
 
+// direct Windows API defitions if not available on some compiler revisions
+function GetSystemTimes(var lpIdleTime, lpKernelTime, lpUserTime: TFileTime): BOOL;
+  stdcall; external kernel32;
+function GetProcessTimes(hProcess: THandle;
+    var lpCreationTime, lpExitTime, lpKernelTime, lpUserTime: TFileTime): BOOL;
+  stdcall; external kernel32;
 function AttachConsole(pid: cardinal): BOOL;
   stdcall; external kernel32;
 function GetConsoleWindow: HWND;
@@ -2279,8 +2283,7 @@ function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean
 var
   ftidl, ftkrn, ftusr: TFileTime;
 begin
-  result := Assigned(GetSystemTimes) and
-            GetSystemTimes(ftidl, ftkrn, ftusr);
+  result := GetSystemTimes(ftidl, ftkrn, ftusr);
   if not result then
     exit;
   FileTimeToInt64(ftidl, IdleTime);
@@ -2307,8 +2310,7 @@ var
   mem: TProcessMemoryCounters;
 begin
   result := false;
-  if (not Assigned(GetProcessTimes)) or
-     (not DelayedGetProcessMemoryInfo) then
+  if not DelayedGetProcessMemoryInfo then
     exit;
   h := OpenProcess(OpenProcessAccess, false, PID);
   if h = 0 then
@@ -2347,7 +2349,7 @@ type
     ullAvailExtendedVirtual: QWord;
   end;
 
-// information about the system's current usage of both physical and virtual memory
+// Windows system's current usage of both physical and virtual memory
 function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
   stdcall; external kernel32;
 
@@ -2368,18 +2370,16 @@ var
 begin
   QueryPerformanceCounter(u.Lo); // e.h3 xored with raw timestamps
   e.i[6] := e.i[6] xor u.Lo;
-  if Assigned(GetProcessTimes) then
-    GetProcessTimes(GetCurrentProcess, ft.p, ft.e, ft.krn, ft.usr);
+  GetProcessTimes(GetCurrentProcess, ft.p, ft.e, ft.krn, ft.usr);
   DefaultHasher128(@e.h0, @ft, SizeOf(ft)); // maybe AesNiHash128
   mem.cb := SizeOf(mem);
   if Assigned(GetProcessMemoryInfo) then // may have been delayed
-    if GetProcessMemoryInfo(GetCurrentProcess, mem, SizeOf(mem)) then
-      DefaultHasher128(@e.h1, @mem, SizeOf(mem));
+    GetProcessMemoryInfo(GetCurrentProcess, mem, SizeOf(mem));
+  DefaultHasher128(@e.h1, @mem, SizeOf(mem));
   memst.dwLength := SizeOf(memst);
-  if GlobalMemoryStatusEx(memst) then
-    DefaultHasher128(@e.h2, @memst, SizeOf(memst));
-  if Assigned(GetSystemTimes) then
-    GetSystemTimes(ft.usr, ft.p, ft.e);
+  GlobalMemoryStatusEx(memst);
+  DefaultHasher128(@e.h2, @memst, SizeOf(memst));
+  GetSystemTimes(ft.usr, ft.p, ft.e);
   DefaultHasher128(@e.h3, @ft, SizeOf(ft));
   for i := 0 to high(e.r) do
   begin
@@ -2414,10 +2414,8 @@ end;
 function TProcessInfo.Init: boolean;
 begin
   FillCharFast(self, SizeOf(self), 0);
-  // no monitoring API available under oldest Windows
-  result := Assigned(GetSystemTimes) and
-            Assigned(GetProcessTimes) and
-            DelayedGetProcessMemoryInfo;
+  // no monitoring API available under oldest Windows (need at least XP SP1)
+  result := DelayedGetProcessMemoryInfo;
 end;
 
 function TProcessInfo.Start: boolean;
@@ -2425,8 +2423,7 @@ var
   ftidl, ftkrn, ftusr: TFileTime;
   sidl, skrn, susr: Int64;
 begin
-  result := Assigned(GetSystemTimes) and
-            GetSystemTimes(ftidl, ftkrn, ftusr);
+  result := GetSystemTimes(ftidl, ftkrn, ftusr);
   if not result then
     exit;
   FileTimeToInt64(ftidl, sidl);
@@ -2499,6 +2496,46 @@ begin
     Idle   := 100 - Kernel - User; // ensure sum is always 100%
     result := true;
   end;
+end;
+
+type
+  // emulate sysinfo() Linux syscall on Windows
+  TSysInfo = packed record
+    uptime: cardinal;                    // Seconds since boot
+    loads: array[0 .. 1] of cardinal;    // User and Kernel current percent
+    totalram: cardinal;                  // Total usable main memory size
+    freeram: cardinal;                   // Available memory size
+    totalswap: cardinal;                 // Total swap space size
+    freeswap: cardinal;                  // swap space still available
+    mem_unit: cardinal;                  // Memory unit size in bytes
+  end;
+
+function RetrieveSysInfo(var si: TSysInfo): boolean;
+var
+  global: TMemoryStatusEx;
+  I, K, U, S: Int64;
+begin
+  FillCharFast(si, SizeOf(si), 0);
+  si.uptime := GetUptimeSec;
+  if RetrieveSystemTimes(i, k, u) then
+  begin
+    dec(K, I); // raw KernelTime includes IdleTime with GetSystemTimes() WinAPI
+    S := I + K + U;
+    if S <> 0 then
+    begin
+      si.loads[0] := ((U * 100) shl 16) div S;
+      si.loads[1] := ((K * 100) shl 16) div S;
+    end;
+  end;
+  global.dwLength := SizeOf(global);
+  result := GlobalMemoryStatusEx(global);
+  if not result then
+    exit;
+  si.totalram  := global.ullTotalPhys shr 12;
+  si.freeram   := global.ullAvailPhys shr 12;
+  si.totalswap := global.ullTotalPageFile shr 12;
+  si.freeswap  := global.ullAvailPageFile shr 12;
+  si.mem_unit := 1 shl 12; // 4096
 end;
 
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
@@ -5376,10 +5413,6 @@ begin
   if not Assigned(GetSystemTimePreciseAsFileTime) then
     GetSystemTimePreciseAsFileTime := @GetSystemTimeAsFileTime;
   CreateSymbolicLinkW := GetProcAddress(h, 'CreateSymbolicLinkW'); // Vista+
-  {$ifdef WITH_VECTOREXCEPT}
-  AddVectoredExceptionHandler :=
-    GetProcAddress(h, 'AddVectoredExceptionHandler');
-  {$endif WITH_VECTOREXCEPT}
   QueryPerformanceFrequency(PInt64(@_QueryPerformanceFrequency)^);
   if _QueryPerformanceFrequency = 0 then
     raise Exception.Create('QueryPerformanceFrequency=0'); // paranoid
@@ -5407,11 +5440,9 @@ begin
     ((machine = IMAGE_FILE_MACHINE_I386) or
      (machine = IMAGE_FILE_MACHINE_AMD64));
     {$endif CPUINTEL}
-  GetSystemTimes := GetProcAddress(h, 'GetSystemTimes');
-  GetProcessTimes := GetProcAddress(h, 'GetProcessTimes');
-  QueryFullProcessImageNameW := GetProcAddress(h, 'QueryFullProcessImageNameW');
+  QueryFullProcessImageNameW := GetProcAddress(h, 'QueryFullProcessImageNameW'); // Vista+
   GetLogicalProcessorInformation := GetProcAddress(h, 'GetLogicalProcessorInformation');
-  InitializeSRWLock := GetProcAddress(h, 'InitializeSRWLock');
+  InitializeSRWLock       := GetProcAddress(h, 'InitializeSRWLock'); // Vista+
   AcquireSRWLockExclusive := GetProcAddress(h, 'AcquireSRWLockExclusive');
   ReleaseSRWLockExclusive := GetProcAddress(h, 'ReleaseSRWLockExclusive');
   if not Assigned(InitializeSRWLock) or
@@ -5429,6 +5460,7 @@ begin
     GetNativeSystemInfo(SystemInfo)
   else
     Windows.GetSystemInfo(SystemInfo);
+  crc32c128(@StartupRandom, @SystemInfo, SizeOf(SystemInfo));
   GetMem(P, 10); // ensure that using MIN_PTR_VALUE won't break anything
   if (PtrUInt(P) > MIN_PTR_VALUE) and
      (PtrUInt(SystemInfo.lpMinimumApplicationAddress) <= MIN_PTR_VALUE) then
@@ -5438,8 +5470,10 @@ begin
   mem.dwLength := SizeOf(mem);
   if GlobalMemoryStatusEx(mem) then
     SystemMemorySize := mem.ullTotalPhys;
+  crc32c128(@StartupRandom, @mem, SizeOf(mem));
   OSVersionInfo.dwOSVersionInfoSize := SizeOf(OSVersionInfo);
   GetVersionEx(OSVersionInfo);
+  crc32c128(@StartupRandom, @OSVersionInfo, SizeOf(OSVersionInfo));
   Vers := wUnknown;
   with OSVersionInfo do
     // see https://msdn.microsoft.com/en-us/library/windows/desktop/ms724833
@@ -5584,6 +5618,7 @@ begin
     siz := SizeOf(proc[0]) * length(proc);
     if GetLogicalProcessorInformation(proc[0], @siz) then
     begin
+      crc32c128(@StartupRandom, pointer(proc), siz);
       for i := 0 to (siz div SizeOf(proc[0])) - 1 do
         with proc[i] do
           case Relationship of

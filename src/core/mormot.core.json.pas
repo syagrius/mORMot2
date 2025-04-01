@@ -4441,7 +4441,7 @@ begin
             break;
           end
           else
-            objPath := objPath + objName + '.';
+            Append(objPath, objName, '.');
         until false;
       end;
     until PropPath = nil;
@@ -4780,8 +4780,7 @@ begin
     // direct allocation if no JSON escape is needed
     Lp := length(aPrefix);
     Ls := length(aSuffix);
-    FastSetString(result, PLen + Lp + Ls + 2);
-    D := pointer(result); // we checked dest result <> source P above
+    D := FastSetString(result, PLen + Lp + Ls + 2);
     if Lp > 0 then
     begin
       MoveFast(pointer(aPrefix)^, D^, Lp);
@@ -6366,7 +6365,7 @@ begin
         twJsonEscape:
           AddJsonEscape(PUtf8Char(P), 0); // faster with no Len
         twOnSameLine:
-          AddOnSameLine(PUtf8Char(P), Len);
+          AddOnSameLine(PUtf8Char(P), 0); // faster with no Len
       end;
     CP_RAWBYTESTRING: // direct write of RawByteString content as UTF-8
       Add(PUtf8Char(P), Len, Escape);
@@ -7392,7 +7391,14 @@ begin
       AddW(pointer(V^.VPWideChar), StrLenW(V^.VPWideChar), Escape);
     vtAnsiString:
       if V^.VAnsiString <> nil then // expect RawUtf8
-        Add(V^.VAnsiString, PStrLen(PAnsiChar(V^.VAnsiString) - _STRLEN)^, Escape);
+        case Escape of
+          twNone:
+            AddNoJsonEscape(V^.VAnsiString, PStrLen(PAnsiChar(V^.VAnsiString) - _STRLEN)^);
+          twJsonEscape:
+            AddJsonEscape(V^.VAnsiString, 0); // faster with no len
+          twOnSameLine:
+            AddOnSameLine(V^.VAnsiString); // faster with no len
+        end;
     vtWideString:
       if V^.VWideString <> nil then
         AddW(V^.VWideString, length(WideString(V^.VWideString)), Escape);
@@ -8906,7 +8912,7 @@ function JsonDecode(P: PUtf8Char; Names: PPUtf8CharArray; NamesCount: integer;
 var
   v: PValuePUtf8Char;
   name: PUtf8Char;
-  namelen, i: integer;
+  i: integer;
   info: TGetJsonField;
 begin
   result := nil;
@@ -8924,7 +8930,7 @@ begin
       inc(P);
   info.Json := P + 1; // jump {
   repeat
-    name := GetJsonPropName(info.Json, @namelen);
+    name := GetJsonPropName(info.Json);
     if name = nil then
       exit;  // invalid Json content
     info.GetJsonFieldOrObjectOrArray(HandleValuesAsObjectOrArray);
@@ -8936,7 +8942,7 @@ begin
          (StrIComp(Names[i], name) = 0) then // properly inlined
       begin
         v^.Text := info.Value;
-        v^.Len := info.ValueLen;
+        v^.Len  := info.ValueLen;
         break;
       end
       else
@@ -11431,7 +11437,7 @@ begin
     end
   else
     // Value is a number or null/true/false: no TJsonWriter needed
-    Make(['{"', Name, '":', SQLValue, '}'], result);
+    Join(['{"', Name, '":', SQLValue, '}'], result);
 end;
 
 procedure SaveJson(const Value; TypeInfo: PRttiInfo; Options: TTextWriterOptions;

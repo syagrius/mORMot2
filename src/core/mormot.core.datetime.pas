@@ -260,7 +260,7 @@ function TimeToIso8601PChar(Time: TDateTime; P: PUtf8Char; Expanded: boolean;
 // ISO-8601 parsing if possible
 function VariantToDateTime(const V: Variant; var Value: TDateTime): boolean;
 
-/// decode most used TimeZone text values (CEST, GMT, +0200, -0800...)
+/// decode most used HTML TimeZone text values (CEST, GMT, +0200, -0800...)
 // - on match, returns true and the time zone minutes offset in respect to UTC
 // - if P is not a time zone, returns false and leave Zone to its supplied value
 // - will recognize only the most used text values using a fixed table (RFC 822
@@ -268,9 +268,34 @@ function VariantToDateTime(const V: Variant; var Value: TDateTime): boolean;
 // numerical zones is the preferred way in recent RFC anyway
 function ParseTimeZone(var P: PUtf8Char; var Zone: integer): boolean; overload;
 
-/// decode most used TimeZone text values (CEST, GMT, +0200, -0800...)
+/// decode most used HTML TimeZone text values (CEST, GMT, +0200, -0800...)
 // - just a wrapper around overloaded ParseTimeZone(PUtf8Char)
 function ParseTimeZone(const s: RawUtf8; var Zone: integer): boolean; overload;
+
+const
+  /// three-chars abbreviation of all week days, starting at Sunday = index 1
+  HTML_WEEK_DAYS: array[1..7] of string[3] = (
+    'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat');
+
+  /// three-chars abbreviation of all month names, starting at January = index 1
+  HTML_MONTH_NAMES: array[1..12] of string[3] = (
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+
+  /// all month names full text, starting at January = index 1
+  MONTH_NAMES: array[1..12] of RawUtF8 = (
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December');
 
 /// decode a month from its RFC 822 text value (Jan, Feb...)
 function ParseMonth(var P: PUtF8Char; var Month: word): boolean; overload;
@@ -298,7 +323,6 @@ procedure LogToTextFile(Msg: RawUtf8);
 // - date and time format used is 'YYYYMMDD hh:mm:ss'
 function AppendToTextFile(const aLine: RawUtf8; const aFileName: TFileName;
   aMaxSize: Int64 = MAXLOGSIZE; aUtcTimeStamp: boolean = false): boolean;
-
 
 var
   /// custom TTimeLog date to ready to be displayed text function
@@ -530,10 +554,12 @@ type
     /// copy Year/Month/DayOfWeek/Day fields to a TSynDate
     procedure ToSynDate(out date: TSynDate);
       {$ifdef HASINLINE}inline;{$endif}
-    /// convert the stored time into a timestamped local file name
+    /// convert the stored date and time into a timestamped local file name
     // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits,
     // expecting a date > 1999 (a current date would be fine)
     procedure ToFileShort(out result: TShort16);
+    /// convert the stored date and time into e.g. '19 Mar 2025, 13:56:52'
+    procedure ToHuman(var Text: RawUtf8);
     /// fill the DayOfWeek field from the stored Year/Month/Day
     // - by default, most methods will just store 0 in the DayOfWeek field
     // - sunday is DayOfWeek 1, saturday is 7
@@ -571,6 +597,10 @@ function TryEncodeTime(Hour, Min, Sec, MSec: cardinal; out Time: TDateTime): boo
   {$ifdef HASINLINE} inline; {$endif}
 
 /// our own faster version of the corresponding RTL function
+// - returns 0 if TryEncodeDate/TryEncodeTime failed
+function EncodeDateTime(Year, Month, Day, Hour, Min, Sec, MSec: cardinal): TDateTime;
+
+/// our own faster version of the corresponding RTL function
 function IsLeapYear(Year: cardinal): boolean;
 
 /// compute how many days there are in a given month
@@ -584,6 +614,9 @@ function DaysInMonth(Date: TDateTime): cardinal; overload;
 function NowToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' ';
   UtcDate: boolean = false): RawUtf8;
 
+/// retrieve the current local Date, e.g. as '19 Mar 2025, 13:56:52'
+function NowToHuman(UtcDate: boolean = false; WithMS: boolean = false): RawUtf8;
+
 /// retrieve the current UTC Date, in the ISO 8601 layout, but expanded and
 // ready to be displayed
 function NowUtcToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' '): RawUtf8;
@@ -594,6 +627,9 @@ function NowTextDateShort(UtcDate: boolean = false): TShort15;
 
 /// convert a TUnixTime date into '19 Sep 2023' English-readable text
 function UnixTimeToTextDateShort(Date: TUnixTime): TShort15;
+
+/// convert a TDateTime date into '19 Sep 2023' English-readable text
+function DateToTextDateShort(Date: TDateTime): TShort15;
 
 /// convert some date/time to the ISO 8601 text layout, including milliseconds
 // - i.e. 'YYYY-MM-DD hh:mm:ss.sssZ' or 'YYYYMMDD hhmmss.sssZ' format
@@ -704,7 +740,7 @@ const
   UNIXTIMEMS_MINIMAL = QWord(UNIXTIME_MINIMAL) * MSecsPerSec;
 
 /// returns UnixTimeUtc - UNIXTIME_MINIMAL so has no "Year 2038" overflow issue
-function UnixTimeMinimalUtc: cardinal;
+function UnixTimeMinimalUtc: TUnixTimeMinimal;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a second-based c-encoded time as TDateTime
@@ -1187,7 +1223,7 @@ begin
     begin
       inc(P);
       dec(L);
-    end; // allow YYYY-MM-DD
+    end; // allow YYYY-MM-DD and YYYY/MM/DD
     d := 1;
     if L >= 6 then
     begin
@@ -1200,7 +1236,7 @@ begin
       begin
         inc(P);
         dec(L);
-      end; // allow YYYY-MM-DD
+      end; // allow YYYY-MM-DD and YYYY/MM/DD
       if L >= 8 then
       begin
         // YYYYMMDD
@@ -1521,10 +1557,7 @@ begin
   if Date = 0 then
     result := ''
   else
-  begin
-    FastSetString(result, 10);
-    DateToIso8601PChar(Date, pointer(result), true);
-  end;
+    DateToIso8601PChar(Date, FastSetString(result, 10), true);
 end;
 
 function TimeToIso8601PChar(Time: TDateTime; P: PUtf8Char; Expanded: boolean;
@@ -1587,15 +1620,15 @@ end;
 function DateToIso8601(Date: TDateTime; Expanded: boolean): RawUtf8;
 // use YYYYMMDD / YYYY-MM-DD date format
 begin
-  FastSetString(result, 8 + 2 * integer(Expanded));
-  DateToIso8601PChar(Date, pointer(result), Expanded);
+  DateToIso8601PChar(Date,
+    FastSetString(result, 8 + 2 * integer(Expanded)), Expanded);
 end;
 
 function DateToIso8601(Y, M, D: cardinal; Expanded: boolean): RawUtf8;
 // use 'YYYYMMDD' format if not Expanded, 'YYYY-MM-DD' format if Expanded
 begin
-  FastSetString(result, 8 + 2 * integer(Expanded));
-  DateToIso8601PChar(pointer(result), Expanded, Y, M, D);
+  DateToIso8601PChar(
+    FastSetString(result, 8 + 2 * integer(Expanded)), Expanded, Y, M, D);
 end;
 
 function TimeToIso8601(Time: TDateTime; Expanded: boolean;
@@ -1737,13 +1770,6 @@ const
     -5, -6, -6, -7, -7, -8, -8, -9, -9,
     -10, -10, -10, -10, -11, -12, -12);
 
-  HTML_WEEK_DAYS: array[1..7] of string[3] = (
-    'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat');
-
-  HTML_MONTH_NAMES: array[1..12] of string[3] = (
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
-
   HTML_MONTH_NAMES_32: array[0..11] of array[0..3] of AnsiChar = (
     'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
     'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC');
@@ -1862,8 +1888,8 @@ begin
   if (aFileName = '') or
      (aLine = '') then
     exit;
-  FormatUtf8(CRLF + '% %',
-    [NowToString(true, ' ', aUtcTimeStamp), TrimControlChars(aLine)], line);
+  Join([
+    NowToString(true, ' ', aUtcTimeStamp), ' ', TrimControlChars(aLine)], line);
   AppendToTextFileSafe.Lock;
   try
     AppendToFile(line, aFileName, aMaxSize);
@@ -1989,6 +2015,17 @@ begin
   d := Hour * MilliSecsPerHour + Min * MilliSecsPerMin + Sec * MilliSecsPerSec + MSec;
   Time := d / MSecsPerDay;
   result := true;
+end;
+
+function EncodeDateTime(Year, Month, Day, Hour, Min, Sec, MSec: cardinal): TDateTime;
+var
+  time: TDateTime;
+begin
+  if TryEncodeDate(Year, Month, Day, result) and
+     TryEncodeTime(Hour, Min, Sec, MSec, time) then
+    result := result + time
+  else
+    result := 0;
 end;
 
 
@@ -2679,6 +2716,14 @@ begin
   PWord(@result[11])^ := tab[Second];
 end;
 
+procedure TSynSystemTime.ToHuman(var Text: RawUtf8);
+begin
+  FormatUtf8('% % %, %:%:%', [
+    SmallUInt32Utf8[Day], HTML_MONTH_NAMES[Month], UInt4DigitsToShort(Year),
+    UInt2DigitsToShortFast(Hour), UInt2DigitsToShortFast(Minute),
+    UInt2DigitsToShortFast(Second)], Text);
+end;
+
 procedure TSynSystemTime.ComputeDayOfWeek;
 begin
   PSynDate(@self)^.ComputeDayOfWeek; // first 4 fields do match
@@ -2757,6 +2802,14 @@ begin
   result := bits.Text(Expanded, FirstTimeChar);
 end;
 
+function NowToHuman(UtcDate, WithMS: boolean): RawUtf8;
+var
+  T: TSynSystemTime;
+begin
+  T.FromNow(not UtcDate);
+  T.ToHuman(result);
+end;
+
 function NowUtcToString(Expanded: boolean; FirstTimeChar: AnsiChar): RawUtf8;
 begin
   result := NowToString(Expanded, FirstTimeChar, {UTC=}true);
@@ -2775,6 +2828,14 @@ var
   T: TSynSystemTime;
 begin
   T.FromUnixTime(Date);
+  T.ToTextDateShort(result);
+end;
+
+function DateToTextDateShort(Date: TDateTime): TShort15;
+var
+  T: TSynSystemTime;
+begin
+  T.FromDate(Date);
   T.ToTextDateShort(result);
 end;
 
@@ -2999,7 +3060,7 @@ end;
 
 { ************ TUnixTime / TUnixMSTime POSIX Epoch Compatible 64-bit date/time }
 
-function UnixTimeMinimalUtc: cardinal;
+function UnixTimeMinimalUtc: TUnixTimeMinimal;
 begin
   result := UnixTimeUtc - UNIXTIME_MINIMAL;
 end;

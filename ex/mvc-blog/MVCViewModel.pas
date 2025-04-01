@@ -21,6 +21,7 @@ uses
   mormot.core.base,
   mormot.core.data,
   mormot.core.text,
+  mormot.core.datetime,
   mormot.core.json,
   mormot.core.variants,
   mormot.core.os,
@@ -103,8 +104,11 @@ type
     procedure MonthToText(const Value: variant; out result: variant);
     procedure TagToText(const Value: variant; out result: variant);
   public
-    procedure Start(aServer: TRest); reintroduce;
+    procedure Start(aServer: TRest; const aTemplatesFolder: TFileName); reintroduce;
+    property HasFts: boolean
+      read fHasFts write fHasFts;
   public
+    // IBlogApplication methods - one per URI and its associated view
     procedure Default(
       var Scope: variant);
     procedure ArticleView(
@@ -135,8 +139,6 @@ type
     function ArticleCommit(
       ID: TID;
       const Title, Content: RawUtf8): TMvcAction;
-    property HasFts: boolean
-      read fHasFts write fHasFts;
   end;
 
 
@@ -152,7 +154,7 @@ resourcestring
 
 { TBlogApplication }
 
-procedure TBlogApplication.Start(aServer: TRest);
+procedure TBlogApplication.Start(aServer: TRest; const aTemplatesFolder: TFileName);
 begin
   fDefaultData := TLockedDocVariant.Create;
   inherited Start(aServer, TypeInfo(IBlogApplication));
@@ -160,7 +162,7 @@ begin
   // TRestOrmServer(TRestServer(aServer).Server).StaticVirtualTable[TOrmArticle]=nil;
   fTagsLookup.Init(RestModel.Orm);
   // publish IBlogApplication using Mustache Views (TMvcRunOnRestServer default)
-  fMainRunner := TMvcRunOnRestServer.Create(Self).
+  fMainRunner := TMvcRunOnRestServer.Create(self, aTemplatesFolder).
     SetCache('Default', cacheRootIfNoSession, 15).
     SetCache('ArticleView', cacheWithParametersIfNoSession, 60).
     SetCache('AuthorView', cacheWithParametersIgnoringSession, 60);
@@ -173,7 +175,8 @@ begin
     RegisterExpressionHelpers(['MonthToText'], [MonthToText]).
     RegisterExpressionHelpers(['TagToText'],   [TagToText]);
   // data setup
-  ComputeMinimalData;
+  if not RestModel.Orm.TableHasRows(TOrmArticle) then
+    ComputeMinimalData;
   aServer.Orm.Cache.SetCache(TOrmAuthor);
   aServer.Orm.Cache.SetCache(TOrmArticle);
   aServer.Orm.Cache.SetCache(TOrmComment);
@@ -188,26 +191,15 @@ begin
 end;
 
 procedure TBlogApplication.MonthToText(const Value: variant; out result: variant);
-const
-  MONTHS: array[0..11] of RawUtf8 = (
-    'January',
-    'February',
-    'March',
-    'April',
-    'May',
-    'June',
-    'July',
-    'August',
-    'September',
-    'October',
-    'November',
-    'December');
 var
-  month: integer;
+  m, y: integer;
 begin
-  if VariantToInteger(Value, month) and
-     (month > 0) then
-    RawUtf8ToVariant(MONTHS[month mod 12] + ' ' + UInt32ToUTF8(month div 12), result)
+  if VariantToInteger(Value, m) and
+     (m > 0) then
+  begin
+    y := m div 12;
+    RawUtf8ToVariant(Make([MONTH_NAMES[m - y * 12 + 1], ' ', y]), result);
+  end
   else
     SetVariantNull(result);
 end;

@@ -288,13 +288,13 @@ type
   RawUcs4 = array of Ucs4CodePoint;
 
   {$ifdef CPU64}
-  HalfInt = integer;
+  HalfInt  = integer;
   HalfUInt = cardinal;
   {$else}
   /// a CPU-dependent signed integer type cast of half a pointer
-  HalfInt = smallint;
+  HalfInt  = SmallInt;
   /// a CPU-dependent unsigned integer type cast of half a pointer
-  HalfUInt = word;
+  HalfUInt = Word;
   {$endif CPU64}
   /// a CPU-dependent signed integer type cast of a pointer to half a pointer
   PHalfInt = ^HalfInt;
@@ -799,7 +799,8 @@ procedure FastSetString(var s: RawUtf8; p: pointer; len: PtrInt); overload;
   {$ifndef HASCODEPAGE} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// faster equivalence to SetString(s,nil,len) function
-procedure FastSetString(var s: RawUtf8; len: PtrInt); overload;
+// - returns the allocated pointer(s) value
+function FastSetString(var s: RawUtf8; len: PtrInt): pointer; overload;
   {$ifndef HASCODEPAGE} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// equivalence to SetString(s,pansichar,len) function but from a raw pointer
@@ -814,7 +815,7 @@ procedure FastSynUnicode(var s: SynUnicode; p: pointer; len: PtrInt);
 
 /// equivalence to SetString(s,nil,len) function to allocate a new RawByteString
 // - faster especially under FPC
-procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
+function FastNewRawByteString(var s: RawByteString; len: PtrInt): pointer;
   {$ifndef HASCODEPAGE} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// equivalence to SetString(s,pansichar,len) function with a specific code page
@@ -910,6 +911,12 @@ procedure GetMemAligned(var holder: RawByteString; fillwith: pointer; len: PtrUI
 function UniqueRawUtf8(var u: RawUtf8): pointer;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// concatenate several string arguments into an UTF-8 string
+function Join(const Args: array of RawByteString): RawUtf8; overload;
+
+/// concatenate several string arguments into an UTF-8 string
+procedure Join(const Args: array of RawByteString; var Text: RawUtf8); overload;
+
 /// direct conversion of an ANSI-7 ShortString into an AnsiString
 // - can be used e.g. for names retrieved from RTTI to convert them into RawUtf8
 function ShortStringToAnsi7String(const source: ShortString): RawByteString; overload;
@@ -938,6 +945,11 @@ procedure AppendShortQWord(const value: QWord; var dest: ShortString);
 // - will emit 0, 2 or 4 decimals in the output text (e.g. '1', '1.23', '1.2345')
 procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
   fixeddecimals: PtrInt = 0);
+
+/// simple concatenation of a character into a @shorstring, checking its length
+// - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
+procedure AppendShortCharSafe(chr: AnsiChar; dest: PAnsiChar; const max: AnsiChar = #255);
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// simple concatenation of a character into a @shorstring
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
@@ -1775,9 +1787,9 @@ function FastSearchInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
 function AddSortedInt64(var Values: TInt64DynArray; var Count: integer;
   Value: Int64): PtrInt;
 
-/// remove all values smaller or equal than MinValue in a sorted array of Int64
+/// remove all Values[] < MinAllowedValue in a sorted array of Int64
 procedure RemoveSortedInt64SmallerThan(var Values: TInt64DynArray;
-  var Count: integer; MinValue: Int64);
+  var Count: integer; MinAllowedValue: Int64);
 
 /// add an integer value in a sorted dynamic array of integers
 // - returns the index where the Value was added successfully in Values[]
@@ -3835,7 +3847,7 @@ function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): intege
   {$ifndef CPUINTEL} inline; {$endif}
 
 /// compress a data content using the SynLZ algorithm
-// - as expected by THttpSocket.RegisterCompress
+// - as expected by THttpClientSocket/THttpServerGeneric.RegisterCompress
 // - will return 'synlz' as ACCEPT-ENCODING: header parameter
 // - will store a hash of both compressed and uncompressed stream: if the
 // data is corrupted during transmission, will instantly return ''
@@ -4314,6 +4326,10 @@ type
     /// reset the internal DataString content and the current position
     procedure Clear;
       {$ifdef HASINLINE}inline;{$endif}
+    /// will ensure that the DataString storage is a RawUtf8 with CP_UTF8
+    // - is called e.g. from TTextWriter.FlushFinal
+    procedure EnsureDataStringIsUtf8;
+      {$ifdef HASINLINE}inline;{$endif}
     /// direct low-level access to the internal RawByteString storage
     property DataString: RawByteString
       read fDataString write fDataString;
@@ -4454,6 +4470,17 @@ type
   /// pointer to a dynamic array of ORM primary keys, i.e. TOrm.ID
   PIDDynArray = ^TIDDynArray;
 
+  /// identify a JavaScript-compatible integer with up to 53-bit of resolution
+  // - numbers above MAX_SAFE_JS_INTEGER (53-bit) would be rounded as double
+  // in JavaScript, so this type is used to identify such values in our code
+  Int53 = type Int64;
+  /// a pointer to a Int53 value, i.e. 64-bit integer <= MAX_SAFE_JS_INTEGER
+  PInt53 = ^Int53;
+  /// used to store a dynamic array of Int53 values
+  TInt53DynArray = array of Int53;
+  /// pointer to a dynamic array of Int53 values
+  PInt53DynArray = ^TInt53DynArray;
+
   /// timestamp stored as second-based Unix Time
   // - see Unix Time helper functions and types in mormot.core.datetime
   // - i.e. the number of seconds since 1970-01-01 00:00:00 UTC
@@ -4470,6 +4497,11 @@ type
   /// dynamic array of timestamps stored as second-based Unix Time
   TUnixTimeDynArray = array of TUnixTime;
 
+  /// 32-bit seconds, as returnd by mormot.core.datetime. UnixTimeMinimalUtc
+  TUnixTimeMinimal = type cardinal;
+  /// pointer to a timestamp stored as 32-bit seconds
+  PUnixTimeMinimal = ^TUnixTimeMinimal;
+
   /// timestamp stored as millisecond-based Unix Time
   // - see Unix Time helper functions and types in mormot.core.datetime
   // - i.e. the number of milliseconds since 1970-01-01 00:00:00 UTC
@@ -4484,6 +4516,9 @@ type
   TUnixMSTimeDynArray = array of TUnixMSTime;
 
 const
+  /// maximum number stored in a JavaScript-compatible Int53 value
+  MAX_SAFE_JS_INTEGER  = (Int64(1) shl 53) - 1;
+
   /// may be used to log as Trace or Warning event, depending on an Error: boolean
   LOG_TRACEWARNING: array[boolean] of TSynLogLevel = (
     sllTrace,
@@ -4977,15 +5012,13 @@ begin
     FastAssignNewNotVoid(s, r);
 end;
 
-procedure FastSetString(var s: RawUtf8; len: PtrInt);
-var
-  r: pointer;
+function FastSetString(var s: RawUtf8; len: PtrInt): pointer;
 begin
-  r := FastNewString(len, CP_UTF8);
+  result := FastNewString(len, CP_UTF8);
   if pointer(s) = nil then
-    pointer(s) := r
+    pointer(s) := result
   else
-    FastAssignNewNotVoid(s, r);
+    FastAssignNewNotVoid(s, result);
 end;
 
 procedure FastSetRawByteString(var s: RawByteString; p: pointer; len: PtrInt);
@@ -5002,15 +5035,13 @@ begin
     FastAssignNewNotVoid(s, r);
 end;
 
-procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
-var
-  r: pointer;
+function FastNewRawByteString(var s: RawByteString; len: PtrInt): pointer;
 begin
-  r := FastNewString(len);
+  result := FastNewString(len);
   if pointer(s) = nil then
-    pointer(s) := r
+    pointer(s) := result
   else
-    FastAssignNewNotVoid(s, r);
+    FastAssignNewNotVoid(s, result);
 end;
 
 {$ifdef HASVARUSTRING}
@@ -5046,8 +5077,7 @@ procedure GetMemAligned(var holder: RawByteString; fillwith: pointer;
   len: PtrUInt; out aligned: pointer; alignment: PtrUInt);
 begin
   dec(alignment); // expected to be a power of two
-  FastNewRawByteString(holder, len + alignment);
-  aligned := pointer(holder);
+  aligned := FastNewRawByteString(holder, len + alignment);
   while PtrUInt(aligned) and alignment <> 0 do
     inc(PByte(aligned));
   if fillwith <> nil then
@@ -5097,6 +5127,34 @@ begin
   result := @u[1];
 end;
 
+function Join(const Args: array of RawByteString): RawUtf8;
+begin
+  Join(Args, result);
+end;
+
+procedure Join(const Args: array of RawByteString; var Text: RawUtf8);
+var
+  l, i: PtrInt;
+  p: PUtf8Char;
+begin
+  if high(Args) = 0 then
+  begin
+    text := Args[0];
+    EnsureRawUtf8(text);
+    exit;
+  end;
+  l := 0;
+  for i := 0 to high(Args) do
+    inc(l, length(Args[i]));
+  p := FastSetString(Text, l);
+  for i := 0 to high(Args) do
+  begin
+    l := length(Args[i]);
+    MoveFast(pointer(Args[i])^, p^, l);
+    inc(p, l);
+  end;
+end;
+
 function ShortStringToAnsi7String(const source: ShortString): RawByteString;
 begin
   FastSetString(RawUtf8(result), @source[1], ord(source[0]));
@@ -5112,10 +5170,16 @@ begin
   SetString(result, PAnsiChar(pointer(source)), length(source));
 end;
 
+procedure AppendShortCharSafe(chr: AnsiChar; dest: PAnsiChar; const max: AnsiChar);
+begin
+  if dest[0] = max then
+    exit;
+  inc(dest[0]);
+  dest[ord(dest[0])] := chr;
+end;
+
 procedure AppendShortChar(chr: AnsiChar; dest: PAnsiChar);
 begin
-  if dest[0] = #255 then
-    exit;
   inc(dest[0]);
   dest[ord(dest[0])] := chr;
 end;
@@ -7659,38 +7723,41 @@ var
   L {$ifndef CPUX86}, ll, rr{$endif CPUX86}: PtrInt;
   cmp: integer;
 begin
-  if R < 0 then
-    result := 0
+  if R >= 0 then
+    if Value < P[R] then
+    begin
+      L := 0;
+      repeat
+        result := (L + R) shr 1;
+        cmp := P^[result] - Value;
+        if cmp = 0 then
+        begin
+          result := -result - 1; // return -(foundindex+1) if already exists
+          exit;
+        end;
+        {$ifdef CPUX86}   // less registers on good old i386 target
+        if cmp < 0 then
+          L := result + 1
+        else
+          R := result - 1;
+        {$else}
+        rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
+        ll := result - 1;
+        if cmp < 0 then
+          L := rr
+        else
+          R := ll;
+        {$endif CPUX86}
+      until L > R;
+      while (result >= 0) and
+            (P^[result] > Value) do
+        dec(result);
+      inc(result); // return the index where to insert
+    end
+    else
+      result := R + 1 // common case when the new value is bigger than others
   else
-  begin
-    L := 0;
-    repeat
-      result := (L + R) shr 1;
-      cmp := P^[result] - Value;
-      if cmp = 0 then
-      begin
-        result := -result - 1; // return -(foundindex+1) if already exists
-        exit;
-      end;
-      {$ifdef CPUX86}   // less registers on good old i386 target
-      if cmp < 0 then
-        L := result + 1
-      else
-        R := result - 1;
-      {$else}
-      rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
-      ll := result - 1;
-      if cmp < 0 then
-        L := rr
-      else
-        R := ll;
-      {$endif CPUX86}
-    until L > R;
-    while (result >= 0) and
-          (P^[result] >= Value) do
-      dec(result);
-    inc(result); // return the index where to insert
-  end;
+    result := 0;
 end;
 
 function FastSearchIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
@@ -7723,7 +7790,7 @@ begin
         R := result - 1;
     until L > R;
     while (result >= 0) and
-          (P^[result] >= Value) do
+          (P^[result] > Value) do
       dec(result);
     inc(result); // return the index where to insert
   end;
@@ -7733,42 +7800,45 @@ function FastLocateInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
 var
   L, cmp {$ifndef CPUX86}, ll, rr{$endif CPUX86}: PtrInt;
 begin
-  if R < 0 then
-    result := 0
+  if R >= 0 then
+    if Value < P[R] then
+    begin
+      L := 0;
+      repeat
+        result := (L + R) shr 1;
+        {$ifdef CPU32}
+        cmp := CompareInt64(P^[result], Value);
+        {$else}
+        cmp :=  P^[result] - Value;
+        {$endif CPU32}
+        if cmp = 0 then
+        begin
+          result := -result - 1; // return -(foundindex+1) if already exists
+          exit;
+        end;
+        {$ifdef CPUX86}   // less registers on good old i386 target
+        if cmp < 0 then
+          L := result + 1
+        else
+          R := result - 1;
+        {$else}
+        rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
+        ll := result - 1;
+        if cmp < 0 then
+          L := rr
+        else
+          R := ll;
+        {$endif CPUX86}
+      until L > R;
+      while (result >= 0) and
+            (P^[result] > Value) do
+        dec(result);
+      inc(result); // return the index where to insert
+    end
+    else
+      result := R + 1 // common case when the new value is bigger than others
   else
-  begin
-    L := 0;
-    repeat
-      result := (L + R) shr 1;
-      {$ifdef CPU32}
-      cmp := CompareInt64(P^[result], Value);
-      {$else}
-      cmp :=  P^[result] - Value;
-      {$endif CPU32}
-      if cmp = 0 then
-      begin
-        result := -result - 1; // return -(foundindex+1) if already exists
-        exit;
-      end;
-      {$ifdef CPUX86}   // less registers on good old i386 target
-      if cmp < 0 then
-        L := result + 1
-      else
-        R := result - 1;
-      {$else}
-      rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
-      ll := result - 1;
-      if cmp < 0 then
-        L := rr
-      else
-        R := ll;
-      {$endif CPUX86}
-    until L > R;
-    while (result >= 0) and
-          (P^[result] >= Value) do
-      dec(result);
-    inc(result); // return the index where to insert
-  end;
+    result := 0;
 end;
 
 function FastSearchInt64Sorted(P: PInt64Array; R: PtrInt; Value: Int64): PtrInt;
@@ -7787,25 +7857,25 @@ begin
   if Count = Length(Values) then
     SetLength(Values, NextGrow(Count));
   if result < Count then
-    MoveFast(Values[result], Values[result + 1], (Count - result) * SizeOf(Int64))
-  else
-    result := Count;
+    MoveFast(Values[result], Values[result + 1], (Count - result) * SizeOf(Int64));
   Values[result] := Value;
   inc(Count);
 end;
 
 procedure RemoveSortedInt64SmallerThan(var Values: TInt64DynArray;
-  var Count: integer; MinValue: Int64);
+  var Count: integer; MinAllowedValue: Int64);
 var
   lastok: integer;
 begin
   if (Count = 0) or
-     (Values[0] > MinValue) then
+     (Values[0] >= MinAllowedValue) then
     exit; // nothing to remove
-  lastok := FastSearchInt64Sorted(pointer(Values), Count - 1, MinValue);
+  lastok := FastSearchInt64Sorted(pointer(Values), Count - 1, MinAllowedValue);
   dec(Count, lastok);
-  if Count <> 0 then
-    MoveFast(Values[lastok], Values[0], lastok * SizeOf(Int64));
+  if Count = 0 then
+    Finalize(Values)
+  else
+    MoveFast(Values[lastok], Values[0], Count * SizeOf(Int64));
 end;
 
 function AddSortedInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
@@ -11820,22 +11890,25 @@ procedure crc32c128(hash: PHash128; buf: PAnsiChar; len: cardinal);
 var
   blocks: cardinal;
 begin
+  if len = 0 then
+    exit;
   blocks := len shr 4; // from bytes to blocks
   if blocks <> 0 then
   begin
     crcblocks(pointer(hash), pointer(buf), blocks);
     blocks := blocks shl 4; // from blocks to bytes
-    inc(buf, blocks);
     dec(len, blocks);
+    if len = 0 then
+      exit;
+    inc(buf, blocks);
   end;
-  if len <> 0 then
-    with PHash128Rec(hash)^ do
-    begin
-      c0 := crc32c(c0, buf, len);
-      c1 := crc32c(c1, buf, len);
-      c2 := crc32c(c2, buf, len);
-      c3 := crc32c(c3, buf, len);
-    end;
+  with PHash128Rec(hash)^ do
+  begin
+    c0 := crc32c(c0, buf, len);
+    c1 := crc32c(c1, buf, len);
+    c2 := crc32c(c2, buf, len);
+    c3 := crc32c(c3, buf, len);
+  end;
 end;
 
 function crc16(Data: PAnsiChar; Len: integer): cardinal;
@@ -12667,17 +12740,17 @@ end;
 
 function SortDynArraySmallint(const A, B): integer;
 begin
-  result := smallint(A) - smallint(B);
+  result := SmallInt(A) - SmallInt(B);
 end;
 
 function SortDynArrayShortint(const A, B): integer;
 begin
-  result := shortint(A) - shortint(B);
+  result := ShortInt(A) - ShortInt(B);
 end;
 
 function SortDynArrayWord(const A, B): integer;
 begin
-  result := word(A) - word(B);
+  result := Word(A) - Word(B);
 end;
 
 function SortDynArrayExtended(const A, B): integer;
@@ -13028,10 +13101,15 @@ begin
   end;
 end;
 
+procedure TRawByteStringStream.EnsureDataStringIsUtf8;
+begin
+  EnsureRawUtf8(fDataString);
+end;
+
 procedure TRawByteStringStream.Clear;
 begin
   fPosition := 0;
-  fDataString := '';
+  FastAssignNew(fDataString);
 end;
 
 
