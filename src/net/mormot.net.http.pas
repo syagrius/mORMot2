@@ -2727,7 +2727,7 @@ end;
 
 function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean;
 var
-  up: array[byte] of AnsiChar;
+  up: TByteToAnsiChar;
 begin
   result := false;
   if (Name = '') or
@@ -2874,33 +2874,6 @@ begin
       ord('b') + ord('o') shl 8 + ord('t') shl 16:
         result := true;
     end;
-  end;
-end;
-
-function HttpChunkToHex32(p: PAnsiChar): integer;
-var
-  v0, v1: byte;
-begin
-  // note: chunk is not regular two-chars-per-byte hexa since may have odd len
-  result := 0;
-  if p <> nil then
-  begin
-    while p^ = ' ' do
-      inc(p); // trim left
-    repeat
-      v0 := ConvertHexToBin[p[0]];
-      if v0 = 255 then
-        break; // not in '0'..'9','a'..'f' -> trim right
-      v1 := ConvertHexToBin[p[1]];
-      inc(p);
-      if v1 = 255 then
-      begin
-        result := (result shl 4) or v0; // odd number of hexa chars input
-        break;
-      end;
-      result := (result shl 8) or (integer(v0) shl 4) or v1;
-      inc(p);
-    until false;
   end;
 end;
 
@@ -3698,7 +3671,7 @@ begin
       hrsGetBodyChunkedHexNext:
         if ProcessParseLine(st) then
         begin
-          fContentLeft := HttpChunkToHex32(PAnsiChar(st.Line));
+          fContentLeft := ParseHex0x(PAnsiChar(st.Line), {noOx=}true);
           if fContentLeft <> 0 then
           begin
             if ContentStream = nil then
@@ -4262,16 +4235,16 @@ begin
     repeat // chunks decoding loop
       if SockIn <> nil then
       begin
-        readln(SockIn^, chunkline); // use of a static PChar is faster
+        readln(SockIn^, chunkline); // use of a static PChar is convenient
         err := ioresult;
         if err <> 0 then
           EHttpSocket.RaiseUtf8('%.GetBody chunked ioresult=%', [self, err]);
-        len32 := HttpChunkToHex32(chunkline); // get chunk length in hexa
+        len32 := ParseHex0x(chunkline, {noOx=}true); // hexa chunk length
       end
       else
       begin
         SockRecvLn(line);
-        len32 := HttpChunkToHex32(pointer(line)); // get chunk length in hexa
+        len32 := ParseHex0x(pointer(line), {noOx=}true); // hexa chunk length
       end;
       if len32 = 0 then
       begin

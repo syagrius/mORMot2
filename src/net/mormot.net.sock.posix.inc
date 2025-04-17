@@ -108,7 +108,7 @@ const
 
 type
   /// a socket is always cint = 32-bit integer sized on POSIX
-  // - we extend it to PtrInt for our TNetSocketWrap cast
+  // - but we use PtrInt on POSIX to cast it as TNetSocket = ^PNetSocketWrap
   TSocket = PtrInt;
 
   PSockAddrIn6 = ^sockaddr_in6;
@@ -747,7 +747,7 @@ type
     sdl_nlen: byte;      // interface name length, no trailing 0 required
     sdl_alen: byte;      // link level address length
     sdl_slen: byte;      // link layer selector length
-    sdl_data: array[byte] of byte; // interface name + link level address
+    sdl_data: TByteToByte; // interface name + link level address
   end;
   {$else}
   psockaddr_ll = ^sockaddr_ll;
@@ -758,7 +758,7 @@ type
     sll_hatype: word;
     sll_pkttype: byte;
     sll_halen: byte;
-    sll_addr: array[byte] of byte;
+    sll_addr: TByteToByte;
   end;
   {$endif OSBSDDARWIN}
 

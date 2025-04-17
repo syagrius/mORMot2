@@ -118,14 +118,14 @@ var
   // - 1 = JSON_ESCAPE_ENDINGZERO indicates #0 (end of string)
   // - 2 = JSON_ESCAPE_UNICODEHEX should be escaped as \u00xx
   // - b,t,n,f,r,\," as escaped character for #8,#9,#10,#12,#13,\,"
-  JSON_ESCAPE: array[byte] of byte;
+  JSON_ESCAPE: TByteToByte;
 
   /// 256-byte lookup table for fast branchless JSON text un-escaping
   // - #0 = JSON_UNESCAPE_UNEXPECTED for unexpected #0 or control char
   // - #1 = JSON_UNESCAPE_UTF16 for '\u0123' UTF-16 pattern
   // - #8,#9,#10,#12,#13 as unescaped char from b,t,n,f,r
   // - other characters are litterals and should be written as such
-  JSON_UNESCAPE: array[AnsiChar] of AnsiChar;
+  JSON_UNESCAPE: TAnsiCharToAnsiChar;
 
   /// how many initial chars of a JSON array are parsed for intial capacity
   // - used e.g. by _JL_DynArray() and TDocVariantData.InitJsonInPlace()
@@ -4298,7 +4298,7 @@ function JsonObjectItem(P: PUtf8Char; PropName: PUtf8Char; PropNameLen: PtrInt;
   PropNameFound: PRawUtf8): PUtf8Char;
 var
   name: ShortString; // no memory allocation nor P^ modification
-  PropNameUpper: array[byte] of AnsiChar;
+  PropNameUpper: TByteToAnsiChar;
   parser: TJsonGotoEndParser;
 begin
   if P <> nil then
@@ -6325,7 +6325,7 @@ begin // a dedicated method using a TSynAnsiFixedWidth lookup table
       JSON_ESCAPE_UNICODEHEX: // characters below ' ', #7 e.g. -> \u0007
         begin
           PCardinal(W.B + 1)^ := JSON_UHEXC;
-          PCardinal(W.B + 5)^ := TwoDigitsHexWB[P^];
+          PCardinal(W.B + 5)^ := TwoDigitsHex[P^];
           inc(W.B, 6);
         end;
     else // escaped as \ + b,t,n,f,r,\,"
@@ -7071,7 +7071,7 @@ noesc:
         begin
           PCardinal(B + 1)^ := JSON_UHEXC;
           inc(B, 4);
-          PCardinal(B + 1)^ := TwoDigitsHexWB[c^];
+          PCardinal(B + 1)^ := TwoDigitsHex[c^];
         end;
     else
       // escaped as \ + b,t,n,f,r,\,"
@@ -7282,7 +7282,7 @@ nxt:if Len = 0 then
     if (Len < 0) or
        (c = 0) then
       break;
-    tab := @TwoDigitsHexWBLower;
+    tab := @TwoDigitsHexLower;
     if c <= $ffff then
       Utf16ToJsonUnicodeEscape(B, c, tab)
     else
@@ -10530,12 +10530,12 @@ begin
   result := 0; // not used in TRttiJson.ValueCompare / fCompare[]
 end;
 
-procedure TPersistentCopyObject(Dest, Source: TObject);
+procedure CopyTPersistent(Dest, Source: TObject);
 begin
   TPersistent(Dest).Assign(TPersistent(Source)); // works e.g. for TStrings
 end;
 
-procedure TCollectionCopyObject(Dest, Source: TObject);
+procedure CopyTCollection(Dest, Source: TObject);
 begin
   CopyCollection(TCollection(Source), TCollection(Dest)); // inversed order
 end;
@@ -10591,11 +10591,11 @@ begin
   case fCache.ValueRtlClass of
     vcPersistent:
       if fProps.CountNonVoid = 0 then // use TPersistent.Assign() if no props
-        fCopyObject := @TPersistentCopyObject;
+        fCopyObject := @CopyTPersistent;
     vcStrings:
       begin
         new := @_New_Strings; // call non-virtual TStrings.Create
-        fCopyObject := @TPersistentCopyObject;
+        fCopyObject := @CopyTPersistent;
         fJsonSave := @_JS_TStrings;
         fJsonLoad := @_JL_TStrings;
       end;
@@ -10614,7 +10614,7 @@ begin
       begin
         if @new = @_New_Object then
           new := @_New_Collection; // no TInterfacedCollection above
-        fCopyObject := @TCollectionCopyObject;
+        fCopyObject := @CopyTCollection;
         fJsonSave := @_JS_TCollection;
         fJsonLoad := @_JL_TCollection;
       end;
@@ -10636,8 +10636,7 @@ begin
     vcObjectWithID: // also accepts "RowID" field in JSON input
       fJsonLoad := @_JL_RttiObjectWithID;
     vcClonable:
-      if fProps.CountNonVoid = 0 then // TClonable.AssignTo() if no props
-        fCopyObject := @CopyClonable;
+      fCopyObject := @CopyTClonable; // always use TClonable.AssignTo()
   end;
   fCache.NewInstance := @new;
 end;

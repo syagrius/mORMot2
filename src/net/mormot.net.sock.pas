@@ -338,8 +338,10 @@ type
     // - i.e. check if it is likely to be accept Send() and Recv() calls
     // - calls WaitFor(neRead) then Recv() to check e.g. WSACONNRESET on Windows
     function Available(loerr: system.PInteger = nil): boolean;
+    /// call shutdown() on this socket - may be used to simulate a disconnection
+    procedure RawShutdown;
     /// finalize a socket, calling Close after shutdown() if needed
-    function ShutdownAndClose(rdwr: boolean): TNetResult;
+    function ShutdownAndClose(rdwr: boolean; waitms: integer = 0): TNetResult;
     /// close the socket - consider ShutdownAndClose() for clean closing
     function Close: TNetResult;
     /// access to the raw socket handle, i.e. @self
@@ -383,6 +385,9 @@ function NetLastError(AnotherNonFatal: integer = NO_ERROR;
 
 /// internal low-level function retrieving the latest socket error message
 function NetLastErrorMsg(AnotherNonFatal: integer = NO_ERROR): ShortString;
+
+/// internal low-level function using known operating system error
+function NetErrorFromSystem(SystemError, AnotherNonFatal: integer): TNetResult;
 
 /// create a new Socket connected or bound to a given ip:port
 function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
@@ -1415,7 +1420,7 @@ type
   EWinIocp = class(ExceptionWithProps);
 
   /// define the events TWinIocp can monitor
-  // - all wieCustom* events are user-triggered events via EnqueueCustom()
+  // - all wieCustom* events are user-triggered events via TWinIocp.Enqueue()
   TWinIocpEvent = (
     wieRecv,
     wieSend,
@@ -1424,8 +1429,7 @@ type
     wieCustom1,
     wieCustom2,
     wieCustom3,
-    wieCustom4,
-    wieCustom5);
+    wieCustom4);
 
   /// opaque pointer to one TWinIocp.Subscribe state
   PWinIocpSubscription = ^TWinIocpSubscription;
@@ -1441,7 +1445,7 @@ type
     /// return the TNetSocket associated with a Subscribe() call
     function Socket: TNetSocket;
     /// check the overlapped status of a Subscribe() call
-    function CurrentStatus: TPollSocketEvents;
+    function CurrentStatus(event: TWinIocpEvent): TPollSocketEvents;
   end;
 
   /// allow to customize TWinIocp process
@@ -1483,7 +1487,8 @@ type
     function Subscribe(socket: TNetSocket;
       tag: TPollSocketTag): PWinIocpSubscription;
     /// unsubscribe for events on a given socket
-    function Unsubscribe(one: PWinIocpSubscription): boolean;
+    // - will also set one := nil to avoid any dangling pointer
+    function Unsubscribe(var one: PWinIocpSubscription): boolean;
     /// notify IOCP that it needs to track the next event on this subscription
     // - typically called after socket recv/send to re-subscribe for events
     // - for wieRecv events, you should better not supply any buf/buflen to
@@ -1494,11 +1499,12 @@ type
     // will allocate one in the method)
     // - for wieConnect, you need to specify a TNetSocket (not already bound) in
     // netsock and a TNetAddr in buf/buflen
-    function PrepareNext(one: PWinIocpSubscription; event: TWinIocpEvent;
+    function PrepareNext(const ctxt: shortstring;
+      one: PWinIocpSubscription; event: TWinIocpEvent;
       buf: pointer = nil; buflen: integer = 0; netsock: TNetSocket = nil): boolean;
     /// add manually an event to the IOCP queue
     // - it won't make any actual access to a socket, just append an event to
-    // the queue, as regular wieRecv/wieSend/wieAccept/wieConnect or any wieCustom*
+    // the queue, as regular wieRecv .. wieConnect event or any wieCustom*
     function Enqueue(one: PWinIocpSubscription; event: TWinIocpEvent;
       bytes: cardinal = 0): boolean;
     /// pick a pending task from the internal queue within a specified timeout
@@ -1659,6 +1665,7 @@ function NetGetNextSpaced(var P: PUtf8Char): RawUtf8;
 function NetStartWith(p, up: PUtf8Char): boolean;
 
 /// BinToBase64() like function, to avoid linking mormot.core.buffers
+// - only used for TUri.UserPasswordBase64, so is not performance sensitive
 function NetBinToBase64(const s: RawByteString): RawUtf8;
 
 /// IsPem() like function, to avoid linking mormot.crypt.secure
@@ -2154,19 +2161,15 @@ const
     'Connect Timeout',
     'Invalid Parameter');
 
-function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetResult;
-var
-  err: integer;
+function NetErrorFromSystem(SystemError, AnotherNonFatal: integer): TNetResult;
 begin
-  err := RawSocketErrNo;
-  if Error <> nil then
-    Error^ := err;
-  case err of
+  case SystemError of
     NO_ERROR:
       result := nrOK;
     {$ifdef OSWINDOWS}
     WSAETIMEDOUT,
     WSAEWOULDBLOCK,
+    WSAIOPENDING,
     {$endif OSWINDOWS}
     WSAEINPROGRESS,
     WSATRY_AGAIN:
@@ -2184,11 +2187,21 @@ begin
     WSAECONNABORTED:
       result := nrClosed;
   else
-    if err = AnotherNonFatal then
+    if SystemError = AnotherNonFatal then
       result := nrRetry
     else
       result := nrFatalError;
   end;
+end;
+
+function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetResult;
+var
+  err: integer;
+begin
+  err := RawSocketErrNo;
+  if Error <> nil then
+    Error^ := err;
+  result := NetErrorFromSystem(err, AnotherNonFatal);
 end;
 
 function NetLastErrorMsg(AnotherNonFatal: integer): ShortString;
@@ -3252,7 +3265,7 @@ begin
   if events = [] then
     exit; // the socket seems stable with no pending input
   if neRead in events then
-    // - on Windows, may be because of WSACONNRESET (nrClosed)
+    // - on Windows, may be WSACONNRESET (nrClosed), with recv() returning 0
     // - on POSIX, may be ESysEINPROGRESS (nrRetry) just after connect
     // - no need to MakeAsync: recv() should not block after neRead
     // - may be [neRead, neClosed] on gracefully closed HTTP/1.0 response
@@ -3263,7 +3276,13 @@ begin
   result := false; // e.g. neError or neClosed with no neRead
 end;
 
-function TNetSocketWrap.ShutdownAndClose(rdwr: boolean): TNetResult;
+procedure TNetSocketWrap.RawShutdown;
+begin
+  if @self <> nil then
+    shutdown(TSocket(@self), SHUT_RDWR);
+end;
+
+function TNetSocketWrap.ShutdownAndClose(rdwr: boolean; waitms: integer): TNetResult;
 const
   SHUT_: array[boolean] of integer = (
     SHUT_RD, SHUT_RDWR);
@@ -3277,7 +3296,13 @@ begin
     if rdwr then
     {$endif OSLINUX}
       shutdown(TSocket(@self), SHUT_[rdwr]);
-    result := Close;
+    {$ifdef OSWINDOWS}
+    if waitms <> 0 then
+      // try to close the socket as documented by Microsoft (with rdwr=true)
+      // - documented pattern is: shutdown(SD_SEND) + recv()=0 + closesocket
+      WaitFor(waitms, [neRead, neError]); // typically neRead = WSACONNRESET
+    {$endif OSWINDOWS}
+    result := Close; // eventual closesocket()
   end;
 end;
 
@@ -3796,9 +3821,9 @@ begin
       with addr[i] do
         if Address <> '' then
         begin
-          w := Join([w, Name, '=', Address, ' ']);
+          w := Join([{%H-}w, Name, '=', Address, ' ']);
           if Kind <> makSoftware then
-            wo := Join([wo, Address, ' ']);
+            wo := Join([{%H-}wo, Address, ' ']);
         end;
     FakeLength(w, length(w) - 1); // trim ending spaces
     FakeLength(wo, length(wo) - 1);

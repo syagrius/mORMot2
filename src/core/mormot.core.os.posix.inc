@@ -2024,11 +2024,6 @@ procedure AllocConsole;
 begin
 end;
 
-function HasConsole: boolean;
-begin
-  result := true;
-end;
-
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   TextAttr: integer = -1; // always change the color at startup
@@ -2767,7 +2762,7 @@ function kenv(action: integer; name, value: PAnsiChar; len: integer): integer;
 
 function GetSmbEfiMem: RawByteString;
 var
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
   xaddr: PtrUInt;
 begin
   result := '';
@@ -2803,7 +2798,7 @@ const
 procedure _DirectSmbiosInfo(out info: TSmbiosBasicInfos);
 var
   i: PtrInt;
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
 begin
   for i := 0 to high(_KNOWN) do
     with _KNOWN[i] do
@@ -3136,8 +3131,7 @@ begin
        (e.d_name[0] in ['1'..'9']) then
     begin
       pid := GetCardinal(@e.d_name[0]);
-      if (pid <> 0) and
-         IsValidPid(pid) then
+      if IsValidPid(pid) then
         AddInteger(TIntegerDynArray(result), n, pid);
     end;
   until false;
@@ -3205,11 +3199,11 @@ begin
   result[0] := #0;
   if SysInfo(@si) <> 0 then // one syscall is faster than /proc/loadavg access
     exit;
-  AppendShort(TwoDigits(si.loads[0] / 65536.0), result);
+  AppendShort(TwoDigits(si.loads[0] / double(65536.0)), result);
   AppendShortChar(' ', @result);
-  AppendShort(TwoDigits(si.loads[1] / 65536.0), result);
+  AppendShort(TwoDigits(si.loads[1] / double(65536.0)), result);
   AppendShortChar(' ', @result);
-  AppendShort(TwoDigits(si.loads[2] / 65536.0), result);
+  AppendShort(TwoDigits(si.loads[2] / double(65536.0)), result);
 end; // we didn't use AppendShortCurr64() because of expected rounding
 
 function RetrieveSysInfo(var si: TSysInfo): boolean;
@@ -3601,7 +3595,7 @@ begin
     exit;
   fn := mnt;
   //writeln('GetDiskInfo=',GetDiskInfo(fn, av, fr, tot));
-  //writeln('fs=',fs,' mnt=',fn,' typ=',typ, ' av=',_oskb(av),' fr=',_oskb(fr),' tot=',_oskb(tot));
+  //writeln('fs=',fs,' mnt=',fn,' typ=',typ, ' av=',KB(av),' fr=',KB(fr),' tot=',KB(tot));
   if not (GetDiskInfo(fn, av, fr, tot)) or
      (tot < 1 shl 20) then
     exit;
@@ -4747,8 +4741,8 @@ begin
   if CpuCacheSize = 0 then
     CpuCacheSize := CpuCache[1].Size;
   if CpuCacheSize <> 0 then
-    _fmt('L1=%s L2=%s L3=%s', [_oskb(CpuCache[1].Size),
-      _oskb(CpuCache[2].Size), _oskb(CpuCache[3].Size)], CpuCacheText);
+    _fmt('L1=%s L2=%s L3=%s', [KBNoSpace(CpuCache[1].Size),
+      KBNoSpace(CpuCache[2].Size), KBNoSpace(CpuCache[3].Size)], CpuCacheText);
   SystemMemorySize := fpsysctlhwint(HW_MEMSIZE);
   {$else}
   SystemMemorySize := fpsysctlhwint(HW_PHYSMEM);
@@ -4893,7 +4887,7 @@ begin
   {$endif OSBSDDARWIN}
   SystemInfo.dwPageSize := getpagesize; // call libc API
   if CpuCacheSize <> 0 then
-    _fmt('[%s]', [_oskb(CpuCacheSize)], CpuInfoText);
+    _fmt('[%s]', [KBNoSpace(CpuCacheSize)], CpuInfoText);
   if CpuSockets = 0 then
     CpuSockets := 1;
   if fpuname(uts) < 0 then

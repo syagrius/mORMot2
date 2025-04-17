@@ -392,6 +392,9 @@ const
   /// the maximum known RID value of S-1-5-21-xx-xx-xx-RID patterns
   WKR_RID_MAX = 584;
 
+function ToText(w: TWellKnownSid): PShortString; overload;
+function ToText(w: TWellKnownRid): PShortString; overload;
+
 
 { ****************** Security Descriptor Self-Relative Binary Structures }
 
@@ -720,7 +723,7 @@ type
     // - could also generate SDDL RID placeholders, if dom binary is supplied,
     // e.g. S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
     // - could also customize UUID values, e.g. with uuid = @AppendShortKnownUuid
-    procedure AppendAsText(var s: ShortString; var sddl: TSynTempBuffer;
+    procedure AppendAsText(var s: ShortString; var sddl: TSynTempAdder;
       dom: PSid; uuid: TAppendShortUuid);
     /// decode a SDDL ACE textual representation into this (cleared) entry
     function FromText(var p: PUtf8Char; dom: PSid; uuid: TShortToUuid): TAceTextParse;
@@ -1016,10 +1019,10 @@ type
         Int: TRawAceOperandInt);
       sctOctetString: (
         OctetBytes: cardinal;
-        Octet: array[byte] of byte);
+        Octet: TByteToByte);
       sctComposite: (
         CompositeBytes: cardinal;
-        Composite: array[byte] of byte);
+        Composite: TByteToByte);
       sctSid: (
         SidBytes: cardinal;
         Sid: TSid);
@@ -1030,7 +1033,7 @@ type
       sctResourceAttribute,
       sctDeviceAttribute: (
         UnicodeBytes: cardinal;
-        Unicode: array[byte] of WideChar);
+        Unicode: TByteToWideChar);
   end;
   PRawAceOperand = ^TRawAceOperand;
 
@@ -1112,8 +1115,8 @@ type
     function AddNode(position, len: cardinal): integer;
     function ParseNextToken: integer;
     function ParseExpr: integer;
-    function AppendBinary(var bin: TSynTempBuffer; node: integer): boolean;
-    function RawAppendBinary(var bin: TSynTempBuffer;
+    function AppendBinary(var bin: TSynTempAdder; node: integer): boolean;
+    function RawAppendBinary(var bin: TSynTempAdder;
       const node: TAceTextTreeNode): boolean;
   public
     /// the associated SDDL text input storage
@@ -1308,6 +1311,8 @@ const
     'ms-DS-Allowed-To-Act-On-Behalf-Of-Other-Identity',  // kaMsDsAllowedToActOnBehalfOfOtherIdentity
     'RAS-Information');                        // kaRasInformation
 
+function ToText(a: TAdsKnownAttribute): PShortString; overload;
+
 /// search a known AD schema attribute from its ObjectID
 // - is implemented via O(log(n)) binary search within ordered ATTR_UUID[]
 // - returns kaNull if the supplied TGuid was not found
@@ -1399,7 +1404,7 @@ procedure SddlBinaryToText(tok: TSecConditionalToken; var l, r, u: RawUtf8);
 
 /// append a TSecAce.Opaque value as SDDL text form
 // - use a TAceBinaryTree for the binary to SDDL processing
-procedure SddlAppendOpaque(var s: TSynTempBuffer; const ace: TSecAce; dom: PSid);
+procedure SddlAppendOpaque(var s: TSynTempAdder; const ace: TSecAce; dom: PSid);
 
 /// parse the next conditional ACE token from its SDDL text
 // - see [MS-DTYP] 2.5.1.1 SDDL Syntax
@@ -1763,7 +1768,7 @@ type
   private
     function NextAclFromText(var p: PUtf8Char; dom: PSid; uuid: TShortToUuid;
       scope: TSecAceScope): TAceTextParse;
-    procedure AclToText(var sddl: TSynTempBuffer; dom: PSid; uuid: TAppendShortUuid;
+    procedure AclToText(var sddl: TSynTempAdder; dom: PSid; uuid: TAppendShortUuid;
       scope: TSecAceScope);
     function InternalAdd(scope: TSecAceScope; out acl: PSecAcl): PSecAce;
     function InternalAdded(scope: TSecAceScope; ace: PSecAce; acl: PSecAcl;
@@ -1819,7 +1824,7 @@ type
     // - could also generate SDDL RID placeholders, if dom binary is supplied,
     // e.g. S-1-5-21-xx-xx-xx-512 (wkrGroupAdmins) into 'DA'
     // - could also customize UUID values, e.g. with uuid = @AppendShortKnownUuid
-    procedure AppendAsText(var sddl: TSynTempBuffer; dom: PSid = nil;
+    procedure AppendAsText(var sddl: TSynTempAdder; dom: PSid = nil;
       uuid: TAppendShortUuid = nil);
     /// add one new ACE to the DACL (or SACL)
     // - SID and Mask are supplied in their regular / SDDL text form, with
@@ -2629,6 +2634,16 @@ begin
   KnownRidSid(wkr, dom, PSid(result)^);
 end;
 
+function ToText(w: TWellKnownSid): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TWellKnownSid), ord(w));
+end;
+
+function ToText(w: TWellKnownRid): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TWellKnownRid), ord(w));
+end;
+
 
 { ****************** Security Descriptor Self-Relative Binary Structures }
 
@@ -2750,6 +2765,11 @@ end;
 
 
 { ****************** Active Directory Definitions }
+
+function ToText(a: TAdsKnownAttribute): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TAdsKnownAttribute), ord(a));
+end;
 
 function UuidToKnownAttribute(const u: TGuid): TAdsKnownAttribute;
 begin
@@ -3172,7 +3192,7 @@ begin
     AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
   else if mask - samWithSddl <> [] then
   begin
-    AppendShortTwoChars('0x', @s);        // we don't have all tokens it needs
+    AppendShortTwoChars('0x', @s);        // we don't have all needed tokens
     AppendShortIntHex(cardinal(mask), s); // store as @x##### hexadecimal
   end
   else
@@ -3244,7 +3264,7 @@ begin
   result := atpSuccess;
 end;
 
-procedure SddlAppendOpaque(var s: TSynTempBuffer; const ace: TSecAce; dom: PSid);
+procedure SddlAppendOpaque(var s: TSynTempAdder; const ace: TSecAce; dom: PSid);
 var
   tree: TAceBinaryTree;
   tmp: shortstring absolute tree;
@@ -3670,11 +3690,11 @@ end;
 
 function TSecAce.ConditionalExpression(dom: PSid): RawUtf8;
 var
-  tmp: TSynTempBuffer;
+  tmp: TSynTempAdder;
 begin
-  tmp.InitOnStack;
+  tmp.Init;
   SddlAppendOpaque(tmp, self, dom);
-  tmp.Done(result, CP_UTF8);
+  tmp.Done(result);
 end;
 
 function TSecAce.ConditionalExpressionParse(
@@ -3718,7 +3738,7 @@ begin
   result := true;
 end;
 
-procedure TSecAce.AppendAsText(var s: ShortString; var sddl: TSynTempBuffer;
+procedure TSecAce.AppendAsText(var s: ShortString; var sddl: TSynTempAdder;
   dom: PSid; uuid: TAppendShortUuid);
 var
   f: TSecAceFlag;
@@ -4361,7 +4381,7 @@ begin
   result := Error;
 end;
 
-function TAceTextTree.RawAppendBinary(var bin: TSynTempBuffer;
+function TAceTextTree.RawAppendBinary(var bin: TSynTempAdder;
   const node: TAceTextTreeNode): boolean;
 
   procedure DoBytes(b: pointer; blen: PtrInt);
@@ -4387,9 +4407,9 @@ function TAceTextTree.RawAppendBinary(var bin: TSynTempBuffer;
   var
     s: PUtf8Char;
     one: TAceTextTreeNode;
-    items: TSynTempBuffer;
+    items: TSynTempAdder;
   begin
-    items.InitOnStack;
+    items.Init;
     s := p + 1; // ignore trailing '{'
     repeat
       while s^ = ' ' do
@@ -4413,8 +4433,8 @@ function TAceTextTree.RawAppendBinary(var bin: TSynTempBuffer;
         inc(s);
     until Error <> atpSuccess;
     if Error = atpSuccess then
-      DoBytes(items.buf, items.added);
-    items.Done;
+      DoBytes(items.Buffer, items.Size);
+    items.Store.Done;
   end;
 
   procedure DoSid(p: PUtf8Char);
@@ -4512,7 +4532,7 @@ begin
   end;
 end;
 
-function TAceTextTree.AppendBinary(var bin: TSynTempBuffer; node: integer): boolean;
+function TAceTextTree.AppendBinary(var bin: TSynTempAdder; node: integer): boolean;
 var
   n: ^TAceTextTreeNode;
 begin
@@ -4534,7 +4554,7 @@ end;
 function TAceTextTree.ToBinary(dom: PSid): RawByteString;
 var
   pad: PtrUInt;
-  bin: TSynTempBuffer; // no temporary allocation needed
+  bin: TSynTempAdder; // no temporary allocation needed
 begin
   result := '';
   if (Count = 0) or
@@ -4542,18 +4562,18 @@ begin
      (Root >= Count) then
     exit;
   ToBinaryDom := dom;
-  bin.InitOnStack;
+  bin.Init;
   PCardinal(bin.Add(4))^ := ACE_CONDITION_SIGNATURE;
   if AppendBinary(bin, Root) then // recursive generation
   begin
-    pad := bin.added and 3;
+    pad := bin.Size and 3;
     if pad <> 0 then
       PCardinal(bin.Add(4 - pad))^ := 0; // should be DWORD-padded with zeros
-    FastSetRawByteString(result, bin.buf, bin.added);
+    FastSetRawByteString(result, bin.Buffer, bin.Size);
   end
   else if Error = atpSuccess then
     Error := atpInvalidContent; // if no Error was specified
-  bin.Done;
+  bin.Store.Done;
   ToBinaryDom := nil;
 end;
 
@@ -4598,14 +4618,14 @@ function SecurityDescriptorToText(const sd: RawSecurityDescriptor;
   var text: RawUtf8; dom: PSid; uuid: TAppendShortUuid): boolean;
 var
   tmp: TSecurityDescriptor;
-  buf: TSynTempBuffer;
+  buf: TSynTempAdder;
 begin
   result := tmp.FromBinary(sd);
   if not result then
     exit; // returns false, and don't change the text value on rendering error
-  buf.InitOnStack;
+  buf.Init;
   tmp.AppendAsText(buf, dom, uuid);
-  buf.Done(text, CP_UTF8);
+  buf.Done(text);
 end;
 
 
@@ -4761,7 +4781,7 @@ begin
   until p^ <> '(';
 end;
 
-procedure TSecurityDescriptor.AclToText(var sddl: TSynTempBuffer;
+procedure TSecurityDescriptor.AclToText(var sddl: TSynTempAdder;
   dom: PSid; uuid: TAppendShortUuid; scope: TSecAceScope);
 var
   tmp: ShortString;
@@ -4772,9 +4792,9 @@ begin
   if SCOPE_P[scope] in Flags then
     AppendShortChar('P', @tmp);
   if SCOPE_AR[scope] in Flags then
-    AppendShortTwoChars('AR', @tmp);
+    AppendShortTwoChars(ord('A') + ord('R') shl 8, @tmp);
   if SCOPE_AI[scope] in Flags then
-    AppendShortTwoChars('AI', @tmp);
+    AppendShortTwoChars(ord('A') + ord('I') shl 8, @tmp);
   acl := @Dacl;
   if scope = sasSacl then
     acl := @Sacl;
@@ -4840,17 +4860,17 @@ function TSecurityDescriptor.ToText(const RidDomain: RawUtf8;
   uuid: TAppendShortUuid): RawUtf8;
 var
   dom: RawSid;
-  tmp: TSynTempBuffer;
+  tmp: TSynTempAdder;
 begin
   result := '';
   if not TryDomainTextToSid(RidDomain, dom) then
     exit;
-  tmp.InitOnStack;
+  tmp.Init;
   AppendAsText(tmp, pointer(dom), uuid);
-  tmp.Done(result, CP_UTF8);
+  tmp.Done(result);
 end;
 
-procedure TSecurityDescriptor.AppendAsText(var sddl: TSynTempBuffer;
+procedure TSecurityDescriptor.AppendAsText(var sddl: TSynTempAdder;
   dom: PSid; uuid: TAppendShortUuid);
 var
   tmp: ShortString;
@@ -4858,12 +4878,12 @@ begin
   tmp[0] := #0;
   if Owner <> '' then
   begin
-    tmp := 'O:';
+    AppendShortTwoChars(ord('O') + ord(':') shl 8, @tmp);
     SddlAppendSid(tmp, pointer(Owner), dom);
   end;
   if Group <> '' then
   begin
-    AppendShortTwoChars('G:', @tmp);
+    AppendShortTwoChars(ord('G') + ord(':') shl 8, @tmp);
     SddlAppendSid(tmp, pointer(Group), dom);
   end;
   sddl.AddShort(tmp);
@@ -5237,7 +5257,7 @@ end;
 function LookupSid(sid: PSid; out name, domain: RawUtf8;
   const server: RawUtf8): TSidType;
 var
-  n, d: array[byte] of WideChar;
+  n, d: TByteToWideChar;
   s: TSynTempBuffer;
   nl, dl, use: cardinal;
 begin

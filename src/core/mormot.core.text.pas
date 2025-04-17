@@ -660,7 +660,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append a GUID value, encoded as text without any {}
     // - will store e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
-    // - you can set tab = @TwoDigitsHexWBLower to force a lowercase output
+    // - you can set tab = @TwoDigitsHexLower to force a lowercase output
     procedure Add(Value: PGuid; QuotedChar: AnsiChar = #0; tab: PWordArray = nil); overload;
     /// append a floating-point Value as a String
     // - write "Infinity", "-Infinity", and "NaN" for corresponding IEEE values
@@ -1947,23 +1947,6 @@ procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean = tru
 
 { ************ Resource and Time Functions }
 
-/// convert a size to a human readable value power-of-two metric value
-// - append EB, PB, TB, GB, MB, KB or B symbol with or without preceding space
-// - for EB, PB, TB, GB, MB and KB, add one fractional digit
-procedure KB(bytes: Int64; out result: TShort16; nospace: boolean); overload;
-
-/// convert a size to a human readable value
-// - append EB, PB, TB, GB, MB, KB or B symbol with preceding space
-// - for EB, PB, TB, GB, MB and KB, add one fractional digit
-function KB(bytes: Int64): TShort16; overload;
-  {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
-
-/// convert a size to a human readable value
-// - append EB, PB, TB, GB, MB, KB or B symbol without preceding space
-// - for EB, PB, TB, GB, MB and KB, add one fractional digit
-function KBNoSpace(bytes: Int64): TShort16;
-  {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
-
 /// convert a size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol with or without preceding space
 // - for EB, PB, TB, GB, MB and KB, add one fractional digit
@@ -2027,8 +2010,8 @@ procedure NanoSecToString(Nano: QWord; out result: TShort16);
 
 /// convert "valueunit" values into x or x.xx text with up to 2 digits
 // - supplied value should be the actual unit value * 100
-procedure By100ToTwoDigitString(value: cardinal; const valueunit: ShortString;
-  var result: TShort16);
+procedure AppendShortBy100(value: cardinal; const valueunit: ShortString;
+  var result: ShortString);
 
 /// convert an integer value into its textual representation with thousands marked
 // - ThousandSep is the character used to separate thousands in numbers with
@@ -2262,14 +2245,6 @@ function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
 
 { **************** Hexadecimal Text And Binary Conversion }
 
-type
-  /// type of a lookup table used for fast two-digit chars conversion
-  TAnsiCharToWord = array[AnsiChar] of word;
-  PAnsiCharToWord = ^TAnsiCharToWord;
-  /// type of a lookup table used for fast two-digit chars conversion
-  TByteToWord = array[byte] of word;
-  PByteToWord = ^TByteToWord;
-
 var
   /// conversion table from hexa chars into 0..15 binary data
   // - returns 255 for any character out of 0..9,A..Z,a..z range
@@ -2282,13 +2257,11 @@ var
   /// fast lookup table for converting hexadecimal numbers from 0 to 15
   // into their ASCII equivalence
   // - is local for better code generation
-  TwoDigitsHex: array[byte] of array[1..2] of AnsiChar;
+  TwoDigitsHex: TByteToWord;
   TwoDigitsHexW: TAnsiCharToWord absolute TwoDigitsHex;
-  TwoDigitsHexWB: TByteToWord absolute TwoDigitsHex;
   /// lowercase hexadecimal lookup table
-  TwoDigitsHexLower: array[byte] of array[1..2] of AnsiChar;
+  TwoDigitsHexLower: TByteToWord;
   TwoDigitsHexWLower: TAnsiCharToWord absolute TwoDigitsHexLower;
-  TwoDigitsHexWBLower: TByteToWord absolute TwoDigitsHexLower;
 
 /// fast conversion from hexa chars into binary data
 // - BinBytes contain the bytes count to be converted: Hex^ must contain
@@ -2544,7 +2517,7 @@ function OctToBin(const Oct: RawUtf8): RawByteString; overload;
 // - will store e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {})
 // - this will be the format used for JSON encoding, e.g.
 // $ { "UID": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
-// - you can set tab = @TwoDigitsHexWBLower to force a lowercase output
+// - you can set tab = @TwoDigitsHexLower to force a lowercase output
 function GuidToText(P: PUtf8Char; guid: PByteArray; tab: PWordArray = nil): PUtf8Char;
 
 /// convert a TGuid into 38 chars encoded { text } as RawUtf8
@@ -2566,14 +2539,14 @@ function NotNullGuidToUtf8(
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
-// - you can set tab = @TwoDigitsHexWBLower to force a lowercase output
+// - you can set tab = @TwoDigitsHexLower to force a lowercase output
 procedure ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid;
   var text: RawUtf8; tab: PWordArray = nil); overload;
 
 /// convert one or several TGuid into 36 chars encoded CSV text
 // - will return e.g.
 // ! '3F2504E0-4F89-11D3-9A0C-0305E82C3301,C595476E-73D1-4B9C-9725-308C4A72DEC8'
-// - you can set tab = @TwoDigitsHexWBLower to force a lowercase output
+// - you can set tab = @TwoDigitsHexLower to force a lowercase output
 function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar = ',';
   tab: PWordArray = nil): RawUtf8;
 
@@ -3664,6 +3637,7 @@ procedure PRawUtf8ToCsv(v: PPUtf8Char; n: integer; const sep: RawUtf8;
 var
   len, seplen: PtrInt;
   p: PAnsiChar;
+  s: PUtf8Char;
 begin
   result := '';
   if (v = nil) or
@@ -3680,10 +3654,11 @@ begin
   if Reverse then
     v := @PPointerArray(v)[n - 1];
   repeat
-    if v^ <> nil then
+    s := v^;
+    if s <> nil then
     begin
-      len := PStrLen(v^ - _STRLEN)^;
-      MoveFast(v^^, p^, len);
+      len := PStrLen(s - _STRLEN)^;
+      MoveFast(s^, p^, len);
       inc(p, len);
     end;
     dec(n);
@@ -5304,7 +5279,7 @@ procedure TTextWriter.AddByteToHex(Value: PtrUInt);
 begin
   if B >= BEnd then
     FlushToStream;
-  PCardinal(B + 1)^ := TwoDigitsHexWB[Value];
+  PCardinal(B + 1)^ := TwoDigitsHex[Value];
   inc(B, 2);
 end;
 
@@ -5312,7 +5287,7 @@ procedure TTextWriter.AddByteToHexLower(Value: PtrUInt);
 begin
   if B >= BEnd then
     FlushToStream;
-  PCardinal(B + 1)^ := TwoDigitsHexWBLower[Value];
+  PCardinal(B + 1)^ := TwoDigitsHexLower[Value];
   inc(B, 2);
 end;
 
@@ -5904,7 +5879,7 @@ var
   c: AnsiChar;
   hex: PByteToWord; // better code generation on x86_64 and arm
 begin
-  hex := @TwoDigitsHexWB;
+  hex := @TwoDigitsHex;
   result := dest;
   if srclen > 0 then
     repeat
@@ -5951,7 +5926,7 @@ var
   c: AnsiChar;
   hex: PByteToWord; // better code generation on x86_64 and arm
 begin
-  hex := @TwoDigitsHexWB;
+  hex := @TwoDigitsHex;
   result := dest;
   if srclen > 0 then
     repeat
@@ -8459,7 +8434,10 @@ procedure PrepareTempUtf8(var Res: TTempUtf8; Len: PtrInt);
   {$ifdef FPC} inline; {$endif} // Delphi XE8 fails to inline this anyway :(
 begin
   if Len > SizeOf(Res.Temp) then // memory allocation needed
-    Res.Text := FastSetString(RawUtf8(Res.TempRawUtf8), Len) // new RawUtf8
+  begin
+    Res.TempRawUtf8 := FastNewString(Len, CP_UTF8); // new RawUtf8
+    Res.Text := Res.TempRawUtf8;
+  end
   else
     Res.Text := @Res.Temp; // use stack buffer
   Res.Len := Len;
@@ -8566,7 +8544,7 @@ begin
       varEmpty,
       varNull:
         begin
-          Res.Text := pointer(NULL_STR_VAR);
+          Res.Text := pointer(NULL_STR_VAR); // 'null' + wasString=false
           Res.Len := 4;
         end;
       varSmallint:
@@ -8590,12 +8568,12 @@ begin
       varBoolean:
         if VBoolean then
         begin
-          Res.Text := @BOOL_STR[true][1];
+          Res.Text := @BOOL_STR[true][1]; // 'false' + wasString=false
           Res.Len := 4;
         end
         else
         begin
-          Res.Text := @BOOL_STR[false][1];
+          Res.Text := @BOOL_STR[false][1]; // 'true' + wasString=false
           Res.Len := 5;
         end;
       varInteger:
@@ -8666,7 +8644,7 @@ begin
       else
       {$endif HASVARUSTRING}
       begin
-        // not recognizable vt -> seralize as JSON to handle also custom types
+        // not recognizable vt -> serialize as JSON to handle also custom types
         wasString := true;
         _VariantSaveJson(V, twJsonEscape, RawUtf8(Res.TempRawUtf8));
         Res.Text := pointer(Res.TempRawUtf8);
@@ -9537,10 +9515,9 @@ begin
        VarRecToUtf8IsString(Part[hipart], ext) then
       dec(hipart)
     else
-      LastIsExt := false;
+      ext := '';
   f.DoDelim(@Part[0], hipart + 1, false, PathDelim);
-  if LastIsExt and
-     (ext <> '') then
+  if ext <> '' then
   begin
     if ext[1] <> '.' then
       f.Add('.');
@@ -9568,6 +9545,8 @@ procedure ConsoleWrite(const Fmt: RawUtf8; const Args: array of const;
 var
   tmp: RawUtf8;
 begin
+  if not HasConsole then
+    exit;
   FormatUtf8(Fmt, Args, tmp);
   ConsoleWrite(tmp, Color, NoLineFeed);
 end;
@@ -9577,6 +9556,8 @@ procedure ConsoleWrite(const Args: array of const;
 var
   tmp: RawUtf8;
 begin
+  if not HasConsole then
+    exit;
   Make(Args, tmp);
   ConsoleWrite(tmp, Color, NoLineFeed);
 end;
@@ -9585,13 +9566,17 @@ procedure ConsoleWriteRaw(const Args: array of const; NoLineFeed: boolean);
 var
   tmp: RawUtf8;
 begin
+  if not HasConsole then
+    exit;
   Make(Args, tmp);
   ConsoleWrite(tmp, ccLightGray, NoLineFeed, {nocolor=}true);
 end;
 
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean);
 begin
-  ConsoleWrite(CRLF + 'Fatal exception ', ccLightRed, true);
+  if not HasConsole then
+    exit;
+  ConsoleWrite(CRLF + 'Fatal exception ', ccLightRed, {nolinefeed=}true);
   ConsoleWrite('%', [E], ccWhite, true);
   ConsoleWrite(' raised with message ', ccLightRed);
   ConsoleWrite('  %', [E.Message], ccLightMagenta);
@@ -9607,108 +9592,31 @@ end;
 
 { ************ Resource and Time Functions }
 
-procedure KB(bytes: Int64; out result: TShort16; nospace: boolean);
-type
-  TUnits = (kb, mb, gb, tb, pb, eb, b);
-const
-  TXT: array[{nospace:}boolean, TUnits] of RawUtf8 = (
-    (' KB', ' MB', ' GB', ' TB', ' PB', ' EB', '% B'),
-    ( 'KB',  'MB',  'GB',  'TB',  'PB',  'EB', '%B'));
-var
-  hi, rem: cardinal;
-  u: TUnits;
-begin
-  if bytes < 0 then
-  begin
-    result[0] := #0;
-    exit;
-  end;
-  if bytes < 1 shl 10 - (1 shl 10) div 10 then
-  begin
-    FormatShort16(TXT[nospace, b], [integer(bytes)], result);
-    exit;
-  end;
-  if bytes < 1 shl 20 - (1 shl 20) div 10 then
-  begin
-    u := kb;
-    rem := bytes;
-    hi  := bytes shr 10;
-  end
-  else if bytes < 1 shl 30 - (1 shl 30) div 10 then
-  begin
-    u := mb;
-    rem := bytes shr 10;
-    hi  := bytes shr 20;
-  end
-  else if bytes < Int64(1) shl 40 - (Int64(1) shl 40) div 10 then
-  begin
-    u := gb;
-    rem := bytes shr 20;
-    hi  := bytes shr 30;
-  end
-  else if bytes < Int64(1) shl 50 - (Int64(1) shl 50) div 10 then
-  begin
-    u := tb;
-    rem := bytes shr 30;
-    hi  := bytes shr 40;
-  end
-  else if bytes < Int64(1) shl 60 - (Int64(1) shl 60) div 10 then
-  begin
-    u := pb;
-    rem := bytes shr 40;
-    hi  := bytes shr 50;
-  end
-  else
-  begin
-    u := eb;
-    rem := bytes shr 50;
-    hi  := bytes shr 60;
-  end;
-  rem := rem and 1023;
-  if rem <> 0 then
-    rem := rem div 102;
-  if rem = 10 then
-  begin
-    rem := 0;
-    inc(hi); // round up as expected by (most) human beings
-  end;
-  if rem <> 0 then
-    FormatShort16('%.%%', [hi, rem, TXT[nospace, u]], result)
-  else
-    FormatShort16('%%', [hi, TXT[nospace, u]], result);
-end;
-
-function KB(bytes: Int64): TShort16;
-begin
-  KB(bytes, result, {nospace=}false);
-end;
-
-function KBNoSpace(bytes: Int64): TShort16;
-begin
-  KB(bytes, result, {nospace=}true);
-end;
-
 function KB(bytes: Int64; nospace: boolean): TShort16;
 begin
-  KB(bytes, result, nospace);
+  result[0] := #0;
+  AppendKb(bytes, result, not nospace);
 end;
 
 function KB(const buffer: RawByteString): TShort16;
 begin
-  KB(length(buffer), result, {nospace=}false);
+  result[0] := #0;
+  AppendKb(length(buffer), result, {withspace=}true);
 end;
 
 procedure KBU(bytes: Int64; var result: RawUtf8);
 var
   tmp: TShort16;
 begin
-  KB(bytes, tmp, {nospace=}false);
+  tmp[0] := #0;
+  AppendKb(bytes, tmp, {withspace=}true);
   FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
 procedure K(value: Int64; out result: TShort16);
 begin
-  KB(Value, result, {nospace=}true);
+  result[0] := #0;
+  AppendKb(value, result, {withspace=}false);
   if result[0] <> #0 then
     dec(result[0]); // just trim last 'B' ;)
 end;
@@ -9758,66 +9666,84 @@ begin
   MicroSecToString(stop - Int64(Start), result);
 end;
 
-procedure By100ToTwoDigitString(value: cardinal; const valueunit: ShortString;
-  var result: TShort16);
+procedure AppendShortBy100(value: cardinal; const valueunit: ShortString;
+  var result: ShortString);
 var
   d100: TDiv100Rec;
 begin
   if value < 100 then
-    FormatShort16('0.%%', [UInt2DigitsToShortFast(value), valueunit], result)
+  begin
+    PCardinal(PAnsiChar(@result) + ord(result[0]) + 1)^ := ord('0') + ord('.') shl 8 +
+      cardinal(TwoDigitLookupW[value]) shl 16;
+    inc(result[0], 4);
+  end
   else
   begin
     Div100(value, d100{%H-});
-    if d100.m = 0 then
-      FormatShort16('%%', [d100.d, valueunit], result)
-    else
-      FormatShort16('%.%%', [d100.d, UInt2DigitsToShortFast(d100.m), valueunit], result);
+    AppendShortCardinal(d100.d, result);
+    if d100.m <> 0 then
+    begin
+      AppendShortChar('.', @result);
+      AppendShortTwoChars(TwoDigitLookupW[d100.m], @result);
+    end;
   end;
+  AppendShort(valueunit, result)
 end;
 
-procedure _TimeToString(value: cardinal; const u: ShortString;
-  var result: TShort16);
+procedure AppendShortTime(value: cardinal; const u: ShortString;
+  var result: ShortString);
 var
   d: cardinal;
 begin
   d := value div 60;
-  FormatShort16('%%%',
-    [d, u, UInt2DigitsToShortFast(value - (d * 60))], result);
+  AppendShortCardinal(d, result);
+  AppendShort(u, result);
+  AppendShortTwoChars(TwoDigitLookupW[value - (d * 60)], @result);
 end;
 
 procedure MicroSecToString(Micro: QWord; out result: TShort16);
 begin
-  if Int64(Micro) <= 0 then
+  result[0] := #0;
+  if Int64(Micro) <= 0 then // warning: QWord=Int64 on pre-Unicode Delphi
     PCardinal(@result)^ := 3 + ord('0') shl 8 + ord('u') shl 16 + ord('s') shl 24
-  else if Micro < 1000 then
-    FormatShort16('%us', [Micro], result)
+  else if Int64(Micro) < 1000 then
+  begin
+    AppendShortCardinal(Micro, result);
+    AppendShortTwoChars(ord('u') + ord('s') shl 8, @result);
+  end
   else if Micro < 1000000 then
-    By100ToTwoDigitString(
+    AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 10, 'ms', result)
   else if Micro < 60000000 then
-    By100ToTwoDigitString(
+    AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 10000, 's', result)
   else if Micro < QWord(3600000000) then
-    _TimeToString(
+    AppendShortTime(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 1000000, 'm', result)
   else if Micro < QWord(86400000000 * 2) then
-    _TimeToString(Micro div 60000000, 'h', result)
+    AppendShortTime(Micro div 60000000, 'h', result)
   else
-    FormatShort16('%d', [Micro div QWord(86400000000)], result)
+  begin
+    AppendShortCardinal(Micro div QWord(86400000000), result);
+    AppendShortChar('d', @result);
+  end;
 end;
 
 procedure NanoSecToString(Nano: QWord; out result: TShort16);
 begin
-  if Int64(Nano) <= 0 then
+  result[0] := #0;
+  if Int64(Nano) <= 0 then // warning: QWord=Int64 on pre-Unicode Delphi
     PCardinal(@result)^ := 3 + ord('0') shl 8 + ord('n') shl 16 + ord('s') shl 24
-  else if Nano > 9900 then
-    MicroSecToString(Nano div NanoSecsPerMicroSec, result)
-  else if Nano >= 1000 then
-    By100ToTwoDigitString(
+  else if Nano < 1000 then
+  begin
+    AppendShortCardinal(Nano, result);
+    AppendShortTwoChars(ord('n') + ord('s') shl 8, @result);
+  end
+  else if Nano < 1000000 then
+    AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Nano)^ {$else} Nano {$endif} div 10, 'us', result)
   else
-    By100ToTwoDigitString(
-      {$ifdef CPU32} PCardinal(@Nano)^ {$else} Nano {$endif} * 100, 'ns', result);
+    MicroSecToString(Nano div NanoSecsPerMicroSec, result);
 end;
 
 
@@ -10426,7 +10352,7 @@ end;
 
 function ByteToHex(P: PAnsiChar; Value: byte): PAnsiChar;
 begin
-  PWord(P)^ := TwoDigitsHexWB[Value];
+  PWord(P)^ := TwoDigitsHex[Value];
   result := P + 2;
 end;
 
@@ -10911,7 +10837,7 @@ var
 begin
   // encode as '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
   if tab = nil then
-    tab := @TwoDigitsHexWB; // uppercased hexa by default (as for GUID)
+    tab := @TwoDigitsHex; // uppercased hexa by default (as for GUID)
   for i := 3 downto 0 do
   begin
     PWord(P)^ := tab[guid[i]];
@@ -11013,7 +10939,7 @@ function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
   guid: TGuid): TGuidShortString;
 begin
   result[0] := #36;
-  GuidToText(@result[1], @guid, @TwoDigitsHexWBLower);
+  GuidToText(@result[1], @guid, @TwoDigitsHexLower);
 end;
 
 {$ifdef UNICODE}
@@ -11179,7 +11105,7 @@ procedure _AppendShortUuid(const u: TGuid; var s: ShortString);
 begin // much more efficient than default GUIDToString() in mormot.core.os
   if ord(s[0]) > 255 - 36 then
     exit;
-  GuidToText(@s[ord(s[0]) + 1], @u, @TwoDigitsHexWBLower);
+  GuidToText(@s[ord(s[0]) + 1], @u, @TwoDigitsHexLower);
   inc(s[0], 36);
 end;
 
@@ -11271,9 +11197,18 @@ begin
     {$endif FPC}
 end;
 
-const // should be local for better code generation
-  HexChars:      array[0..15] of AnsiChar = '0123456789ABCDEF';
-  HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
+procedure HexLookup(lookup, hex: PAnsiChar);
+var
+  h, l: PtrInt;
+begin
+  for h := 0 to 15 do
+    for l := 0 to 15 do
+    begin
+      lookup[0] := hex[h];
+      lookup[1] := hex[l];
+      inc(lookup, 2);
+    end;
+end;
 
 procedure InitializeUnit;
 var
@@ -11286,13 +11221,8 @@ var
   tmp: array[0..15] of AnsiChar;
 begin
   // initialize internal lookup tables for various text conversions
-  for i := 0 to 255 do
-  begin
-    TwoDigitsHex[i][1]      := HexChars[i shr 4];
-    TwoDigitsHex[i][2]      := HexChars[i and $f];
-    TwoDigitsHexLower[i][1] := HexCharsLower[i shr 4];
-    TwoDigitsHexLower[i][2] := HexCharsLower[i and $f];
-  end;
+  HexLookup(@TwoDigitsHex, '0123456789ABCDEF');
+  HexLookup(@TwoDigitsHexLower, '0123456789abcdef');
   {$ifdef DOUBLETOSHORT_USEGRISU}
   MoveFast(TwoDigitLookup[0], TwoDigitByteLookupW[0], SizeOf(TwoDigitLookup));
   for i := 0 to 199 do

@@ -2201,10 +2201,11 @@ begin
       inc(P, enc[i].Encode(Frames[i], P));
     result := Owner.SendBytes(tmp.buf, len); // directly send at once
     if (WebSocketLog <> nil) and
-       (logTextFrameContent in Owner.Settings.LogDetails) and
-       (sllTrace in WebSocketLog.Family.Level) then
-      WebSocketLog.Add.Log(sllTrace, 'SendFrames=% len=% %',
-        [FramesCount * ord(result), len, EscapeToShort(tmp.buf, len)], self);
+       (logTextFrameContent in Owner.Settings.LogDetails) then
+      with WebSocketLog.Family do
+        if sllTrace in Level then
+          Add.Log(sllTrace, 'SendFrames=% len=% %',
+            [FramesCount * ord(result), len, EscapeToShort(tmp.buf, len)], self);
   except
     result := false;
   end;
@@ -4040,7 +4041,7 @@ end;
 function TSocketIORemoteNamespace.SendEvent(const aEventName, aDataArray: RawUtf8;
   const aOnAck: TOnSocketIOAck): TSocketIOAckID;
 var
-  tmp: TSynTempBuffer;
+  tmp: TSynTempAdder;
 begin
   result := SIO_NO_ACK;
   if Assigned(aOnack) then
@@ -4057,9 +4058,9 @@ begin
     end;
     tmp.AddDirect(']');
     SocketIOSendPacket(fOwner.fWebSockets,
-      sioEvent, fNameSpace, tmp.buf, tmp.added, result);
+      sioEvent, fNameSpace, tmp.Buffer, tmp.Size, result);
   finally
-    tmp.Done;
+    tmp.Store.Done;
   end;
 end;
 
@@ -4248,7 +4249,7 @@ procedure SocketIOSendPacket(aWebSockets: TWebCrtSocketProcess;
   aOperation: TSocketIOPacket; const aNamespace: RawUtf8;
   aPayload: pointer; aPayloadLen: PtrInt; ackId: TSocketIOAckID);
 var
-  tmp: TSynTempBuffer;
+  tmp: TSynTempAdder;
 begin
   if (aWebSockets = nil) or
      not aWebSockets.Protocol.InheritsFrom(TWebSocketEngineIOProtocol) then
@@ -4266,9 +4267,9 @@ begin
       tmp.AddU(ackID);
     if aPayloadLen <> 0 then
       tmp.Add(aPayload, aPayloadLen);
-    EngineIOSendPacket(aWebSockets, tmp.buf, tmp.added, {binary=}false);
+    EngineIOSendPacket(aWebSockets, tmp.Buffer, tmp.Size, {binary=}false);
   finally
-    tmp.Done;
+    tmp.Store.Done;
   end;
 end;
 

@@ -142,51 +142,51 @@ unit mormot.core.fpcx64mm;
 
 interface
 
+{$undef FPCX64MM_AVAILABLE}  // global conditional to enable this unit
 {$ifdef FPC}
-  // cut-down version of mormot.defines.inc to make this unit standalone
-  {$mode Delphi}
-  {$inline on}
-  {$R-} // disable Range checking
-  {$S-} // disable Stack checking
-  {$W-} // disable stack frame generation
-  {$Q-} // disable overflow checking
-  {$B-} // expect short circuit boolean
-  {$ifdef CPUX64}
-    {$define FPCX64MM} // this unit is for FPC + x86_64 only
-    {$asmmode Intel}
+  {$ifdef CPUX64}            // this unit is for FPC + x86_64 only
+    {$ifndef FPCMM_DISABLE}  // disabled on some targets/projects
+      {$define FPCX64MM_AVAILABLE}
+    {$endif FPCMM_DISABLE}
   {$endif CPUX64}
-  {$ifdef OLDLINUXKERNEL}
-    {$define FPCMM_NOMREMAP}
-  {$endif OLDLINUXKERNEL}
-
-  {$ifdef FPCMM_BOOSTER}
-    {$define FPCMM_BOOST}
-    {$define FPCMM_MULTIPLESMALLNOTWITHMEDIUM}
-    {$define FPCMM_TINYPERTHREAD}
-  {$endif FPCMM_BOOSTER}
-  {$ifdef FPCMM_BOOST}
-    {$define FPCMM_SERVER}
-    {$define FPCMM_SMALLNOTWITHMEDIUM}
-    {$define FPCMM_LARGEBIGALIGN} // bigger blocks implies less reallocation
-  {$endif FPCMM_BOOST}
-  {$ifdef FPCMM_SERVER}
-    {$define FPCMM_DEBUG}
-    {$define FPCMM_ASSUMEMULTITHREAD}
-    {$define FPCMM_ERMS}
-  {$endif FPCMM_SERVER}
-  {$ifdef FPCMM_BOOSTER}
-    {$undef FPCMM_DEBUG} // when performance matters more than stats
-  {$endif FPCMM_BOOSTER}
 {$endif FPC}
 
-{$ifdef FPCMM_DISABLE}
-  {$undef FPCX64MM} // e.g. when compiled as Design-Time Lazarus package
-{$endif FPCMM_DISABLE}
-
-
-{$ifdef FPCX64MM}
+{$ifdef FPCX64MM_AVAILABLE}
 // this unit is available only for FPC + X86_64 CPU
 // other targets would compile as a void unit
+
+// cut-down version of mormot.defines.inc to make this unit standalone
+{$mode Delphi}
+{$inline on}
+{$asmmode Intel}
+{$R-} // disable Range checking
+{$S-} // disable Stack checking
+{$W-} // disable stack frame generation
+{$Q-} // disable overflow checking
+{$B-} // expect short circuit boolean
+
+{$ifdef OLDLINUXKERNEL}
+  {$define FPCMM_NOMREMAP}
+{$endif OLDLINUXKERNEL}
+
+{$ifdef FPCMM_BOOSTER}
+  {$define FPCMM_BOOST}
+  {$define FPCMM_MULTIPLESMALLNOTWITHMEDIUM}
+  {$define FPCMM_TINYPERTHREAD}
+{$endif FPCMM_BOOSTER}
+{$ifdef FPCMM_BOOST}
+  {$define FPCMM_SERVER}
+  {$define FPCMM_SMALLNOTWITHMEDIUM}
+  {$define FPCMM_LARGEBIGALIGN} // bigger blocks implies less reallocation
+{$endif FPCMM_BOOST}
+{$ifdef FPCMM_SERVER}
+  {$define FPCMM_DEBUG}
+  {$define FPCMM_ASSUMEMULTITHREAD}
+  {$define FPCMM_ERMS}
+{$endif FPCMM_SERVER}
+{$ifdef FPCMM_BOOSTER}
+  {$undef FPCMM_DEBUG} // when performance matters more than stats
+{$endif FPCMM_BOOSTER}
 
 type
   /// Arena (middle/large) heap information as returned by CurrentHeapStatus
@@ -380,7 +380,7 @@ const
 
 {$endif FPCMM_STANDALONE}
 
-{$endif FPCX64MM}
+{$endif FPCX64MM_AVAILABLE}
 
 
 
@@ -429,7 +429,7 @@ implementation
 
 }
 
-{$ifdef FPCX64MM}
+{$ifdef FPCX64MM_AVAILABLE}
 // this unit is available only for FPC + X86_64 CPU
 
 {$ifndef FPCMM_NOPAUSE}
@@ -992,6 +992,7 @@ const
   // on Linux, mremap() on PMD_SIZE=2MB aligned data can make a huge speedup
   {$endif FPCMM_LARGEBIGALIGN}
 
+// all T*BlockInfo variables are local to this unit, so are FPC_PIC compatible
 var
   SmallBlockInfo: TSmallBlockInfo;
   MediumBlockInfo: TMediumBlockInfo;
@@ -3656,7 +3657,7 @@ finalization
 
 {$endif FPCMM_STANDALONE}
 
-{$endif FPCX64MM}
+{$endif FPCX64MM_AVAILABLE}
 
 end.
 

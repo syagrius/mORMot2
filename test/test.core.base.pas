@@ -524,7 +524,7 @@ const
 
 var
   gen, ref: TLecuyer;
-  Bits: array[byte] of byte;
+  Bits: TByteToByte;
   Bits64: Int64 absolute Bits;
   Si, i: integer;
   c: cardinal;
@@ -4320,7 +4320,7 @@ var
   vj, vs: variant;
   a, a2: ShortString;
   u: string;
-  varint: array[0..255] of byte;
+  varint: TByteToByte;
   st: TFastReader;
   PB, PC: PByte;
   P: PUtf8Char;
@@ -4336,16 +4336,6 @@ begin
   for i := 11 to 150 do
     AppendShortCardinal(i, a);
   CheckHash(a, $1CDCEE09, 'AppendShortCardinal');
-  Check(_oskb(0)            = '0KB', 'oskb0');
-  Check(_oskb(1 shl 10 - 1) = '1KB', 'oskb1');
-  Check(_oskb(1 shl 10)     = '1KB', 'oskb2');
-  Check(_oskb(1 shl 10 + 1) = '1KB', 'oskb3');
-  Check(_oskb(1 shl 20 - 1) = '1MB', 'oskb4');
-  Check(_oskb(1 shl 20)     = '1MB', 'oskb5');
-  Check(_oskb(1 shl 20 + 1) = '1MB', 'oskb6');
-  Check(_oskb(1 shl 30 - 1) = '1GB', 'oskb7');
-  Check(_oskb(1 shl 30)     = '1GB', 'oskb8');
-  Check(_oskb(1 shl 30 + 1) = '1GB', 'oskb9');
   Check(TwoDigits(0) = '0');
   Check(TwoDigits(1) = '1');
   Check(TwoDigits(10) = '10');
@@ -4504,6 +4494,17 @@ begin
   Check(MicroSecToString(1000001) = '1s');
   Check(MicroSecToString(2030001) = '2.03s');
   Check(MicroSecToString(200000070001) = '2d');
+  Check(KbNoSpace(0)            = '0B' , 'kb0');
+  Check(KbNoSpace(99)           = '99B', 'kb99');
+  Check(KbNoSpace(1 shl 10 - 1) = '1KB', 'kb1');
+  Check(KbNoSpace(1 shl 10)     = '1KB', 'kb2');
+  Check(KbNoSpace(1 shl 10 + 1) = '1KB', 'kb3');
+  Check(KbNoSpace(1 shl 20 - 1) = '1MB', 'kb4');
+  Check(KbNoSpace(1 shl 20)     = '1MB', 'kb5');
+  Check(KbNoSpace(1 shl 20 + 1) = '1MB', 'kb6');
+  Check(KbNoSpace(1 shl 30 - 1) = '1GB', 'kb7');
+  Check(KbNoSpace(1 shl 30)     = '1GB', 'kb8');
+  Check(KbNoSpace(1 shl 30 + 1) = '1GB', 'kb9');
   Check(KB(-123) = '');
   Check(KB(0) = '0 B');
   Check(KB(123) = '123 B');
@@ -4515,6 +4516,7 @@ begin
   Check(KB(16385) = '16 KB');
   Check(KB(3 * 1024 * 1024 - 800 * 1024) = '2.2 MB');
   Check(KB(3 * 1024 * 1024) = '3 MB');
+  Check(KB(3 * 1024 * 1024 + 511 * 1024) = '3.5 MB');
   Check(KB(3 * 1024 * 1024 + 512 * 1024) = '3.5 MB');
   Check(KB(3 * 1024 * 1024 + 1024) = '3 MB');
   Check(KB(maxInt) = '2 GB');
@@ -4751,6 +4753,12 @@ begin
   CheckEqual(length(a), SizeOf(Int64) * 2);
   for i := 1 to length(a) do
     Check(a[1] = 'f');
+  CheckEqual(ParseHex0x('0x3f',   {no0x=}false), $3f, '3f');
+  CheckEqual(ParseHex0x('0x3ff',  {no0x=}false), $3ff, '3ff');
+  CheckEqual(ParseHex0x(' 0x3ff', {no0x=}false), $3ff, '3ff2');
+  CheckEqual(ParseHex0x('0x3ff ', {no0x=}false), $3ff, '3ff3');
+  CheckEqual(ParseHex0x('0x3ff'#13#10,  {no0x=}false), $3ff, '3ff4');
+  CheckEqual(ParseHex0x(' 0x3ff'#13#10, {no0x=}false), $3ff, '3ff4');
   for i := -10000 to 10000 do
     Check(GetInteger(Pointer(Int32ToUtf8(i))) = i);
   for i := 0 to 10000 do
@@ -4766,7 +4774,8 @@ begin
     if s <> '' then
       Check(xxhash32(0, pointer(s), length(s)) = xxHash32reference(pointer(s),
         length(s)));
-    j := Random32;
+    if i <> 0 then
+      j := Random32; // always validate j=0 value
     str(j, a);
     s := RawUtf8(a);
     u := string(a);
@@ -4841,6 +4850,10 @@ begin
     l := GetInt64(pointer(s), err);
     Check(err <> 0);
     case i of // validate some explicit ToVarUInt32/64 boundaries
+      8999:
+        j := $0000000f;
+      9990:
+        j := $000000ff;
       9991:
         j := $00003fff;
       9992:
@@ -4867,8 +4880,15 @@ begin
     if j >= 0 then
     begin
       a[0] := #0;
-      AppendShortIntHex(j, a);
-      CheckEqual(RawUtf8(a), RawUtf8(PointerToHexShort(pointer(PtrInt(j)))));
+      AppendShortIntHex(j, a); // with DisplayMinChars() trimming
+      CheckUtf8(PointerToHexShort(pointer(PtrInt(j))) = a, 'p2hex %=%', [j, a]);
+      CheckUtf8(IdemPropName(a, ToHexShort(@j, 4)), '2hex %=%', [j, a]);
+      CheckUtf8(IdemPropNameU(Int64ToHexLower(j), @a[1], ord(a[0])), 'i2hex %', [a]);
+      a[ord(a[0]) + 1] := #0; // make valid PAnsiChar
+      CheckEqual(ParseHex0x(@a[1], {no0x=}true), j, '8-bit hex');
+      if a[1] = '0' then
+        CheckEqual(ParseHex0x(@a[2], {no0x=}true), j, '4-bit hex');
+      CheckEqual(ParseHex0x(@a[1], {no0x=}false), 0, '0x');
     end;
     case i of
       9990:
@@ -5113,7 +5133,7 @@ procedure TTestCoreBase._UTF8;
   var
     i, j: PtrInt;
     up, lo, up2: array[0..10] of AnsiChar;
-    src, dst: array[byte] of AnsiChar;
+    src, dst: TByteToAnsiChar;
   begin
     CheckEqual('A', UpperCaseReference('a'));
     CheckEqual('ABC', UpperCaseReference('aBc'));
@@ -5489,10 +5509,14 @@ begin
   CheckEqual(TrimControlChars('a  '), 'a');
   CheckEqual(TrimControlChars('a  b'), 'ab');
   CheckEqual(TrimControlChars('synopse.info, www.synopse.info'), 'synopse.info,www.synopse.info');
-  Check(split(res, ',') = 'one');
-  Check(split(res, '*') = res);
-  Check(split(res, ',', 5) = 'two');
-  Check(split(res, '*', 6) = 'wo,three');
+  CheckEqual(Split(res, ','), 'one', 'sp1');
+  CheckEqual(Split(res, ',', s1), 'two,three', 'sp2');
+  CheckEqual(s1, 'one');
+  CheckEqual(Split(res, ',', s1, {toupper=}true), 'TWO,THREE');
+  CheckEqual(s1, 'ONE');
+  Check(Split(res, '*') = res);
+  Check(Split(res, ',', 5) = 'two');
+  Check(Split(res, '*', 6) = 'wo,three');
   CheckEqual(Split('titi-tata-toto', ['-'], [@s1, @s2, @s3]), 3, 'split3');
   CheckEqual(s1, 'titi', 'split3a');
   CheckEqual(s2, 'tata', 'split3b');
@@ -5513,6 +5537,12 @@ begin
   CheckEqual(s1, 'a', 'split4a');
   CheckEqual(s2, 'b', 'split4b');
   CheckEqual(s3, '', 'split4c');
+  CheckEqual(SplitRight(res, ','), 'three');
+  CheckEqual(SplitRight(res, 'r'), 'ee');
+  CheckEqual(SplitRights(res, ','), 'three');
+  CheckEqual(SplitRights(res, '!,'), 'three');
+  CheckEqual(SplitRights(res, ',!'), 'three');
+  CheckEqual(SplitRights(res, '!thr'), 'ee');
   Check(mormot.core.base.StrLen(nil) = 0);
   for i := length(res) + 1 downto 1 do
     Check(mormot.core.base.StrLen(Pointer(@res[i])) = length(res) - i + 1);
@@ -7420,6 +7450,26 @@ begin
       CheckUtf8(not CurrentUserHasGroup(s), s);
   end;
   {$endif OSWINDOWS}
+  // some cross-platform Windows error detection
+  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
+  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb');
+  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecB');
+  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecB');
+  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
+  Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
+  Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
+  Check(WinErrorConstant(12002)^ = 'WINHTTP_TIMEOUT', 'wecf');
+  Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
+  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
+  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
+  Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
+  Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
+  Check(WinErrorConstant(12152)^ = 'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
+  Check(WinErrorConstant(87)^ = 'INVALID_PARAMETER', 'wecl');
+  Check(WinErrorConstant(1315)^ = 'INVALID_ACCOUNT_NAME', 'wecm');
+  Check(WinErrorConstant(1331)^ = 'ACCOUNT_DISABLED', 'wecn');
+  Check(WinErrorConstant(1342)^ = 'SERVER_NOT_DISABLED', 'weco');
 end;
 
 const
@@ -9877,19 +9927,6 @@ var
   nfo: TWinProcessInfo;
 begin
   // validate Windows API error code recognition
-  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(ERROR_OPERATION_ABORTED)^ = 'OPERATION_ABORTED', 'wecb');
-  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
-  Check(WinErrorConstant(ERROR_MORE_DATA)^ = 'MORE_DATA', 'wecd');
-  Check(WinErrorConstant(ERROR_ACCESS_DENIED)^ = 'ACCESS_DENIED', 'wece');
-  Check(WinErrorConstant(ERROR_WINHTTP_TIMEOUT)^ = 'WINHTTP_TIMEOUT', 'wecf');
-  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecg');
-  Check(WinErrorConstant($800b010d)^ = '', 'wech');
-  Check(WinErrorConstant(ERROR_CONNECTION_INVALID)^  = 'CONNECTION_INVALID', 'weci');
-  Check(WinErrorConstant(ERROR_INSUFFICIENT_BUFFER)^ = 'INSUFFICIENT_BUFFER', 'wecj');
-  Check(WinErrorConstant(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)^ =
-    'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
-  Check(WinErrorConstant(ERROR_INVALID_PARAMETER)^ = 'INVALID_PARAMETER', 'wecl');
   CheckEqual(WinErrorText(1246, nil), 'ERROR__CONTINUE');
   CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER, nil), 'ERROR_INSUFFICIENT_BUFFER');
   // validate DotNet exceptions error code recognition
