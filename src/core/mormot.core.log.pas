@@ -5462,17 +5462,14 @@ end;
 procedure TSynLog.AddErrorMessage(Error: cardinal);
 {$ifdef OSWINDOWS}
 var
-  msg: PShortString;
+  msg: ShortString;
 {$endif OSWINDOWS}
 begin
   fWriter.AddDirect(' ', '"');
   {$ifdef OSWINDOWS}
-  msg := WinErrorConstant(Error);
-  if msg^[0] <> #0 then
-  begin
-    fWriter.AddShorter('ERROR_');
-    fWriter.AddShort(msg^);
-  end
+  msg[0] := #0;
+  if AppendWinErrorText(Error, msg, {sep=}#0) then
+    fWriter.AddShort(msg)
   else
   {$endif OSWINDOWS}
     fWriter.AddOnSameLine(pointer(GetErrorText(Error)));
@@ -5483,7 +5480,7 @@ end;
 
 procedure TSynLog.AddSysInfo;
 var
-  tmp: shortstring;
+  tmp: ShortString;
 begin
   fWriter.AddDirect(' ', '{');
   RetrieveSysInfoText(tmp);

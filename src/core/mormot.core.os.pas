@@ -776,7 +776,13 @@ function MatchOS(os: TOperatingSystem): boolean;
 function WinErrorConstant(Code: cardinal): PShortString;
 
 /// return the error code number, and its ERROR_* constant (if known)
-function WinErrorConstantText(Code: cardinal): shortstring;
+function WinErrorShort(Code: cardinal): ShortString;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// append the error as ' ERROR_*' constant and return TRUE if known
+// - append nothing and return FALSE if Code is not known
+function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
+  Sep: AnsiChar): boolean;
 
 type
   /// the recognized ARM/AARCH64 CPU types
@@ -890,14 +896,14 @@ function ArmCpuType(id: word): TArmCpuType;
 
 /// recognize a given ARM/AARCH64 CPU type name from its 12-bit hardware ID
 function ArmCpuTypeName(act: TArmCpuType; id: word;
-  const before: shortstring = ''): shortstring;
+  const before: ShortString = ''): ShortString;
 
 /// recognize a given ARM/AARCH64 CPU implementer from its 8-bit hardware ID
 function ArmCpuImplementer(id: byte): TArmCpuImplementer;
 
 /// recognize a given ARM/AARCH64 CPU implementer name from its 8-bit hardware ID
 function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word;
-  const after: shortstring = ''): shortstring;
+  const after: ShortString = ''): ShortString;
 
 
 const
@@ -2920,15 +2926,15 @@ function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
 
 /// raise an EOSException from the last system error using WinErrorText()
 // - if Code is kept to its default 0, GetLastError is called
-procedure RaiseLastError(const Context: shortstring;
+procedure RaiseLastError(const Context: ShortString;
   RaisedException: ExceptClass = nil; Code: integer = 0);
 
 /// return a RaiseLastError-like error message using WinErrorText()
 // - if Code is kept to its default 0, GetLastError is called
-function WinLastError(const Context: shortstring; Code: integer = 0): string;
+function WinLastError(const Context: ShortString; Code: integer = 0): string;
 
 /// call RaiseLastError(Code) if Code <> NO_ERROR = ERROR_SUCCESS
-procedure WinCheck(const Context: shortstring; Code: integer;
+procedure WinCheck(const Context: ShortString; Code: integer;
   RaisedException: ExceptClass = nil);
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -3010,7 +3016,7 @@ function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
 // - Unicode_CodePageName(932) returns e.g. 'SHIFT_JIS'
 // - Unicode_CodePageName(1251) returns 'MS1251' since 'CP####' is used
 // for IBM code pages by ICU - which do not match Windows code pages
-procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
+procedure Unicode_CodePageName(CodePage: cardinal; var Name: ShortString);
 
 /// returns a system-wide current monotonic timestamp as milliseconds
 // - will use the corresponding native API function under Vista+, or will be
@@ -3859,7 +3865,7 @@ function RetrieveLoadAvg: TShort23;
 /// a shorter version of GetSystemInfoText
 // - 'ncores avg1 avg5 avg15 [updays] used/totalram [used/totalswap] osint32' on POSIX,
 // or 'ncores user kern [updays] used/totalram [used/totalswap] osint32' on Windows
-procedure RetrieveSysInfoText(out text: shortstring);
+procedure RetrieveSysInfoText(out text: ShortString);
 
 /// retrieve low-level information about current memory usage
 // - as used e.g. by TSynMonitorMemory or GetMemoryInfoText
@@ -4071,7 +4077,7 @@ procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8); overload;
 /// will append the value as one-decimal number text and B/KB/MB/GB/TB suffix
 // - append EB, PB, TB, GB, MB, KB or B symbol with or without a preceding space
 // - for EB, PB, TB, GB, MB and KB, add one fractional digit
-procedure AppendKb(Size: Int64; var Dest: shortstring; WithSpace: boolean = false);
+procedure AppendKb(Size: Int64; var Dest: ShortString; WithSpace: boolean = false);
 
 /// convert a size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol with preceding space
@@ -5834,7 +5840,10 @@ type
   PParseCommands = ^TParseCommands;
 
   /// used to store references of arguments recognized by ParseCommandArgs()
-  TParseCommandsArgs = array[0..31] of PAnsiChar;
+  // - up to 255 arguments are usually stored on the stack as function result
+  // - POSIX has almost no limit (since command line is intensively used in scripts),
+  // but some Windows versions seemed to limit to 8KB total as a whole
+  TParseCommandsArgs = array[byte] of PAnsiChar;
   PParseCommandsArgs = ^TParseCommandsArgs;
 
 const
@@ -5868,6 +5877,7 @@ function ParseCommandArgs(const cmd: RawUtf8; argv: PParseCommandsArgs = nil;
 
 /// high-level extraction of the executable of a RunCommand() execution command
 // - returns the first parameter returned by ParseCommandArgs()
+// - returns '' if cmd is incorrectly formatted
 function ExtractExecutableName(const cmd: RawUtf8;
   posix: boolean = PARSCOMMAND_POSIX): RawUtf8;
 
@@ -6067,7 +6077,7 @@ begin
   P := S;
 end;
 
-procedure AppendKb(Size: Int64; var Dest: shortstring; WithSpace: boolean);
+procedure AppendKb(Size: Int64; var Dest: ShortString; WithSpace: boolean);
 const
   _U: array[1..5] of AnsiChar = 'KMGTE';
 var
@@ -6324,7 +6334,7 @@ begin
     SizeOf(pointer) {$ifdef FPC_PROVIDE_ATTR_TABLE} + SizeOf(pointer) {$endif})];
   if Value > 0 then
     repeat
-      inc(PByte(result), ord(result^[0]) + 1); // next shortstring
+      inc(PByte(result), ord(result^[0]) + 1); // next ShortString
       dec(Value);
     until Value = 0;
   {$endif FPC_REQUIRES_PROPER_ALIGNMENT}
@@ -6449,17 +6459,29 @@ begin
   end;
 end;
 
-function WinErrorConstantText(Code: cardinal): shortstring;
-var
-  txt: PShortString;
+function WinErrorShort(Code: cardinal): ShortString;
 begin
   result[0] := #0;
   AppendShortCardinal(Code, result);
+  AppendWinErrorText(Code, result, ' ');
+end;
+
+function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
+  Sep: AnsiChar): boolean;
+var
+  txt: PShortString;
+begin
+  result := false;
   txt := WinErrorConstant(Code);
   if txt^[0] = #0 then
     exit;
-  AppendShort(' ERROR_', result);
-  AppendShort(txt^, result);
+  if Sep <> #0 then
+    AppendShortChar(Sep, @Dest);
+  if (Code < 10000) or
+     (Code > 11999) then
+    AppendShort('ERROR_', Dest); // if not WSA*
+  AppendShort(txt^, Dest);
+  result := true;
 end;
 
 const
@@ -6593,7 +6615,7 @@ begin
   result := actUnknown;
 end;
 
-function ArmCpuTypeName(act: TArmCpuType; id: word; const before: shortstring): shortstring;
+function ArmCpuTypeName(act: TArmCpuType; id: word; const before: ShortString): ShortString;
 begin
   result := before;
   if act = actUnknown then
@@ -6614,7 +6636,7 @@ begin
 end;
 
 function ArmCpuImplementerName(aci: TArmCpuImplementer; id: word;
-  const after: shortstring): shortstring;
+  const after: ShortString): ShortString;
 begin
   if aci = aciUnknown then
   begin
@@ -6751,7 +6773,7 @@ begin
   end;
 end;
 
-procedure Unicode_CodePageName(CodePage: cardinal; var Name: shortstring);
+procedure Unicode_CodePageName(CodePage: cardinal; var Name: ShortString);
 begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
   case codepage of
     932:
@@ -8082,7 +8104,7 @@ begin // return 'U:usr K:krn' percents on windows
   AppendShortCurr64(K, result, {fixeddecimals=}2);
 end;
 
-procedure AppendFreeTotalKB(free, total: QWord; var dest: shortstring);
+procedure AppendFreeTotalKB(free, total: QWord; var dest: ShortString);
 begin
   AppendKb(free, dest);
   AppendShortChar('/', @dest);
@@ -8125,7 +8147,7 @@ begin
      result);
 end;
 
-procedure RetrieveSysInfoText(out text: shortstring);
+procedure RetrieveSysInfoText(out text: ShortString);
 var
   si: TSysInfo;  // Linuxism
 begin
@@ -11142,7 +11164,10 @@ begin
             include(result, pcUnbalancedDoubleQuote);
           exclude(result, pcInvalidCommand);
           if argv <> nil then
-            argv^[n] := nil; // always end with a last argv^[] = nil
+            if n <= high(argv^) then
+              argv^[n] := nil // always end with a last argv^[] = nil
+            else
+              include(result, pcTooManyArguments);
           if argc <> nil then
             argc^ := n;
           exit;
@@ -11215,11 +11240,10 @@ begin
           end
           else if state = [] then
           begin
-            if argv <> nil then
+            if (argv <> nil) and
+               (n <= high(argv^)) then
               argv^[n] := d;
             inc(n);
-            if n = high(argv^) then
-              exit;
             state := [sInSQ, sInArg];
             continue;
           end
@@ -11237,11 +11261,10 @@ begin
           end
           else if state = [] then
           begin
-            if argv <> nil then
+            if (argv <> nil) and
+               (n <= high(argv^)) then
               argv^[n] := d;
             inc(n);
-            if n = high(argv^) then
-              exit;
             state := [sInDQ, sInArg];
             continue;
           end
@@ -11288,11 +11311,10 @@ begin
     exclude(state, sBslash);
     if state = [] then
     begin
-      if argv <> nil then
+      if (argv <> nil) and
+         (n <= high(argv^)) then
         argv^[n] := d;
       inc(n);
-      if n = high(argv^) then
-        exit;
       state := [sInArg];
     end;
     if d <> nil then
