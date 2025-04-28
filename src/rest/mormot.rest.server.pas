@@ -2804,7 +2804,6 @@ procedure TRestServerUriContext.Prepare(aServer: TRestServer;
   const aCall: TRestUriParams);
 var
   fam: TSynLogFamily;
-  tmp: pointer;
 begin
   // setup the state machine
   fCall := @aCall;
@@ -2821,10 +2820,8 @@ begin
      not (sllEnter in fam.Level) then
     exit;
   fLog := fam.Add; // TSynLog instance for the current thread
-  tmp := nil; // same logic than Enter() but with no ISynLog involved
-  FormatUtf8('URI % % in=%', [aCall.Method, aCall.Url, KB(aCall.InBody)],
-    RawUtf8(tmp));
-  fLog.ManualEnter(tmp, fServer, mnEnterOwnMethodName);
+  fLog.ManualEnter(fServer,
+    'URI % % in=%', [aCall.Method, aCall.Url, KB(aCall.InBody)]);
   if fServer.StatLevels <> [] then // get start timestamp from log
     fMicroSecondsStart := fLog.LastQueryPerformanceMicroSeconds;
 end;
@@ -6190,7 +6187,7 @@ begin
       Append(result, [' ', ToText(m), '=', fTreeCount[m]]);
   for n := low(fNodeCount) to high(fNodeCount) do
     if fNodeCount[n] <> 0 then
-      Append(result, [' ', ToText(n), '=', fNodeCount[n]]);
+      Append(result, [' ', ToText(n)^, '=', fNodeCount[n]]);
 end;
 
 
@@ -6337,10 +6334,10 @@ begin
     exit;
   if (fModel <> nil) and
      (fStats <> nil) then
-    log := fLogClass.Enter('Shutdown(%) % CurrentRequestCount=%',
+    fLogClass.EnterLocal(log, 'Shutdown(%) % CurrentRequestCount=%',
       [aStateFileName, fModel.Root, fStats.CurrentRequestCount], self)
   else
-    log := fLogClass.Enter('Shutdown(%)', [aStateFileName], self);
+    fLogClass.EnterLocal(log, 'Shutdown(%)', [aStateFileName], self);
   OnNotifyCallback := nil;
   fSessions.Safe.WriteLock;
   try
@@ -6595,7 +6592,7 @@ var
   retry: integer;
   {%H-}log: ISynLog;
 begin
-  log := fLogClass.Enter('RecordVersionSynchronizeSlaveStart % over %',
+  fLogClass.EnterLocal(log, 'RecordVersionSynchronizeSlaveStart % over %',
     [Table, MasterRemoteAccess], self);
   callback := nil; // weird fix for FPC/ARM
   result := false;
@@ -6933,7 +6930,7 @@ var
   b: TOrmPropInfoRttiRawBlob;
   log: ISynLog;
 begin
-  log := fLogClass.Enter(self, 'ComputeRoutes');
+  fLogClass.EnterLocal(log, self, 'ComputeRoutes');
   fRouterSafe.WriteLock;
   try
     if fRouter <> nil then
@@ -7166,7 +7163,7 @@ begin
       begin
         if result = 0 then
         begin
-          log := fLogClass.Enter(self, 'SessionDeleteDeprecated');
+          fLogClass.EnterLocal(log, self, 'SessionDeleteDeprecated');
           fSessions.Safe.WriteLock; // upgrade the lock (hardly)
         end;
         LockedSessionDelete(i, nil);
@@ -7730,7 +7727,7 @@ begin
         if (Call.OutStatus = HTTP_SUCCESS) and
            (rsoHttp200WithNoBodyReturns204 in fOptions) then
           Call.OutStatus := HTTP_NOCONTENT;
-      if ctxt.fMicroSecondsStart <> 0 then
+      if StatLevels <> [] then
         fStats.ProcessSuccess(outcomingfile);
     end
     else if (Call.OutStatus < 200) or
@@ -7763,7 +7760,7 @@ begin
         [EscapeToShort(Call.OutHead)], HTTP_SERVERERROR);
   finally
     // 9. gather statistics and log execution
-    if ctxt.fMicroSecondsStart <> 0 then
+    if StatLevels <> [] then
       ctxt.ComputeStatsAfterCommand;
     if ctxt.fLog <> nil then
       ctxt.LogFromContext;
