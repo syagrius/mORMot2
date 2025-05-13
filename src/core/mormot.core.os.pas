@@ -153,6 +153,8 @@ const
   HTTP_TIMEOUT = 408;
   /// HTTP Status Code for "Conflict"
   HTTP_CONFLICT = 409;
+  /// HTTP Status Code for "Gone"
+  HTTP_GONE = 410;
   /// HTTP Status Code for "Length Required"
   HTTP_LENGTHREQUIRED = 411;
   /// HTTP Status Code for "Payload Too Large"
@@ -161,8 +163,12 @@ const
   HTTP_RANGENOTSATISFIABLE = 416;
   /// HTTP Status Code for "I'm a teapot"
   HTTP_TEAPOT = 418;
- /// HTTP Status Code for "Unprocessable Content"
+  /// HTTP Status Code for "Unprocessable Content"
   HTTP_UNPROCESSABLE_CONTENT = 422;
+  /// HTTP Status Code for "Upgrade Required"
+  HTTP_UPGRADE_REQUIRED = 426;
+  /// HTTP Status Code for "Too Many Requests"
+  HTTP_TOO_MANY_REQUESTS = 429;
   /// HTTP Status Code for "Internal Server Error"
   HTTP_SERVERERROR = 500;
   /// HTTP Status Code for "Not Implemented"
@@ -177,7 +183,7 @@ const
   HTTP_HTTPVERSIONNONSUPPORTED = 505;
 
   /// a fake response code, generated for client side panic failure/exception
-  // - for it is the number of a man
+  // - for it is the number of a man, and that number is 666
   HTTP_CLIENTERROR = 666;
   /// a fake response code, usedfor internal THttpAsyncServer asynchronous process
   HTTP_ASYNCRESPONSE = 777;
@@ -213,15 +219,6 @@ const
   // - i.e. 'Content-Type: application/json'
   JSON_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE + JSON_CONTENT_TYPE;
 
-  /// MIME content type used for plain JSON, in upper case
-  // - could be used e.g. with IdemPChar() to retrieve the Content-Type value
-  JSON_CONTENT_TYPE_UPPER = 'APPLICATION/JSON';
-
-  /// HTTP header for MIME content type used for plain JSON, in upper case
-  // - could be used e.g. with IdemPChar() to retrieve the Content-Type value
-  JSON_CONTENT_TYPE_HEADER_UPPER =
-    HEADER_CONTENT_TYPE_UPPER + JSON_CONTENT_TYPE_UPPER;
-
   /// MIME content type used for plain UTF-8 text - see RFC 7231 section-3.1.1
   TEXT_CONTENT_TYPE = 'text/plain;charset=utf-8';
 
@@ -252,18 +249,6 @@ const
   /// MIME content type used for a JPEG picture
   JPEG_CONTENT_TYPE = 'image/jpeg';
 
-  /// a IdemPPChar() compatible array of textual MIME content types
-  // - as used e.g. by IsHtmlContentTypeTextual()
-  CONTENT_TYPE_TEXTUAL: array[0..7] of PAnsiChar = (
-    JSON_CONTENT_TYPE_UPPER,
-    'TEXT/',
-    'APPLICATION/XML',
-    'APPLICATION/JSON',
-    'APPLICATION/JAVASCRIPT',
-    'APPLICATION/X-JAVASCRIPT',
-    'IMAGE/SVG+XML',
-    nil);
-
   /// internal HTTP content-type for efficient static file sending
   // - detected e.g. by http.sys' THttpApiServer.Request or via the NGINX
   // X-Accel-Redirect header's THttpServer.Process (see
@@ -287,13 +272,13 @@ const
   // response from the other endpoint
   NORESPONSE_CONTENT_TYPE = '!NORESPONSE';
 
-  /// HTTP body following RFC 2324 standard e.g. for banned IP
-  HTTP_BANIP_RESPONSE: string[201] =
+  /// HTTP body from RFC 2324 e.g. for banned IP or hsoRejectBotUserAgent
+  HTTP_BANIP_RESPONSE: string[191] =
     'HTTP/1.0 418 I''m a teapot'#13#10 +
-    'Content-Length: 125'#13#10 +
+    'Content-Length: 111'#13#10 +
     'Content-Type: text/plain'#13#10#13#10 +
     'Server refuses to brew coffee because it is currently a teapot.'#13#10 +
-    'Do not mess with it and retry from this IP in a few seconds.';
+    'Botbusters message: "I ain''t ''fraid of no bot"';
 
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
   // - can be used e.g. in logs, or anything accepting a ShortString
@@ -301,8 +286,9 @@ const
     'false', 'true');
 
   /// the JavaScript-like values of non-number IEEE constants
-  // - as recognized by FloatToShortNan, and used by TTextWriter.Add()
+  // - as recognized by ShortToFloatNan, and used by TTextWriter.Add()
   // when serializing such single/double/extended floating-point values
+  // - GetExtended() should also detect those values
   JSON_NAN: array[TFloatNan] of string[11] = (
     '0', '"NaN"', '"Infinity"', '"-Infinity"');
 
@@ -2668,7 +2654,7 @@ type
 
 /// a wrapper calling SystemTimeToTzSpecificLocalTime Windows API
 // - note: FileTimeToLocalFileTime is not to be involved here
-// - only used by mormot.lib.static for proper SQlite3 linking on Windows
+// - only used by mormot.lib.static for proper SQLite3 linking on Windows
 procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
 
 /// convert an Unix seconds time to a Win32 64-bit FILETIME value
@@ -2872,14 +2858,15 @@ procedure GetLocalTime(out result: TSystemTime);
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
 /// compatibility function, wrapping Win32 API file truncate at current position
+// or FpFtruncate() on POSIX
 procedure SetEndOfFile(F: THandle);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
-/// compatibility function, wrapping Win32 API file flush to disk
+/// compatibility function, wrapping Win32 API file flush to disk or FpFsync()
 procedure FlushFileBuffers(F: THandle);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
-/// compatibility function, wrapping Win32 API last error code
+/// compatibility function, wrapping Win32 API last error code or fpgeterrno
 function GetLastError: integer;
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
@@ -2904,7 +2891,7 @@ function GetErrorText(error: integer): RawUtf8;
 // ENGLISH_LANGID flag first
 // - if ModuleName does support this Code, will try it as system error
 // - replace SysErrorMessagePerModule() and SysErrorMessage() from mORMot 1
-function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
+function WinErrorText(Code: cardinal; ModuleName: PChar = nil): RawUtf8;
 
 /// raise an EOSException from the last system error using WinErrorText()
 // - if Code is kept to its default 0, GetLastError is called
@@ -3122,6 +3109,11 @@ procedure QueryPerformanceMicroSeconds(out Value: Int64);
 /// cross-platform check if the supplied THandle is not invalid
 function ValidHandle(Handle: THandle): boolean;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// faster cross-platform alternative to sysutils homonymous function
+// - on Windows, will support FileName longer than MAX_PATH
+// - FPC on Windows is not consistent with Delphi and the expected low-level API
+function SetCurrentDir(const NewDir: TFileName): boolean;
 
 /// faster cross-platform alternative to sysutils homonymous function
 // - on Windows, will support FileName longer than MAX_PATH
@@ -3855,7 +3847,7 @@ function RetrieveSystemTimesText: TShort23;
 function RetrieveLoadAvg: TShort23;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
-/// a shorter version of GetSystemInfoText
+/// a shorter version of GetSystemInfoText, used e.g. by TSynLogFamily.LevelSysInfo
 // - 'ncores avg1 avg5 avg15 [updays] used/totalram [used/totalswap] osint32' on POSIX,
 // or 'ncores user kern [updays] used/totalram [used/totalswap] osint32' on Windows
 procedure RetrieveSysInfoText(out text: ShortString);
@@ -4834,13 +4826,13 @@ type
   // - on Windows, calls directly the CreateEvent/ResetEvent/SetEvent API
   // - on Linux, will use eventfd() in blocking and non-semaphore mode
   // - on other POSIX, will use PRTLEvent which is lighter than TEvent BasicEvent
-  // - only limitation is that we don't know if WaitFor is signaled or timeout,
-  // but this is not a real problem in practice since most code don't need this
-  // information or has already its own flag in its implementation logic
   TSynEvent = class(TSynPersistent)
   protected
     fHandle: pointer; // Windows THandle or FPC PRTLEvent
+    {$ifdef OSLINUX}
     fFD: integer;     // for eventfd()
+    {$endif OSLINUX}
+    fNotified: boolean;
   public
     /// initialize an instance of cross-platform event
     constructor Create; override;
@@ -4853,13 +4845,17 @@ type
     procedure SetEvent;
       {$ifdef OSPOSIX} inline; {$endif}
     /// wait until SetEvent is called from another thread, with a maximum time
-    // - does not return if it was signaled or timeout
+    // - returns true if was signaled by SetEvent, or false on timeout
     // - WARNING: you should wait from a single thread at once
-    procedure WaitFor(TimeoutMS: integer);
+    function WaitFor(TimeoutMS: integer): boolean;
       {$ifdef OSPOSIX} inline; {$endif}
     /// wait until SetEvent is called from another thread, with no maximum time
-    procedure WaitForEver;
+    // - returns true if was signaled by SetEvent, or false if aborted/destroyed
+    function WaitForEver: boolean;
       {$ifdef OSPOSIX} inline; {$endif}
+    /// wait until SetEvent is called, calling CheckSynchronize() on main thread
+    // - returns true if was signaled by SetEvent, or false on timeout
+    function WaitForSafe(TimeoutMS: integer): boolean;
     /// calls SleepHiRes() in steps while checking terminated flag and this event
     function SleepStep(var start: Int64; terminated: PBoolean): Int64;
     /// could be used to tune your algorithm if the eventfd() API is used
@@ -5963,7 +5959,7 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TProcessInformation; const env: TFileName = '';
   options: TRunOptions = []; waitfordelayms: cardinal = INFINITE;
   redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
-  const wrkdir: TFileName = ''): integer;
+  const wrkdir: TFileName = ''; jobtoclose: PHandle = nil): integer;
 
 type
   /// how RunRedirect() or RunCommand() should try to gracefully terminate
@@ -6402,7 +6398,7 @@ type
     LUIDS_EXHAUSTED, INVALID_SUB_AUTHORITY, INVALID_ACL, INVALID_SID,
     INVALID_SECURITY_DESCR, _1339, BAD_INHERITANCE_ACL, SERVER_DISABLED,
     SERVER_NOT_DISABLED);
-  // O(log(n)) binary search in WINERR_ONE[] constants
+  // O(log(n)) binary search in WINERR_SORTED[] constants
   TWinErrorOne = (
     CRYPT_E_BAD_ENCODE, CRYPT_E_SELF_SIGNED, CRYPT_E_BAD_MSG, CRYPT_E_REVOKED,
     CRYPT_E_NO_REVOCATION_CHECK, CRYPT_E_REVOCATION_OFFLINE, TRUST_E_BAD_DIGEST,
@@ -6415,7 +6411,7 @@ type
     WINHTTP_TIMEOUT, WINHTTP_OPERATION_CANCELLED, WINHTTP_CANNOT_CONNECT,
     WINHTTP_CLIENT_AUTH_CERT_NEEDED, WINHTTP_INVALID_SERVER_RESPONSE);
 const
-  WINERR_ONE: array[TWinErrorOne] of cardinal = (
+  WINERR_SORTED: array[TWinErrorOne] of cardinal = (
     // some security-related HRESULT errors (negative 32-bit values first)
     $80092002, $80092007, $8009200d, $80092010, $80092012, $80092013, $80096010,
     $800b0100, $800b0101, $800b010a, $800b010c,
@@ -6448,7 +6444,7 @@ begin
       result := GetEnumNameRtti(TypeInfo(TWinError1315), Code - 1315);
   else
     result := GetEnumNameRtti(TypeInfo(TWinErrorOne),
-      FastFindIntegerSorted(@WINERR_ONE, ord(high(WINERR_ONE)), Code));
+      FastFindIntegerSorted(@WINERR_SORTED, ord(high(WINERR_SORTED)), Code));
   end;
 end;
 
@@ -7081,7 +7077,7 @@ begin
     h := FileCreate(aFileName, Mode and $00ff) // fmCreate=$ffff on oldest Delphi
   else
     h := FileOpen(aFileName, Mode);
-  CreateFromHandle(h, aFileName);
+  CreateFromHandle(h, aFileName); // raise EOSException on invalid h
 end;
 
 constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
@@ -7096,7 +7092,7 @@ begin
 end;
 
 constructor TFileStreamEx.CreateRead(const aFileName: TFileName);
-begin
+begin // raise EOSException on invalid handle/aFileName
   CreateFromHandle(FileOpenSequentialRead(aFileName), aFileName);
 end;
 
@@ -7107,7 +7103,7 @@ begin
   h := FileOpen(aFileName, fmOpenReadWrite or fmShareRead);
   if not ValidHandle(h) then // we may need to create the file
     h := FileCreate(aFileName, fmShareRead);
-  CreateFromHandle(h, aFileName);
+  CreateFromHandle(h, aFileName); // raise EOSException on invalid h
 end;
 
 destructor TFileStreamEx.Destroy;
@@ -7166,7 +7162,7 @@ begin
           break;
       end;
     end;
-  CreateFromHandle(h, aFileName);
+  CreateFromHandle(h, aFileName); // raise EOSException on invalid h
 end;
 
 function TFileStreamNoWriteError.Write(const Buffer; Count: Longint): Longint;
@@ -7182,7 +7178,7 @@ var
 begin
   result := nil;
   h := FileOpenSequentialRead(FileName);
-  if ValidHandle(h) then
+  if ValidHandle(h) then // would raise EOSException on invalid h
     result := TFileStreamEx.CreateFromHandle(h, FileName);
 end;
 
@@ -10769,6 +10765,23 @@ begin
         exit;
       result := GetTickCount64;
     until result >= endtix;
+end;
+
+function TSynEvent.WaitForSafe(TimeoutMS: integer): boolean;
+var
+  endtix: Int64;
+begin
+  if GetCurrentThreadID = MainThreadID then
+  begin
+    endtix := GetTickCount64 + TimeoutMS;
+    repeat
+      CheckSynchronize(1); // make UI responsive enough
+    until WaitFor(10) or
+          (GetTickCount64 > endtix);
+    result := fNotified;
+  end
+  else
+    result := WaitFor(TimeoutMS);
 end;
 
 

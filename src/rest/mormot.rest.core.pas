@@ -103,9 +103,6 @@ type
 
 
 const
-  /// size in bytes, to log up to 2 KB of JSON response, to save space
-  MAX_SIZE_RESPONSE_LOG = 2 shl 10;
-
   CONTENT_TYPE_WEBFORM: PAnsiChar = 'APPLICATION/X-WWW-FORM-URLENCODED';
   CONTENT_TYPE_MULTIPARTFORM: PAnsiChar = 'MULTIPART/FORM-DATA';
 
@@ -535,8 +532,11 @@ type
     /// ease logging of some text in the context of the current TRest
     procedure InternalLog(Format: PUtf8Char; const Args: array of const;
       Level: TSynLogLevel = sllTrace); overload;
+    /// ease logging of some response in the context of the current TRest
+    procedure InternalLogResponse(const aContent: RawByteString;
+      const aContext: shortstring; Level: TSynLogLevel = sllServiceReturn);
     /// ease logging of method enter/leave in the context of the current TRest
-    function Enter(const TextFmt: RawUtf8; const TextArgs: array of const;
+    function Enter(TextFmt: PUtf8Char; const TextArgs: array of const;
       aInstance: TObject = nil): ISynLog;
     /// internal method to retrieve the current Session TAuthUser.ID
     function GetCurrentSessionUserID: TID; virtual; abstract;
@@ -1185,8 +1185,8 @@ type
     LowLevelConnectionID: TRestConnectionID;
     /// low-level properties of the current connection
     LowLevelConnectionFlags: TRestUriParamsLowLevelFlags;
-    /// most HTTP servers support a per-connection pointer storage
-    // - may be nil if unsupported, e.g. by the http.sys servers
+    /// efficient per-connection pointer storage at HTTP server level
+    // - nil if unsupported, e.g. by the http.sys servers
     // - map to THttpAsyncServerConnection or THttpServerSocket fConnectionOpaque
     // of type THttpServerConnectionOpaque as defined in mormot.net.http
     // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
@@ -2054,7 +2054,7 @@ procedure TRest.InternalLog(const Text: RawUtf8; Level: TSynLogLevel);
 begin
   if (self <> nil) and
      (Level in fLogLevel) then
-    fLogFamily.Add.Log(Level, Text, self);
+    fLogFamily.Add.LogText(Level, pointer(Text), self);
 end;
 
 procedure TRest.InternalLog(Format: PUtf8Char; const Args: array of const;
@@ -2065,7 +2065,14 @@ begin
     fLogFamily.Add.Log(Level, Format, Args, self);
 end;
 
-function TRest.Enter(const TextFmt: RawUtf8; const TextArgs: array of const;
+procedure TRest.InternalLogResponse(const aContent: RawByteString;
+  const aContext: shortstring; Level: TSynLogLevel);
+begin // caller checked that self<>nil and sllServiceReturn in fLogLevel
+  fLogFamily.Add.LogEscape(
+    Level, '%', [aContext], pointer(aContent), length(aContent), self);
+end;
+
+function TRest.Enter(TextFmt: PUtf8Char; const TextArgs: array of const;
   aInstance: TObject): ISynLog;
 begin
   result := nil;
@@ -3699,8 +3706,15 @@ begin
 end;
 
 function TRestUriParams.OutBodyTypeIsJson(GuessJsonIfNoneSet: boolean): boolean;
+var
+  ct: PUtf8Char;
+  len: PtrInt;
 begin
-  result := IdemPChar(pointer(OutBodyType(GuessJsonIfNoneSet)), JSON_CONTENT_TYPE_UPPER);
+  ct := FindNameValuePointer(pointer(OutHead), HEADER_CONTENT_TYPE_UPPER, len);
+  if ct = nil then
+    result := GuessJsonIfNoneSet
+  else
+    result := IsContentTypeJson(ct, len);
 end;
 
 function TRestUriParams.Header(UpperName: PAnsiChar): RawUtf8;
@@ -3888,7 +3902,8 @@ end;
 function TRestUriContext.ContentTypeIsJson: boolean;
 begin
   result := (fInputContentType = '') or
-            IdemPChar(pointer(fInputContentType), JSON_CONTENT_TYPE_UPPER);
+            IsContentTypeJson(pointer(fInputContentType),
+              PStrLen(PAnsiChar(pointer(fInputContentType)) - _STRLEN)^);
 end;
 
 function TRestUriContext.InputAsMultiPart(
@@ -4019,19 +4034,17 @@ begin
       AppendLine(fCall^.OutHead, ['Cache-Control: max-age=', CacheControlMaxAgeSec]);
     fCall^.OutStatus := HTTP_SUCCESS;
     if Handle304NotModified and
-       FileHttp304NotModified(size, time, fCall^.InHead, fCall^.OutHead) then
+       FileHttp304NotModified(size, time, pointer(fCall^.InHead), fCall^.OutHead) then
     begin
       fCall^.OutStatus := HTTP_NOTMODIFIED;
       exit;
     end;
     // Content-Type: appears twice: 1st to notify static file, 2nd for mime type
     if not ExistsIniName(pointer(fCall^.OutHead), HEADER_CONTENT_TYPE_UPPER) then
-    begin
       if ContentType <> '' then
         AppendLine(fCall^.OutHead, [HEADER_CONTENT_TYPE, ContentType])
       else
-        AppendLine(fCall^.OutHead, [GetMimeContentTypeHeader('', FileName)]);
-    end;
+        AppendLine(fCall^.OutHead, [HEADER_CONTENT_TYPE, GetMimeContentType('', FileName)]);
     Prepend(fCall^.OutHead, [STATICFILE_CONTENT_TYPE_HEADER + #13#10]);
     StringToUtf8(FileName, fCall^.OutBody); // body=filename for STATICFILE_CONTENT
     if AttachmentFileName <> '' then
@@ -4177,14 +4190,14 @@ begin
       // detect and append the error message as JSON object
       AddShort(','#13#10'"error":'#13#10);
       AddNoJsonEscape(pointer(msg), length(msg));
-      AddShorter(#13#10'}');
+      AddDirect(#13, #10, '}');
     end
     else
     begin
       // regular error message as JSON text
       AddShort(','#13#10'"errorText":"');
       AddJsonEscape(pointer(msg));
-      AddShorter('"'#13#10'}');
+      AddDirect('"', #13, #10, '}');
     end;
     SetText(fCall^.OutBody);
   finally

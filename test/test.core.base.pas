@@ -10,6 +10,7 @@ interface
 uses
   sysutils,
   classes,
+  math,
   mormot.core.base,
   mormot.core.os,
   mormot.core.os.security,
@@ -189,20 +190,24 @@ type
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
     procedure intdel(const Sender; Value: integer);
+    /// test the TDynArrayHashed object and methods (dictionary features)
+    // - this test will create an array of 200,000 items to test speed
+    procedure TDynArrayHashedSlow(Context: TObject);
+    /// test the TSynDictionary class
+    procedure TSynDictionarySlow(Context: TObject);
+    /// test UTF-8 and Win-Ansi conversion (from or to, through RawUnicode)
+    procedure Utf8Slow(Context: TObject);
+    /// test the TSynTimeZone class and its cross-platform local time process
+    procedure TimeZonesSlow(Context: TObject);
+    /// test the TRawUtf8List class
+    procedure TRawUtf8ListSlow(Context: TObject);
   published
     /// test RecordCopy(), TRttiMap and TRttiFilter
     procedure _Records;
     /// test the TSynList class
     procedure _TSynList;
-    /// test the TRawUtf8List class
-    procedure _TRawUtf8List;
     /// test the TDynArray object and methods
     procedure _TDynArray;
-    /// test the TDynArrayHashed object and methods (dictionary features)
-    // - this test will create an array of 200,000 items to test speed
-    procedure _TDynArrayHashed;
-    /// test the TSynDictionary class
-    procedure _TSynDictionary;
     /// validate the TSynQueue class
     procedure _TSynQueue;
     /// test TSynNameValue class
@@ -251,8 +256,6 @@ type
     procedure Bits;
     /// the fast .ini file content direct access
     procedure IniFiles;
-    /// test UTF-8 and Win-Ansi conversion (from or to, through RawUnicode)
-    procedure _UTF8;
     /// validate Unicode / Ansi Charset conversion methods
     procedure Charsets;
     /// test UrlEncode() and UrlDecode() functions
@@ -265,8 +268,6 @@ type
     /// the ISO-8601 date and time encoding
     // - test especially the conversion to/from text
     procedure Iso8601DateAndTime;
-    /// test the TSynTimeZone class and its cross-platform local time process
-    procedure TimeZones;
     /// test the SMBIOS decoding features
     procedure DmiSmbios;
     /// test Security IDentifier (SID) process
@@ -971,7 +972,7 @@ begin
   Check(not Soundex.Utf8('moi rechercher mouette'));
 end;
 
-procedure TTestCoreBase._TRawUtf8List;
+procedure TTestCoreBase.TRawUtf8ListSlow(Context: TObject);
 const
   MAX = 20000;
 var
@@ -1076,7 +1077,7 @@ type
   end;
   TAmountIDynArray = array of TAmountI;
 
-procedure TTestCoreBase._TDynArrayHashed;
+procedure TTestCoreBase.TDynArrayHashedSlow(Context: TObject);
 var
   ACities: TDynArrayHashed;
   Cities: TCityDynArray;
@@ -1093,7 +1094,6 @@ var
 const
   CITIES_MAX = 200000;
 begin
-//FIXME - too slow on FullDebugMode exit;
   // default Init() will hash and compare binary content before string, i.e. firmID
   AmountDA.Init(TypeInfo(TAmountDynArray), AmountCollection);
   Check(AmountDA.Info.Parser = ptDynArray);
@@ -1399,7 +1399,12 @@ const
   end;
 
 begin
-//FIXME - too slow on FullDebugMode exit;
+  // run the slowest tests in a background thread
+  Run(TDynArrayHashedSlow, self, 'TDynArrayHashed', true, false);
+  Run(TSynDictionarySlow, self, 'TSynDictionary', true, false);
+  Run(Utf8Slow, self, 'UTF-8', true, false);
+  Run(TimeZonesSlow, self, 'TimeZones', true, false);
+  Run(TRawUtf8ListSlow, self, 'TRawUtf8List', true, false);
   { TODO : implement TypeInfoToHash() if really needed }
   {
   h := TypeInfoToHash(TypeInfo(TAmount));
@@ -4578,6 +4583,27 @@ begin
   d := GetExtended(pointer(s), err);
   CheckSame(d, 40640.0, DOUBLE_SAME, 'e400=e0');
   Check(err > 0, 'e400');
+  s := 'Nan';
+  d := GetExtended(pointer(s), err);
+  CheckEqual(err, 0, s);
+  Check(IsNan(d));
+  DoubleToShort(@a, d);
+  Check(IdemPropName(a, 'Nan'));
+  Check(ShortToFloatNan(a) = fnNan);
+  s := 'INF';
+  d := GetExtended(pointer(s), err);
+  CheckEqual(err, 0, s);
+  Check(IsInfinite(d));
+  DoubleToShort(@a, d);
+  Check((a = '+Inf') or (a = 'INF'));
+  Check(ShortToFloatNan(a) = fnInf);
+  s := '-INfinity';
+  d := GetExtended(pointer(s), err);
+  CheckEqual(err, 0, s);
+  Check(IsInfinite(d));
+  DoubleToShort(@a, d);
+  Check(IdemPropName(a, '-Inf'));
+  Check(ShortToFloatNan(a) = fnNegInf);
   Check(IsAnsiCompatible('t'));
   Check(IsAnsiCompatible('te'));
   Check(IsAnsiCompatible('tes'));
@@ -4843,9 +4869,20 @@ begin
     Check(FormatSql('?', [], [k]) = ':(' + s + '):');
     err := 1;
     l := GetInt64(pointer(s), err);
-    Check((err = 0) and
-        (l = k));
+    Check(l = k);
+    Check(err = 0);
+    dec(l);
     SetInt64(pointer(s), l);
+    Check(l = k);
+    if k >= 0 then
+    begin
+      l := GetQWord(pointer(s), err);
+      Check(l = k);
+      Check(err = 0);
+      dec(l);
+      SetQword(pointer(s), QWord(l));
+      Check(l = k);
+    end;
     s := s + 'z';
     l := GetInt64(pointer(s), err);
     Check(err <> 0);
@@ -5123,7 +5160,7 @@ begin
   FastSetRawByteString(result, pointer(S), Length(S));
 end;
 
-procedure TTestCoreBase._UTF8;
+procedure TTestCoreBase.Utf8Slow(Context: TObject);
 
   procedure CaseFoldingTest;
   const
@@ -5195,7 +5232,7 @@ procedure TTestCoreBase._UTF8;
 
 var
   i, j, k, len, len120, lenup100, CP, L: integer;
-  bak: AnsiChar;
+  bak, bakj: AnsiChar;
   W: WinAnsiString;
   WS: WideString;
   SU, SU2: SynUnicode;
@@ -5278,19 +5315,19 @@ begin
   // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
   rb2 := ARawSetString;
   rb1 := rb2 + RawByteString('test');
-  Check(rb1 = '123456test', 'ARawSetString1');
+  CheckEqual(rb1, '123456test', 'ARawSetString1');
   Append(rb2, 'test');
-  Check(rb2 = '123456test', 'ARawSetString2');
+  CheckEqual(rb2, '123456test', 'ARawSetString2');
   rb2 := ARawFastSetString;
   rb3 := 'test';
   {$ifdef FPC} // circumvent FPC RTL oddity on Win32 :(
   SetCodePage(rb3, CP_RAWBYTESTRING, false);
   {$endif FPC}
   rb1 := rb2 + rb3;
-  Check(rb1 = '123456test', 'ARawFastSetString1');
+  CheckEqual(rb1, '123456test', 'ARawFastSetString1');
   rb1 := ARawFastSetString;
   Append(rb1, 'test');
-  Check(rb1 = '123456test', 'ARawFastSetString2');
+  CheckEqual(rb1, '123456test', 'ARawFastSetString2');
   Check(SafeFileName(''));
   Check(SafePathName(''));
   Check(SafeFileName('toto'));
@@ -5885,15 +5922,18 @@ begin
         end;
       end;
     end;
-    if len > 120 then
-      len120 := Utf8TruncatedLength(P, 120)
+    if length(U) > 120 then
+      len120 := Utf8TruncatedLength(U, 120)
     else
       len120 := 0;
     Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer truncated');
     {$ifdef ASMX64AVXNOCONST}
     HasValidUtf8Avx2 := (cpuHaswell in X64CpuFeatures);
     if HasValidUtf8Avx2 then
-      Check(IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas');
+    begin
+      check(IsValidUtf8Small(U), 'IsValidUtf8Pas');
+      Check(IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas120');
+    end;
     {$else}
     HasValidUtf8Avx2 := false; // IsValidUtf8Buffer = @IsValidUtf8Pas
     {$endif ASMX64AVXNOCONST}
@@ -5914,14 +5954,21 @@ begin
       begin
         bak := P[len120];
         P[len120] := #0; // no need to go any further
-        P[j - 1] := AnsiChar(ord(P[j - 1]) xor 128); // always invalidate the UTF-8 content
+        bakj := P[j - 1];
+        P[j - 1] := AnsiChar(ord(P[j - 1]) xor 128); // invalidate the UTF-8 content
         check(not IsValidUtf8Buffer(P, len120), 'IsValidUtf8 up100');
         if HasValidUtf8Avx2 then
           check(not IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas up100');
-        P[j - 1] := AnsiChar(ord(P[j - 1]) xor 128); // restore
+        P[j - 1] := bakj;
         check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8 restored');
         if HasValidUtf8Avx2 then
           check(IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas restored');
+        P[j - 1] := #0;
+        check(not IsValidUtf8NotVoid(P, len120), 'IsValidUtf8 0');
+        if HasValidUtf8Avx2 then
+          check(not IsValidUtf8Pas(P, len120), 'IsValidUtf8Pas 0');
+        P[j - 1] := bakj;
+        check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8 final');
         P[len120] := bak;
       end;
     end;
@@ -6250,6 +6297,46 @@ begin
   CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', true), 'abCabCabC');
   CheckEqual(StringReplaceAll('abcabcabc', 'c', '', true), 'ababab');
   CheckEqual(StringReplaceAll('abcabcabc', 'C', '', true), 'ababab');
+  CheckEqual(LogEscapeFull(''), '');
+  CheckEqual(LogEscapeFull(' abc'), ' abc');
+  CheckEqual(LogEscapeFull('abc'), 'abc');
+  u := 'abc'#10;
+  CheckEqual(LogEscapeFull(u), 'abc$0a');
+  u2 := RawUtf8OfChar('-', 10);
+  CheckEqual(u2, '----------');
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 15)^ = #0);
+  CheckEqual(u2, 'abc$0a'#0'---');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 12)^ = #0);
+  CheckEqual(u2, 'abc$0a'#0'---');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 7)^ = #0);
+  CheckEqual(u2, 'abc$0a'#0'---');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 6)^ = #0);
+  CheckEqual(u2, 'abc..'#0'----');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 5)^ = #0);
+  CheckEqual(u2, 'ab..'#0'-----');
+  u := '012345678';
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 10)^ = #0);
+  CheckEqual(u2, '012345678'#$00);
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 9)^ = #0);
+  CheckEqual(u2, '012345..'#0'-');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 5)^ = #0);
+  CheckEqual(u2, '01..'#0'-----');
+  u2 := RawUtf8OfChar('-', 10);
+  Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 4)^ = #0);
+  CheckEqual(u2, '0..'#0'------');
+  for i := 3 downto 0 do
+  begin
+    u2 := RawUtf8OfChar('-', 10);
+    Check(EscapeBuffer(pointer(u), length(u), pointer(u2), 3)^ = #0);
+    CheckEqual(u2, #0'---------');
+  end;
   for i := -10 to 50 do
     for j := -10 to 50 do
     begin
@@ -7085,7 +7172,7 @@ end;
 
 {$R ..\src\mormot.tz.res} // validate our Win10-generated resource file
 
-procedure TTestCoreBase.TimeZones;
+procedure TTestCoreBase.TimeZonesSlow(Context: TObject);
 var
   tz: TSynTimeZone;
   d: TTimeZoneData;
@@ -8570,8 +8657,8 @@ begin
     'Googlebot/2.1 (+http://www.google.com/bot.html)'));
   Check(IsHttpUserAgentBot(
     'Googlebot/2.1 (+http://www.google.org/bot.html)'));
-  Check(not IsHttpUserAgentBot(
-    'Googlebot/2.1 (+http://www.google.cam/bot.html)'));
+  Check(IsHttpUserAgentBot(
+    'Y!J-BRW/1.0 crawler (http://help.yahoo.co.jp/help/jp/search/indexing/indexing-15.html'));
   Check(IsHttpUserAgentBot(
     'Mozilla/5.0 (compatible; adidxbot/2.0;  http://www.bing.com/bingbot.htm)'));
   Check(IsHttpUserAgentBot(
@@ -8583,7 +8670,10 @@ begin
   Check(IsHttpUserAgentBot(
     'Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)'));
   Check(IsHttpUserAgentBot(
-    'Mozilla/5.0 (compatible; coccoc/1.0; +http://help.coccoc.com/searchengine)'));
+    'Mozilla/5.0 (compatible; coccoc:1.0; +http://help.coccoc.com/searchengine)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (Linux; Android 5.0; SM-G920A) AppleWebKit (KHTML, like Gecko) ' +
+    'Chrome Mobile Safari (compatible; AdsBot-Google-Mobile; +http://www.google.com/mobile/adsbot.html)'));
   Check(IsHttpUserAgentBot(
     'DuckDuckBot/1.0; (+http://duckduckgo.com/duckduckbot.html)'));
   Check(IsHttpUserAgentBot(
@@ -8591,7 +8681,31 @@ begin
   Check(IsHttpUserAgentBot(
     'Mozilla/5.0 (compatible; AhrefsBot/6.1; +http://ahrefs.com/robot/)'));
   Check(IsHttpUserAgentBot(
-   'serpstatbot/1.0 (advanced backlink tracking bot; http://serpstatbot.com/;'));
+    'serpstatbot/1.0 (advanced backlink tracking bot; http://serpstatbot.com/;'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; TinEye-bot/1.31; +http://www.tineye.com/crawler.html)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; Yeti/1.1; +http://naver.me/bot)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)'));
+  Check(IsHttpUserAgentBot(
+    'LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)'));
+  Check(IsHttpUserAgentBot(
+    'Twitterbot/1.0 Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) '));
+  Check(IsHttpUserAgentBot(
+    'Wget/1.14 (linux-gnu)'));
+  Check(IsHttpUserAgentBot(
+    'CCBot/2.0 (https://commoncrawl.org/faq/'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; MegaIndex.ru/2.0; +http://megaindex.com/crawler)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; Exabot-Images/3.0; +http://www.exabot.com/go/robot'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; GPTBot/1.0; +https://openai.com/gptbot'));
+  Check(IsHttpUserAgentBot(
+    'Feedfetcher-Google; (+http://www.google.com/feedfetcher.html; 1 subscribers; feed-id=728742641706423)'));
+  Check(IsHttpUserAgentBot(
+    'Python-urllib/3.4'));
   // some HTTP methods
   CheckEqual(PurgeHeaders(''), '');
   CheckEqual(PurgeHeaders('toto'), 'toto');
@@ -8663,24 +8777,57 @@ begin
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtJson);
   s := '["json",'#0'123]';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtUnknown);
-  Check(not IsContentTypeCompressible('anything'));
-  Check(not IsContentTypeCompressible('toto/plain'));
-  Check(IsContentTypeCompressible('text/plain'));
-  Check(IsContentTypeCompressible('text/xml'));
-  Check(IsContentTypeCompressible('text/css'));
-  Check(not IsContentTypeCompressible('texto/xml'));
-  Check(IsContentTypeCompressible('application/json'));
+  Check(not IsContentTypeCompressibleU('anything'));
+  Check(not IsContentTypeCompressibleU('toto/plain'));
+  Check(IsContentTypeCompressibleU('text/plain'));
+  Check(IsContentTypeCompressibleU('text/xml'));
+  Check(IsContentTypeCompressibleU('text/css'));
+  Check(not IsContentTypeCompressibleU('texto/xml'));
+  Check(IsContentTypeCompressibleU('application/json'));
   Check(IsContentTypeCompressibleU('APPLICATION/JSON'));
-  Check(IsContentTypeCompressible('application/xml'));
-  Check(IsContentTypeCompressible('application/javascript'));
-  Check(IsContentTypeCompressible('application/VND.API+JSON'));
-  Check(IsContentTypeCompressible('application/atom+xml'));
-  Check(not IsContentTypeCompressible('applications/atom+xml'));
-  Check(not IsContentTypeCompressible('application/plain'));
-  Check(IsContentTypeCompressible('image/svg'));
-  Check(IsContentTypeCompressible('image/X-ico'));
-  Check(IsContentTypeCompressible('image/X-ICO'));
-  Check(not IsContentTypeCompressible('image/png'));
+  Check(IsContentTypeCompressibleU('application/xml'));
+  Check(IsContentTypeCompressibleU('application/rtf'));
+  Check(not IsContentTypeCompressibleU('application/zrtf'));
+  Check(not IsContentTypeCompressibleU('application/xm'));
+  Check(IsContentTypeCompressibleU('application/javascript'));
+  Check(IsContentTypeCompressibleU('application/VND.API+JSON'));
+  Check(IsContentTypeCompressibleU('application/vnd.mysoft.v1+json'));
+  Check(IsContentTypeCompressibleU('application/atom+XMl'));
+  Check(IsContentTypeCompressibleU('application/office+RTf'));
+  Check(not IsContentTypeCompressibleU('application/office+rtl'));
+  Check(not IsContentTypeCompressibleU('applications/atom+xml'));
+  Check(not IsContentTypeCompressibleU('application/plain'));
+  Check(IsContentTypeCompressibleU('image/svg'));
+  Check(IsContentTypeCompressibleU('image/X-ico'));
+  Check(IsContentTypeCompressibleU('image/X-ICO'));
+  Check(not IsContentTypeCompressibleU('image/png'));
+  Check(IsContentTypeJsonU('ApplicatioN/JSON'));
+  Check(IsContentTypeJsonU('application/json; charset=utf8'));
+  Check(IsContentTypeJsonU('application/Json;CharSet=Utf-8'));
+  Check(IsContentTypeJsonU('application/VND.API+JSON;CharSet=Utf-8'));
+  Check(not IsContentTypeJsonU('application/vnd.mysoft.v1+jso'));
+  Check(IsContentTypeJsonU('application/vnd.mysoft.v1+json'));
+  Check(not IsContentTypeJsonU('application/vnd.mysoft.v1+j'));
+  Check(IsContentTypeJsonU('application/vnd.mysoft.v1+json2'));
+  Check(not IsContentTypeJsonU('application/vnd.mysoft.v1+'));
+  Check(IsContentTypeJsonU('application/+json'));
+  Check(not IsContentTypeJsonU('application/xml'));
+  Check(IsContentTypeTextU('text/plain'));
+  Check(IsContentTypeTextU('text/xml'));
+  Check(IsContentTypeTextU('text/css'));
+  Check(not IsContentTypeTextU('texto/xml'));
+  Check(IsContentTypeTextU('application/json'));
+  Check(IsContentTypeTextU('APPLICATION/JSON'));
+  Check(IsContentTypeTextU('application/xml'));
+  Check(IsContentTypeTextU('application/javascript'));
+  Check(IsContentTypeTextU('application/VND.API+JSON'));
+  Check(IsContentTypeTextU('application/vnd.mysoft.v1+json'));
+  Check(IsContentTypeTextU('application/atom+xml'));
+  Check(not IsContentTypeTextU('applications/atom+xml'));
+  Check(not IsContentTypeTextU('application/plain'));
+  Check(IsContentTypeTextU('image/svg'));
+  Check(not IsContentTypeTextU('image/X-ico'));
+  Check(not IsContentTypeTextU('image/X-ICO'));
   // mime multipart encoding
   for rfc2388 := false to true do
   begin
@@ -9228,7 +9375,7 @@ type
 {.$define DYNARRAYHASHCOLLISIONCOUNT}
 // should also be defined in mormot.core.data.pas to have detailed information
 
-procedure TTestCoreBase._TSynDictionary;
+procedure TTestCoreBase.TSynDictionarySlow(Context: TObject);
 type
   tvalue = variant;
   tvalues = TVariantDynArray;
@@ -9325,8 +9472,9 @@ var
 
 var
   v: tvalue;
-  s, k, key, val, u: RawUtf8;
+  s, k, key, val, u, json: RawUtf8;
   i, n: integer;
+  i64: Int64;
   exists: boolean;
   sdk: TSDKey;
 begin
@@ -9355,13 +9503,13 @@ begin
     val := 'lol';
     dict.AddOrUpdate(key, val);
     CheckEqual(dict.Count, 1);
-    s := dict.SaveToJson;
-    CheckEqual(s, '{"Foobar":"lol"}');
+    json := dict.SaveToJson;
+    CheckEqual(json, '{"Foobar":"lol"}');
     key := 'foobar';
     val := 'xxx';
     dict.AddOrUpdate(key, val);
-    s := dict.SaveToJson;
-    CheckEqual(s, '{"Foobar":"xxx"}');
+    json := dict.SaveToJson;
+    CheckEqual(json, '{"Foobar":"xxx"}');
     CheckEqual(dict.Count, 1);
     key := 'FooBar';
     dict.FindAndCopy(key, val, False);
@@ -9399,12 +9547,12 @@ begin
       check(dict.Add(k, v) = i - 1);
     end;
     Test;
-    s := dict.SaveToJson;
+    json := dict.SaveToJson;
     check(dict.Exists(k));
     dict.DeleteAll;
     check(dict.Count = 0);
     check(not dict.Exists(k));
-    check(dict.LoadFromJson(s));
+    check(dict.LoadFromJson(json));
     Test;
     s := dict.SaveToBinary;
     u := '{"a":1,"b":2}';
@@ -9446,6 +9594,42 @@ begin
           check(GetInteger(pointer(k)) = i);
         end;
       end;
+    end;
+  finally
+    dict.Free;
+  end;
+  // keys which are not serialized as JSON string
+  dict := TSynDictionary.Create(TypeInfo(TInt64DynArray), TypeInfo(tvalues));
+  try
+    for i := 1 to MAX do
+    begin
+      i64 := i;
+      v := i;
+      check(dict.Add(i64, v) = i - 1);
+    end;
+    json := dict.SaveToJson;
+    Check(IsValidUtf8(json));
+    Check(IsValidJson(json));
+    CheckHash(json, $F67B5FA8, 'dict.savetojson');
+    for i := 1 to MAX do
+    begin
+      i64 := i;
+      check(dict.FindAndCopy(i64, v));
+      check(v = i);
+    end;
+  finally
+    dict.Free;
+  end;
+  dict := TSynDictionary.Create(TypeInfo(TInt64DynArray), TypeInfo(tvalues));
+  try
+    check(dict.LoadFromJson(json));
+    CheckHash(json, $F67B5FA8, 'untouched after loadfromjson');
+    checkEqual(json, dict.SaveToJson);
+    for i := 1 to MAX do
+    begin
+      i64 := i;
+      check(dict.FindAndCopy(i64, v));
+      check(v = i);
     end;
   finally
     dict.Free;
@@ -9927,8 +10111,8 @@ var
   nfo: TWinProcessInfo;
 begin
   // validate Windows API error code recognition
-  CheckEqual(WinErrorText(1246, nil), 'ERROR__CONTINUE');
-  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER, nil), 'ERROR_INSUFFICIENT_BUFFER');
+  CheckEqual(WinErrorText(1246), 'ERROR__CONTINUE');
+  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER), 'ERROR_INSUFFICIENT_BUFFER');
   // validate DotNet exceptions error code recognition
   Win32DotNetException(0, '');
   Win32DotNetException(9234, '');

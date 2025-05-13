@@ -798,6 +798,9 @@ const
   CLOCK_MONOTONIC_COARSE = CLOCK_MONOTONIC;
   {$endif OSFREEBSD}
 
+// most BSD systems have VDSO-like implementation via co-evolution of the kernel
+// and C runtime - https://www.freebsd.org/status/report-2021-10-2021-12/vdso/
+
 function clock_gettime(clk_id: cardinal; tp: ptimespec): integer;
   cdecl external clib name 'clock_gettime';
 
@@ -1333,6 +1336,12 @@ begin
   result := (FpS_ISDIR(st.st_mode) = CheckAsDir);
 end;
 
+function SetCurrentDir(const NewDir: TFileName): boolean;
+begin
+  result := (NewDir <> '') and
+            (fpChdir(pointer(NewDir)) = 0);
+end;
+
 function FileCreate(const aFileName: TFileName; aMode, aRights: integer): THandle;
 begin
   if aFileName = '' then
@@ -1713,6 +1722,7 @@ end;
 
 procedure TSynEvent.ResetEvent;
 begin
+  fNotified := false;
   {$ifdef HASEVENTFD}
   if fFD = 0 then // no need to reset the eventfd() handle
   {$endif HASEVENTFD}
@@ -1721,6 +1731,7 @@ end;
 
 procedure TSynEvent.SetEvent;
 begin
+  fNotified := true;
   {$ifdef HASEVENTFD}
   if fFD <> 0 then
     LinuxEventFDWrite(fFD, 1)
@@ -1729,7 +1740,7 @@ begin
     RTLEventSetEvent(fHandle);
 end;
 
-procedure TSynEvent.WaitFor(TimeoutMS: integer);
+function TSynEvent.WaitFor(TimeoutMS: integer): boolean;
 begin
   {$ifdef HASEVENTFD}
   if fFD <> 0 then
@@ -1740,9 +1751,10 @@ begin
   else
   {$endif HASEVENTFD}
     RTLEventWaitFor(fHandle, TimeoutMS);
+  result := fNotified;
 end;
 
-procedure TSynEvent.WaitForEver;
+function TSynEvent.WaitForEver: boolean;
 begin
   {$ifdef HASEVENTFD}
   if fFD <> 0 then
@@ -1750,6 +1762,7 @@ begin
   else
   {$endif HASEVENTFD}
     RTLEventWaitFor(fHandle);
+  result := fNotified;
 end;
 
 function TSynEvent.IsEventFD: boolean;
@@ -2039,7 +2052,7 @@ end;
 
 procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
 const
-  TERM_CTRL: string[8] = '04261537';
+  TERM_CTRL: PUtf8Char = '04261537';
 begin
   s[0] := #0;
   if (ord(Color) = TextAttr) or
@@ -2049,10 +2062,11 @@ begin
   s := #27'[0;3#m';
   if ord(Color) >= 8 then
     s[3] := '1';
-  s[6] := TERM_CTRL[(ord(Color) and 7) + 1];
+  s[6] := TERM_CTRL[(ord(Color) and 7)];
 end;
 
 procedure TextColorAppend(Color: TConsoleColor; var s: RawUtf8);
+  {$ifdef HASINLINE} inline; {$endif}
 var
   c: TShort8;
 begin
@@ -2966,6 +2980,7 @@ begin
   result := 0;
 end;
 
+{$ifdef CPUARM3264}
 procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
 var
   v: integer;
@@ -2974,6 +2989,7 @@ begin
   if v <> 0 then
     AddInteger(result, v, {nodup=}true);
 end;
+{$endif CPUARM3264}
 
 function ParseLine(P: PUtf8Char): PUtf8Char;
 begin

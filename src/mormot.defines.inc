@@ -90,16 +90,16 @@
 // disable TOrmTable internal fLen[] pre-computed table - slower but less memory
 
 {.$define NOSQLITE3STATIC}
-// disable static SQlite3 linking - to force use external dll/so library
+// disable static SQLite3 linking - to force use external dll/so library
 
 {.$define NOSQLITE3FPUSAVE}
-// disable SetFpuFlags() calls during SQlite3 engine - may enhance performance
+// disable SetFpuFlags() calls during SQLite3 engine - may enhance performance
 
 {.$define DEBUGSTORAGELOCK}
 // could be defined to force verbose log of StorageLock/StorageUnLock
 
 {.$define DEBUGSQLVIRTUALTABLE}
-// could be defined to force verbose log of SQlite3 virtual table query planner costs
+// could be defined to force verbose log of SQLite3 virtual table query planner costs
 
 {.$define ONLYUSEHTTPSOCKET}
 // is defined on POSIX but may be enabled on Windows if socket+SChannel is enough
@@ -142,10 +142,11 @@
   {$OBJECTCHECKS OFF} // as expected e.g. when hooking classes
 
   {$define HASINLINE}
-  {$define HASINLINEWINAPI} // Delphi has troubles inlining Windows API calls
-  {$define HASSAFEINLINE}   // Delphi 2007-2009 have troubles inlining
-  {$define NODELPHIASM}     // avoid e.g. low-level System.@LStrFromPCharLen
-  {$define HASDYNARRAYTYPE} // eltype2 field, used e.g. for T*ObjArray
+  {$define HASINLINEWINAPI}   // Delphi has troubles inlining Windows API calls
+  {$define HASSAFEINLINE}     // Delphi 2007-2009 have troubles inlining
+  {$define HASSAFEFPCINLINE}  // FPC 3.2.0 specific inlining troubles
+  {$define NODELPHIASM}       // avoid e.g. low-level System.@LStrFromPCharLen
+  {$define HASDYNARRAYTYPE}   // eltype2 field, used e.g. for T*ObjArray
   {$define HASITERATORS}
   {$define HASIMPLICITOPERATOR}
   {$define HASDBFTWIDE}
@@ -189,6 +190,9 @@
     {$define ISFPC30}
     {$define ISFPC32}
     {$define HASGETTYPEKIND}
+    {$ifdef VER3_2_0}
+      {$undef HASSAFEFPCINLINE} // synopse.info/forum/viewtopic.php?id=7259
+    {$endif VER3_2_0}
     {$ifdef VER3_2_2}
       {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
     {$endif VER3_2_2}
@@ -354,7 +358,11 @@
         {$define CPUX86NOTPIC} // use "absolute" instead of local register
         {$define HASAESNI}
       {$endif FPC_PIC}
-      {$define TSYNEXTENDED80} // only 32-bit has a true x87 extended type
+      {$ifdef FPUSSE2}
+        {$undef TSYNEXTENDED80}  // no "extended" if -dFPC_SSE2 was defined
+      {$else}
+        {$define TSYNEXTENDED80} // only 32-bit has a true x87 extended type
+      {$endif FPUSSE2}
       {$undef FPC_SINGLEABI}   // on i386, cdecl <> register convention
     {$endif CPUX86}
     {$ifdef CPUARM}
@@ -534,6 +542,7 @@
     {$ifend}
     {$if CompilerVersion >= 21.0}
       {$define HASSAFEINLINE}     // Delphi 2007-2009 have troubles inlining :(
+      {$define HASSAFEFPCINLINE}  // FPC specific inlining troubles
       {$define ISDELPHI2010}
       {$define HASDYNARRAYTYPE}   // eltype2 field, used e.g. for T*ObjArray
       {$define HASEXTRECORDRTTI}     // Delphi 2010 extended RTTI for records

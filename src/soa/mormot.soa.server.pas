@@ -1254,7 +1254,7 @@ begin
               with PServiceCustomAnswer(Sender.Values[ArgsResultIndex])^ do
               begin
                 len := length(Content);
-                W.AddShorter('len:');
+                W.AddDirect('l', 'e', 'n', ':');
                 W.AddU(len);
                 if (Status <> 0) and
                    (Status <> HTTP_SUCCESS) then
@@ -1266,9 +1266,12 @@ begin
                    (len > 0) and
                    (len <= 1024) then
                 begin
-                  // write up to 1KB of result binary as Base64 text
+                  // write up to 1KB of result binary as (Base64) text
                   W.AddShort(',result:"');
-                  W.WrBase64(pointer(content), len, false);
+                  if IsValidUtf8NotVoid(pointer(content), len) then
+                    W.AddJsonEscape(pointer(content), len)
+                  else
+                    W.WrBase64(pointer(content), len, false);
                   W.AddDirect('"');
                 end;
               end
@@ -1340,7 +1343,7 @@ begin
   begin
     W.AddShorter(',IP:"');
     W.AddShort(ip, StrLen(ip));
-    W.AddShorter('"},');
+    W.AddDirect('"', '}', ',');
   end;
   with Ctxt.ServiceExecution^ do
     IRestOrm(LogRest).AsyncBatchRawAppend(LogClass, W);
@@ -1966,7 +1969,7 @@ begin
     Ctxt.ServiceMethodIndex := Ctxt.ServiceMethodIndex + SERVICE_PSEUDO_METHOD_COUNT;
     FormatUtf8('[%,"%"]',
       [PtrInt(PtrUInt(fake.fFakeInterface)), fake.Factory.InterfaceName], params);
-    Ctxt.ServiceParameters := pointer(params);
+    Ctxt.ServiceParameters := pointer(params); // keep ServiceParametersLen=0
     withlog := (sllDebug in fRestServer.LogLevel) and
                fake.CanLog; // before ExcuteMethod which may free fake instance
     fake._AddRef; // ExecuteMethod() calls fake._Release on its parameter

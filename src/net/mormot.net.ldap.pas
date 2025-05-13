@@ -323,6 +323,7 @@ const
 type
   /// high level LDAP result codes
   // - as returned e.g. by TLdapClient.ResultError property
+  // - leUnknown is a client-side error - check TLdapClient.ResultString text
   // - use RawLdapError() and RawLdapErrorString() to decode a LDAP result code
   // or LDAP_RES_CODE[] and LDAP_ERROR_TEXT[] to their integer/text value
   TLdapError = (
@@ -1893,7 +1894,8 @@ type
     procedure RetrieveRootDseInfo;
     procedure RetrieveDefaultDNInfo;
     procedure Reset;
-    procedure SetResultString(const msg: RawUtf8);
+    procedure SetUnknownError(const msg: RawUtf8); overload;
+    procedure SetUnknownError(const fmt: RawUtf8; const args: array of const); overload;
     function DoBind(Mode: TLdapClientBound): boolean;
     function Reconnect(const context: ShortString): boolean;
   public
@@ -2415,7 +2417,7 @@ type
     property ResultCode: integer
       read fResultCode;
     /// contains the high-level result enumerate of the last LDAP operation
-    // - see also ResultCode raw integer and ResultString text
+    // - see also ResultString text, especially for leUnknown
     property ResultError: TLdapError
       read fResultError;
     /// human readable description of the last LDAP operation
@@ -3393,7 +3395,7 @@ begin
   result := (Text <> '') and
             (PosExChar('*', Text) = 0) and
             (PosExChar('\', Text) = 0) and
-            IsValidUtf8(Text);
+            IsValidUtf8Small(Text); // AVX2 not worth it
 end;
 
 function LdapEscape(const Text: RawUtf8; KeepWildChar: boolean): RawUtf8;
@@ -3422,7 +3424,7 @@ function LdapIsValidDistinguishedName(const Text: RawUtf8): boolean;
 begin
   result := (Text <> '') and
             (PosExChar('*', Text) = 0) and // but allows \ within DN
-            IsValidUtf8(Text);
+            IsValidUtf8Small(Text); // AVX2 not worth it
 end;
 
 function LdapValidDistinguishedName(const Text: RawUtf8): RawUtf8;
@@ -3693,7 +3695,7 @@ begin
       end;
   end;
   // atsAny or not expected format: check valid UTF-8, or fallback to hexa
-  if IsValidUtf8(s) then
+  if IsValidUtf8Small(s) then // AVX2 not worth it
     EnsureRawUtf8(s)
   else
   begin
@@ -4800,16 +4802,16 @@ begin
     if AttributeValueMakeReadable(tmp, a.fKnownTypeStorage) or
        (pointer(tmp) = pointer(v)) then
       exit; // don't put hexadecimal or identical content in comment
-  w.AddShorter(#10'# ');
+  w.AddDirect(#10, '#', ' ');
   w.AddString(a.AttributeName); // is either OID or plain alphanum
-  w.AddShorter(': <');
+  w.AddDirect(':', ' ', '<');
   truncated := (maxlen > 0) and
                (length(tmp) + length(a.AttributeName) > maxlen - 6);
   if truncated then
     FakeLength(tmp, Utf8TruncatedLength(tmp, maxlen - 9));
   w.AddString(tmp);             // human-readable text as comment
   if truncated then
-    w.AddShorter('...>')
+    w.AddDirect('.', '.', '.', '>')
   else
     w.AddDirect('>');
 end;
@@ -4995,7 +4997,7 @@ var
 begin
   w.AddDirect('#', ' ');
   w.AddString(DNToCN(fObjectName, {NoRaise=}true));
-  w.AddShorter(#10'dn:');
+  w.AddDirect(#10, 'd', 'n', ':');
   AddLdif(w, fObjectName, false, false, nil, 0);
   w.AddDirect(#10);
   for i := 0 to fAttributes.Count - 1 do
@@ -5194,14 +5196,14 @@ begin
     w.Add(count);
     if not NoTime then
     begin
-      w.AddShorter(' in ');
+      w.AddDirect(' ', 'i', 'n', ' ');
       w.AddShort(MicroSecToString(fMicroSec));
       w.AddShorter(' sent=');
       w.AddShort(KBNoSpace(fOut));
       w.AddShorter(' recv=');
       w.AddShort(KBNoSpace(fIn));
     end;
-    w.AddShorter(CRLF);
+    w.AddDirectNewLine; // = #13#10 on Windows, #10 on POSIX
     for i := 0 to Count - 1 do
     begin
       res := Items[i];
@@ -5212,16 +5214,16 @@ begin
         attr := res.Attributes.Items[j];
         w.Add('  % : ', [attr.AttributeName]);
         if attr.Count <> 1 then
-          w.AddShorter(CRLF);
+          w.AddDirectNewLine;
         for k := 0 to attr.Count - 1 do
         begin
           if attr.Count <> 1 then
             w.AddShorter('    - ');
           w.AddString(attr.GetReadable(k));
-          w.AddShorter(CRLF);
+          w.AddDirectNewLine;
         end;
       end;
-      w.AddShorter(CRLF);
+      w.AddDirectNewLine;
     end;
     w.SetText(result);
   finally
@@ -5637,11 +5639,21 @@ end;
 
 // **** TLdapClient connection methods
 
-procedure TLdapClient.SetResultString(const msg: RawUtf8);
+procedure TLdapClient.SetUnknownError(const msg: RawUtf8);
 begin
+  fResultError := leUnknown;
+  fResultCode := -1;
   fResultString := msg;
   if Assigned(fLog) then
     fLog.Add.Log(sllTrace, msg, self);
+end;
+
+procedure TLdapClient.SetUnknownError(const fmt: RawUtf8; const args: array of const);
+var
+  msg: RawUtf8;
+begin
+  FormatUtf8(fmt, args, msg);
+  SetUnknownError(fmt);
 end;
 
 function TLdapClient.Connect(DiscoverMode: TLdapClientConnect;
@@ -5662,7 +5674,7 @@ begin
   if fSettings.TargetHost = '' then
     if lccNoDiscovery in DiscoverMode then
     begin
-      SetResultString('Connect: no TargetHost supplied');
+      SetUnknownError('Connect: no TargetHost supplied');
       exit;
     end
     else
@@ -5686,7 +5698,7 @@ begin
       end;
       if dc = nil then
       begin
-        SetResultString('Connect: no LDAP server found on this network');
+        SetUnknownError('Connect: no LDAP server found on this network');
         exit;
       end;
       if Assigned(log) then
@@ -5740,11 +5752,11 @@ begin
       on E: Exception do
       begin
         FreeAndNil(fSock); // abort and try next dc[]
-        FormatUtf8('Connect %: %', [E, E.Message], fResultString);
+        SetUnknownError('Connect %: %', [E, E.Message]);
       end;
     end;
   if fResultString = '' then
-    SetResultString('Connect: failed');
+    SetUnknownError('Connect: failed');
 end;
 
 function TLdapClient.GetTlsContext: PNetTlsContext;
@@ -6154,14 +6166,14 @@ begin
   fResponseDN := '';
   if AsnNext(Pos, Asn1Response) <> ASN1_SEQ then
   begin
-    fResultString := 'Malformated response: missing ASN.1 SEQ';
+    SetUnknownError('Malformated response: missing ASN.1 SEQ');
     exit;
   end;
   seqend := AsnNextInteger(Pos, Asn1Response, asntype);
   if (seqend <> fSeq) or
      (asntype <> ASN1_INT) then
    begin
-     FormatUtf8('Unexpected SEQ=% expected=%', [seqend, fSeq], fResultString);
+     SetUnknownError('Unexpected SEQ=% expected=%', [seqend, fSeq]);
      exit;
    end;
   fResponseCode := AsnNext(Pos, Asn1Response, nil, @seqend);
@@ -6377,7 +6389,7 @@ begin
   // initiate GSSAPI bind request
   if not InitializeDomainAuth then
   begin
-    SetResultString('Kerberos: Error initializing the library');
+    SetUnknownError('Kerberos: Error initializing the library');
     exit;
   end;
   if (fSettings.KerberosSpn = '') and
@@ -6428,8 +6440,7 @@ begin
         except
           on E: Exception do
           begin
-            FormatUtf8('Kerberos %: %', [E, E.Message], fResultString);
-            // keep ResultCode = LDAP_RES_SASL_BIND_IN_PROGRESS (14)
+            SetUnknownError('Kerberos %: %', [E, E.Message]);
             exit; // catch SSPI/GSSAPI errors and return false
           end;
         end;
@@ -6442,14 +6453,14 @@ begin
           if fResultCode <> LDAP_RES_SASL_BIND_IN_PROGRESS then
           begin
             if fResultCode = LDAP_RES_SUCCESS then // paranoid
-              SetResultString('Kerberos: aborted SASL handshake');
+              SetUnknownError('Kerberos: aborted SASL handshake');
             exit;
           end;
           ParseInput;
           datain := SecDecrypt(fSecContext, datain);
           if length(datain) <> 4 then
           begin
-            fResultString := 'Kerberos: Unexpected SecLayer response';
+            SetUnknownError('Kerberos: Unexpected SecLayer response');
             exit; // expected format is #0=SecLayer #1#2#3=MaxMsgSizeInNetOrder
           end;
           seclayers := TKerbSecLayer(datain[1]);
@@ -6459,8 +6470,7 @@ begin
             if secmaxsize <> 0 then
             begin
               // invalid answer (as stated by RFC 4752)
-              FormatUtf8('Kerberos: Unexpected secmaxsize=%',
-                [secmaxsize], fResultString);
+              SetUnknownError('Kerberos: Unexpected secmaxsize=%', [secmaxsize]);
               exit;
             end
             else
@@ -6472,8 +6482,8 @@ begin
           else if seclayers * KLS_EXPECTED = [] then
           begin
             // we only support signing+sealing
-            FormatUtf8('Kerberos: Unsupported [%] method(s)',
-              [GetSetName(TypeInfo(TKerbSecLayer), seclayers)], fResultString);
+            SetUnknownError('Kerberos: Unsupported [%] method(s)',
+              [GetSetName(TypeInfo(TKerbSecLayer), seclayers)]);
             exit;
           end
           else
@@ -6623,11 +6633,7 @@ begin
     result := DoBind(fBoundAs);
   except
     on E: Exception do
-    begin
-      FormatUtf8('% raised %', [step, E], fResultString);
-      if Assigned(log) then
-        log.Log(sllError, 'Reconnect: %', [fResultString], self);
-    end;
+      SetUnknownError('Reconnect: % raised %', [step, E]);
   end;
 end;
 

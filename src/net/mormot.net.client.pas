@@ -257,7 +257,7 @@ const
 type
   /// maintain one partial download for THttpPartials
   THttpPartial = record
-    /// genuine positive identifier, 0 if empty/recyclable
+    /// genuine 31-bit positive identifier, 0 if empty/recyclable
     ID: THttpPartialID;
     /// the expected full size of this download
     FullSize: Int64;
@@ -274,7 +274,7 @@ type
   // - used e.g. during progressive download in THttpPeerCache
   THttpPartials = class
   protected
-    /// 32-bit monotonic counter sequence to populate THttpPartial.ID
+    /// 31-bit monotonic counter sequence to populate THttpPartial.ID
     fLastID: cardinal;
     /// how many fDownload[] are actually non void (ID <> 0)
     fUsed: cardinal;
@@ -2751,7 +2751,7 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
     if Assigned(OnLog) then
        OnLog(sllTrace, 'DoRetry % socket=% fatal=% retry=%',
          [msg, fSock.Socket, FatalErrorCode, BOOL_STR[rMain in ctxt.Retry]], self);
-    if fAborted then
+    if Aborted then
       ctxt.Status := HTTP_CLIENTERROR
     else if rMain in ctxt.Retry then
       // we should retry once -> return error only if failed twice
@@ -2785,7 +2785,7 @@ begin
       fServer, fPort, ctxt.Url, ToText(Http.HeaderFlags), byte(ctxt.Retry)], self);
   end;
   Http.Content := '';
-  if fAborted then
+  if Aborted then
     ctxt.Status := HTTP_CLIENTERROR
   else if (hfConnectionClose in Http.HeaderFlags) or
           not SockIsDefined then
@@ -3040,7 +3040,7 @@ begin
         ctxt.Status := fOnProtocolRequest(Http);
         if StatusCodeIsSuccess(ctxt.Status) then
           ctxt.Status := Http.ContentToOutput(ctxt.Status, ctxt.OutStream);
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(%)=% via %.OnRequest',
             [fOpenUriFull, ctxt.Status,
              TObject(TMethod(fOnProtocolRequest).Data)], self);
@@ -3048,15 +3048,15 @@ begin
     end
     else
     repeat
-      // sub-method to handle the actual request, with proper retrial
+      // sub-method to handle the actual request, with proper retry
       RequestInternal(ctxt);
-      if fAborted then
+      if Aborted then
         break;
       // handle optional (proxy) authentication callbacks
       if (ctxt.Status = HTTP_UNAUTHORIZED) and
           Assigned(fOnAuthorize) then
       begin
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(% %)=%', [ctxt.Method, url, ctxt.Status], self);
         if rAuth in ctxt.Retry then
           break; // avoid infinite recursion
@@ -3067,7 +3067,7 @@ begin
       else if (ctxt.Status = HTTP_PROXYAUTHREQUIRED) and
           Assigned(fOnProxyAuthorize) then
       begin
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(% %)=%', [ctxt.Method, url, ctxt.Status], self);
         if rAuthProxy in ctxt.Retry then
           break;
@@ -3101,7 +3101,7 @@ begin
         OutStream.Size := ctxt.OutStreamInitialPos;     // truncate
         OutStream.Position := ctxt.OutStreamInitialPos; // reset position
       end;
-      if assigned(OnLog) then
+      if Assigned(OnLog) then
         OnLog(sllTrace, 'Request % % redirected to %', [ctxt.Method, url, ctxt.Url], self);
       if Assigned(fOnRedirect) then
         if not fOnRedirect(self, ctxt) then
@@ -3128,7 +3128,7 @@ begin
       else
         fRedirected := ctxt.Url;
       inc(ctxt.Redirected);
-    until fAborted;
+    until Aborted;
     if Assigned(fOnAfterRequest) then
       fOnAfterRequest(self, ctxt);
   end;
@@ -3998,19 +3998,19 @@ begin
       InternalAddHeader(fCompressList.AcceptEncoding);
     upload:= IsPost(method) or IsPut(method);
     // send request to remote server
-    if assigned(fOnUpload) and
+    if Assigned(fOnUpload) and
        upload then
       fOnUpload(self, false)
-    else if assigned(fOnDownload) and
+    else if Assigned(fOnDownload) and
             not upload then
       fOnDownload(self, false);
     InternalSendRequest(method, data);
     // retrieve status and headers
     result := InternalRetrieveAnswer(OutHeader, contentEnc, acceptEnc, OutData);
-    if assigned(fOnUpload) and
+    if Assigned(fOnUpload) and
        upload then
       fOnUpload(self, true)
-    else if assigned(fOnDownload) and
+    else if Assigned(fOnDownload) and
             not upload then
       fOnDownload(self, true);
     // handle incoming answer compression
@@ -5399,7 +5399,7 @@ begin
   fBaseUri := IncludeTrailingUriDelimiter(aBaseUri);
   fKeepAlive := aKeepAlive;
   fHttp := TSimpleHttpClient.Create;
-  fDefaultHeaders := 'Accept: ' + JSON_CONTENT_TYPE;
+  fDefaultHeaders := ('Accept: ' + JSON_CONTENT_TYPE);
   fOptions := [jcoParseTolerant, jcoHttpErrorRaise];
   fUrlEncoder := [ueEncodeNames, ueSkipVoidString];
 end;

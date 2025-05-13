@@ -541,22 +541,18 @@ var
   tmp: array[0..511] of WideChar;
   tmps: ShortString absolute tmp;
 begin
+  tmps[0] := #0;
+  if (ModuleName = nil) and
+     AppendWinErrorText(Code, tmps, #0) then
+  begin
+    // return directly the known standard system error code constant
+    FastSetString(result, @tmps[1], ord(tmps[0]));
+    exit;
+  end;
   bak := GetLastError;
   src := nil;
   flags := FORMAT_MESSAGE_FROM_SYSTEM;
-  if ModuleName = nil then
-  begin
-    // system error codes
-    tmps[0] := #0;
-    if AppendWinErrorText(Code, tmps, #0) then
-    begin
-      // we can return directly the standard system error code constant
-      FastSetString(result, @tmps[1], ord(tmps[0]));
-      SetLastError(bak);
-      exit;
-    end;
-  end
-  else
+  if ModuleName <> nil then
   begin
     // module specific error codes
     src := pointer(GetModuleHandle(ModuleName));
@@ -572,10 +568,11 @@ begin
      (src <> nil) then
   begin
     // fallback to the system error message if this module as no such code
+    result := WinErrorText(Code);
     SetLastError(bak);
-    result := WinErrorText(Code, nil);
     exit;
   end;
+  // return the formatted error message as trimmed UTF-8
   while (len > 0) and
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
     dec(len); // trim right
@@ -585,7 +582,7 @@ end;
 
 function GetErrorText(error: integer): RawUtf8;
 begin
-  result := WinErrorText(error, nil);
+  result := WinErrorText(error);
 end;
 
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
@@ -602,7 +599,7 @@ begin
   if Code = 0 then
     Code := GetLastError;
   result := Format('%s error [%s] (0x%x)',
-    [Context, string(WinErrorText(Code, nil)), code]);
+    [Context, string(WinErrorText(Code)), code]);
 end;
 
 procedure RaiseLastError(const Context: ShortString;
@@ -1027,14 +1024,20 @@ begin
     result := r.V;
 end;
 
+function SetCurrentDir(const NewDir: TFileName): boolean;
+var
+  tmp: TW32Temp;
+begin
+  result := (NewDir <> '') and
+            SetCurrentDirectoryW(W32(NewDir, tmp));
+end;
+
 function DeleteFile(const aFileName: TFileName): boolean;
 var
   tmp: TW32Temp;
 begin
-  if aFileName = '' then
-    result := false
-  else
-    result := DeleteFileW(W32(aFileName, tmp));
+  result := (aFileName <> '') and
+            DeleteFileW(W32(aFileName, tmp));
 end;
 
 function FileShare(aMode: integer): DWord;
@@ -1367,22 +1370,26 @@ end;
 
 procedure TSynEvent.ResetEvent;
 begin
+  fNotified := false;
   Windows.ResetEvent(THandle(fHandle));
 end;
 
 procedure TSynEvent.SetEvent;
 begin
+  fNotified := true;
   Windows.SetEvent(THandle(fHandle));
 end;
 
-procedure TSynEvent.WaitFor(TimeoutMS: integer);
+function TSynEvent.WaitFor(TimeoutMS: integer): boolean;
 begin
   WaitForSingleObject(THandle(fHandle), TimeoutMS);
+  result := fNotified;
 end;
 
-procedure TSynEvent.WaitForEver;
+function TSynEvent.WaitForEver: boolean;
 begin
   WaitForSingleObject(THandle(fHandle), INFINITE);
+  result := fNotified;
 end;
 
 function TSynEvent.IsEventFD: boolean;
@@ -4850,7 +4857,7 @@ function RunCommandWin(const cmd: TFileName; waitfor: boolean;
   var processinfo: TProcessInformation; const env: TFileName;
   options: TRunOptions; waitfordelayms: cardinal;
   redirected: PRawByteString; const onoutput: TOnRedirect;
-  const wrkdir: TFileName): integer;
+  const wrkdir: TFileName; jobtoclose: PHandle): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   security: TSecurityAttributes;
@@ -4963,6 +4970,8 @@ begin
   l := 0;
   rd := 0;
   job := 0;
+  if Assigned(jobtoclose) then
+    jobtoclose^ := job;
   if Assigned(onoutput) or
      (redirected <> nil) then
     if CreatePipe(rd, wr, @security, 0) then
@@ -5018,7 +5027,9 @@ begin
     begin
       CloseHandle(job);
       job := 0;
-    end;
+    end
+    else if Assigned(jobtoclose) then
+      jobtoclose^ := job;
   end;
   if Assigned(onoutput) then
     onoutput('', processinfo.dwProcessId);
@@ -5104,8 +5115,9 @@ begin
   CloseHandle(processinfo.hThread);
   if rd <> 0 then // CloseHandle(wr) has already be done
     CloseHandle(rd);
-  if job <> 0 then
-    CloseHandle(job);
+  if (job <> 0) and
+     not Assigned(jobtoclose) then
+      CloseHandle(job); // caller should make CloseHandle(jobtoclose^)
 end;
 
 function RunRedirect(const cmd: TFileName; exitcode: PInteger;

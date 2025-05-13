@@ -119,7 +119,7 @@ type
   end;
 
   /// kind of (static) database server implementation available
-  // - sMainEngine will identify the default main SQlite3 engine
+  // - sMainEngine will identify the default main SQLite3 engine
   // - sStaticDataTable will identify a TRestStorageInMemory - i.e.
   // TRestServer.fStaticData[] which can work without SQLite3
   // - sVirtualTable will identify virtual TRestStorage classes - i.e.
@@ -207,6 +207,7 @@ type
     fService: TServiceFactory;
     fServiceMethod: PInterfaceMethod;
     fServiceParameters: PUtf8Char;
+    fServiceParametersLen: PtrInt; // used for logging only
     fServiceInstanceID: TID;
     fServiceExecution: PServiceFactoryExecution;
     fServiceExecutionOptions: TInterfaceMethodOptions;
@@ -809,7 +810,7 @@ type
   // client driven session will be signed individualy
   TRestServerRoutingRest = class(TRestServerUriContext)
   protected
-    /// encode fInput[] as a JSON array for regular execution
+    /// encode fInput[] as a JSON array into InBody for regular execution
     procedure DecodeUriParametersIntoJson;
     /// register the interface-based SOA URIs to Server.Router multiplexer
     // - this overridden implementation register URI encoded as
@@ -2822,8 +2823,6 @@ begin
   fLog := fam.Add; // TSynLog instance for the current thread
   fLog.ManualEnter(fServer,
     'URI % % in=%', [aCall.Method, aCall.Url, KB(aCall.InBody)]);
-  if fServer.StatLevels <> [] then // get start timestamp from log
-    fMicroSecondsStart := fLog.LastQueryPerformanceMicroSeconds;
 end;
 
 destructor TRestServerUriContext.Destroy;
@@ -3156,18 +3155,19 @@ procedure TRestServerUriContext.LogFromContext;
 const
   COMMANDTEXT: array[TRestServerUriContextCommand] of string[15] = (
     '?', 'Method', 'Interface', 'Read', 'Write');
+var
+  cmd: PShortString;
 begin
+  cmd := @COMMANDTEXT[fCommand];
   if sllServer in fServer.LogLevel then
     fLog.Log(sllServer, '% % % % %=% out=% in %', [SessionUserName,
-      RemoteIPNotLocal, COMMANDTEXT[fCommand], fCall.Method,
+      RemoteIPNotLocal, cmd^, fCall.Method,
       fCall.Url, fCall.OutStatus, KB(fCall.OutBody),
-      MicroSecToString(fMicroSecondsElapsed)]);
-  if (sllServiceReturn in fServer.LogLevel) and
-     (fCall.OutBody <> '') and
-     not (optNoLogOutput in fServiceExecutionOptions) and
-     ((fCall.OutHead = '') or
-      IsHtmlContentTypeTextual(pointer(fCall.OutHead))) then
-    fLog.Log(sllServiceReturn, fCall.OutBody, self, MAX_SIZE_RESPONSE_LOG);
+      MicroSecToString(fMicroSecondsElapsed)], self);
+  if (fCall.OutBody <> '') and
+     (sllServiceReturn in fServer.LogLevel) and
+     not (optNoLogOutput in fServiceExecutionOptions) then
+    fServer.InternalLogResponse(fCall.OutBody, cmd^);
 end;
 
 procedure TRestServerUriContext.ExecuteCallback(var Ctxt: TJsonParserContext;
@@ -3396,6 +3396,7 @@ procedure TRestServerUriContext.InternalExecuteSoaByInterface;
 var
   m: PtrInt;
   spi: TInterfaceMethodValueDirections;
+  tmp: ShortString;
 begin
   // expects Service, ServiceParameters, ServiceMethod(Index) to be set
   m := fServiceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
@@ -3405,7 +3406,7 @@ begin
       fServiceMethod := @Service.InterfaceFactory.Methods[m];
     fServiceExecution := @Service.Execution[m];
     fServiceExecutionOptions := ServiceExecution.Options;
-    // un-log SPI into Ctxt.ServiceExecutionOptions
+    // un-log SPI into Ctxt.ServiceExecutionOptions (for TSynLog and DB log)
     spi := fServiceMethod^.HasSpiParams;
     if spi <> [] then
     begin
@@ -3417,14 +3418,13 @@ begin
     // log method call and parameter values (if worth it)
     if Assigned(fLog) and
        (sllServiceCall in fServer.LogLevel) and
-       (ServiceParameters <> nil) and
-       (PWord(ServiceParameters)^ <> ord('[') + ord(']') shl 8) then
-     if optNoLogInput in fServiceExecutionOptions then
-       fLog.Log(sllServiceCall, '%{}',
-         [fServiceMethod^.InterfaceDotMethodName], Server)
-     else
-       fLog.Log(sllServiceCall, '%%',
-         [fServiceMethod^.InterfaceDotMethodName, ServiceParameters], Server);
+       (fServiceParametersLen > 2) and
+       not (optNoLogInput in fServiceExecutionOptions) then
+    begin
+      Ansi7StringToShortString(fServiceMethod^.InterfaceDotMethodName, tmp);
+      ContentToShortAppend(pointer(fServiceParameters), fServiceParametersLen, tmp);
+      fLog.LogText(sllServiceCall, @tmp[1], Server);
+    end;
     // OnMethodExecute() callback event
     if Assigned(TServiceFactoryServer(Service).OnMethodExecute) then
       if not TServiceFactoryServer(Service).
@@ -4668,7 +4668,7 @@ begin
       fake.c := '[';                      // starts like a regular JSON array
       fake.marker := JSON_BIN_MAGIC_C;    // internal identifier
       fake.bin := pointer(fCall^.InBody); // pass by reference (not base-64)
-      ServiceParameters := @fake;
+      fServiceParameters := @fake;        // keep fServiceParametersLen=0
       InternalExecuteSoaByInterface;
       exit;
     end;
@@ -4691,11 +4691,12 @@ begin
         FillInput; // fInput[0]='Param1',fInput[1]='Value1',fInput[2]='Param2'...
         if (fInput <> nil) and
            (ServiceMethod <> nil) then
-          DecodeUriParametersIntoJson;
+          DecodeUriParametersIntoJson; // fill fCall^.InBody from Input[]
       end;
     end;
   end;
-  ServiceParameters := pointer(fCall^.InBody);
+  fServiceParameters := pointer(fCall^.InBody);
+  fServiceParametersLen := length(fCall^.InBody);
   // now Service, ServiceParameters, ServiceMethod(Index) are set
   InternalExecuteSoaByInterface;
 end;
@@ -4745,10 +4746,11 @@ begin
     JsonDecode(tmp.buf, @RPC_NAMES, length(RPC_NAMES), @values, true);
     if values[0].Text = nil then // Method name required
       exit;
-    values[0].ToUtf8(method);                  // "method":"methodname"
-    ServiceParameters := values[1].Text;       // "params":[....]
-    ServiceInstanceID := values[2].ToCardinal; // "id":ClientDrivenID
-    ServiceMethodIndex := Service.ServiceMethodIndex(method); // O(n) lookup
+    values[0].ToUtf8(method);                   // "method":"methodname"
+    fServiceParameters    := values[1].Text;    // "params":[....]
+    fServiceParametersLen := values[1].Len;
+    fServiceInstanceID    := values[2].ToCardinal; // "id":ClientDrivenID
+    fServiceMethodIndex := Service.ServiceMethodIndex(method); // O(n) lookup
     if ServiceMethodIndex < 0 then
     begin
       Error('Unknown method');
@@ -6778,7 +6780,7 @@ begin
             W.AddDirect('}', ',');
           end;
         W.CancelLastComma;
-        W.AddShorter(']},');
+        W.AddDirect(']', '}', ',');
       end;
     finally
       Stats.UnLock;
@@ -6848,7 +6850,7 @@ begin
             W.AddDirect('}', ',');
           end;
         W.CancelLastComma;
-        W.AddShorter(']},');
+        W.AddDirect(']', '}', ',');
       end;
     finally
       fSessions.Safe.ReadOnlyUnLock;
@@ -7584,14 +7586,17 @@ var
 begin
   tc := fStats.NotifyThreadCount(-1);
   id := GetCurrentThreadId;
+  // log thread finalization
   if Sender = nil then
     ERestException.RaiseUtf8('%.EndCurrentThread(nil)', [self]);
   InternalLog('EndCurrentThread(%) ThreadID=% ''%'' ThreadCount=%',
-    [PClass(Sender)^, {%H-}pointer(id), CurrentThreadNameShort^, tc]);
+    [PClass(Sender)^, PointerToHexShort({%H-}pointer(id)),
+     CurrentThreadNameShort^, tc]);
   if Sender.ThreadID <> id then
     ERestException.RaiseUtf8(
       '%.EndCurrentThread(%.ID=%) should match CurrentThreadID=%',
       [self, Sender, {%H-}pointer(Sender.ThreadID), {%H-}pointer(id)]);
+  // cleanup services: remove sicPerThread instances and RunningThread instance
   if Services <> nil then
   begin
     inst.InstanceID := PtrUInt(id);
@@ -7672,7 +7677,7 @@ begin
     else if (Call.InBody <> '') and
             (rsoValidateUtf8Input in fOptions) and
             ctxt.ContentTypeIsJson and
-            not IsValidUtf8(Call.InBody) then
+            not IsValidUtf8NotVoid(Call.InBody) then // may use AVX2
       ctxt.Error('Expects valid UTF-8 input')
     else
     // 5. handle security
@@ -7762,7 +7767,8 @@ begin
     // 9. gather statistics and log execution
     if StatLevels <> [] then
       ctxt.ComputeStatsAfterCommand;
-    if ctxt.fLog <> nil then
+    if (ctxt.fLog <> nil) and
+       (fLogLevel * [sllServer, sllServiceReturn] <> []) then
       ctxt.LogFromContext;
     // 10. finalize execution context
     if Assigned(OnAfterUri) then

@@ -553,7 +553,7 @@ type
   {$M-}
 
 type
-  /// used e.g. to serialize up to 256-bit as hexadecimal
+  /// used e.g. to serialize up to 256-bit binary as hexadecimal
   TShort64 = string[64];
   PShort64 = ^TShort64;
 
@@ -565,7 +565,7 @@ type
   TShort31 = string[31];
   PShort31 = ^TShort31;
 
-  /// used e.g. by Int64ToHttpEtag
+  /// used e.g. by TwoDigits(), ToShort(Int64) or Int64ToHttpEtag()
   TShort23 = string[23];
   PShort23 = ^TShort23;
 
@@ -582,6 +582,10 @@ type
   /// used e.g. for TTextWriter.AddShorter small text constants
   TShort8 = string[8];
   PShort8 = ^TShort8;
+
+  /// used e.g. by UInt4DigitsToShort/UInt3DigitsToShort/UInt2DigitsToShort
+  // - such result type would avoid a string allocation on heap
+  TShort4 = string[4];
 
   /// stack-allocated ASCII string, used by GuidToShort() function
   TGuidShortString = string[38];
@@ -848,7 +852,7 @@ procedure FastAssignNewNotVoid(var d; s: pointer); overload;
 
 /// internal function used by FastSetString/FastSetStringCP
 function FastNewString(len: PtrInt; codepage: PtrInt = CP_RAWBYTESTRING): pointer;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef HASSAFEFPCINLINE}inline;{$endif}
 
 /// ensure the supplied variable will have a CP_UTF8 code page
 // - making it unique if needed
@@ -1032,7 +1036,7 @@ function GetClassParent(C: TClass): TClass;
 
 var
   /// retrieve the unit name where a given class is implemented
-  // - is implemented in mormot.core.rtti.pas; so may be nil otherwise
+  // - properly implemented in mormot.core.rtti.pas; returns '' otherwise
   // - is needed since Delphi 7-2009 do not define TObject.UnitName (because
   // there is no such information available in RTTI)
   ClassUnit: function(C: TClass): PShortString;
@@ -1099,14 +1103,14 @@ function DateTimeToIsoString(dt: TDateTime): string;
 
 /// parse a '0x#####' buffer context into a 32-bit binary
 // - jump trailing '0x', then ends at first non hexadecimal character
-// - internal function to avoid linking mormot.core.buffers.pas
+// - internal function to avoid linking mormot.core.buffers.pas for a few bytes
 function ParseHex0x(p: PAnsiChar; no0x: boolean = false): cardinal;
 
 /// parse an hexadecimal buffer into its raw binary
 // - parse up to n chars from p^, ending in case of not hexadecimal char
 // - any '#' char in the input buffer will be handled as '0'
 // - caller should ensure p<>nil and b<>nil and n>0
-// - internal function to avoid linking mormot.core.buffers.pas
+// - internal function to avoid linking mormot.core.buffers.pas for a few bytes
 function ParseHex(p: PAnsiChar; b: PByte; n: integer): PAnsiChar;
 
 /// convert a binary into its human-friendly per-byte hexadecimal lowercase text
@@ -1432,14 +1436,6 @@ const
     1E160, 1E192, 1E224, 1E256, 1E288, 1E320, 1E-0,{45} 1E-32, 1E-64,
     1E-96, 1E-128, 1E-160, 1E-192, 1E-224, 1E-256, 1E-288, 1E-320);
 
-/// low-level computation of 10 ^ positive exponent, if POW10[] is not enough
-function HugePower10Pos(exponent: PtrInt; pow10: PPow10): TSynExtended;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// low-level computation of 10 ^ negative exponent, if POW10[] is not enough
-function HugePower10Neg(exponent: PtrInt; pow10: PPow10): TSynExtended;
-  {$ifdef HASINLINE}inline;{$endif}
-
 /// get the signed 32-bit integer value stored in a RawUtf8 string
 // - we use the PtrInt result type, even if expected to be 32-bit, to use
 // native CPU register size (don't want any 32-bit overflow here)
@@ -1532,6 +1528,11 @@ const
   // - 1E-12 is too small, and triggers sometimes some unexpected errors;
   // FPC RTL uses 1E-4 so we are paranoid enough
   DOUBLE_SAME = 1E-11;
+
+  // some constants also available in the Math unit - see ShortToFloatNan()
+  NaN         =  0.0 / 0.0;
+  Infinity    =  1.0 / 0.0;
+  NegInfinity = -1.0 / 0.0;
 
 /// compare to floating point values, with IEEE 754 double precision
 // - use this function instead of raw = operator
@@ -3080,6 +3081,7 @@ var MoveFast: procedure(const Source; var Dest; Count: PtrInt) = Move;
 {$endif ASMINTEL}
 
 /// Move() with one-by-one byte copy
+// - expects Source <> nil, Dest <> nil and Count > 0
 // - never redirect to MoveFast() so could be used when data overlaps
 procedure MoveByOne(Source, Dest: pointer; Count: PtrUInt);
   {$ifdef HASINLINE} inline; {$endif}
@@ -5432,6 +5434,11 @@ begin
     result := PPointer(PPtrInt(Instance)^ + vmtClassName)^;
 end;
 
+function _ClassUnit(C: TClass): PShortString;
+begin
+  result := @NULCHAR; // properly implemented by mormot.core.rtti.pas
+end;
+
 procedure ClassToText(C: TClass; var result: RawUtf8);
 var
   P: PShortString;
@@ -5627,9 +5634,9 @@ end;
 function Hex2Dec(c: AnsiChar): ShortInt; {$ifdef HASINLINE} inline; {$endif}
 begin
   result := ord(c);
-  case c of
+  case c of // fast enough for a few chars
     '#':
-      result := 0; // handle # as 0 char within an hexadecimal buffer
+      result := 0; // handle '#' as '0' within the hexadecimal buffer
     '0'..'9':
       dec(result, ord('0'));
     'A'..'Z':
@@ -5665,7 +5672,7 @@ begin
     v1 := Hex2Dec(p^);
     if v1 < 0 then
     begin
-      result := (result shl 4) or cardinal(v0); // only one char left = 4-bit
+      result := (result shl 4) or cardinal(v0);  // only one char left = 4-bit
       break;
     end;
     result := (result shl 8) or (cardinal(v0) shl 4) or cardinal(v1); // 8-bit
@@ -6162,7 +6169,7 @@ end;
 
 procedure SetInt64(P: PUtf8Char; var result: Int64);
 var
-  c: cardinal;
+  c, r32: cardinal;
   minus: boolean;
 begin
   result := 0;
@@ -6186,30 +6193,31 @@ begin
         inc(P)
       until P^ <> ' ';
   end;
-  c := byte(P^) - 48;
-  if c > 9 then
+  r32 := byte(P^) - 48;
+  if r32 > 9 then
     exit;
-  PCardinal(@result)^ := c;
   inc(P);
   repeat // fast 32-bit loop
     c := byte(P^) - 48;
     if c > 9 then
-      break
-    else
-      PCardinal(@result)^ := PCardinal(@result)^ * 10 + c;
-    inc(P);
-    if PCardinal(@result)^ >= high(cardinal) div 10 then
     begin
-      repeat // 64-bit loop
-        c := byte(P^) - 48;
-        if c > 9 then
-          break;
-        result := result shl 3 + result + result; // fast result := result*10
-        inc(result, c);
-        inc(P);
-      until false;
+      result := r32; // reached the end of input digits
       break;
     end;
+    r32 := r32 * 10 + c;
+    inc(P);
+    if r32 < high(cardinal) div 10 then
+      continue;
+    result := r32;
+    repeat // 64-bit loop
+      c := byte(P^) - 48;
+      if c > 9 then
+        break;
+      result := result shl 3 + result + result; // fast result := result*10
+      inc(result, c);
+      inc(P);
+    until false;
+    break;
   until false;
   if minus then
     result := -result;
@@ -6217,7 +6225,7 @@ end;
 
 procedure SetQWord(P: PUtf8Char; var result: QWord);
 var
-  c: cardinal;
+  c, r32: cardinal;
 begin
   result := 0;
   if P = nil then
@@ -6229,30 +6237,31 @@ begin
     repeat
       inc(P)
     until P^ <> ' ';
-  c := byte(P^) - 48;
-  if c > 9 then
+  r32 := byte(P^) - 48;
+  if r32 > 9 then
     exit;
-  PCardinal(@result)^ := c;
   inc(P);
   repeat // fast 32-bit loop
     c := byte(P^) - 48;
     if c > 9 then
-      break
-    else
-      PCardinal(@result)^ := PCardinal(@result)^ * 10 + c;
-    inc(P);
-    if PCardinal(@result)^ >= high(cardinal) div 10 then
     begin
-      repeat // 64-bit loop
-        c := byte(P^) - 48;
-        if c > 9 then
-          break;
-        result := result shl 3 + result + result; // fast result := result*10
-        inc(result, c);
-        inc(P);
-      until false;
-      break;
+      result := r32; // reached the end of input digits
+      exit;
     end;
+    r32 := r32 * 10 + c;
+    inc(P);
+    if r32 < high(cardinal) div 10 then
+      continue;
+    result := r32;
+    repeat // 64-bit loop
+      c := byte(P^) - 48;
+      if c > 9 then
+        break;
+      result := result shl 3 + result + result; // fast result := result*10
+      inc(result, c);
+      inc(P);
+    until false;
+    break;
   until false;
 end;
 
@@ -6313,7 +6322,7 @@ end;
 
 function GetInt64(P: PUtf8Char; var err: integer): Int64;
 var
-  c: cardinal;
+  c, r32: cardinal;
   minus: boolean;
 begin
   err := 0;
@@ -6339,12 +6348,11 @@ begin
       until P^ <> ' ';
   end;
   inc(err);
-  c := byte(P^) - 48;
-  if c > 9 then
+  r32 := byte(P^) - 48;
+  if r32 > 9 then
     exit;
-  PCardinal(@result)^ := c;
-  inc(P);
   repeat // fast 32-bit loop
+    inc(P);
     c := byte(P^);
     if c <> 0 then
     begin
@@ -6352,40 +6360,36 @@ begin
       inc(err);
       if c > 9 then
         exit;
-      PCardinal(@result)^ := PCardinal(@result)^ * 10 + c;
-      inc(P);
-      if PCardinal(@result)^ >= high(cardinal) div 10 then
-      begin
-        repeat // 64-bit loop
-          c := byte(P^);
-          if c = 0 then
-          begin
-            err := 0; // conversion success without error
-            break;
-          end;
-          dec(c, 48);
-          inc(err);
-          if c > 9 then
-            exit
-          else
-            {$ifdef CPU32DELPHI}
-            result := result shl 3 + result + result;
-            {$else}
-            result := result * 10;
-            {$endif CPU32DELPHI}
-          inc(result, c);
-          if result < 0 then
-            exit; // overflow (>$7FFFFFFFFFFFFFFF)
-          inc(P);
-        until false;
-        break;
-      end;
-    end
-    else
-    begin
-      err := 0; // reached P^=#0 -> conversion success without error
+      r32 := r32 * 10 + c;
+      if r32 < high(cardinal) div 10 then
+        continue;
+      result := r32;
+      repeat // 64-bit loop
+        inc(P);
+        c := byte(P^);
+        if c = 0 then
+        begin
+          err := c; // conversion success without error
+          break;
+        end;
+        dec(c, 48);
+        inc(err);
+        if c > 9 then
+          exit;
+        {$ifdef CPU32DELPHI}
+        result := result shl 3 + result + result;
+        {$else}
+        result := result * 10; // FPC generates fast imul + mul
+        {$endif CPU32DELPHI}
+        inc(result, c);
+        if result < 0 then
+          exit; // overflow (>$7FFFFFFFFFFFFFFF)
+      until false;
       break;
     end;
+    err := c; // reached P^=#0 (c=0) -> 32-bit conversion success without error
+    result := r32;
+    break;
   until false;
   if minus then
     result := -result;
@@ -6393,21 +6397,21 @@ end;
 
 function GetQWord(P: PUtf8Char; var err: integer): QWord;
 var
-  c: PtrUInt;
+  c, r32: PtrUInt;
 begin
-  err := 1; // error
+  err := 0;
   result := 0;
   if P = nil then
     exit;
   while (P^ <= ' ') and
         (P^ <> #0) do
     inc(P);
-  c := byte(P^) - 48;
-  if c > 9 then
+  inc(err);
+  r32 := byte(P^) - 48;
+  if r32 > 9 then
     exit;
-  PByte(@result)^ := c;
-  inc(P);
   repeat // fast 32-bit loop
+    inc(P);
     c := byte(P^);
     if c <> 0 then
     begin
@@ -6415,38 +6419,33 @@ begin
       inc(err);
       if c > 9 then
         exit;
-      PCardinal(@result)^ := PCardinal(@result)^ * 10 + c;
-      inc(P);
-      if PCardinal(@result)^ >= high(cardinal) div 10 then
-      begin
-        repeat // 64-bit loop
-          c := byte(P^);
-          if c = 0 then
-          begin
-            err := 0; // conversion success without error
-            break;
-          end;
-          dec(c, 48);
-          inc(err);
-          if c > 9 then
-            exit
-          else
-            {$ifdef CPU32DELPHI}
-            result := result shl 3 + result + result;
-            {$else}
-            result := result * 10;
-            {$endif CPU32DELPHI}
-          inc(result, c);
-          inc(P);
-        until false;
-        break;
-      end;
-    end
-    else
-    begin
-      err := 0; // reached P^=#0 -> conversion success without error
-      break;
+      r32 := r32 * 10 + c;
+      if r32 < high(cardinal) div 10 then
+        continue;
+      result := r32;
+      repeat // 64-bit loop
+        inc(P);
+        c := byte(P^);
+        if c = 0 then
+        begin
+          err := c; // conversion success without error
+          exit;
+        end;
+        dec(c, 48);
+        inc(err);
+        if c > 9 then
+          exit;
+        {$ifdef CPU32DELPHI}
+        result := result shl 3 + result + result;
+        {$else}
+        result := result * 10; // FPC generates fast imul + mul
+        {$endif CPU32DELPHI}
+        inc(result, c);
+      until false;
     end;
+    err := c; // reached P^=#0 (c=0) -> conversion success without error
+    result := r32;
+    exit;
   until false;
 end;
 
@@ -6541,26 +6540,15 @@ begin
     result := 0;
 end;
 
-function HugePower10Pos(exponent: PtrInt; pow10: PPow10): TSynExtended;
-begin
-  result := pow10[(exponent and not 31) shr 5 + 34] * pow10[exponent and 31];
-end;
-
-function HugePower10Neg(exponent: PtrInt; pow10: PPow10): TSynExtended;
-begin
-  exponent := -exponent;
-  result := pow10[(exponent and not 31) shr 5 + 45] / pow10[exponent and 31];
-end;
-
-{$ifndef CPU32DELPHI}
+{$ifndef CPU32DELPHI} // Delphi has its own x86/x87 asm version
 
 function GetExtended(P: PUtf8Char; out err: integer): TSynExtended;
 var
   remdigit: integer;
   frac, exp: PtrInt;
-  c: AnsiChar;
   flags: set of (fNeg, fNegExp, fValid);
   v64: Int64; // allows 64-bit resolution for the digits (match 80-bit extended)
+  d64: TSynExtended;
 label
   e;
 begin
@@ -6569,84 +6557,84 @@ begin
   frac := 0;
   if P = nil then
     goto e; // will return 0 but err=1
-  c := P^;
-  if c = ' ' then
+  if P^ = ' ' then
     repeat
       inc(P);
-      c := P^;
-    until c <> ' '; // trailing spaces
-  if c = '+' then
+    until P^ <> ' '; // trailing spaces
+  if P^ = '+' then
+    inc(P)
+  else if P^ = '-' then
   begin
     inc(P);
-    c := P^;
-  end
-  else if c = '-' then
-  begin
-    inc(P);
-    c := P^;
     include(flags, fNeg);
   end;
+  if P^ > '9' then
+    case PCardinal(P)^ and $00dfdfdf of
+      ord('N') + ord('A') shl 8 + ord('N') shl 16:
+        begin
+          err := 0;
+          result := NaN;
+          exit;
+        end;
+      ord('I') + ord('N') shl 8 + ord('F') shl 16:
+      begin
+        err := 0;
+        if fNeg in flags then
+          result := NegInfinity
+        else
+          result := Infinity;
+        exit;
+      end;
+    end;
   remdigit := 18; // v64=-9,223,372,036,854,775,808..+9,223,372,036,854,775,807
   repeat
-    inc(P);
-    if (c >= '0') and
-       (c <= '9') then
+    if byte(ord(P^) - ord('0')) <= 9 then
     begin
-      if remdigit = 0 then
-        if v64 < 922337203685477580 then // avoid 64-bit overflow
-          inc(remdigit); // but allow up to 19 digits if possible
-      dec(remdigit);
+      if (remdigit <> 0) or // avoid 64-bit overflow, but allow 19 digits
+         (v64 > 922337203685477580) then
+        dec(remdigit);
       if remdigit >= 0 then // over-required digits are just ignored
       begin
-        dec(c, ord('0'));
-        {$ifdef CPU64}
-        v64 := v64 * 10;
-        {$else}
-        v64 := v64 shl 3 + v64 + v64;
-        {$endif CPU64}
-        inc(v64, byte(c));
-        c := P^;
+        v64 := v64 * 10; // FPC generates fast imul + mul on i386
+        inc(v64, Int64(P^) - ord('0'));
         include(flags, fValid);
         if frac <> 0 then
           dec(frac); // digits after '.'
+        inc(P);
         continue;
       end;
       if frac >= 0 then
         inc(frac); // handle #############00000
-      c := P^;
+      inc(P);
       continue;
     end;
-    if c <> '.' then
+    if P^ <> '.' then
       break;
+    inc(P);
     if frac > 0 then
       goto e; // will return partial value but err=1
     dec(frac);
-    c := P^;
   until false;
   if frac < 0 then
     inc(frac); // adjust digits after '.'
-  if (c = 'E') or
-     (c = 'e') then
+  if ord(P^) or $20 = ord('e') then
   begin
     exp := 0;
     exclude(flags, fValid);
-    c := P^;
-    if c = '+' then
+    inc(P);
+    if P^ = '+' then
       inc(P)
-    else if c = '-' then
+    else if P^ = '-' then
     begin
       inc(P);
       include(flags, fNegExp);
     end;
     repeat
-      c := P^;
-      inc(P);
-      if (c < '0') or
-         (c > '9') then
+      if byte(ord(P^) - ord('0')) > 9 then
         break;
-      dec(c, ord('0'));
-      exp := (exp * 10) + byte(c);
+      exp := (exp * 10) + ord(P^) - ord('0');
       include(flags, fValid);
+      inc(P);
     until false;
     if fNegExp in flags then
       dec(frac, exp)
@@ -6660,21 +6648,24 @@ begin
     end;
   end;
   if (fValid in flags) and
-     (c = #0) then
+     (P^ = #0) then
     err := 0
   else
 e:  err := 1; // return the (partial) value even if not ended with #0
-  exp := PtrUInt(@POW10);
+  d64 := v64;
   if frac >= -31 then
-    if frac <= 31 then
-      result := PPow10(exp)[frac] // -31 .. + 31
-    else
-      result := HugePower10Pos(frac, PPow10(exp)) // +32 ..
-  else
-    result := HugePower10Neg(frac, PPow10(exp));  // .. -32
+    if frac <= 31 then // -31 .. + 31
+      result := POW10[frac]
+    else // +32 ..
+      result := POW10[(frac and not 31) shr 5 + 34] * POW10[frac and 31]
+  else  // .. -32
+  begin
+    frac := -frac;
+    result := POW10[(frac and not 31) shr 5 + 45] / POW10[frac and 31];
+  end;
   if fNeg in flags then
-    result := result * PPow10(exp)[33]; // * -1
-  result := result * v64;
+    result := result * POW10[33]; // * -1
+  result := result * d64;
 end;
 
 {$endif CPU32DELPHI}
@@ -13172,8 +13163,14 @@ begin
   result := Count;
   if result <= 0 then
     exit;
+  if fDataString = '' then // we know that fPosition=0 in this case
+  begin
+    FastSetString(RawUtf8(fDataString), @Buffer, result);
+    fPosition := result;
+    exit;
+  end;
   needed := fPosition + result;
-  if needed > length(fDataString) then
+  if needed > PStrLen(PAnsiChar(pointer(fDataString)) - _STRLEN)^ then
     SetLength(fDataString, needed); // resize
   MoveFast(Buffer, PByteArray(fDataString)[fPosition], result);
   fPosition := needed;
@@ -13277,6 +13274,7 @@ begin
   VariantClearSeveral     := @_VariantClearSeveral;
   SortDynArrayVariantComp := @_SortDynArrayVariantComp;
   XorEntropyGetOsRandom256 := @_XorEntropyGetOsRandom256;
+  ClassUnit := @_ClassUnit;
   // initialize CPU-specific asm
   TestCpuFeatures;
 end;

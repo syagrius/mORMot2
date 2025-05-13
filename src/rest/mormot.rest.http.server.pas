@@ -680,7 +680,7 @@ begin
           if THttpApiServer(fHttpServer).RemoveUrl(aServer.Model.Root,
              fPublicPort, fRestServers[i].Security in SEC_TLS,
              fDomainName) <> NO_ERROR then
-            log.Log(sllLastError, '%.RemoveUrl(%)',
+            fLog.Add.Log(sllLastError, '%.RemoveUrl(%)',
               [self, aServer.Model.Root], self);
         {$endif USEHTTPSYS}
         for j := i to n - 1 do
@@ -834,8 +834,7 @@ begin
   if aUse in HTTP_API_MODES then
     if PosEx('Wine', OSVersionInfoEx) > 0 then
     begin
-      if Assigned(log) then
-        log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
+      fLog.Add.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
           'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
       aUse := useHttpAsync; // the closest server we have using sockets
     end
@@ -853,8 +852,7 @@ begin
     except
       on E: Exception do
       begin
-        if Assigned(log) then
-          log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
+        fLog.Add.Log(sllError, '% for % % at%  -> fallback to socket-based server',
             [E, ToText(aUse)^, fHttpServer, fRestServerNames], self);
         FreeAndNilSafe(fHttpServer); // if http.sys initialization failed
         if fUse in [useHttpApiOnly, useHttpApiRegisteringURIOnly] then
@@ -922,12 +920,11 @@ end;
 
 destructor TRestHttpServer.Destroy;
 var
-  log: ISynLog;
+  {%H-}log: ISynLog;
 begin
-  fLog.EnterLocal(log, self, 'Destroy');
-  if log <> nil then
-    log.Log(sllHttp, '% finalized for %',
-      [fHttpServer, Plural('server', length(fRestServers))], self);
+  fLog.EnterLocal(log, self, 'Destroy').
+       Log(sllHttp, '% finalized for %',
+         [fHttpServer, Plural('server', length(fRestServers))], self);
   Shutdown(true); // but don't call fRestServers[i].Server.Shutdown
   FreeAndNilSafe(fHttpServer);
   inherited Destroy;
@@ -1146,7 +1143,7 @@ begin
   if (Ctxt.Method = '') or
      ((rsoOnlyJsonRequests in fOptions) and
       not IsGet(Ctxt.Method) and
-      not IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER)) then
+      not IsContentTypeJsonU(Ctxt.InContentType)) then
   begin
     // wrong Input parameters or not JSON request: 400 BAD REQUEST
     result := HTTP_BADREQUEST;
@@ -1164,9 +1161,8 @@ begin
   end;
   if (Ctxt.InContent <> '') and
      (rsoOnlyValidUtf8 in fOptions) and
-     (IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER) or
-      IdemPChar(pointer(Ctxt.InContentType), 'TEXT/')) and
-     not IsValidUtf8(Ctxt.InContent) then // may use AVX2
+     IsContentUtf8(Ctxt.InContent, Ctxt.InContentType) and
+     not IsValidUtf8NotVoid(Ctxt.InContent) then // may use AVX2
   begin
     // rsoOnlyValidUtf8 rejection
     result := HTTP_NOTACCEPTABLE;

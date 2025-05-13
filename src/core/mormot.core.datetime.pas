@@ -385,7 +385,7 @@ type
     // - on success, move P^ just after the date, and return TRUE
     function ParseFromText(var P: PUtf8Char): boolean;
       {$ifdef HASINLINE}inline;{$endif}
-    /// fill fields with the current UTC/local date, using a 8-16ms thread-safe cache
+    /// fill fields with the current UTC/local date, using a 16ms thread-safe cache
     procedure FromNow(localtime: boolean = false);
     /// fill fields with the supplied date
     procedure FromDate(date: TDate);
@@ -460,13 +460,13 @@ type
     function IsDateEqual(const date: TSynDate): boolean;
     /// internal method used by TSynTimeZone
     function EncodeForTimeChange(const aYear: word): TDateTime;
-    /// fill fields with the current UTC time, using a 8-16ms thread-safe cache
+    /// fill fields with the current UTC time, using a 16ms thread-safe cache
     procedure FromNowUtc;
       {$ifdef HASINLINE}inline;{$endif}
-    /// fill fields with the current Local time, using a 8-16ms thread-safe cache
+    /// fill fields with the current Local time, using a 16ms thread-safe cache
     procedure FromNowLocal;
       {$ifdef HASINLINE}inline;{$endif}
-    /// fill fields with the current UTC or local time, using a 8-16ms thread-safe cache
+    /// fill fields with the current UTC or local time, using a 16ms thread-safe cache
     procedure FromNow(localtime: boolean);
       {$ifdef HASINLINE}inline;{$endif}
     /// fill fields from the given value - but not DayOfWeek
@@ -515,6 +515,10 @@ type
     // the last 2 digits rounded in 0..62 fake sub-second range (1000 ms / 16)
     // - as called by TJsonWriter.AddCurrentLogTime()
     procedure AddLogTime(WR: TTextWriter);
+    /// append the stored date and time, in a log-friendly format, to a memory buffer
+    // - e.g. '20110325 19241502' 17 bytes - with no trailing space nor tab, and
+    // the last 2 digits rounded in 0..62 fake sub-second range (1000 ms / 16)
+    procedure ToLogTime(Dest: PUtf8Char);
     /// append the stored date and time, in apache-like format, to a TJsonWriter
     // - e.g. append '19/Feb/2019:06:18:55 ' - including a trailing space
     procedure AddNcsaText(WR: TTextWriter; const TZD: RawUtf8 = '');
@@ -690,13 +694,13 @@ function UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime): TShort31;
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-function DateTimeToFileShort(const DateTime: TDateTime): TShort16; overload;
+function DateTimeToFileShort(const DateTime: TDateTime): TShort16;
   {$ifdef FPC_OR_UNICODE} inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
-procedure DateTimeToFileShort(const DateTime: TDateTime; out result: TShort16); overload;
+procedure DateTimeToFileShortVar(const DateTime: TDateTime; out result: TShort16);
 
 /// get the current time a small text layout, perfect e.g. for naming a file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits
@@ -719,12 +723,12 @@ procedure Int64ToHttpEtag(Value: Int64; out Etag: TShort23);
 // - decode both 'if-none-match' and 'if-modified-since' input headers
 // - returns true if 304 status code is to be returned
 function FileHttp304NotModified(Size: Int64; Time: TUnixMSTime;
-  const InHeaders: RawUtf8; var OutHeaders: RawUtf8): boolean;
+  InHeaders: PUtf8Char; var OutHeaders: RawUtf8): boolean;
 
 /// handle HTTP_NOTMODIFIED (304) process against raw body content
 // - decode 'if-none-match' input header against the supplied Content
 // - returns true if 304 status code is to be returned
-function ContentHttp304NotModified(const Content, InHeaders: RawUtf8;
+function ContentHttp304NotModified(const Content: RawUtf8; InHeaders: PUtf8Char;
   var OutHeaders: RawUtf8): boolean;
 
 
@@ -1929,7 +1933,7 @@ var
   GlobalTime: array[boolean] of packed record
     safe: TLightLock; // better than RCU
     time: TSystemTime;
-    clock: cardinal;  // avoid slower API call with 8-16ms loss of precision
+    clock: cardinal;  // avoid slower API call with 16ms loss of precision
     _pad: array[1 .. 64 - SizeOf(TLightLock) - SizeOf(TSystemTime) - 4] of byte;
   end;
 
@@ -1945,7 +1949,7 @@ begin
   with GlobalTime[LocalTime] do
     if clock <> tix then // recompute every 16 ms
     begin
-      clock := tix;
+      clock := tix; // can be set first thanks to safe.Lock below
       NewTime.Clear;
       if LocalTime then
         GetLocalTime(newtimesys)
@@ -1964,7 +1968,7 @@ begin
     else
     begin
       safe.Lock;
-      newtimesys := time;
+      newtimesys := time; // fast copy last decoded value from cache
       safe.UnLock;
     end;
 end;
@@ -2504,32 +2508,35 @@ begin
     WR.AddString(TZD);
 end;
 
-procedure TSynSystemTime.AddLogTime(WR: TTextWriter);
+procedure TSynSystemTime.ToLogTime(Dest: PUtf8Char);
 var
   d100: TDiv100Rec;
-  p: PUtf8Char;
   {$ifdef CPUX86NOTPIC}
   tab: TWordArray absolute TwoDigitLookupW;
   {$else}
   tab: PWordArray;
   {$endif CPUX86NOTPIC}
 begin
-  if WR.BEnd - WR.B <= 18 then
-    WR.FlushToStream;
-  p := WR.B + 1;
+  Div100(Year, d100{%H-});
   {$ifndef CPUX86NOTPIC}
   tab := @TwoDigitLookupW;
   {$endif CPUX86NOTPIC}
-  Div100(Year, d100{%H-});
-  PWord(p)^     := tab[d100.D];
-  PWord(p + 2)^ := tab[d100.M];
-  PWord(p + 4)^ := tab[PtrUInt(Month)];
-  PWord(p + 6)^ := tab[PtrUInt(Day)];
-  p[8] := ' ';
-  PWord(p + 9)^  := tab[PtrUInt(Hour)];
-  PWord(p + 11)^ := tab[PtrUInt(Minute)];
-  PWord(p + 13)^ := tab[PtrUInt(Second)];
-  PWord(p + 15)^ := tab[PtrUInt(Millisecond) shr 4]; // rounded in 0..62 range
+  PWord(Dest)^     := tab[d100.D];
+  PWord(Dest + 2)^ := tab[d100.M];
+  PWord(Dest + 4)^ := tab[PtrUInt(Month)];
+  PWord(Dest + 6)^ := tab[PtrUInt(Day)];
+  Dest[8] := ' ';
+  PWord(Dest + 9)^  := tab[PtrUInt(Hour)];
+  PWord(Dest + 11)^ := tab[PtrUInt(Minute)];
+  PWord(Dest + 13)^ := tab[PtrUInt(Second)];
+  PWord(Dest + 15)^ := tab[PtrUInt(Millisecond) shr 4]; // rounded in 0..62 range
+end;
+
+procedure TSynSystemTime.AddLogTime(WR: TTextWriter);
+begin
+  if WR.BEnd - WR.B <= 18 then
+    WR.FlushToStream;
+  ToLogTime(WR.B + 1);
   inc(WR.B, 17);
 end;
 
@@ -2991,10 +2998,10 @@ end;
 
 function DateTimeToFileShort(const DateTime: TDateTime): TShort16;
 begin
-  DateTimeToFileShort(DateTime, result);
+  DateTimeToFileShortVar(DateTime, result);
 end;
 
-procedure DateTimeToFileShort(const DateTime: TDateTime; out result: TShort16);
+procedure DateTimeToFileShortVar(const DateTime: TDateTime; out result: TShort16);
 var
   T: TSynSystemTime;
 begin
@@ -3026,36 +3033,48 @@ begin
 end;
 
 function FileHttp304NotModified(Size: Int64; Time: TUnixMSTime;
-  const InHeaders: RawUtf8; var OutHeaders: RawUtf8): boolean;
+  InHeaders: PUtf8Char; var OutHeaders: RawUtf8): boolean;
 var
   etag: TShort23;
-  hdr: RawUtf8;
+  h: PUtf8Char;
+  l: PtrInt;
 begin
-  result := true; // return true as HTTP_NOTMODIFIED (304) status code
   Int64ToHttpEtag((Size shl 16) xor (Time shr 9), Etag); // 512ms resolution
-  if (FindNameValue(InHeaders, 'IF-NONE-MATCH:', hdr) and
-      IdemPropName(etag, pointer(hdr), length(hdr))) or
-     (FindNameValue(InHeaders, 'IF-MODIFIED-SINCE:', hdr) and
-      IdemPropName(UnixMSTimeUtcToHttpDate(Time), pointer(hdr), length(hdr))) then
-    exit;
-  result := false;
+  if InHeaders <> nil then
+  begin
+    result := true; // return true as HTTP_NOTMODIFIED (304) status code
+    h := FindNameValuePointer(InHeaders, 'IF-NONE-MATCH: ', l);
+    if (h <> nil) and
+       IdemPropName(etag, h, l) then
+      exit;
+    h := FindNameValuePointer(InHeaders, 'IF-MODIFIED-SINCE: ', l);
+    if (h <> nil) and
+       IdemPropName(UnixMSTimeUtcToHttpDate(Time), h, l) then
+      exit;
+  end;
   AppendLine(OutHeaders, ['Etag: ', etag]);
+  result := false;
 end;
 
-function ContentHttp304NotModified(const Content, InHeaders: RawUtf8;
+function ContentHttp304NotModified(const Content: RawUtf8; InHeaders: PUtf8Char;
   var OutHeaders: RawUtf8): boolean;
 var
   etag: TShort23;
-  hdr: RawUtf8;
+  h: PUtf8Char;
+  l: PtrInt;
 begin
-  result := true;
   Int64ToHttpEtag(Int64(crc32c(0, pointer(Content), length(Content))) shl 8
                     xor length(Content), etag);
-  if FindNameValue(InHeaders, 'IF-NONE-MATCH:', hdr) and
-     IdemPropName(etag, pointer(hdr), length(hdr)) then
-    exit;
-  result := false;
+  if InHeaders <> nil then
+  begin
+    result := true; // return true as HTTP_NOTMODIFIED (304) status code
+    h := FindNameValuePointer(InHeaders, 'IF-NONE-MATCH: ', l);
+    if (h <> nil) and
+       IdemPropName(etag, h, l) then
+      exit;
+  end;
   AppendLine(OutHeaders, ['Etag: ', etag]);
+  result := false;
 end;
 
 
@@ -3090,7 +3109,7 @@ begin
   if UnixTime <= 0 then
     PWord(@result[0])^ := 1 + ord('0') shl 8
   else
-    DateTimeToFileShort(UnixTime / SecsPerDay + UnixDateDelta, result);
+    DateTimeToFileShortVar(UnixTime / SecsPerDay + UnixDateDelta, result);
 end;
 
 function UnixTimeToFileShort(const UnixTime: TUnixTime): TShort16;

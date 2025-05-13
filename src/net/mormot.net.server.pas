@@ -37,6 +37,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.datetime,
+  mormot.core.variants,
   mormot.core.zip,
   mormot.core.log,
   mormot.core.search,
@@ -415,6 +416,9 @@ type
     // - to be used in conjunction with a HTTP_ASYNCRESPONSE internal status code
     // - raise an EHttpServer exception if async responses are not available
     function AsyncHandle: TConnectionAsyncHandle;
+    /// save the URI parameters (or POST content) as a TDocVariant
+    // - Url/Method/InContent are stored as aParams.U['url'/'method'/'content']
+    procedure ToDocVariant(out Dest: TDocVariantData);
     /// the associated server instance
     // - may be a THttpServer or a THttpApiServer class
     property Server: THttpServerGeneric
@@ -463,6 +467,7 @@ type
   // per-minute metrics logging via an associated THttpServerGeneric.Analyzer
   // - hsoContentTypeNoGuess will disable content-type detection from small
   // content buffers via GetMimeContentTypeFromBuffer()
+  // - hsoRejectBotUserAgent identifis and reject Bots via IsHttpUserAgentBot()
   THttpServerOption = (
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
@@ -481,7 +486,8 @@ type
     hsoEnableLogging,
     hsoTelemetryCsv,
     hsoTelemetryJson,
-    hsoContentTypeNoGuess);
+    hsoContentTypeNoGuess,
+    hsoRejectBotUserAgent);
 
   /// how a THttpServerGeneric class is expected to process incoming requests
   THttpServerOptions = set of THttpServerOption;
@@ -1073,7 +1079,7 @@ type
     function GetRegisterCompressGzStatic: boolean;
     procedure SetRegisterCompressGzStatic(Value: boolean);
     function ComputeWwwAuthenticate(Opaque: Int64): RawUtf8;
-    function SetRejectInCommandUri(var Http: THttpRequestContext;
+    function ComputeRejectBody(var Body: RawByteString;
       Opaque: Int64; Status: integer): boolean; // true for grWwwAuthenticate
     function Authorization(var Http: THttpRequestContext;
       Opaque: Int64): TAuthServerResult;
@@ -1381,6 +1387,18 @@ const
 
 function ToText(res: THttpServerSocketGetRequestResult): PShortString; overload;
 function ToText(state: THttpServerExecuteState): PShortString; overload;
+
+/// create an ephemeral socket-based HTTP Server, for a single request
+// - typical usage is for Single-Sign On credential entering
+// - raise an Exception on binding error
+// - returns false on timeout
+// - returns true on success, with encoded parameters as aParams - and the
+// received URL/Method/Content values as aParams.U['url'/'method'/'content']
+function EphemeralHttpServer(const aPort: RawUtf8; out aParams: TDocVariantData;
+  aTimeOutSecs: integer = 60; aLogClass: TSynLogClass = nil;
+  const aResponse: RawUtf8 = 'You can close this window.';
+  aMethods: TUriMethods = [mGET, mPOST]; aOptions: THttpServerOptions = []): boolean;
+
 
 
 { ******************** THttpPeerCache Local Peer-to-peer Cache }
@@ -1969,6 +1987,16 @@ function ToText(const msg: THttpPeerCacheMessage): ShortString; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: ShortString);
+
+/// hash an URL and the "Etag:" or "Last-Modified:" headers
+// - could be used to identify a HTTP resource as a binary hash on a given server
+// - returns 0 if aUrl/aHeaders have not enough information
+// - returns the number of hash bytes written to aDigest
+function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
+  aHeaders: PUtf8Char; out aDigest: THash512Rec): integer;
+
+/// get the content full length, from "Content-Length:" or "Content-Range:"
+function HttpRequestLength(aHeaders: PUtf8Char; out Len: PtrInt): PUtf8Char;
 
 
 {$ifdef USEWININET}
@@ -3333,6 +3361,21 @@ begin
     EHttpServer.RaiseUtf8('% has no async response support', [fServer]);
 end;
 
+procedure THttpServerRequest.ToDocVariant(out Dest: TDocVariantData);
+var
+  p: PUtf8Char;
+begin
+  p := UrlParamPos;
+  if p = nil then
+    Dest.InitJson(fInContent, JSON_FAST) // try decoding from JSON body
+  else
+    Dest.InitFromUrl(p + 1, JSON_FAST);  // parameters from /uri?n1=v1&n2=v2
+  Dest.AddValueFromText('url', Split(fUrl, '?'));
+  Dest.AddValueFromText('method', fMethod);
+  if fInContent <> '' then
+    Dest.AddValueFromText('content', fInContent);
+end;
+
 {$ifdef USEWININET}
 
 function THttpServerRequest.GetFullUrl: SynUnicode;
@@ -3484,6 +3527,7 @@ begin
   else
   begin
     if Assigned(Ctxt.ConnectionThread) and
+       Assigned(fOnThreadStart) and
        Ctxt.ConnectionThread.InheritsFrom(TSynThread) and
        (not Assigned(TSynThread(Ctxt.ConnectionThread).StartNotified)) then
       NotifyThreadStart(TSynThread(Ctxt.ConnectionThread));
@@ -4376,16 +4420,16 @@ end;
 
 function THttpServerSocketGeneric.ComputeWwwAuthenticate(Opaque: Int64): RawUtf8;
 begin
-  // return the expected 'WWW-Authenticate: ####' header content
+  // return the expected 'WWW-Authenticate: ####'#13#10 header content
   result := '';
   case fAuthorize of
     hraBasic:
-      result := fAuthorizeBasicRealm;
+      result := fAuthorizeBasicRealm; // includes trailing #13#10
     hraDigest:
       if fAuthorizerDigest <> nil then
         result := fAuthorizerDigest.DigestInit(Opaque, 0);
     hraNegotiate:
-      result := 'WWW-Authenticate: Negotiate'; // with no NTLM support
+      result := 'WWW-Authenticate: Negotiate'#13#10; // with no NTLM support
   end;
 end;
 
@@ -4462,25 +4506,25 @@ begin
   end
 end;
 
-function THttpServerSocketGeneric.SetRejectInCommandUri(
-  var Http: THttpRequestContext; Opaque: Int64; Status: integer): boolean;
+function THttpServerSocketGeneric.ComputeRejectBody(
+  var Body: RawByteString; Opaque: Int64; Status: integer): boolean;
 var
-  reason, auth, body: RawUtf8;
+  reason: PRawUtf8;
+  auth, html: RawUtf8;
 begin
-  StatusCodeToReason(status, reason);
+  reason := StatusCodeToText(status);
   FormatUtf8('<!DOCTYPE html><html><head><title>%</title></head>' +
              '<body style="font-family:verdana"><h1>%</h1>' +
-             '<p>Server rejected % request as % %.</body></html>',
-    [reason, reason, Http.CommandUri, status, reason], body);
+             '<p>Server rejected this request as % %.</body></html>',
+    [reason^, reason^, status, reason^], html);
   result := (status = HTTP_UNAUTHORIZED) and
             (fAuthorize <> hraNone);
   if result then // don't close the connection but set grWwwAuthenticate
-    auth := ComputeWwwAuthenticate(Opaque);
+    auth := ComputeWwwAuthenticate(Opaque); // includes #13#10 trailer
   FormatUtf8('HTTP/1.% % %'#13#10'%' + HTML_CONTENT_TYPE_HEADER +
-    #13#10'Content-Length: %'#13#10#13#10'%',
-    [ord(result), status, reason, auth, length(body), body], Http.CommandUri);
+    #13#10'Content-Length: %'#13#10#13#10'%', [ord(result), status, reason^,
+    auth, length(html), html], RawUtf8(Body));
 end;
-
 
 
 { THttpServer }
@@ -4678,10 +4722,14 @@ begin
         // ServerThreadPoolCount < 0 would use a single thread to rule them all
         // - may be defined when the server is expected to have very low usage,
         // e.g. for port 80 to 443 redirection or to implement Let's Encrypt
-        // HTTP-01 challenges (on port 80) using OnHeaderParsed callback
+        // HTTP-01 challenges (on port 80) using OnHeaderParsed callback,
+        // or for EphemeralHttpServer() function
         try
           cltservsock := fSocketClass.Create(self);
           try
+            if (fLogClass <> nil) and
+               (hsoLogVerbose in fOptions) then
+              cltservsock.OnLog := fLogClass.DoLog;
             cltservsock.AcceptRequest(cltsock, @cltaddr);
             if hsoEnableTls in fOptions then
               cltservsock.DoTlsAfter(cstaAccept);
@@ -4750,14 +4798,54 @@ end;
 const
   STATICFILE_PROGWAITMS = 10; // up to 16ms on Windows
 
+procedure SetAfterResponse(var ctx: TOnHttpServerAfterResponseContext;
+  req: THttpServerRequest; cs: THttpServerSocket);
+begin
+  ctx.User := pointer(req.AuthenticatedUser);
+  ctx.Method := pointer(req.Method);
+  ctx.Host := pointer(req.Host);
+  ctx.Url := pointer(req.Url);
+  ctx.Referer := pointer(cs.Http.Referer);
+  ctx.UserAgent := pointer(req.UserAgent);
+  ctx.RemoteIP := pointer(req.RemoteIP);
+  ctx.Connection := req.ConnectionID;
+  ctx.Flags := req.ConnectionFlags;
+  ctx.State := cs.Http.State;
+  ctx.StatusCode := req.RespStatus;
+  ctx.Tix64 := 0;
+  ctx.Received := cs.BytesIn;
+  ctx.Sent := cs.BytesOut;
+end;
+
+procedure DoAfterResponse(req: THttpServerRequest; cs: THttpServerSocket;
+  started: Int64);
+var
+  ctx: TOnHttpServerAfterResponseContext;
+begin
+  SetAfterResponse(ctx, req, cs);
+  QueryPerformanceMicroSeconds(ctx.ElapsedMicroSec);
+  dec(ctx.ElapsedMicroSec, started);
+  try
+    cs.Server.fOnAfterResponse(ctx); // e.g. THttpLogger or THttpAnalyzer
+  except
+    on E: Exception do // paranoid
+    begin
+      cs.Server.fOnAfterResponse := nil; // won't try again
+      if Assigned(cs.OnLog) then
+        cs.OnLog(sllWarning,
+          'Process: OnAfterResponse raised % -> disabled', [E], cs.Server);
+    end;
+  end;
+end;
+
 procedure THttpServer.Process(ClientSock: THttpServerSocket;
   ConnectionID: THttpServerConnectionID; ConnectionThread: TSynThread);
+var
+  started: Int64;
 var
   req: THttpServerRequest;
   output: PRawByteStringBuffer;
   dest: TRawByteStringBuffer;
-  started: Int64;
-  ctx: TOnHttpServerAfterResponseContext;
 begin
   if (ClientSock = nil) or
      (ClientSock.Http.Headers = '') or
@@ -4817,33 +4905,7 @@ begin
       ClientSock.fKeepAliveClient := false;
     // the response has been sent: handle optional OnAfterResponse event
     if Assigned(fOnAfterResponse) then
-    try
-      QueryPerformanceMicroSeconds(ctx.ElapsedMicroSec);
-      dec(ctx.ElapsedMicroSec, started);
-      ctx.Connection := req.ConnectionID;
-      ctx.User := pointer(req.AuthenticatedUser);
-      ctx.Method := pointer(req.Method);
-      ctx.Host := pointer(req.Host);
-      ctx.Url := pointer(req.Url);
-      ctx.Referer := pointer(ClientSock.Http.Referer);
-      ctx.UserAgent := pointer(req.UserAgent);
-      ctx.RemoteIP := pointer(req.RemoteIP);
-      ctx.Flags := req.ConnectionFlags;
-      ctx.State := ClientSock.Http.State;
-      ctx.StatusCode := req.RespStatus;
-      ctx.Tix64 := 0;
-      ctx.Received := ClientSock.BytesIn;
-      ctx.Sent := ClientSock.BytesOut;
-      fOnAfterResponse(ctx); // e.g. THttpLogger or THttpAnalyzer
-    except
-      on E: Exception do // paranoid
-      begin
-        fOnAfterResponse := nil; // won't try again
-        if Assigned(ClientSock.OnLog) then
-          ClientSock.OnLog(sllWarning,
-            'Process: OnAfterResponse raised % -> disabled', [E], self);
-      end;
-    end;
+      DoAfterResponse(req, ClientSock, started);
   finally
     req.Free;
     if Assigned(fProgressiveRequests) then
@@ -5040,9 +5102,19 @@ begin
          (Http.ContentLength > fServer.MaximumAllowedContentLength) then
       begin
         // 413 HTTP error (and close connection)
-        fServer.SetRejectInCommandUri(Http, 0, HTTP_PAYLOADTOOLARGE);
-        SockSendFlush(Http.CommandUri);
+        fServer.ComputeRejectBody(Http.Content, 0, HTTP_PAYLOADTOOLARGE);
+        SockSendFlush(Http.Content);
         result := grOversizedPayload;
+        exit;
+      end;
+      // implement early hsoRejectBotUserAgent detection as 418 I'm a teapot
+      if (hsoRejectBotUserAgent in fServer.Options) and
+         (Http.UserAgent <> '') and
+         IsHttpUserAgentBot(Http.UserAgent) then
+      begin
+        SockSend(@HTTP_BANIP_RESPONSE[1], ord(HTTP_BANIP_RESPONSE[0]));
+        SockSendFlush;
+        result := grRejected;
         exit;
       end;
       // support optional Basic/Digest authentication
@@ -5063,8 +5135,8 @@ begin
           if fAuthTix32 = tix32 then
           begin
             // 403 HTTP error if not authorized (and close connection)
-            fServer.SetRejectInCommandUri(Http, 0, HTTP_FORBIDDEN);
-            SockSendFlush(Http.CommandUri);
+            fServer.ComputeRejectBody(Http.Content, 0, HTTP_FORBIDDEN);
+            SockSendFlush(Http.Content);
             result := grRejected;
             exit;
           end
@@ -5088,11 +5160,11 @@ begin
         {$endif SYNCRTDEBUGLOW}
         if status <> HTTP_SUCCESS then
         begin
-          if fServer.SetRejectInCommandUri(Http, fRemoteConnectionID, status) then
+          if fServer.ComputeRejectBody(Http.Content, fRemoteConnectionID, status) then
             result := grWwwAuthenticate
           else
             result := grRejected;
-          SockSendFlush(Http.CommandUri);
+          SockSendFlush(Http.Content);
           exit;
         end;
       end;
@@ -5314,7 +5386,7 @@ begin
       else
       begin
         // call from TSynThreadPoolTHttpServer -> handle first request
-        if not fServerSock.fBodyRetrieved and
+        if not (fBodyRetrieved in fServerSock.fFlags) and
            not HttpMethodWithNoBody(fServerSock.Http.CommandMethod) then
           fServerSock.GetBody;
         fServer.Process(fServerSock, ConnectionID, self);
@@ -5398,6 +5470,87 @@ end;
 function ToText(state: THttpServerExecuteState): PShortString;
 begin
   result := GetEnumName(TypeInfo(THttpServerExecuteState), ord(state));
+end;
+
+
+{ THttpServerEphemeral }
+
+type
+  THttpServerEphemeral = class(THttpServer)
+  protected
+    fResponse: RawUtf8;
+    fParams: PDocVariantData;
+    fMethod: TUriMethods;
+    fDone: TSynEvent;
+    fReceived: TSynEvent;
+  public
+    constructor Create(const aPort, aResponse: RawUtf8; aParams: PDocVariantData;
+      aLogClass: TSynLogClass; aMethod: TUriMethods; aOptions: THttpServerOptions); reintroduce;
+    destructor Destroy; override;
+    function Request(Ctxt: THttpServerRequestAbstract): cardinal; override;
+    procedure OnResponded(var Context: TOnHttpServerAfterResponseContext);
+  end;
+
+constructor THttpServerEphemeral.Create(const aPort, aResponse: RawUtf8;
+  aParams: PDocVariantData; aLogClass: TSynLogClass; aMethod: TUriMethods;
+  aOptions: THttpServerOptions);
+begin
+  fResponse := aResponse;
+  fParams := aParams;
+  fMethod := aMethod;
+  fOnAfterResponse := OnResponded;
+  fReceived := TSynEvent.Create;
+  inherited Create(
+    aPort, nil, nil, 'ephemeral', {threadpool=}-1, 0, aOptions, aLogClass);
+end;
+
+destructor THttpServerEphemeral.Destroy;
+begin
+  inherited Destroy;
+  fReceived.Free; 
+end;
+
+function THttpServerEphemeral.Request(Ctxt: THttpServerRequestAbstract): cardinal;
+var
+  m: TUriMethod;
+begin
+  m := ToMethod(Ctxt.Method);
+  if m in fMethod then
+  begin
+    if fParams <> nil then
+      THttpServerRequest(Ctxt).ToDocVariant(fParams^);
+    Ctxt.OutContent := fResponse;
+    result := HTTP_SUCCESS;
+  end
+  else
+    result := HTTP_NOTALLOWED;
+end;
+
+procedure THttpServerEphemeral.OnResponded(var Context: TOnHttpServerAfterResponseContext);
+begin
+  fReceived.SetEvent; // response sent: we can shutdown the server
+end;
+
+
+function EphemeralHttpServer(const aPort: RawUtf8; out aParams: TDocVariantData;
+  aTimeOutSecs: integer; aLogClass: TSynLogClass; const aResponse: RawUtf8;
+  aMethods: TUriMethods; aOptions: THttpServerOptions): boolean;
+var
+  server: THttpServerEphemeral;
+begin
+  aParams.Clear;
+  server := THttpServerEphemeral.Create(
+    aPort, aResponse, @aParams, aLogClass, aMethods, aOptions);
+  try
+    result := server.fReceived.WaitForSafe(aTimeOutSecs shl MilliSecsPerSecShl);
+    if aLogClass <> nil then
+      aLogClass.Add.Log(sllDebug, 'EphemeralHttpServer(%)=% %',
+        [aPort, BOOL_STR[result], variant(aParams)], server);
+    if result then
+      SleepHiRes(10); // wait for the client connection to gracefully disconnect
+  finally
+    server.Free;
+  end;
 end;
 
 
@@ -7407,6 +7560,70 @@ begin
   AppendShortUuid(msg.Uuid, result);
 end;
 
+function HttpRequestLength(aHeaders: PUtf8Char; out Len: PtrInt): PUtf8Char;
+var
+  s: PtrInt;
+begin
+  result := FindNameValuePointer(aHeaders, 'CONTENT-RANGE: ', Len);
+  if result = nil then // no range
+    result := FindNameValuePointer(aHeaders, 'CONTENT-LENGTH: ', Len)
+  else
+  begin // content-range: bytes 100-199/3083 -> extract 3083
+    s := Len;
+    while true do
+      case result[s - 1] of
+        '/':
+          break;
+        '0' .. '9':
+          dec(s);
+      else
+        result := nil;
+        exit;
+      end;
+    inc(result, s);
+    dec(Len, s);
+  end;
+end;
+
+function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
+  aHeaders: PUtf8Char; out aDigest: THash512Rec): integer;
+var
+  hasher: TSynHasher;
+  h: PUtf8Char;
+  l: PtrInt;
+begin
+  result := 0;
+  if (aUri.Server = '') or
+     (aUri.Address = '') or
+     (aHeaders = nil) or
+     not hasher.Init(aAlgo) then
+    exit;
+  hasher.Update(HTTPS_TEXT[aUri.Https]);
+  hasher.Update(@aAlgo, 1); // separator
+  hasher.Update(aUri.Server);
+  hasher.Update(@aAlgo, 1);
+  hasher.Update(aUri.Port);
+  hasher.Update(@aAlgo, 1);
+  hasher.Update(aUri.Address);
+  hasher.Update(@aAlgo, 1);
+  h := FindNameValuePointer(aHeaders, 'ETAG: ', l);
+  if h = nil then
+  begin
+    // fallback to file date and full size
+    h := FindNameValuePointer(aHeaders, 'LAST-MODIFIED: ', l);
+    if h = nil then
+      exit;
+    hasher.Update(h, l);
+    h := HttpRequestLength(aHeaders, l);
+    if h = nil then
+      exit;
+  end;
+  hasher.Update(h, l);
+  result := hasher.Final(aDigest);
+end;
+
+
+
 {$ifdef USEWININET}
 
 { **************** THttpApiServer HTTP/1.1 Server Over Windows http.sys Module }
@@ -7738,14 +7955,14 @@ var
       FormatUtf8('<!DOCTYPE html><html><body style="font-family:verdana;">' +
         '<h1>Server Error %: %</h1><p>', [StatusCode, outstat], msg);
       if E <> nil then
-        msg := FormatUtf8('%% Exception raised:<br>', [msg, E]);
-      msg := msg + HtmlEscape(ErrorMsg) + ('</p><p><small>' + XPOWEREDVALUE);
+        Append(msg, [E, ' Exception raised:<br>']);
+      Append(msg, HtmlEscape(ErrorMsg), '</p><p><small>' + XPOWEREDVALUE);
       resp^.SetContent(datachunkmem, msg, HTML_CONTENT_TYPE);
       Http.SendHttpResponse(fReqQueue, req^.RequestId, 0, resp^, nil,
         bytessent, nil, 0, nil, fLogData);
     except
       on Exception do
-        ; // ignore any HttpApi level errors here (client may crashed)
+        ; // ignore any HttpApi level errors here (client may have crashed)
     end;
   end;
 
@@ -7808,7 +8025,7 @@ var
       filehandle := FileOpen(Utf8ToString(ctxt.OutContent), fmOpenReadShared);
       if not ValidHandle(filehandle)  then
       begin
-        SendError(HTTP_NOTFOUND, WinErrorText(GetLastError, nil));
+        SendError(HTTP_NOTFOUND, WinErrorText(GetLastError));
         result := false; // notify fatal error
       end;
       try // http.sys will serve then close the file from kernel
@@ -7989,6 +8206,13 @@ begin
                (incontlen > QWord(fMaximumAllowedContentLength)) then
             begin
               SendError(HTTP_PAYLOADTOOLARGE, 'Rejected');
+              continue;
+            end;
+            if (hsoRejectBotUserAgent in fOptions) and
+               (ctxt.fUserAgent <> '') and
+               IsHttpUserAgentBot(ctxt.fUserAgent) then
+            begin
+              SendError(HTTP_TEAPOT, 'We don''t need no bot');
               continue;
             end;
             if Assigned(OnBeforeBody) then
