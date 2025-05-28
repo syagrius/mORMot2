@@ -1351,6 +1351,10 @@ type
     // - as encoded e.g. by ToUrlEncode()
     // - Url should point to the first character after '?' in the URI
     procedure InitFromUrl(Url: PUtf8Char; aOptions: TDocVariantOptions);
+    /// initialize an object document, possibly as arrays, from URI parameters
+    // - multiple object field names will be stored as dvArray
+    // - Url should point to the first character after '?' in the URI
+    procedure InitFromUrlArray(Url: PUtf8Char; aOptions: TDocVariantOptions);
 
     /// to be called before any Init*() method call, when a previous Init*()
     // has already be performed on the same instance, to avoid memory leaks
@@ -1851,6 +1855,9 @@ type
     // - returns the index of the corresponding value, which may be just added
     function AddOrUpdateValue(const aName: RawUtf8; const aValue: variant;
       wasAdded: PBoolean = nil; OnlyAddMissing: boolean = false): integer;
+    /// add a value in this document, creating a dvArray if aName already exists
+    // - returns the index of the corresponding value, which may be just added
+    procedure AddValueArray(const aName: RawUtf8; const aValue: variant);
     /// add a value in this document, from its text representation
     // - this function expects a UTF-8 text for the value, which would be
     // converted to a variant number, if possible (as varInt/varInt64/varCurrency
@@ -4234,7 +4241,7 @@ begin
 end;
 
 const
-  _VARDATATEXT: array[0.. varWord64 + 5] of string[15] = (
+  _VARDATATEXT: array[0.. varWord64 + 5] of string[10] = (
     'Empty', 'Null', 'SmallInt', 'Integer', 'Single', 'Double', 'Currency',
     'Date', 'OleStr', 'Dispatch', 'Error', 'Boolean', 'Variant', 'Unknown',
     'Decimal', '15', 'ShortInt', 'Byte', 'Word', 'LongWord', 'Int64', 'QWord',
@@ -4249,7 +4256,7 @@ var
   tmp: TVarData;
 begin
   vt := V.VType;
-  if vt > varWord64 then
+  if vt > varWord64 then // simple types returns 'Empty' to 'QWord'
   repeat
     if SetVariantUnRefSimpleValue(PVariant(V)^, tmp{%H-}) then
     begin
@@ -4262,19 +4269,19 @@ begin
       varStrArg,
       varString,
       varStringByRef:
-        vt := varWord64 + 1;
+        vt := varWord64 + 1; // 'String'
       {$ifdef HASVARUSTRARG}
       varUStrArg,
       {$endif HASVARUSTRARG}
       {$ifdef HASVARUSTRING}
       varUString,
       varUStringByRef:
-        vt := varWord64 + 2;
+        vt := varWord64 + 2; // 'UString'
       {$endif HASVARUSTRING}
       varAny:
-        vt := varWord64 + 3;
+        vt := varWord64 + 3; // 'Any'
       varArray:
-        vt := varWord64 + 4;
+        vt := varWord64 + 4; // 'Array'
       varVariantByRef:
         begin
           result := VariantTypeName(V^.VPointer);
@@ -4282,7 +4289,7 @@ begin
         end;
     else
       if vt = DocVariantVType then
-        vt := varWord64 + 5
+        vt := varWord64 + 5 // 'DocVariant'
       else
       begin
         ct := FindSynVariantType(vt);
@@ -5448,18 +5455,17 @@ end;
 class procedure TDocVariant.GetSingleOrDefault(
   const docVariantArray, default: variant; var result: variant);
 var
-  vt: cardinal;
+  dv: PDocVariantData;
+  tmp: variant;
 begin
-  vt := TVarData(docVariantArray).VType;
-  if vt = varVariantByRef then
-    GetSingleOrDefault(
-      PVariant(TVarData(docVariantArray).VPointer)^, default, result)
-  else if (vt <> DocVariantVType) or
-          (TDocVariantData(docVariantArray).Count <> 1) or
-          not TDocVariantData(docVariantArray).IsArray then
-    result := default
+  if _SafeArray(docVariantArray, dv) and
+     (dv^.Count = 1) then
+    tmp := dv^.Values[0] // should be assigned in two steps
+  else if @result = @default then
+    exit // TMongoCollection call as GetSingleOrDefault(result, result, result)
   else
-    result := TDocVariantData(docVariantArray).Values[0];
+    tmp := default;
+  result := tmp;
 end;
 
 function DocVariantData(const DocVariant: variant): PDocVariantData;
@@ -6929,6 +6935,23 @@ begin
     until Url^ = #0;
 end;
 
+procedure TDocVariantData.InitFromUrlArray(Url: PUtf8Char; aOptions: TDocVariantOptions);
+var
+  n, v: RawUtf8;
+  val: variant;
+begin
+  Init(aOptions, dvObject);
+  if Url <> nil then
+    repeat
+      Url := UrlDecodeNextNameValue(Url, n, v);
+      if Url = nil then
+        break;
+      VarClear(val);
+      _FromText(aOptions, @val, v); // recognize booleans or numbers
+      AddValueArray(n, val);
+    until Url^ = #0;
+end;
+
 procedure TDocVariantData.Void;
 begin
   VCount := 0;
@@ -7314,6 +7337,37 @@ var
 begin
   FastSetString(tmp, aName, aNameLen);
   result := AddValue(tmp, aValue, aValueOwned, aIndex);
+end;
+
+procedure TDocVariantData.AddValueArray(const aName: RawUtf8; const aValue: variant);
+var
+  ndx: PtrInt;
+  v: PVariant;
+  dv: PDocVariantData;
+  tmp: TVarData;
+begin
+  if aName = '' then
+    exit;
+  ndx := GetValueIndex(aName);
+  if ndx < 0 then
+  begin
+    ndx := InternalAdd(aName); // first time seen this aName
+    v := @VValue[ndx];
+  end
+  else
+  begin
+    v := @VValue[ndx];
+    if not _SafeArray(v^, dv) then // convert this aName into a dvArray
+    begin
+      tmp := PVarData(v)^; // weak copy
+      dv := pointer(v);
+      dv^.InitFast(4, dvArray);
+      dv^.VCount := 1; // store previous value as first item
+      PVarData(@dv^.Values[0])^ := tmp;
+    end;
+    v := dv^.NewItem; // append as item in this array
+  end;
+  SetVariantByValue(aValue, v^, Has(dvoValueDoNotNormalizeAsRawUtf8));
 end;
 
 function TDocVariantData.AddValueFromText(const aName, aValue: RawUtf8;

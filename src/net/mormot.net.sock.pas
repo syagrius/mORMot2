@@ -44,13 +44,14 @@ uses
 { ******************** Socket Process High-Level Encapsulation }
 
 const
-  cLocalhost = '127.0.0.1';
-  cAnyHost = '0.0.0.0';
-  cBroadcast = '255.255.255.255';
+  cLocalhost  = '127.0.0.1';
+  cAnyHost    = '0.0.0.0';
+  cBroadcast  = '255.255.255.255';
   c6Localhost = '::1';
-  c6AnyHost = '::';
+  c6AnyHost   = '::';
   c6Broadcast = 'ffff::1';
-  cAnyPort = '0';
+  cAnyPort    = '0';
+
   cLocalhost32 = $0100007f;
 
   {$ifdef OSWINDOWS}
@@ -614,7 +615,9 @@ function GetIPAddresses(Kind: TIPAddress = tiaIPv4): TRawUtf8DynArray;
 function GetIPAddressesText(const Sep: RawUtf8 = ' ';
   Kind: TIPAddress = tiaIPv4): RawUtf8;
 
-/// check if Host is in 127.0.0.0/8 range - warning: Host should be not nil
+/// check if Host is in 127.0.0.0/8 range (e.g. cLocalhost or c6Localhost)
+// - warning: Host should be not nil
+// - would detect both IPv4 '127.x.x.x' pattern and plain IPv6 '::1' constant
 function IsLocalHost(Host: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -1699,6 +1702,14 @@ type
     cstaBind,
     cstaAccept);
 
+  TCrtSocketFlags = set of (
+    fAborted,
+    fWasBind,
+    fBodyRetrieved,
+    fServerTlsEnabled,
+    fProxyConnect,
+    fProxyHttp);
+
   {$M+}
   /// Fast low-level Socket implementation
   // - direct access to the OS (Windows, Linux) network layer API
@@ -1720,7 +1731,7 @@ type
     fSock: TNetSocket; // wrapper to raw socket, stored as a pointer
     fServer: RawUtf8;
     fPort: RawUtf8;
-    fFlags: set of (fAborted, fWasBind, fBodyRetrieved);
+    fFlags: TCrtSocketFlags;
     fSocketLayer: TNetLayer;
     fSocketFamily: TNetFamily;
     fProxyUrl: RawUtf8;
@@ -1746,13 +1757,14 @@ type
       {$ifdef HASINLINE}inline;{$endif}
   public
     /// direct access to the optional low-level HTTP proxy tunnelling information
-    // - could have been assigned by a Tunnel.From() call
     // - User/Password would be taken into consideration for authentication
     // - could be populated by mormot.net.client Tunnel.From(GetSystemProxy())
     Tunnel: TUri;
     /// direct access to the optional low-level TLS Options and Information
     // - depending on the actual INetTls implementation, some fields may not
     // be used nor populated - currently only supported by mormot.lib.openssl11
+    // - reflect the raw socket layer, so TLS.Enabled may apply to the proxy
+    // connection, to the actual destination: see ServerTls method instead
     TLS: TNetTlsContext;
     /// can be assigned to TSynLog.DoLog class method for low-level logging
     OnLog: TSynLogProc;
@@ -1799,7 +1811,7 @@ type
     // mormot.lib.openssl11 unit) - with custom input options in the TLS fields
     procedure OpenBind(const aServer, aPort: RawUtf8; doBind: boolean;
       aTLS: boolean = false; aLayer: TNetLayer = nlTcp;
-      aSock: TNetSocket = TNetSocket(-1); aReusePort: boolean = false);
+      aSock: TNetSocket = TNetSocket(-1); aReusePort: boolean = false); virtual;
     /// a wrapper around Close + OpenBind() with the current settings
     // - could be used to reestablish a broken or closed connection
     // - return '' on success, or an error message on failure
@@ -1810,6 +1822,11 @@ type
     procedure AcceptRequest(aClientSock: TNetSocket; aClientAddr: PNetAddr);
     /// low-level TLS support method
     procedure DoTlsAfter(caller: TCrtSocketTlsAfter);
+    /// check if the Server is accessed using TLS
+    // - TLS.Enabled flag is about the raw socket, probably over a Tunnel/Proxy
+    // - this function reflects the actual aTLS parameter supplied to OpenBind()
+    function ServerTls: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// initialize SockIn for receiving with read[ln](SockIn^,...)
     // - data is buffered, filled as the data is available
     // - read(char) or readln() is indeed very fast
@@ -3737,9 +3754,12 @@ begin
 end;
 
 function IsLocalHost(Host: PUtf8Char): boolean;
+var
+  c: cardinal;
 begin
-  result := (PCardinal(Host)^ =
-     ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24);
+  c := PCardinal(Host)^;
+  result := (c = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24) or
+            (c = ord(':') + ord(':') shl 8 + ord('1') shl 16); // c6Localhost
 end;
 
 procedure NetAddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
@@ -5064,7 +5084,7 @@ const
 var
   len: cardinal;
 begin
-  result:='';
+  result := '';
   len := length(s);
   if len = 0 then
     exit;
@@ -5428,6 +5448,11 @@ begin
   {$endif OSLINUX}
 end;
 
+function TCrtSocket.ServerTls: boolean;
+begin
+  result := (fServerTlsEnabled in fFlags); // properly set by OpenBind()
+end;
+
 const
   CSTA_TXT: array[TCrtSocketTlsAfter] of AnsiChar = 'CBA';
 
@@ -5478,7 +5503,7 @@ begin
     aAddress^ := u.Address;
 end;
 
-procedure TCrtSocket.OpenBind(const aServer, aPort: RawUtf8; doBind: boolean;
+procedure TCrtSocket.OpenBind(const aServer, aPort: RawUtf8; doBind,
   aTLS: boolean; aLayer: TNetLayer; aSock: TNetSocket; aReusePort: boolean);
 var
   retry: integer;
@@ -5492,6 +5517,8 @@ begin
   fFlags := [];
   if doBind then
     include(fFlags, fWasBind);
+  if aTLS then
+    include(fFlags, fServerTlsEnabled); // for proper reconnection
   if {%H-}PtrInt(aSock) <= 0 then
   begin
     // OPEN or BIND mode -> create the socket
@@ -5508,9 +5535,10 @@ begin
             (Tunnel.Server <> fServer) and
             (aLayer = nlTcp) then
     begin
-      // handle client tunnelling via an HTTP(s) proxy
+      // HTTP(S) tunnelling via CONNECT - see also THttpClientSocket.OpenBind
       fProxyUrl := Tunnel.URI;
       if Tunnel.Https and aTLS then
+        // single TLS parameter for either the Tunnel or the destination
         raise ENetSock.Create(
           '%s.Open(%s:%s): %s proxy - unsupported dual TLS layers',
           [ClassNameShort(self)^, fServer, fPort, fProxyUrl]);
@@ -5521,7 +5549,10 @@ begin
         begin
           addr.IP(fRemoteIP, true);
           fSocketFamily := addr.Family;
+          include(fFlags, fProxyConnect);
           res := nrRefused;
+          if Tunnel.Https then
+            DoTlsAfter(cstaConnect); // the proxy requires a TLS connection
           SockSendLine(['CONNECT ', fServer, ':', fPort, ' HTTP/1.0']);
           if Tunnel.User <> '' then
             SockSendLine(['Proxy-Authorization: Basic ', Tunnel.UserPasswordBase64]);
@@ -5543,9 +5574,10 @@ begin
         raise ENetSock.Create('%s.Open(%s:%s): %s proxy error',
           [ClassNameShort(self)^, fServer, fPort, fProxyUrl], res);
       if Assigned(OnLog) then
-        OnLog(sllTrace, 'Open(%:%) via proxy %', [fServer, fPort, fProxyUrl], self);
+        OnLog(sllTrace, 'Open(%:%) via proxy CONNECT %',
+          [fServer, fPort, fProxyUrl], self);
       if aTLS then
-        DoTlsAfter(cstaConnect);
+        DoTlsAfter(cstaConnect); // raw TLS negotation after CONNECT
       exit;
     end
     else
@@ -5602,7 +5634,7 @@ function TCrtSocket.ReOpen(aTimeout: cardinal): string;
 begin
   try
     Close;
-    OpenBind(fServer, fPort, fWasBind in fFlags, TLS.Enabled);
+    OpenBind(fServer, fPort, fWasBind in fFlags, ServerTls);
     if SockConnected then
       result := '' // success
     else
