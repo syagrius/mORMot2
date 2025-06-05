@@ -175,6 +175,8 @@ type
       Token: SpiUtf8;
     end;
     /// how many times THttpClientSocket/TWinHttp should redirect 30x responses
+    // - TCurlHttp would only check for RedirectMax > 0 with no exact count
+    // - TWinINet won't support this parameter
     RedirectMax: integer;
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
@@ -1088,7 +1090,7 @@ type
       write fExtendedOptions.UserAgent;
     /// how many 3xx status code redirections are allowed
     // - default is 0 - i.e. no redirection
-    // - implemented for TWinHttp only
+    // - recognized by TWinHttp and TCurlHttp, but not by TWinINet
     property RedirectMax: integer
       read fExtendedOptions.RedirectMax write fExtendedOptions.RedirectMax;
     /// internal structure used to store extended options
@@ -1247,7 +1249,7 @@ type
   TWinINet = class(TWinHttpApi)
   protected
     // those internal methods will raise an EWinINet exception on error
-    procedure RaiseFromLastError;
+    procedure RaiseFromLastError(const ctxt: ShortString);
     procedure InternalConnect(ConnectionTimeOut, SendTimeout,
       ReceiveTimeout: cardinal); override;
     procedure InternalCreateRequest(const aMethod, aUrl: RawUtf8); override;
@@ -1901,6 +1903,10 @@ function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
   outStatus: PInteger = nil; timeout: integer = 0; forceSocket: boolean = false;
   ignoreTlsCertError: boolean = false): RawByteString; overload;
 
+/// retrieve the content of a web page, with ignoreTlsCertError=true for https
+// - typically used to retrieve reference material online for testing
+// - can optionally use a local file as convenient offline cache
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName = ''): RawByteString;
 
 
 { ************** Send Email using the SMTP Protocol }
@@ -3738,7 +3744,7 @@ begin
   Http := OpenHttp(server, port, aTLS, aLayer, '', aTimeout, @tls);
   if Http <> nil then
   try
-    Http.RedirectMax := 5;
+    Http.RedirectMax := 5; // fair enough
     status := Http.Get(url, 0, inHeaders);
     if outStatus <> nil then
       outStatus^ := status;
@@ -4303,7 +4309,8 @@ begin
   if not WinHttpApi.SetTimeouts(fSession, HTTP_DEFAULT_RESOLVETIMEOUT,
      ConnectionTimeOut, SendTimeout, ReceiveTimeout) then
     RaiseFromLastError('SetTimeouts');
-  if fHttps then
+  if fHttps or
+     (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
   begin
     protocols := InternalGetProtocols;
     if not WinHttpApi.SetOption(fSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
@@ -4433,11 +4440,12 @@ begin
         FillZero(pwd);
       end;
     end;
-  if fHttps and
-     IgnoreTlsCertificateErrors then
-    if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-       @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) then
-      RaiseFromLastError('SetOption');
+  if IgnoreTlsCertificateErrors then
+    if fHttps or
+       (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
+      if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
+         @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) then
+        RaiseFromLastError('SetOption(ignorecert)');
   if fExtendedOptions.RedirectMax > 0 then
     if WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_REDIRECT_POLICY,
          @REDIRECT_POLICY_ALWAYS, SizeOf(cardinal)) then
@@ -4447,14 +4455,15 @@ begin
   if _SendRequest(L) and
      WinHttpApi.ReceiveResponse(fRequest, nil) then
     exit; // success
-  if fHttps and
+  if (fHttps or
+      (fExtendedOptions.RedirectMax > 0)) and
      (GetLastError = ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) and
      IgnoreTlsCertificateErrors and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
        @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
        pointer(WINHTTP_NO_CLIENT_CERT_CONTEXT), 0) and
-     _SendRequest(L) and
+     _SendRequest(L) and // retry
      WinHttpApi.ReceiveResponse(fRequest, nil) then
     exit; // success with no certificate validation
   // if we reached here, an error occurred
@@ -4533,15 +4542,15 @@ end;
 
 { TWinINet }
 
-procedure TWinINet.RaiseFromLastError;
+procedure TWinINet.RaiseFromLastError(const ctxt: ShortString);
 var
   err: integer;
   E: EWinINet;
 begin
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383884
   err := GetLastError;
-  E := EWinINet.CreateUtf8('%: % (%) on %:%',
-    [self, SysErrorMessageWinInet(err), err, fServer, fPort]);
+  E := EWinINet.CreateUtf8('%: % error [%] (%) on %:%',
+    [self, ctxt, SysErrorMessageWinInet(err), err, fServer, fPort]);
   E.fLastError := err;
   raise E;
 end;
@@ -4560,7 +4569,7 @@ begin
   fSession := InternetOpenA(pointer(fExtendedOptions.UserAgent), OpenType,
     pointer(fProxyName), pointer(fProxyByPass), 0);
   if fSession = nil then
-    RaiseFromLastError;
+    RaiseFromLastError('Open');
   InternetSetOption(fConnection, INTERNET_OPTION_CONNECT_TIMEOUT,
     @ConnectionTimeOut, SizeOf(ConnectionTimeOut));
   InternetSetOption(fConnection, INTERNET_OPTION_SEND_TIMEOUT,
@@ -4570,7 +4579,7 @@ begin
   fConnection := InternetConnectA(fSession, pointer(fServer), fPort,
     nil, nil, INTERNET_SERVICE_HTTP, 0, 0);
   if fConnection = nil then
-    RaiseFromLastError;
+    RaiseFromLastError('Connect');
 end;
 
 procedure TWinINet.InternalCreateRequest(const aMethod, aUrl: RawUtf8);
@@ -4591,7 +4600,7 @@ begin
   FRequest := HttpOpenRequestA(FConnection, pointer(aMethod), pointer(aUrl),
     nil, nil, ACCEPT_TYPES[fNoAllAccept], Flags, 0);
   if FRequest = nil then
-    RaiseFromLastError;
+    RaiseFromLastError('OpenRequest');
 end;
 
 procedure TWinINet.InternalCloseRequest;
@@ -4608,7 +4617,7 @@ begin
   if (hdr <> '') and
      not HttpAddRequestHeadersA(fRequest, pointer(hdr), length(hdr),
        HTTP_ADDREQ_FLAG_COALESCE) then
-    RaiseFromLastError;
+    RaiseFromLastError('AddHeader');
 end;
 
 procedure TWinINet.InternalSendRequest(const aMethod: RawUtf8; const aData:
@@ -4625,7 +4634,7 @@ begin
     buff.dwStructSize := SizeOf(buff);
     buff.dwBufferTotal := Length(aData);
     if not HttpSendRequestExA(fRequest, @buff, nil, 0, 0) then
-      RaiseFromLastError;
+      RaiseFromLastError('SendRequest');
     datapos := 0;
     while datapos < datalen do
     begin
@@ -4637,18 +4646,18 @@ begin
         Bytes := max;
       if not InternetWriteFile(fRequest,
          @PByteArray(aData)[datapos], Bytes, BytesWritten) then
-        RaiseFromLastError;
+        RaiseFromLastError('WriteFile');
       inc(datapos, BytesWritten);
       if not fOnUpload(Self, datapos, datalen) then
         raise EWinINet.CreateFmt('OnUpload Canceled %s', [aMethod]);
     end;
     if not HttpEndRequest(fRequest, nil, 0, 0) then
-      RaiseFromLastError;
+      RaiseFromLastError('EndRequest');
   end
   else
     // blocking send with no callback
     if not HttpSendRequestA(fRequest, nil, 0, pointer(aData), length(aData)) then
-      RaiseFromLastError;
+      RaiseFromLastError('SendRequest');
 end;
 
 function TWinINet.InternalGetInfo(Info: cardinal): RawUtf8;
@@ -4689,14 +4698,14 @@ end;
 function TWinINet.InternalQueryDataAvailable: cardinal;
 begin
   if not InternetQueryDataAvailable(fRequest, result, 0, 0) then
-    RaiseFromLastError;
+    RaiseFromLastError('QueryDataAvailable');
 end;
 
 function TWinINet.InternalReadData(var Data: RawByteString;
   Read: PtrInt; Size: cardinal): cardinal;
 begin
   if not InternetReadFile(fRequest, @PByteArray(Data)[Read], Size, result) then
-    RaiseFromLastError;
+    RaiseFromLastError('ReadData');
 end;
 
 destructor TWinINet.Destroy;
@@ -4777,7 +4786,8 @@ const
   CERT_PEM: RawUtf8 = 'PEM';
 begin
   fIn.URL := fRootURL + aUrl;
-  curl.easy_setopt(fHandle, coFollowLocation, 1); // url redirection (as TWinHttp)
+  if fExtendedOptions.RedirectMax > 0 then // url redirection (as TWinHttp)
+    curl.easy_setopt(fHandle, coFollowLocation, 1);
   //curl.easy_setopt(fHandle,coTCPNoDelay,0); // disable Nagle
   if fLayer = nlUnix then
     curl.easy_setopt(fHandle, coUnixSocketPath, pointer(fServer));
@@ -4785,7 +4795,9 @@ begin
   if (fProxyName <> '') and
      not IsNone(fProxyName) then
     curl.easy_setopt(fHandle, coProxy, pointer(fProxyName));
-  if fHttps then
+  if fHttps or
+     (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
+    // see https://curl.haxx.se/libcurl/c/simplessl.html
     if IgnoreTlsCertificateErrors then
     begin
       curl.easy_setopt(fHandle, coSSLVerifyPeer, 0);
@@ -4793,23 +4805,19 @@ begin
       //curl.easy_setopt(fHandle,coProxySSLVerifyPeer,0);
       //curl.easy_setopt(fHandle,coProxySSLVerifyHost,0);
     end
-    else
+    else if fTls.CertFile <> '' then
     begin
-      // see https://curl.haxx.se/libcurl/c/simplessl.html
-      if fTls.CertFile <> '' then
-      begin
-        curl.easy_setopt(fHandle, coSSLCertType, pointer(CERT_PEM));
-        curl.easy_setopt(fHandle, coSSLCert, pointer(fTls.CertFile));
-        if fTls.PassPhrase <> '' then
-          curl.easy_setopt(fHandle, coSSLCertPasswd, pointer(fTls.PassPhrase));
-        curl.easy_setopt(fHandle, coSSLKeyType, nil);
-        curl.easy_setopt(fHandle, coSSLKey, pointer(fTls.KeyName));
-        curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
-        curl.easy_setopt(fHandle, coSSLVerifyPeer, 1);
-      end
-      else if fTls.CACertFile <> '' then
-        curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
-    end;
+      curl.easy_setopt(fHandle, coSSLCertType, pointer(CERT_PEM));
+      curl.easy_setopt(fHandle, coSSLCert, pointer(fTls.CertFile));
+      if fTls.PassPhrase <> '' then
+        curl.easy_setopt(fHandle, coSSLCertPasswd, pointer(fTls.PassPhrase));
+      curl.easy_setopt(fHandle, coSSLKeyType, nil);
+      curl.easy_setopt(fHandle, coSSLKey, pointer(fTls.KeyName));
+      curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
+      curl.easy_setopt(fHandle, coSSLVerifyPeer, 1);
+    end
+    else if fTls.CACertFile <> '' then
+      curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
   curl.easy_setopt(fHandle, coUserAgent, pointer(fExtendedOptions.UserAgent));
   curl.easy_setopt(fHandle, coWriteFunction, @CurlWriteRawByteString);
   curl.easy_setopt(fHandle, coHeaderFunction, @CurlWriteRawByteString);
@@ -5687,6 +5695,20 @@ begin
   {$endif LINUX_RAWDEBUGVOIDHTTPGET}
 end;
 
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName): RawByteString;
+begin
+  if aLocalFile <> '' then // try from local cache
+  begin
+    result := StringFromFile(aLocalFile); // useful e.g. during regression tests
+    if result <> '' then
+      exit;
+  end;
+  result := HttpGet(aUri, {inhead=}'', {outhead=}nil, {notsock=}false,
+    {outstatus=}nil, {timeout=}0, {forcesocket=}false, {ignorecerterror=}true);
+  if (aLocalFile <> '') and
+     (result <> '') then
+    FileFromString(result, aLocalFile);
+end;
 
 
 { ************** Send Email using the SMTP Protocol }

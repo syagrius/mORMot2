@@ -267,9 +267,7 @@ begin
       if not IdemPChar(pointer(url), 'HTTP') then
         url := Join(['https://raw.githubusercontent.com/OAI/' +
                  'OpenAPI-Specification/main/examples/', url]);
-       JsonBufferReformat(pointer(
-         HttpGet(url, nil, false, nil, 0, {forcesock:}false, {igncerterr:}true)),
-         api[i]);
+      JsonBufferReformat(pointer(HttpGetWeak(url)), api[i]);
       if api[i] <> '' then
         FileFromString(api[i], fn);
     end;
@@ -304,16 +302,14 @@ end;
 
 procedure RtspRegressionTests(proxy: TRtspOverHttpServer; test: TSynTestCase;
   clientcount, steps: integer);
-type
-  TReq = record
+var
+  streamer: TCrtSocket;
+  req: array of record
     get: THttpSocket;
     post: TCrtSocket;
     stream: TCrtSocket;
     session: RawUtf8;
   end;
-var
-  streamer: TCrtSocket;
-  req: array of TReq;
 
   procedure Shutdown;
   var
@@ -1603,10 +1599,13 @@ end;
 
 procedure TNetworkProtocols.IPAddresses;
 var
-  i: PtrInt;
+  i, n: PtrInt;
   s: ShortString;
   txt: RawUtf8;
   ip: THash128Rec;
+  sub: TIp4SubNets;
+  bin: RawByteString;
+  timer: TPrecisionTimer;
 begin
   FillZero(ip.b);
   Check(IsZero(ip.b));
@@ -1676,15 +1675,151 @@ begin
   CheckEqual(IP4Prefix('255.254.1.0'), 0, 'invalid netmask 4');
   CheckEqual(IP4Prefix('255.255.255.256'), 0, 'invalid netmask 5');
   CheckEqual(IP4Subnet('192.168.1.135', '255.255.255.0'), '192.168.1.0/24');
-  Check(IP4Match('192.168.1.1', '192.168.1.0/24'), 'match1');
+  Check(IP4Match('192.168.1.1',   '192.168.1.0/24'), 'match1');
   Check(IP4Match('192.168.1.135', '192.168.1.0/24'), 'match2');
   Check(IP4Match('192.168.1.250', '192.168.1.0/24'), 'match3');
   Check(not IP4Match('192.168.2.135', '192.168.1.0/24'), 'match4');
   Check(not IP4Match('191.168.1.250', '192.168.1.0/24'), 'match5');
-  Check(not IP4Match('192.168.1', '192.168.1.0/24'), 'match6');
-  Check(not IP4Match('192.168.1.135', '192.168.1/24'), 'match7');
+  Check(not IP4Match('192.168.1',     '192.168.1.0/24'), 'match6');
+  Check(not IP4Match('192.168.1.135', '192.168.1/24'),   'match7');
   Check(not IP4Match('192.168.1.135', '192.168.1.0/65'), 'match8');
-  Check(not IP4Match('193.168.1.1', '192.168.1.0/24'), 'match9');
+  Check(not IP4Match('193.168.1.1',   '192.168.1.0/24'), 'match9');
+  Check(IP4Match('192.168.1.250', '192.168.1.250'),     'match10');
+  Check(not IP4Match('192.168.1.251', '192.168.1.250'), 'match11');
+  sub := TIp4SubNets.Create;
+  try
+    CheckEqual(sub.AfterAdd, 0);
+    bin := sub.SaveToBinary;
+    if CheckEqual(length(bin), 4) then
+      CheckEqual(PInteger(bin)^, 0);
+    Check(not sub.Match('190.16.1.1'));
+    Check(not sub.Match('190.16.1.135'));
+    Check(not sub.Match('190.16.1.250'));
+    Check(not sub.Match('190.16.2.135'));
+    Check(sub.Add('190.16.1.0/24'));
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(not sub.Match('193.168.1.1'));
+    Check(not sub.Match('190.16.2.135'));
+    Check(not sub.Match('191.168.1.250'));
+    CheckEqual(sub.AfterAdd, 1);
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    CheckEqual(sub.AfterAdd, 0);
+    Check(not sub.Match('190.16.1.1'));
+    Check(not sub.Match('190.16.1.135'));
+    Check(not sub.Match('190.16.1.250'));
+    Check(sub.LoadFromBinary(bin), 'load1');
+    CheckEqual(sub.AfterAdd, 1);
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(not sub.Match('193.168.1.1'));
+    sub.Clear;
+    Check(sub.Add('190.16.40.0/21'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(not sub.Match('190.16.55.1'));
+    Check(sub.Add('190.16.1.0/24'));
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(not sub.Match('190.16.55.1'));
+    CheckEqual(sub.AfterAdd, 2);
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    Check(not sub.Match('190.16.43.1'));
+    Check(sub.LoadFromBinary(bin), 'load2');
+    CheckEqual(sub.AfterAdd, 2);
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(sub.SaveToBinary = bin, 'save');
+    sub.Clear;
+    CheckEqual(sub.AddFromText('# test'#10'190.16.40.0/21 # comment'#10 +
+      '190.16.1.0/24'), 2);
+    Check(sub.SaveToBinary = bin, 'loadtext');
+    CheckEqual(sub.AfterAdd, 2);
+    sub.Clear;
+    Check(sub.Add('1.2.3.4'));
+    Check(sub.Match('1.2.3.4'));
+    Check(not sub.Match('1.2.3.5'));
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    CheckEqual(sub.AddFromText('1.2.3.4 ; comment'#10), 1);
+    CheckEqual(sub.AfterAdd, 1);
+    Check(sub.SaveToBinary = bin, 'loadtext');
+    Check(sub.Match('1.2.3.4'));
+    Check(not sub.Match('1.2.3.5'));
+    txt := HttpGetWeak('https://raw.githubusercontent.com/firehol/blocklist-ipsets/' +
+      'refs/heads/master/firehol_level1.netset', WorkDir + 'firehol.netset');
+    if txt <> '' then
+    begin
+      sub.Clear;
+      timer.Start;
+      n := sub.AddFromText(txt);
+      NotifyTestSpeed('parse TIp4SubNets', n, length(txt), @timer);
+      Check(n > 4000);
+      CheckEqual(sub.AfterAdd, n);
+      CheckEqual(length(sub.SubNet), 18);
+      Check(not sub.Match('1.2.3.4'));
+      Check(not sub.Match('1.2.3.5'));
+      Check(not sub.Match('192.168.1.1'), '192'); // only IsPublicIP() was added
+      Check(not sub.Match('10.18.1.1'), '10');
+      Check(not sub.Match('62.210.254.173'), 'synopse.info');
+      // 223.254.0.0/16 as https://check.spamhaus.org/results/?query=SBL212803
+      Check(sub.Match('223.254.0.1') ,'a0');
+      Check(sub.Match('223.254.1.1'), 'b0');
+      Check(sub.Match('223.254.200.129'), 'c0');
+      CheckEqual(sub.AddFromText(txt), 0, 'twice');
+      // e.g. 18 masks, 4471 subnets, 612.950.208 unique IPs: around 16M/s
+      timer.Start;
+      for i := 1 to 20000 do
+        Check(not sub.Match($01010101), '1.1.1.1');
+      NotifyTestSpeed('blacklist TIp4SubNets', 20000, 0, @timer);
+      bin := sub.SaveToBinary;
+      Check(length(bin) < length(txt), 'bin<txt'); // 18020 < 71138
+      FileFromString(bin, WorkDir + 'firehol-bin.netset');
+      // TSynAlgo.Compress: bin=18020 AlgoSynLZ=16598 AlgoDeflate=11923
+      Check(IP4SubNetMatch(bin, '223.254.0.1') ,'a1');
+      Check(IP4SubNetMatch(bin, '223.254.1.1'), 'b1');
+      Check(IP4SubNetMatch(bin, '223.254.200.129'), 'c1');
+      // IP4SubNetMatch() is actually not faster than sub.Match()
+      timer.Start;
+      for i := 1 to 20000 do
+        Check(not IP4SubNetMatch(pointer(bin), $01010101), 'IP4SubNetMatch');
+      NotifyTestSpeed('blacklist direct', 20000, 0, @timer);
+      txt := HttpGetWeak('https://www.spamhaus.org/drop/drop.txt',
+        WorkDir + 'spamhaus.netset');
+      if txt <> '' then
+      begin
+        Check(sub.AddFromText(txt) < 1000, 'spamhaus within firehol');
+        sub.Clear;
+        Check(not sub.Match('10.18.1.1'), '10');
+        Check(sub.AddFromText(txt) > 1000, 'spamhaus=1525');
+        Check(sub.Match('223.254.0.1') ,'a2'); // 223.254.0.0/16
+        Check(sub.Match('223.254.1.1'), 'b2');
+        Check(sub.Match('223.254.200.129'), 'c2');
+        CheckEqual(sub.AddFromText(txt), 0, 'twice');
+      end;
+      sub.Clear;
+      Check(sub.LoadFromBinary(bin), 'loadbin');
+      Check(sub.SaveToBinary = bin, 'savebin');
+      Check(sub.Match('223.254.0.1') ,'a3'); // 223.254.0.0/16
+      Check(sub.Match('223.254.1.1'), 'b3');
+      Check(sub.Match('223.254.200.129'), 'c3');
+    end;
+  finally
+    sub.Free;
+  end;
 end;
 
 const
@@ -1956,7 +2091,10 @@ begin
           Check(res = mdOk, 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
           // validate the UDP client/server stack is running
-          Check(hpc.Ping = nil);
+          if hpc.Ping <> nil then // multiple VMs may ping - twice may fail
+            Check(not fOwner.MultiThread, 'ping<>nil') // LUTI = not multithread
+          else
+            Check(true, 'ping=nil');
           // validate THttpPeerCrypt.HttpDirectUri request encoding/decoding
           Check(THttpPeerCrypt.HttpDirectUri('secret',
             'https://synopse.info/forum', ToText(msg.Hash), dUri, dBearer), 'direct');
@@ -2251,23 +2389,27 @@ begin
     AddConsole('libcurl is not available on this system -> skip test');
     exit;
   end;
+  // create a temporary file to server
   orig := RandomAnsi7(256 shl 10 + Random32(100)); // 256.1KB of random data
-  tmp := TemporaryFileName;
+  tmp := TemporaryFileName; // e.g. '/tmp/mormot2tests_28F3D8C5.tmp'
   if not CheckFailed(FileFromString(orig, tmp), 'tmp file') then
   try
+    // start the TFTP server
     srv := TTftpServerThread.Create(ExtractFilePath(tmp),
       [ttoRrq , {ttoLowLevelLog,} ttoCaseInsensitiveFileName, ttoAllowSubFolders],
       TSynLogTestLog, '127.0.0.1', '6969', '');
     try
+      // request the temporary file using the libcurl client
       timer.Start;
-      StringToUtf8(ExtractFileName(tmp), uri); // .tmp file
+      StringToUtf8(ExtractFileName(tmp), uri); // 'mormot2tests_28F3D8C5.tmp'
       res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd);
       CheckUtf8(res = crOK, 'tftp exact case %', [ToText(res)^]);
       if res <> crOk then
         exit;
       CheckEqual(length(rd), length(orig), 'tftp1a');
       CheckEqual(rd, orig, 'tftp1b');
-      UpperCaseSelf(uri);  // .TMP file to validate case-insensitive URI
+      // validate case-insensitive URI as e.g. 'MORMOT2TESTS_28F3D8C5.TMP'
+      UpperCaseSelf(uri);
       rd := ''; // paranoid
       res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd, 1000, nil,
         {tftpblocksize=}1468);
@@ -2279,6 +2421,7 @@ begin
       srv.Free;
     end;
   finally
+    // remove the temporary file to serve
     Check(DeleteFile(tmp), 'delete tmp');
   end;
 end;

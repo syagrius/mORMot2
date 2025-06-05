@@ -333,6 +333,12 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
   NanoSecsPerMilliSec  = NanoSecsPerMicroSec  * MicroSecsPerMilliSec;
   NanoSecsPerSec       = NanoSecsPerMilliSec  * MilliSecsPerSec;
 
+/// check if Host is in 127.0.0.0/8 range (e.g. cLocalhost or c6Localhost)
+// - warning: Host should be not nil
+// - would detect both IPv4 '127.x.x.x' pattern and plain IPv6 '::1' constant
+function IsLocalHost(Host: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
 
 { ****************** Gather Operating System Information }
 
@@ -3989,6 +3995,12 @@ function ConsoleReadBody: RawByteString;
 /// low-level access to the keyboard state of a given key
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
+var
+  /// internal wrapper using the RTL by default
+  // - overriden by mormot.core.unicode on Delphi 7/2007 to handle surrogates
+  // - called if IsAnsiCompatibleW(P, Len) returned false
+  DoWin32PWideCharToUtf8: procedure(P: PWideChar; Len: PtrInt; var res: RawUtf8);
+
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt;
   out res: RawUtf8); overload;
@@ -4157,6 +4169,15 @@ type
     property TryFromExecutableFolder: boolean
       read fTryFromExecutableFolder write fTryFromExecutableFolder;
   end;
+
+  /// used to track e.g. a library or API availability at runtime
+  TLibraryState = (
+    lsUnTested,
+    lsAvailable,
+    lsNotAvailable);
+
+/// call once Init if State is in its default lsUntested (0) value
+function LibraryAvailable(var State: TLibraryState; Init: TProcedure): boolean;
 
 
 { *************** Per Class Properties O(1) Lookup via vmtAutoTable Slot }
@@ -4396,7 +4417,7 @@ type
     // !   begin
     // !     rwlock.WriteLock; // block any ReadOnlyLock/ReadWriteLock/WriteLock
     // !     try
-    // !       Add(value);
+    // !       Add(value); // safely modify the shared content
     // !     finally
     // !       rwlock.WriteUnLock;
     // !     end;
@@ -4416,7 +4437,7 @@ type
     // - typical usage is the following:
     // ! rwlock.WriteLock; // block any ReadOnlyLock/ReadWriteLock/WriteLock
     // ! try
-    // !   Add(value);
+    // !   Add(value); // safely modify the shared content
     // ! finally
     // !   rwlock.WriteUnLock;
     // ! end;
@@ -4690,7 +4711,8 @@ type
     // !   finally
     // !     Safe.Unlock;
     // !   end;
-    function TryLockMS(retryms: integer; terminated: PBoolean = nil): boolean;
+    function TryLockMS(retryms: integer; terminated: PBoolean = nil;
+      tix64: Int64 = 0): boolean;
     /// release the instance for exclusive access, as RWUnLock(cWrite)
     // - each Lock/TryLock should have its exact UnLock opposite, so a
     // try..finally block is mandatory for safe code
@@ -6066,45 +6088,6 @@ begin
   P := S;
 end;
 
-procedure AppendKb(Size: Int64; var Dest: ShortString; WithSpace: boolean);
-const
-  _U: array[1..5] of AnsiChar = 'KMGTE';
-var
-  u: PtrInt;
-  b: Int64;
-begin
-  if Size < 0 then
-    exit;
-  u := 0;
-  b := 1 shl 10;
-  repeat
-    if Size < b - (b shr 3) then
-      break;
-    b := b shl 10;
-    inc(u);
-  until u = high(_u);
-  Size := (Size * 10000) shr (u * 10);
-  SimpleRoundTo2DigitsCurr64(Size);
-  AppendShortCurr64(Size, Dest, 1);
-  if WithSpace then
-    AppendShortChar(' ', @Dest);
-  if u <> 0 then
-    AppendShortChar(_U[u], @Dest);
-  AppendShortChar('B', @Dest);
-end;
-
-function KB(Size: Int64): TShort16;
-begin
-  result[0] := #0;
-  AppendKb(Size, result, {withspace=}true);
-end;
-
-function KBNoSpace(Size: Int64): TShort16;
-begin
-  result[0] := #0;
-  AppendKb(Size, result, {withspace=}false);
-end;
-
 {$ifdef ISDELPHI} // missing convenient RTL function in Delphi
 function TryStringToGUID(const s: string; var uuid: TGuid): boolean;
 begin
@@ -6147,6 +6130,27 @@ begin
   tmp[0] := #0;
   AppendShortUuid(u, tmp); // may call mormot.core.text
   FastSetString(result, @tmp[1], ord(tmp[0]));
+end;
+
+function KB(Size: Int64): TShort16;
+begin
+  result[0] := #0;
+  AppendKb(Size, result, {withspace=}true);
+end;
+
+function KBNoSpace(Size: Int64): TShort16;
+begin
+  result[0] := #0;
+  AppendKb(Size, result, {withspace=}false);
+end;
+
+function IsLocalHost(Host: PUtf8Char): boolean;
+var
+  c: cardinal;
+begin
+  c := PCardinal(Host)^;
+  result := (c = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24) or
+            (c = ord(':') + ord(':') shl 8 + ord('1') shl 16); // c6Localhost
 end;
 
 
@@ -7745,6 +7749,32 @@ begin
     result := false;
 end;
 
+procedure AppendKb(Size: Int64; var Dest: ShortString; WithSpace: boolean);
+const
+  _U: array[1..5] of AnsiChar = 'KMGTE';
+var
+  u: PtrInt;
+  b: Int64;
+begin
+  if Size < 0 then
+    exit;
+  u := 0;
+  b := 1 shl 10;
+  repeat
+    if Size < b - (b shr 3) then
+      break;
+    b := b shl 10;
+    inc(u);
+  until u = high(_u);
+  Size := (Size * 10000) shr (u * 10);
+  SimpleRoundTo2DigitsCurr64(Size);
+  AppendShortCurr64(Size, Dest, 1);
+  if WithSpace then
+    AppendShortChar(' ', @Dest);
+  if u <> 0 then
+    AppendShortChar(_U[u], @Dest);
+  AppendShortChar('B', @Dest);
+end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
@@ -8396,6 +8426,22 @@ function TSynLibrary.Exists: boolean;
 begin
   result := (self <> nil) and
             (fHandle <> 0);
+end;
+
+
+function LibraryAvailable(var State: TLibraryState; Init: TProcedure): boolean;
+begin
+  if State = lsUnTested then
+  begin
+    GlobalLock; // thread-safe check and initialization
+    try
+      if State = lsUntested then
+        Init; // should eventually set State as lsAvailable or lsNotAvailable
+    finally
+      GlobalUnLock;
+    end;
+  end;
+  result := State = lsAvailable;
 end;
 
 
@@ -10438,10 +10484,10 @@ begin
     inc(fLockCount);
 end;
 
-function TSynLocker.TryLockMS(retryms: integer; terminated: PBoolean): boolean;
+function TSynLocker.TryLockMS(retryms: integer; terminated: PBoolean;
+  tix64: Int64): boolean;
 var
   ms: integer;
-  endtix: Int64;
 begin
   result := TryLock;
   if result or
@@ -10449,7 +10495,9 @@ begin
      (retryms <= 0) then
     exit;
   ms := 0;
-  endtix := GetTickCount64 + retryms;
+  if tix64 = 0 then
+    tix64 := GetTickCount64;
+  inc(tix64, retryms);
   repeat
     SleepHiRes(ms);
     result := TryLock;
@@ -10458,7 +10506,7 @@ begin
         terminated^) then
       exit;
     ms := ms xor 1; // 0,1,0,1... seems to be good for scaling
-  until GetTickCount64 > endtix;
+  until GetTickCount64 > tix64;
 end;
 
 function TSynLocker.ProtectMethod: IUnknown;

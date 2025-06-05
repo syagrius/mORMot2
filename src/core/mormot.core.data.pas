@@ -421,6 +421,10 @@ type
     // - can optionally specify an item class for efficient JSON serialization
     constructor Create(aOwnObjects: boolean = true;
       aItemClass: TClass = nil); reintroduce; virtual;
+    /// add one TObject to the list and a variable slot, or release it
+    // - return true and store item into sharedslot if it is nil
+    // - return false and call item.Free if sharedslot <> nil
+    function AddOnceInto(item: TObject; sharedslot: PObject): boolean; virtual;
     /// delete one object from the list
     // - will also Free the item if OwnObjects was set, and dontfree is false
     procedure Delete(index: integer; dontfree: boolean = false); override;
@@ -504,6 +508,9 @@ type
   public
     /// add one item to the list using Safe.WriteLock
     function Add(item: pointer): PtrInt; override;
+    /// add one TObject to the list and a variable slot using Safe.WriteLock
+    // - can be used e.g. for thread-safe garbage collection of TObject instances
+    function AddOnceInto(item: TObject; sharedslot: PObject): boolean; override;
     /// delete all items of the list using Safe.WriteLock
     procedure Clear; override;
     /// delete all items of the list in reverse order, using Safe.WriteLock
@@ -858,6 +865,10 @@ function _BC_SQWord(A, B: PInt64; Info: PRttiInfo; out Compared: integer): PtrIn
 function _BC_UQWord(A, B: PQWord; Info: PRttiInfo; out Compared: integer): PtrInt;
 function _BC_ObjArray(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 function _BCI_ObjArray(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
+function _BC_LString(A, B: PRawByteString; Info: PRttiInfo; out Compared: integer): PtrInt;
+function _BC_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+function _BCI_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+function _BC_Default(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 
 /// check equality of two values by content, using RTTI
 // - optionally returns the known in-memory PSize of the value
@@ -3395,6 +3406,18 @@ begin
   inherited Create;
 end;
 
+function TSynObjectList.AddOnceInto(item: TObject; sharedslot: PObject): boolean;
+begin
+  result := sharedslot^ = nil;
+  if result then
+  begin
+    sharedslot^ := item; // atomic storage
+    inherited Add(item); // will own this instance
+  end
+  else
+    item.Free; // release of the unused transient instance
+end;
+
 procedure TSynObjectList.Delete(index: integer; dontfree: boolean);
 begin
   if cardinal(index) >= cardinal(fCount) then
@@ -3458,6 +3481,16 @@ begin
   Safe.WriteLock;
   try
     result := inherited Add(item);
+  finally
+    Safe.WriteUnLock;
+  end;
+end;
+
+function TSynObjectListLocked.AddOnceInto(item: TObject; sharedslot: PObject): boolean;
+begin
+  Safe.WriteLock;
+  try
+    result := inherited AddOnceInto(item, sharedslot);
   finally
     Safe.WriteUnLock;
   end;
@@ -5845,6 +5878,24 @@ begin
   result := 8;
 end;
 
+function _BC_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  compared := StrComp(A^, B^);
+  result := SizeOf(pointer);
+end;
+
+function _BCI_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  compared := StrIComp(A^, B^);
+  result := SizeOf(pointer);
+end;
+
+function _BC_Default(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ComparePointer(A, B); // weak fallback
+  result := 0; // not used in TRttiJson.ValueCompare / fCompare[]
+end;
+
 function _BC_LString(A, B: PRawByteString; Info: PRttiInfo;
   out Compared: integer): PtrInt;
 begin
@@ -7938,46 +7989,47 @@ begin
   result := false;
   n := GetCount;
   if Assigned(fCompare) then
-    if n = 0 then // a void array is always sorted
-      Index := 0
-    else if fSorted then
-    begin
-      P := fValue^;
-      // first compare with the last sorted item (common case, e.g. with IDs)
-      dec(n);
-      cmp := fCompare(Item, P[n * fInfo.Cache.ItemSize]);
-      if cmp >= 0 then
+    if n <> 0 then // a void array is always sorted
+      if fSorted then
       begin
-        Index := n;
-        if cmp = 0 then
-          // was just added: returns true + index of last item
-          result := true
-        else
-          // bigger than last item: returns false + insert after last position
-          inc(Index);
-        exit;
-      end;
-      // O(log(n)) binary search of the sorted position
-      Index := 0; // more efficient code if we use Index and not a local var
-      repeat
-        i := (Index + n) shr 1;
-        cmp := fCompare(Item, P[i * fInfo.Cache.ItemSize]);
-        if cmp = 0 then
+        P := fValue^;
+        // first compare with the last sorted item (common case, e.g. with IDs)
+        dec(n);
+        cmp := fCompare(Item, P[n * fInfo.Cache.ItemSize]);
+        if cmp >= 0 then
         begin
-          // returns true + index of (first found) existing Item
-          Index := i;
-          result := true;
+          Index := n;
+          if cmp = 0 then
+            // was just added: returns true + index of last item
+            result := true
+          else
+            // bigger than last item: returns false + insert after last position
+            inc(Index);
           exit;
-        end
-        else if cmp > 0 then
-          Index := i + 1
-        else
-          n := i - 1;
-      until Index > n;
-      // Item not found: returns false + the index where to insert
-    end
+        end;
+        // O(log(n)) binary search of the sorted position
+        Index := 0; // more efficient code if we use Index and not a local var
+        repeat
+          i := (Index + n) shr 1;
+          cmp := fCompare(Item, P[i * fInfo.Cache.ItemSize]);
+          if cmp = 0 then
+          begin
+            // returns true + index of (first found) existing Item
+            Index := i;
+            result := true;
+            exit;
+          end
+          else if cmp > 0 then
+            Index := i + 1
+          else
+            n := i - 1;
+        until Index > n;
+        // Item not found: returns false + the index where to insert
+      end
+      else
+        Index := -1 // not Sorted
     else
-      Index := -1 // not Sorted
+      Index := 0 // void array
   else
     Index := -1; // no fCompare()
 end;

@@ -1080,6 +1080,7 @@ type
     // internal methods
     function DoEnter: PSynLogThreadInfo;
       {$ifdef FPC}inline;{$endif}
+    procedure RaiseDoEnter;
     procedure LockAndPrepareEnter(nfo: PSynLogThreadInfo);
       {$ifdef FPC}inline;{$endif} // Delphi can't inline EnterCriticalSection()
     procedure LockAndDisableExceptions;
@@ -1309,9 +1310,11 @@ type
     // - is slightly more optimized than Log(RawUtf8)
     procedure LogText(Level: TSynLogLevel; Text: PUtf8Char; Instance: TObject);
     /// call this method to add the content of a binary buffer with ASCII escape
-    // - will precompute up to 255 bytes of output before writing
-    procedure LogEscape(Level: TSynLogLevel; const Fmt: RawUtf8; const Args: array of const;
-      Data: pointer; DataLen: PtrInt; Instance: TObject);
+    // - will precompute up to TruncateLen (1024) bytes of output before writing
+    // with a hardcoded limit of 4KB text output for pre-rendering on stack
+    procedure LogEscape(Level: TSynLogLevel;
+      const ContextFmt: RawUtf8; const ContextArgs: array of const; Data: pointer;
+      DataLen: PtrInt; Instance: TObject; TruncateLen: PtrInt = 1024);
     /// allows to identify the current thread with a textual representation
     // - would append an sllInfo entry with "SetThreadName ThreadID=Name" text
     // - entry would also be replicated at the begining of any rotated log file
@@ -4769,6 +4772,11 @@ begin
     FlushFileBuffers(diskflush); // slow OS operation outside of the main lock
 end;
 
+procedure TSynLog.RaiseDoEnter;
+begin
+  ESynLogException.RaiseUtf8('Too many %.Enter', [self]);
+end;
+
 function TSynLog.DoEnter: PSynLogThreadInfo;
 var
   ndx: byte;
@@ -4782,7 +4790,7 @@ begin
   ndx := result^.RecursionCount;
   inc(ndx);
   if ndx = 0 then
-    ESynLogException.RaiseUtf8('Too many %.Enter', [self]);
+    RaiseDoEnter;
   result^.RecursionCount := ndx;
   if ndx > high(result^.Recursion) then
     result := nil; // nothing logged above MAX_SYNLOGRECURSION
@@ -4946,22 +4954,19 @@ end;
 class function TSynLog.EnterLocalString(var Local: ISynLog; aInstance: TObject;
   const aMethodName: string): TSynLog;
 var
-  tmp: TSynTempBuffer;
-begin
-  if (aMethodName = '')
-  {$ifndef UNICODE} or
-     {$ifdef HASCODEPAGE}
-     (GetCodePage(aMethodName) = CP_UTF8) or
-     {$endif HASCODEPAGE}
-     IsAnsiCompatible(aMethodName)
-  {$endif UNICODE} then
-    result := EnterLocal(Local, aInstance, pointer(aMethodName))
-  else
-  begin
-    StringToUtf8(aMethodName, tmp);
-    result := EnterLocal(Local, aInstance, tmp.buf);
-    tmp.Done;
-  end;
+  nfo: PSynLogThreadInfo;
+begin // expects the caller to have set Local = nil
+  result := Add;
+  nfo := result.DoEnter;
+  if nfo = nil then
+    exit; // nothing to log
+  result.LockAndPrepareEnter(nfo); // inlined result.LogEnter()
+  result.LogHeader(sllEnter, aInstance);
+  if aMethodName <> '' then // direct string output with no temp conversion
+    result.fWriter.AddOnSameLineString(aMethodName);
+  result.fWriterEcho.AddEndOfLine(sllEnter);
+  mormot.core.os.LeaveCriticalSection(GlobalThreadLock);
+  pointer(Local) := PAnsiChar(result) + result.fISynLogOffset; // result := self
 end;
 
 procedure TSynLog.ManualEnter(aMethodName: PUtf8Char; aInstance: TObject);
@@ -4994,7 +4999,9 @@ type
 
 class function TSynLog.Void: TSynLogClass;
 begin
-  TSynLogVoid.Family.Level := [];
+  with TSynLogVoid.Family do
+    if fLevel <> [] then
+      SetLevel([]); // paranoid (if user did change the family settings)
   result := TSynLogVoid;
 end;
 
@@ -5328,23 +5335,25 @@ begin
   end;
 end;
 
-procedure TSynLog.LogEscape(Level: TSynLogLevel; const Fmt: RawUtf8;
-  const Args: array of const; Data: pointer; DataLen: PtrInt; Instance: TObject);
+procedure TSynLog.LogEscape(Level: TSynLogLevel; const ContextFmt: RawUtf8;
+  const ContextArgs: array of const; Data: pointer; DataLen: PtrInt;
+  Instance: TObject; TruncateLen: PtrInt);
 var
-  tmp: ShortString; // efficient local buffer
+  tmp: array[0..4095] of AnsiChar; // pre-render on local buffer (max 4KB)
+  tmps: ShortString absolute tmp;
 begin
   if (self = nil) or
      not (Level in fFamily.fLevel) then
     exit;
-  tmp[0] := #0;
-  if Fmt <> '' then
-    tmp[0] := AnsiChar(FormatBufferRaw(Fmt, @Args[0], length(Args),
-      @tmp[1], 200) - @tmp[1]);
-  AppendShort(' len=', tmp);
-  AppendShortCardinal(DataLen, tmp);
-  AppendShortChar(' ', @tmp);
-  ContentToShortAppend(Data, DataLen, tmp); // and makes #0 terminated
-  LogText(Level, @tmp[1], Instance);
+  tmps[0] := #0;
+  if ContextFmt <> '' then
+    FormatShort(ContextFmt, ContextArgs, tmps);
+  AppendShort(' len=', tmps);
+  AppendShortCardinal(DataLen, tmps);
+  AppendShortChar(' ', @tmps);
+  ContentAppend(Data, DataLen, ord(tmps[0]),
+    MinPtrInt(high(tmp) - ord(tmps[0]), TruncateLen), @tmp[ord(tmps[0])]);
+  LogText(Level, @tmp[1], Instance); // #0 ended
 end;
 
 {$STACKFRAMES OFF}
@@ -5714,7 +5723,7 @@ end;
 procedure TSynLog.LogInternalText(Level: TSynLogLevel; const Text: RawUtf8;
   Instance: TObject; TextTruncateAtLength: integer);
 var
-  lasterror, textlen: integer;
+  lasterror, textlen, trunclen: integer;
 begin
   if Level = sllLastError then
     lasterror := GetLastError
@@ -5732,16 +5741,21 @@ begin
     else
     begin
       textlen := PStrLen(PAnsiChar(pointer(Text)) - _STRLEN)^;
+      trunclen := textlen;
       if (TextTruncateAtLength <> 0) and
          (textlen > TextTruncateAtLength) then
-      begin
-        fWriter.AddOnSameLine(pointer(Text),
-          Utf8TruncatedLength(pointer(Text), textlen, TextTruncateAtLength));
-        fWriter.AddShort('... (truncated) length=');
-        fWriter.AddU(textlen);
-      end
-      else
-        fWriter.AddOnSameLine(pointer(Text));
+        trunclen := Utf8TruncatedLength(pointer(Text), textlen, TextTruncateAtLength);
+      if IsValidUtf8Buffer(pointer(Text), trunclen) then
+        if trunclen <> textlen then
+        begin
+          fWriter.AddOnSameLine(pointer(Text), trunclen);
+          fWriter.AddShort('... (truncated) length=');
+          fWriter.AddU(textlen);
+        end
+        else
+          fWriter.AddOnSameLine(pointer(Text)) // faster without textlen
+      else // binary is written as escaped text and $xx binary
+        fWriter.AddEscapeBuffer(pointer(Text), trunclen, TextTruncateAtLength);
     end;
     if lasterror <> 0 then
       AddErrorMessage(lasterror);

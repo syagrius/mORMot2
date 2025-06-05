@@ -382,7 +382,7 @@ type
     fSafe: TSynLocker;
     /// any number not null assigned to this field will display a "../sec" stat
     fRunConsoleOccurrenceNumber: cardinal;
-    fMainThread: boolean;
+    fMultiThread: boolean;
     fFailed: TSynTestFaileds;
     fFailedCount: integer;
     fNotifyProgressLineLen: integer;
@@ -501,6 +501,9 @@ type
     // - as retrieved from "--test class.method" command line switch
     property Restrict: TRawUtf8DynArray
       read fRestrict write fRestrict;
+    /// if the "--multithread" switch has been defined at command line
+    property MultiThread: boolean
+      read fMultiThread;
   published
     /// the number of assertions (i.e. Check() method call) in all tests
     // - this property is set by the Run method above
@@ -1092,12 +1095,12 @@ procedure TSynTestCase.Run(const OnTask: TNotifyEvent; Sender: TObject;
   const TaskName: RawUtf8; Threaded, NotifyTask, ForcedThreaded: boolean);
 begin
   if NotifyTask or
-     fOwner.fMainThread or
+     not fOwner.fMultiThread or
      not Threaded then
     NotifyProgress([TaskName]);
   if not Assigned(OnTask) then
     exit;
-  if fOwner.fMainThread or // avoid timeout e.g. on slow VMs
+  if not fOwner.fMultiThread or // avoid timeout e.g. on slow VMs
      not Threaded then
     OnTask(Sender) // run in main thread
   else
@@ -1248,7 +1251,6 @@ constructor TSynTests.Create(const Ident: string);
 begin
   inherited Create(Ident);
   fSafe.InitFromClass;
-  fMainThread := (SystemInfo.dwNumberOfProcessors <= 2);
 end;
 
 procedure TSynTests.EndSaveToFileExternal;
@@ -1411,8 +1413,8 @@ var
   log: IUnknown;
 begin
   result := true;
-  if Executable.Command.Option('mainthread') then
-    fMainThread := true;
+  if Executable.Command.Option('multithread') then
+    fMultiThread := SystemInfo.dwNumberOfProcessors > 2; // enabled with 3 cores
   if Executable.Command.Option('&methods') then
   begin
     for m := 0 to Count - 1 do
@@ -1691,8 +1693,8 @@ begin
     'list all class name(s) as expected by --test');
   Executable.Command.Option('&methods',
     'list all method name(s) of #class as specified to --test');
-  Executable.Command.Option('mainthread',
-    'ensure no sub-thread are created for tests');
+  Executable.Command.Option('multithread',
+    'parallelize tests execution on multi-core CPU');
   if Executable.Command.Option('&verbose',
        'run logs in verbose mode: enabled only with --test') and
      (restrict <> nil) then

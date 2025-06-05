@@ -773,6 +773,7 @@ type
     /// append some RTL string to the buffer in one line
     // - will write #0..#31 chars as spaces (so content will stay on the same line)
     procedure AddOnSameLineString(const Text: string);
+      {$ifdef HASINLINE}inline;{$endif}
     /// append an UTF-8 String, with no JSON escaping
     procedure AddString(const Text: RawUtf8);
     /// append several UTF-8 strings
@@ -789,9 +790,13 @@ type
     // for appending simple UTF-8 constant text
     procedure AddShorter(const Short8: TShort8);
       {$ifdef HASINLINE}inline;{$endif}
+    /// append up to 4 chars, encoded as 32-bit constant
+    // - called e.g. as (JSON_BASE64_MAGIC_C, 3) / (JSON_BASE64_MAGIC_QUOTE_C, 4)
+    // or (JSON_SQLDATE_MAGIC_C, 3) / (JSON_SQLDATE_MAGIC_QUOTE_C, 4)
+    procedure AddShort(Text4Chars: cardinal; const TextLen: PtrInt); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// append 'null' as text
     procedure AddNull;
-      {$ifdef HASINLINE}inline;{$endif}
     /// append a sub-part of an UTF-8 String
     // - emulates AddString(copy(Text,start,len))
     procedure AddStringCopy(const Text: RawUtf8; start, len: PtrInt);
@@ -4234,12 +4239,17 @@ begin
   inc(B, ord(Short8[0]));
 end;
 
-procedure TTextWriter.AddNull;
+procedure TTextWriter.AddShort(Text4Chars: cardinal; const TextLen: PtrInt);
 begin
   if B >= BEnd then
     FlushToStream;
-  PCardinal(B + 1)^ := NULL_LOW;
-  inc(B, 4);
+  PCardinal(B + 1)^ := Text4Chars;
+  inc(B, TextLen);
+end;
+
+procedure TTextWriter.AddNull;
+begin
+  AddShort(NULL_LOW, 4);
 end;
 
 function TTextWriter.AddPrepare(Len: PtrInt): pointer;
@@ -5049,7 +5059,7 @@ end;
 procedure TTextWriter.AddRawJson(const json: RawJson);
 begin
   if json = '' then
-    AddNull
+    AddShort(NULL_LOW, 4)
   else
     AddNoJsonEscape(pointer(json), length(json));
 end;

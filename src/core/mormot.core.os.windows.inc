@@ -14,7 +14,7 @@ procedure _fmt(const Fmt: string; const Args: array of const;
   var result: RawUtf8); overload; forward;
 function PosExtString(Str: PChar): PChar; forward;
 
-procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
+procedure _DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 var
   tmp: TSynTempBuffer;
 begin
@@ -134,7 +134,7 @@ begin
   end
   {$ifdef FPC}
   else if DefaultRTLFileSystemCodePage = CP_UTF8 then // happens with Lazarus
-    DoWin32PWideCharToUtf8(P, l, RawUtf8(fn)) // use RTL UnicodeToUtf8()
+    DoWin32PWideCharToUtf8(P, l, RawUtf8(fn)) // use RTL or mormot.core.unicode
   {$endif FPC}
   else
     Win32PWideCharToFileNameConv(P, l, fn);
@@ -156,7 +156,7 @@ begin
         R[i] := PWordArray(P)[i]; // fast direct conversion
     end
     else
-      DoWin32PWideCharToUtf8(P, Len, res); // use RTL UnicodeToUtf8()
+      DoWin32PWideCharToUtf8(P, Len, res); // use RTL or mormot.core.unicode
 end;
 
 procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8);
@@ -3101,19 +3101,19 @@ end;
 
 {$ifdef CPU32}
 var
-  IsUacEnabled: (iueUntested, iueDisabled, iueEnabled);
+  IsUacEnabled: TLibraryState;
 
 function IsUacVirtualizationEnabled: boolean;
 var
   token: THandle;
   enabled, len: DWORD;
 begin
-  if IsUacEnabled = iueUntested then
+  if IsUacEnabled = lsUntested then
     if OSVersion < wVista then
-      IsUacEnabled := iueDisabled // no UAC on Windows XP
+      IsUacEnabled := lsNotAvailable // no UAC on Windows XP
     else
     begin
-      IsUacEnabled := iueEnabled; // enabled by default
+      IsUacEnabled := lsAvailable; // enabled by default
       if OpenProcessToken(GetCurrentProcess, TOKEN_QUERY, token) then
       begin
         enabled := 1;
@@ -3122,11 +3122,11 @@ begin
              @enabled, SizeOf(enabled), len) and
            (enabled = 0) then
           // returns enabled=0 if mormot.win.default.manifest.res is included
-          IsUacEnabled := iueDisabled;
+          IsUacEnabled := lsNotAvailable;
         CloseHandle(token);
       end;
     end;
-  result := IsUacEnabled = iueEnabled;
+  result := IsUacEnabled = lsAvailable;
 end;
 
 function IsUacVirtualFolder(const Folder: TFileName): boolean;
@@ -5263,6 +5263,7 @@ begin
   {$endif HASNOSSE2}
   {$endif ASMX86}
   // late-binding of newest Windows APIs
+  DoWin32PWideCharToUtf8 := @_DoWin32PWideCharToUtf8; // or mormot.core.unicode
   h := GetModuleHandle(kernel32);
   GetTickCount64 := GetProcAddress(h, 'GetTickCount64'); // Vista+
   if not Assigned(GetTickCount64) then

@@ -72,6 +72,7 @@ type
     fExecuteMessage: RawUtf8;
     fFrame: PUdpFrame;
     fReceived: integer;
+    fBound: boolean;
     function GetIPWithPort: RawUtf8;
     procedure AfterBind; virtual;
     /// will loop for any pending UDP frame, and execute FrameReceived method
@@ -92,6 +93,8 @@ type
       read GetIPWithPort;
     property Received: integer
       read fReceived;
+    property ExecuteMessage: RawUtf8
+      read fExecuteMessage;
   end;
 
 const
@@ -874,7 +877,7 @@ type
   // - grBodyReceived is returned for GetRequest({withbody=}true)
   // - grWwwAuthenticate is returned if GetRequest() did send a 401 response
   // - grUpgraded indicates that this connection was upgraded e.g. as WebSockets
-  // - grBanned is triggered by the hsoBan40xIP option
+  // - grBanned is triggered by the hsoBan40xIP option or from Banned.BlackList
   THttpServerSocketGetRequestResult = (
     grClosed,
     grException,
@@ -1210,7 +1213,7 @@ type
     // - for THttpAsyncServer inherited class, redirect to TAsyncServer.fServer
     property Sock: TCrtSocket
       read fSock;
-    /// access to the the IPv4 banning list, if hsoBan40xIP was set
+    /// access to the the IPv4 banning list, via hsoBan40xIP option or BlackList
     property Banned: THttpAcceptBan
       read GetBanned;
   published
@@ -1225,6 +1228,9 @@ type
     // - see THttpApiServer.SetTimeOutLimits(aIdleConnection) parameter
     property ServerKeepAliveTimeOut: cardinal
       read fServerKeepAliveTimeOut write SetServerKeepAliveTimeOut;
+    /// internal error message set by the processing thread, e.g. at binding
+    property ExecuteMessage: RawUtf8
+      read fExecuteMessage;
     /// if we should search for local .gz cached file when serving static files
     property RegisterCompressGzStatic: boolean
       read GetRegisterCompressGzStatic write SetRegisterCompressGzStatic;
@@ -1259,6 +1265,7 @@ type
     property StatUpgraded: integer
       index grUpgraded read GetStat;
     /// how many HTTP connections have been not accepted by hsoBan40xIP option
+    // or from Banned.BlackList registered IPv4/CIDR
     property StatBanned: integer
       index grBanned read GetStat;
   end;
@@ -1312,7 +1319,7 @@ type
     fExecuteState: THttpServerExecuteState;
     fMonoThread: boolean;
     fOnHeaderParsed: TOnHttpServerHeaderParsed;
-    fBanned: THttpAcceptBan; // for hsoBan40xIP
+    fBanned: THttpAcceptBan; // for hsoBan40xIP or BlackList
     fOnAcceptIdle: TOnPollSocketsIdle;
     function GetExecuteState: THttpServerExecuteState; override;
     function GetBanned: THttpAcceptBan; override;
@@ -1365,8 +1372,8 @@ type
     // - may be nil if ServerThreadPoolCount was 0 on constructor
     property ThreadPool: TSynThreadPoolTHttpServer
       read fThreadPool;
-    /// set if hsoBan40xIP has been defined
-    // - indicates e.g. how many accept() have been rejected from their IP
+    /// access Banned.BlackList or if hsoBan40xIP has been defined
+    // - handle efficient accept() IPv4 ASAP filtering
     // - you can customize its behavior once the server is started by resetting
     // its Seconds/Max/WhiteIP properties, before any connections are made
     property Banned: THttpAcceptBan
@@ -2557,14 +2564,15 @@ begin
     FormatUtf8('udp%srv', [BindPort], ident);
   LogClass.Add.Log(sllTrace, 'Create: bind %:% for input requests on %',
     [BindAddress, BindPort, ident], self);
+  inherited Create({suspended=}false, nil, nil, LogClass, ident);
   res := NewSocket(BindAddress, BindPort, nlUdp, {bind=}true,
     TimeoutMS, TimeoutMS, TimeoutMS, 10, fSock, @fSockAddr);
+  fBound := true; // notify DoExecute()
   if res <> nrOk then
     // on binding error, raise exception before the thread is actually created
     raise EUdpServer.Create('%s.Create binding error on %s:%s',
       [ClassNameShort(self)^, BindAddress, BindPort], res);
   AfterBind;
-  inherited Create({suspended=}false, nil, nil, LogClass, ident);
 end;
 
 destructor TUdpServerThread.Destroy;
@@ -2621,45 +2629,48 @@ begin
   lasttix := 0;
   // main server process loop
   try
+    if not fBound then
+      SleepHiRes(100, fBound, {boundDone=}true);
     if fSock = nil then // paranoid check
-      raise EUdpServer.CreateFmt('%s.Execute: Bind failed', [ClassNameShort(self)^]);
-    while not Terminated do
-    begin
-      if fSock.WaitFor(1000, [neRead, neError]) <> [] then
+      FormatUtf8('%.DoExecute: % Bind failed', [self, fProcessName], fExecuteMessage)
+    else
+      while not Terminated do
       begin
-        if Terminated then
+        if fSock.WaitFor(1000, [neRead, neError]) <> [] then
         begin
-          fLogClass.Add.Log(sllDebug, 'DoExecute: Terminated', self);
-          break;
-        end;
-        res := fSock.RecvPending(len);
-        if (res = nrOk) and
-           (len >= 4) then
-        begin
-          PInteger(fFrame)^ := 0;
-          len := fSock.RecvFrom(fFrame, SizeOf(fFrame^), remote);
           if Terminated then
-            break;
-          if (len >= 0) and // -1=error, 0=shutdown
-             (CompareBuf(UDP_SHUTDOWN, fFrame, len) <> 0) then // paranoid
           begin
-            inc(fReceived);
-            OnFrameReceived(len, remote);
+            fLogClass.Add.Log(sllDebug, 'DoExecute: Terminated', self);
+            break;
           end;
-        end
-        else if res <> nrRetry then
-          SleepHiRes(100); // don't loop with 100% cpu on failure
+          res := fSock.RecvPending(len);
+          if (res = nrOk) and
+             (len >= 4) then
+          begin
+            PInteger(fFrame)^ := 0;
+            len := fSock.RecvFrom(fFrame, SizeOf(fFrame^), remote);
+            if Terminated then
+              break;
+            if (len >= 0) and // -1=error, 0=shutdown
+               (CompareBuf(UDP_SHUTDOWN, fFrame, len) <> 0) then // paranoid
+            begin
+              inc(fReceived);
+              OnFrameReceived(len, remote);
+            end;
+          end
+          else if res <> nrRetry then
+            SleepHiRes(100); // don't loop with 100% cpu on failure
+        end;
+        if Terminated then
+          break;
+        tix64 := mormot.core.os.GetTickCount64;
+        tix := tix64 shr 9; // div 512
+        if tix <> lasttix then
+        begin
+          lasttix := tix;
+          OnIdle(tix64); // called every 512 ms at most
+        end;
       end;
-      if Terminated then
-        break;
-      tix64 := mormot.core.os.GetTickCount64;
-      tix := tix64 shr 9; // div 512
-      if tix <> lasttix then
-      begin
-        lasttix := tix;
-        OnIdle(tix64); // called every 512 ms at most
-      end;
-    end;
     OnShutdown; // should close all connections
   except
     on E: Exception do
@@ -4544,8 +4555,7 @@ begin
   fServerSendBufferSize := 256 shl 10; // 256KB seems fine on Windows + POSIX
   inherited Create(aPort, OnStart, OnStop, ProcessName, ServerThreadPoolCount,
     KeepAliveTimeOut, ProcessOptions, aLog);
-  if hsoBan40xIP in ProcessOptions then
-    fBanned := THttpAcceptBan.Create;
+  fBanned := THttpAcceptBan.Create; // for hsoBan40xIP or BlackList
   if ServerThreadPoolCount > 0 then
   begin
     fThreadPool := TSynThreadPoolTHttpServer.Create(self, ServerThreadPoolCount);
@@ -4744,7 +4754,8 @@ begin
               grIntercepted: // handled by OnHeaderParsed event -> no ban
                 ;
             else
-              if fBanned.BanIP(cltaddr.IP4) then // e.g. after grTimeout
+              if (hsoBan40xIP in fOptions) and
+                 fBanned.BanIP(cltaddr.IP4) then // e.g. after grTimeout
                 IncStat(grBanned);
             end;
             OnDisconnect;
@@ -4863,7 +4874,8 @@ begin
     DoRequest(req);
     output := req.SetupResponse(
       ClientSock.Http, fCompressGz, fServerSendBufferSize);
-    if fBanned.ShouldBan(req.RespStatus, ClientSock.fRemoteIP) then
+    if (hsoBan40xIP in fOptions) and
+       fBanned.ShouldBan(req.RespStatus, ClientSock.fRemoteIP) then
       IncStat(grBanned);
     // send back the response
     if Terminated then
@@ -5002,6 +5014,7 @@ begin
           fServer.Sock.OnLog(sllTrace, 'Task: close after GetRequest=% from %',
               [ToText(aHeaderResult)^, fRemoteIP], self);
         if (aHeaderResult <> grClosed) and
+           (hsoBan40xIP in fServer.Options) and
            fServer.fBanned.BanIP(fRemoteIP) then
           fServer.IncStat(grBanned);
       end;
@@ -5339,6 +5352,7 @@ procedure THttpServerResp.Execute;
                 else
                   begin
                     banned := (res <> grClosed) and
+                              (hsoBan40xIP in fServer.Options) and
                               fServer.fBanned.BanIP(fServerSock.RemoteIP);
                     if banned then
                       fServer.IncStat(grBanned);
@@ -6414,7 +6428,8 @@ begin
     // actually start and wait for the local HTTP(S) server to be available
     if fServerTls.Enabled then
     begin
-      fLog.Add.Log(sllTrace, 'StartHttpServer: HTTPS from ServerTls', self);
+      fLog.Add.Log(sllTrace, 'StartHttpServer: HTTPS from ServerTls using %',
+        [fServerTls.PrivateKeyFile], self);
       srv.WaitStarted(10, @fServerTls);
     end
     else if pcoSelfSignedHttps in fSettings.Options then

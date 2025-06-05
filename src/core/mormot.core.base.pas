@@ -5259,17 +5259,22 @@ begin
 end;
 
 procedure AppendShortBuffer(buf: PAnsiChar; len: PtrInt; dest: PAnsiChar);
+var
+  max: PtrInt;
 begin
-  if len + ord(dest[0]) > 255 then
+  max := 255 - ord(dest[0]);
+  if max = 0 then
     exit;
+  if len > max then
+    len := max;
   MoveFast(buf^, dest[ord(dest[0]) + 1], len);
   inc(dest[0], len);
 end;
 
 procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
 begin
-  if buf <> '' then
-    AppendShortBuffer(pointer(buf), PStrLen(PtrUInt(buf) - _STRLEN)^, @dest);
+  if pointer(buf) <> nil then
+    AppendShortBuffer(pointer(buf), PStrLen(PtrUInt(pointer(buf)) - _STRLEN)^, @dest);
 end;
 
 procedure AppendShort(const src: ShortString; var dest: ShortString);
@@ -7697,7 +7702,7 @@ end;
 
 function FastFindIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): PtrInt;
 var
-  L: PtrInt;
+  L {$ifndef CPUX86}, ll, rr{$endif CPUX86}: PtrInt;
   v: integer;
 begin
   L := 0;
@@ -7705,12 +7710,23 @@ begin
     repeat
       result := (L + R) shr 1;
       v := P^[result];
+      {$ifdef CPUX86}   // less registers on good old i386 target
       if v = Value then
         exit
       else if v < Value then
         L := result + 1
       else
         R := result - 1;
+      {$else}
+      rr := result + 1; // compile as 2 branchless cmovl/cmovge on FPC
+      ll := result - 1;
+      if v = Value then
+        exit
+      else if v < Value then
+        L := rr
+      else
+        R := ll;
+      {$endif CPUX86}
     until L > R;
   result := -1
 end;
@@ -7793,6 +7809,8 @@ begin
         dec(result);
       inc(result); // return the index where to insert
     end
+    else if Value = P[R] then
+      result := -R - 1 // return the last entered item as negative
     else
       result := R + 1 // common case when the new value is bigger than others
   else
@@ -7874,6 +7892,8 @@ begin
         dec(result);
       inc(result); // return the index where to insert
     end
+    else if Value = P[R] then
+      result := -R - 1
     else
       result := R + 1 // common case when the new value is bigger than others
   else
@@ -9627,15 +9647,7 @@ begin
 _3: inc(source);
 _2: inc(source);
 _1: inc(source);
-_0: if source[0] = #13 then
-    begin
-      if source[1] = #10 then
-      begin
-        result := source + 2; // most common case is text ending with #13#10
-        exit;
-      end;
-    end
-    else if source[0] = #0 then
+_0: if source[0] = #0 then
     begin
       result := nil; // premature ending
       exit;
@@ -11715,6 +11727,7 @@ begin
   dec(Store.added); // caller should have tested that Size = Store.added > 0
 end;
 
+
 procedure OrMemory(Dest, Source: PByteArray; size: PtrInt);
 begin
   while size >= SizeOf(PtrInt) do
@@ -13268,7 +13281,7 @@ begin
   crc32tabInit(2197175160, crc32ctab); // crc32c() reversed polynom
   crc32tabInit(3988292384, crc32tab);  // crc32() = zlib's reversed polynom
   // setup minimalistic global functions - overriden by other core units
-  VariantClearSeveral     := @_VariantClearSeveral;
+  VariantClearSeveral := @_VariantClearSeveral;
   SortDynArrayVariantComp := @_SortDynArrayVariantComp;
   XorEntropyGetOsRandom256 := @_XorEntropyGetOsRandom256;
   ClassUnit := @_ClassUnit;

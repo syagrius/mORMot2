@@ -541,15 +541,15 @@ function IP4Netmask(prefix: integer): cardinal; overload;
 function IP4Netmask(prefix: integer; out mask: cardinal): boolean; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// compute a subnet value from a 32-bit IP4 and its associated NetMask
+/// compute a subnet/CIDR value from a 32-bit IPv4 and its associated NetMask
 // - e.g. ip4=192.168.0.16 and mask4=255.255.255.0 returns '192.168.0.0/24'
 function IP4Subnet(ip4, netmask4: cardinal): ShortString; overload;
 
-/// compute a subnet value from an IP4 and its associated NetMask
+/// compute a subnet/CIDR value from an IPv4 and its associated NetMask
 // - e.g. ip4='192.168.0.16' and mask4='255.255.255.0' returns '192.168.0.0/24'
 function IP4Subnet(const ip4, netmask4: RawUtf8): RawUtf8; overload;
 
-/// check if an IP4 match a sub-network
+/// check if an IPv4 text match a CIDR sub-network
 // - e.g. IP4Match('192.168.1.1', '192.168.1.0/24') = true
 function IP4Match(const ip4, subnet: RawUtf8): boolean;
 
@@ -614,12 +614,6 @@ function GetIPAddresses(Kind: TIPAddress = tiaIPv4): TRawUtf8DynArray;
 // - an internal cache of the result is refreshed every 32 seconds
 function GetIPAddressesText(const Sep: RawUtf8 = ' ';
   Kind: TIPAddress = tiaIPv4): RawUtf8;
-
-/// check if Host is in 127.0.0.0/8 range (e.g. cLocalhost or c6Localhost)
-// - warning: Host should be not nil
-// - would detect both IPv4 '127.x.x.x' pattern and plain IPv6 '::1' constant
-function IsLocalHost(Host: PUtf8Char): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
 
 type
   /// the network interface type, as stored in TMacAddress.Kind
@@ -1628,7 +1622,7 @@ type
   end;
   PUri = ^TUri;
 
-  /// 32-bit binary storage of a IPv4 sub-network for fast comparison
+  /// 32-bit binary storage of a IPv4 CIDR sub-network for fast comparison
   {$ifdef USERECORDWITHMETHODS}
   TIp4SubNet = record
   {$else}
@@ -1638,15 +1632,76 @@ type
     ip: cardinal;
     /// 32-bit IP mask, e.g. 255.255.255.0 for '1.2.3.4/24'
     mask: cardinal;
-    /// check and decode the supplied address text from its format '1.2.3.4/24'
+    /// check and decode the supplied CIDR address text from its format '1.2.3.4/24'
     // - e.g. as 32-bit 1.2.3.0 into ip and 255.255.255.0 into mask
+    // - plain IP address like '1.2.3.4' will be decoded with mask=255.255.255.255
     function From(const subnet: RawUtf8): boolean;
-    /// check if an 32-bit IP4 matches a decoded sub-network
+    /// check if an 32-bit IPv4 matches a decoded CIDR sub-network
     function Match(ip4: cardinal): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
-    /// check if a textual IPv4 matches a decoded sub-network
+    /// check if a textual IPv4 matches a decoded CIDR sub-network
     function Match(const ip4: RawUtf8): boolean; overload;
   end;
+
+  /// store one TIp4SubNets CIDR mask definition
+  TIp4SubNetMask = record
+    /// 32-bit IP mask, e.g. 255.255.255.0 for '1.2.3.4/24'
+    Mask: cardinal;
+    /// how many 32-bit masked IP are actually stored in IP[]
+    IPCount: integer;
+    /// list of 32-bit masked IPs, e.g. 1.2.3.0 for '1.2.3.4/24'
+    // - sorted to allow efficient O(log(n)) binary search in TIp4SubNets.Match
+    IP: TIntegerDynArray;
+  end;
+  PIp4SubNetMask = ^TIp4SubNetMask;
+  TIp4SubNetMasks = array of TIp4SubNetMask;
+
+  /// store several CIDR sub-network mask definitions for efficient search
+  // - to handle typically a blacklist of IP ranges e.g. from spamhaus.org
+  TIp4SubNets = class(TSynPersistent)
+  protected
+    fSubNet: TIp4SubNetMasks;
+    function FindMask(mask4: cardinal): PIp4SubNetMask;
+  public
+    /// decode and register the supplied CIDR address text e.g. as '1.2.3.4/24'
+    function Add(const subnet: RawUtf8): boolean; overload;
+    /// decode and register the supplied CIDR address as TIp4SubNet
+    // - by definition, private IP like 192.168.x.x are not added
+    function Add(const subnet: TIp4SubNet): boolean; overload;
+    /// decode and add all IP and CIDR listed in a text content
+    // - i.e. netsets as IP or CIDR with # or ; comments e.g. as in
+    // https://www.spamhaus.org/drop/drop.txt or
+    // https://github.com/firehol/blocklist-ipsets/blob/master/firehol_level1.netset
+    // - by definition, private IP like 192.168.x.x are not included
+    // - returns the number of added IP or CIDR, merging with existing content
+    function AddFromText(const text: RawUtf8): integer;
+    /// ensure all length(SubNet[].IP) = IPCount after Add/AddFromText usage
+    // - returns the current total number of stored IP or CIDR
+    function AfterAdd: integer;
+    /// check if a 32-bit IPv4 matches a registered CIDR sub-network
+    // - reach 16M/s per core with spamhaus or firehol databases
+    function Match(ip4: cardinal): boolean; overload;
+    /// check if a textual IPv4 matches a registered CIDR sub-network
+    function Match(const ip4: RawUtf8): boolean; overload;
+    // remove all registered CIDR sub-networks
+    procedure Clear;
+    /// persist this list as optimized binary
+    function SaveToBinary: RawByteString;
+    /// clear and retrieve from a binary buffer persisted via SaveToBinary
+    function LoadFromBinary(const bin: RawByteString): boolean;
+    /// low-level access to the internal storage
+    // - warning: length(IP) may be > IPCount - do not use "for in SubNet[].IP"
+    // pattern unless you called AfterAdd or LoadFromBinary
+    property SubNet: TIp4SubNetMasks
+      read fSubNet;
+  end;
+
+/// check if a 32-bit IPv4 matches a registered CIDR sub-network binary buffer
+// - directly parse TIp4SubNets.SaveToBinary output for conveniency
+function IP4SubNetMatch(P: PIntegerArray; ip4: cardinal): boolean; overload;
+
+/// check if a textual IPv4 matches a registered CIDR sub-network binary buffer
+function IP4SubNetMatch(const bin: RawByteString; const ip4: RawUtf8): boolean; overload;
 
 
 const
@@ -1665,7 +1720,7 @@ const
 
 /// check is the supplied address text is on format '1.2.3.4'
 // - will optionally fill a 32-bit binary buffer with the decoded IPv4 address
-// - end text input parsing at final #0 or any char <= ' '
+// - end text input parsing at final #0 '/' or any char <= ' '
 function NetIsIP4(text: PUtf8Char; value: PByte = nil): boolean;
 
 /// parse a text input buffer until the end space or EOL
@@ -3394,7 +3449,7 @@ const // should be local for better code generation
 function IsPublicIP(ip4: cardinal): boolean;
 begin
   result := false;
-  case ToByte(ip4) of // ignore IANA private IP4 address spaces
+  case ToByte(ip4) of // ignore IANA private IPv4 address spaces
     10:
       exit;
     172:
@@ -3416,7 +3471,7 @@ end;
 function IP4Mask(ip4: cardinal): cardinal;
 begin
   result := $ffffffff;
-  case ToByte(ip4) of // detect IANA private IP4 address spaces
+  case ToByte(ip4) of // detect IANA private IPv4 address spaces
     10:
       result := $000000ff;
     172:
@@ -3448,7 +3503,7 @@ begin
   result := (mask <> 0);
 end;
 
-function TIp4SubNet.Match(ip4: cardinal): boolean;
+function TIp4SubNet.Match(ip4: cardinal): boolean; // defined here for inlining
 begin
   // e.g. ip4=172.16.144.160 subip=172.16.144.0 submask=255.255.255.0
   result := (ip4 and mask) = ip;
@@ -3751,15 +3806,6 @@ begin
     inc(P, 2);
     inc(i);
   until false;
-end;
-
-function IsLocalHost(Host: PUtf8Char): boolean;
-var
-  c: cardinal;
-begin
-  c := PCardinal(Host)^;
-  result := (c = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24) or
-            (c = ord(':') + ord(':') shl 8 + ord('1') shl 16); // c6Localhost
 end;
 
 procedure NetAddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
@@ -4983,7 +5029,8 @@ begin
   n := 0;
   while true do
     case text^ of
-      #0 .. ' ':
+      #0 .. ' ',
+      '/': // allow CIDR '1.2.3.4/20' decoding
         if (b < 0) or
            (n <> 3) then
           exit
@@ -5131,14 +5178,21 @@ end;
 function TIp4SubNet.From(const subnet: RawUtf8): boolean;
 var
   ip4, sub4: RawUtf8;
-  ip32, prefix: cardinal; // local temporary ip32 is needed on Delphi XE4
+  ip32, prefix: cardinal; // local temporary ip32 is needed on Delphi XE4 :(
 begin
-  mask := 0;
-  ip32 := 0;
-  result := SplitFromRight(subnet, '/', ip4, sub4) and
-            NetIsIP4(pointer(ip4), @ip32) and
-            ToCardinal(sub4, prefix, 1) and
-            IP4Netmask(prefix{%H-}, mask);
+  if SplitFromRight(subnet, '/', ip4, sub4) then // regular '1.2.3.4/sub' mask
+  begin
+    ip32 := 0;
+    mask := 0;
+    result := NetIsIP4(pointer(ip4), @ip32) and
+              ToCardinal(sub4, prefix, 1) and
+              IP4Netmask(prefix{%H-}, mask);
+  end
+  else
+  begin
+    mask := cardinal(-1); // 255.255.255.255
+    result := NetIsIP4(pointer(subnet), @ip32); // plain '1.2.3.4' IPv4 address
+  end;
   ip := ip32 and mask; // normalize
 end;
 
@@ -5148,6 +5202,218 @@ var
 begin
   result := NetIsIP4(pointer(ip4), @ip32) and
             Match(ip32{%H-});
+end;
+
+
+{ TIp4SubNets }
+
+function TIp4SubNets.FindMask(mask4: cardinal): PIp4SubNetMask;
+var
+  n: integer;
+begin
+  result := pointer(fSubNet);
+  if result = nil then
+    exit;
+  n := PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF;
+  repeat
+    if result^.Mask = mask4 then
+      exit;
+    inc(result);
+    dec(n);
+  until n = 0;
+  result := nil;
+end;
+
+function TIp4SubNets.Add(const subnet: TIp4SubNet): boolean;
+var
+  p: PIp4SubNetMask;
+  n: PtrInt;
+begin
+  result := false;
+  if (subnet.ip = cardinal(-1)) or  // 255.255.255.255
+     not IsPublicIP(subnet.ip) then // e.g. 192.168.1.1
+    exit;
+  p := FindMask(subnet.mask);
+  if p = nil then
+  begin
+    n := length(fSubNet);
+    SetLength(fSubNet, n + 1);
+    p := @fSubNet[n];
+    p^.Mask := subnet.mask;
+  end;
+  result := AddSortedInteger(p^.IP, p^.IPCount, subnet.ip) >= 0;
+end;
+
+function TIp4SubNets.Add(const subnet: RawUtf8): boolean;
+var
+  sub: TIp4SubNet;
+begin
+  result := sub.From(subnet) and
+            Add(sub);
+end;
+
+function TIp4SubNets.Match(ip4: cardinal): boolean;
+var
+  p: PIp4SubNetMask;
+  n: integer;
+begin
+  p := pointer(fSubNet);
+  if p <> nil then
+  begin
+    result := true;
+    n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // try all masks
+    repeat
+      // O(log(n)) binary search (branchless asm on x86_64)
+      if FastFindIntegerSorted(pointer(p^.IP), p^.IPCount - 1, ip4 and P^.Mask) >= 0 then
+        exit; // not faster to use IntegerScanIndex() for small IPCount
+      inc(p);
+      dec(n);
+    until n = 0;
+  end;
+  result := false;
+end;
+
+function TIp4SubNets.Match(const ip4: RawUtf8): boolean;
+var
+  ip32: cardinal;
+begin
+  result := NetIsIP4(pointer(ip4), @ip32) and
+            Match(ip32{%H-});
+end;
+
+procedure TIp4SubNets.Clear;
+begin
+  fSubNet := nil;
+end;
+
+function TIp4SubNets.SaveToBinary: RawByteString;
+var
+  i, n, L: PtrInt;
+  p: PIntegerArray;
+begin
+  n := length(fSubNet);
+  L := n * 8 + 4;
+  for i := 0 to n - 1 do
+    inc(L, fSubNet[i].IPCount * 4);
+  p := FastNewRawByteString(result, L);
+  p^[0] := n;
+  for i := 0 to n - 1 do
+    with fSubNet[i] do
+    begin
+      p^[1] := Mask;
+      p^[2] := IPCount;
+      MoveFast(pointer(IP)^, p^[3], p^[2] * 4);
+      p := @p^[p^[2] + 2];
+    end;
+end;
+
+function TIp4SubNets.LoadFromBinary(const bin: RawByteString): boolean;
+var
+  i, n: PtrInt;
+  p: PIntegerArray;
+  d: PIp4SubNetMask;
+begin
+  result := false;
+  Clear;
+  n := length(bin);
+  if (n and 3) <> 0 then
+    exit;
+  n := n shr 2;
+  p := pointer(bin);
+  for i := 0 to p^[0] - 1 do
+  begin
+    if n < 2 then
+      exit; // avoid buffer overflow
+    dec(n, p^[2] + 2);
+    p := @p^[p^[2] + 2];
+  end;
+  if n <> 1 then
+    exit; // decoded size should be an exact match with supplied bin
+  p := pointer(bin);
+  SetLength(fSubNet, p^[0]);
+  d := pointer(fSubNet);
+  for i := 0 to p^[0] - 1 do
+  begin
+    d^.Mask := p^[1];
+    d^.IPCount := p^[2];
+    SetLength(d^.IP, p^[2]);
+    MoveFast(p^[3], pointer(d^.IP)^, p^[2] * 4);
+    p := @p^[p^[2] + 2];
+    inc(d);
+  end;
+  result := true;
+end;
+
+function TIp4SubNets.AddFromText(const text: RawUtf8): integer;
+var
+  p: PUtf8Char;
+  sub: TIp4SubNet;
+begin
+  result := 0;
+  p := pointer(text);
+  while p <> nil do
+  begin
+    while p^ in [#1 .. ' ' ] do
+      inc(p);
+    if NetIsIP4(p, @sub.ip) then // ignore any line starting e.g. with # or ;
+    begin
+      while p^ in ['0' .. '9', '.', ' '] do
+        inc(p);
+      if p^ <> '/' then
+        sub.mask := cardinal(-1) // single IP has 255.255.255.255 mask
+      else
+        sub.mask := IP4Netmask(GetCardinal(p + 1)); // CIDR
+      if (sub.mask <> 0) and
+         Add(sub) then
+        inc(result); // first time seen
+    end;
+    p := GotoNextLine(p);
+  end;
+end;
+
+function TIp4SubNets.AfterAdd: integer;
+var
+  n: integer;
+  p: PIp4SubNetMask;
+begin
+  result := 0;
+  p := pointer(fSubNet);
+  if p = nil then
+    exit;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // process all masks
+  repeat // SetLength(SubNet[].IP, SubNet[].IPCount) without any realloc
+    PDALen(PAnsiChar(pointer(p^.IP)) - _DALEN)^ := p^.IPCount - _DAOFF;
+    inc(result, p^.IPCount);
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+
+function IP4SubNetMatch(P: PIntegerArray; ip4: cardinal): boolean;
+var
+  n: integer;
+begin
+  if P <> nil then
+  begin
+    result := true;
+    n := P^[0]; // try all masks - warning: won't check for buffer overflow
+    repeat
+      if FastFindIntegerSorted(@P^[3], P^[2] - 1, ip4 and P^[1]) >= 0 then
+        exit;
+      P := @P^[P^[2] + 2]; // O(log(n)) search the binary buffer in-place
+      dec(n);
+    until n = 0;
+  end;
+  result := false;
+end;
+
+function IP4SubNetMatch(const bin: RawByteString; const ip4: RawUtf8): boolean;
+var
+  ip32: cardinal;
+begin
+  result := NetIsIP4(pointer(ip4), @ip32) and
+            IP4SubNetMatch(pointer(bin), ip32);
 end;
 
 

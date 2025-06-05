@@ -949,11 +949,13 @@ type
   // - used e.g. to implement hsoBan40xIP or THttpPeerCache instable
   // peers list (with a per-minute resolution)
   // - the DoRotate method should be called every second
+  // - can optionally maintain one TIp4SubNets blacklist of IPv4 from Internet
   THttpAcceptBan = class(TObjectOSLightLock)
   protected
     fCount, fLastSec: integer;
     fIP: array of TCardinalDynArray; // one [0..fMax] IP array per second
     fSeconds, fMax, fWhiteIP: cardinal;
+    fBlackList: TIp4SubNets;
     fRejected, fTotal: Int64;
     fOnBanIp, fOnBanned: TOnHttpAcceptBan;
     function IsBannedRaw(ip4: cardinal): boolean;
@@ -967,21 +969,23 @@ type
     // - maxpersecond is the maximum number of banned IPs remembered per second
     constructor Create(banseconds: cardinal = 4; maxpersecond: cardinal = 1024;
       banwhiteip: cardinal = cLocalhost32); reintroduce;
-    /// register an IP4 to be rejected
+    /// finalize this process
+    destructor Destroy; override;
+    /// register a 32-bit IPv4 to be rejected
     function BanIP(ip4: cardinal): boolean; overload;
-    /// register an IP4 to be rejected
+    /// register a IPv4 text to be rejected
     function BanIP(const ip4: RawUtf8): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
-    /// fast check if this IP4 is to be rejected
+    /// fast check if this IPv4 is to be rejected
     function IsBanned(const addr: TNetAddr): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
-    /// fast check if this IP4 is to be rejected
+    /// fast check if this 32-bit IPv4 is to be rejected
     function IsBanned(ip4: cardinal): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
-    /// register an IP4 if status in >= 400 (but not 401 HTTP_UNAUTHORIZED)
+    /// register an IPv4 if status in >= 400 (but not 401 HTTP_UNAUTHORIZED)
     function ShouldBan(status, ip4: cardinal): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
-    /// register an IP4 if status in >= 400 (but not 401 HTTP_UNAUTHORIZED)
+    /// register an IPv4 if status in >= 400 (but not 401 HTTP_UNAUTHORIZED)
     function ShouldBan(status: cardinal; const ip4: RawUtf8): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// to be called every second to remove deprecated bans from the list
@@ -991,11 +995,11 @@ type
     // - returns the number of freed bans
     function DoRotate: integer;
       {$ifdef HASINLINE} inline; {$endif}
-    /// a 32-bit IP4 which should never be banned
+    /// a 32-bit IPv4 which should never be banned
     // - is set to cLocalhost32, i.e. 127.0.0.1, by default
     property WhiteIP: cardinal
       read fWhiteIP write fWhiteIP;
-    /// how many seconds a banned IP4 should be rejected
+    /// how many seconds a banned IPv4 should be rejected
     // - will set the closest power of two <= 128, with a default of 4
     // - when set, any previous banned IP will be flushed
     property Seconds: cardinal
@@ -1013,14 +1017,23 @@ type
     /// event called when IsBanned() method returns true
     property OnBanned: TOnHttpAcceptBan
       read fOnBanned write fOnBanned;
+    /// raw access to an associated IPv4/CIDR blacklist storage
+    // - could be populated from fixed reference material, in addition to the
+    // transient banishment process set by ShouldBan() method on unexpected errors
+    // - typically filled from https://www.spamhaus.org/drop/drop.txt or
+    // https://github.com/firehol/blocklist-ipsets/blob/master/firehol_level1.netset
+    // - use Safe.Lock when accessing this instance, e.g. when initializing from
+    // text or binary once at startup, before IsBanned() is actually called
+    property BlackList: TIp4SubNets
+      read fBlackList;
   published
     /// total number of accept() rejected by IsBanned()
     property Rejected: Int64
       read fRejected;
-    /// total number of banned IP4 since the beginning
+    /// total number of banned IPv4 since the beginning
     property Total: Int64
       read fTotal;
-    /// current number of banned IP4
+    /// current number of banned IPv4
     property Count: integer
       read fCount;
   end;
@@ -4679,6 +4692,13 @@ begin
   fMax := maxpersecond;
   SetSeconds(banseconds);
   fWhiteIP := banwhiteip;
+  fBlackList := TIp4SubNets.Create;
+end;
+
+destructor THttpAcceptBan.Destroy;
+begin
+  inherited Destroy;
+  fBlackList.Free;
 end;
 
 procedure THttpAcceptBan.SetMax(Value: cardinal);
@@ -4771,7 +4791,8 @@ var
 begin
   result := false;
   if (self = nil) or
-     (fCount = 0) then
+     ((fCount = 0) and
+      (fBlackList.SubNet = nil)) then
     exit;
   ip4 := addr.IP4;
   if (ip4 = 0) or
@@ -4783,7 +4804,8 @@ end;
 function THttpAcceptBan.IsBanned(ip4: cardinal): boolean;
 begin
   result := (self <> nil) and
-            (fCount <> 0) and
+            ((fCount <> 0) or
+             (fBlackList.SubNet = nil)) and
             (ip4 <> 0) and
             (ip4 <> fWhiteIP) and
             IsBannedRaw(ip4);
@@ -4803,7 +4825,8 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    s := pointer(fIP); // fIP[secs,0]=count fIP[secs,1..fMax]=ips
+    // search the transient list of fIP[secs,0]=count fIP[secs,1..fMax]=ips
+    s := pointer(fIP);
     n := fSeconds;
     if n <> 0 then
       repeat
@@ -4813,19 +4836,24 @@ begin
         if (cnt <> 0) and
            IntegerScanExists(@P[1], cnt, ip4) then // O(n) SSE2 asm on Intel
         begin
-          inc(fRejected);
           result := true;
           break;
         end;
         dec(n);
       until n = 0;
+    // also try the public blacklist of IPv4 (if any)
+    if not result and
+       (fBlackList.SubNet <> nil) then
+      result := fBlackList.Match(ip4);
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
     fSafe.UnLock;
   end;
-  if result and
-     Assigned(fOnBanned) then
+  if not result then
+    exit;
+  inc(fRejected);
+  if Assigned(fOnBanned) then
     fOnBanned(self, ip4);
 end;
 
@@ -4864,15 +4892,14 @@ begin
   result := 0;
   fSafe.Lock; // very quick O(1) process
   try
-    if fCount <> 0 then
-    begin
-      n := (fLastSec + 1) and (fSeconds - 1); // per-second round robin
-      fLastSec := n; // the oldest slot becomes the current (no memory move)
-      p := @fIP[n][0]; // fIP[secs,0]=count fIP[secs,1..fMax]=ips
-      result := p^;
-      p^ := 0; // void the current slot
-      dec(fCount, result);
-    end;
+    if fCount = 0 then
+      exit;
+    n := (fLastSec + 1) and (fSeconds - 1); // per-second round robin
+    fLastSec := n; // the oldest slot becomes the current (no memory move)
+    p := @fIP[n][0]; // fIP[secs,0]=count fIP[secs,1..fMax]=ips
+    result := p^;
+    p^ := 0; // void the current slot
+    dec(fCount, result);
   finally
     fSafe.UnLock;
   end;
