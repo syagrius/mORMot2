@@ -897,7 +897,7 @@ type
     procedure AddJsonEscape(Source: TJsonWriter); overload;
     /// flush a supplied TJsonWriter, and write pending data as JSON escaped text
     // - may be used with InternalJsonWriter, as a faster alternative to
-    // ! AddNoJsonEscapeUtf8(Source.Text);
+    // ! AddString(Source.Text);
     procedure AddNoJsonEscape(Source: TJsonWriter); overload;
     /// append a UTF-8 already encoded JSON buffer forcing Unicode escape
     // - don't escapes chars according to the JSON RFC but convert any 8-bit
@@ -1958,7 +1958,7 @@ type
     // - ResultRtti holds the type of the resolved result pointer
     // - note that TStrings values are not supported, because they require a
     // temporary string variable for their getter method
-    function ValueIterate(Data: pointer; Index: PtrUInt;
+    function ValueIterate(Data: pointer; Index: PtrUInt; var Temp: TVarData;
       out ResultRtti: TRttiCustom): pointer; override;
     /// lookup a value by a path name e.g. 'one.two.three' nested values
     // - for a record/class, will search for a property name
@@ -4823,7 +4823,7 @@ end;
 procedure JsonBufferReformat(P: PUtf8Char; out result: RawUtf8;
   Format: TTextWriterJsonFormat);
 var
-  temp: array[word] of byte; // 64KB buffer
+  temp: TBuffer64K;
 begin
   if P <> nil then
     with TJsonWriter.CreateOwnedStream(@temp, SizeOf(temp)) do
@@ -6620,7 +6620,7 @@ begin
     AddDirect('"');
   end
   else // was not a quoted string
-    AddNoJsonEscape(pointer(QuotedString), length(QuotedString));
+    AddString(QuotedString);
 end;
 
 procedure TJsonWriter.AddVariant(const Value: variant; Escape: TTextWriterKind;
@@ -7091,7 +7091,7 @@ noesc:
         inc(c);
       until (PtrUInt(c) >= PtrUInt(Len)) or
             (tab[c^] <> JSON_ESCAPE_NONE);
-    l := PUtf8Char(c) - P;
+    l := PUtf8Char(c) - P; // inlined AddNoJsonEscape()
     if PtrInt(BEnd - B) < l then // note: PtrInt(BEnd - B) could be < 0
       AddNoJsonEscapeBig(P, l)
     else
@@ -7287,7 +7287,7 @@ begin
   if Source.fTotalFileSize = 0 then
     AddNoJsonEscapeBig(Source.fTempBuf, Source.B - Source.fTempBuf + 1)
   else
-    AddNoJsonEscapeUtf8(Source.Text);
+    AddString(Source.Text);
 end;
 
 procedure TJsonWriter.AddNoJsonEscapeForcedUnicode(P: PUtf8Char; Len: PtrInt);
@@ -8175,8 +8175,9 @@ begin
     v := List^;
     if v <> nil then
     begin
-      if (PStrLen(v - _STRLEN)^ = ValueLen) and
-         CompareMemFixed(v, Value, ValueLen) then
+      if (PStrLen(v - _STRLEN)^ = ValueLen) and   // same length
+         (v^ = PUtf8Char(Value)^) and             // same first char
+         CompareMemFixed(v, Value, ValueLen) then // efficiently inlined on FPC
       exit;
     end else if ValueLen = 0 then
       exit;
@@ -9384,10 +9385,10 @@ begin
       if (IgnoreKey = '') or
          (List[i].Name <> IgnoreKey) then
       begin
-        AddNoJsonEscapeUtf8(List[i].Name);
-        AddNoJsonEscapeUtf8(KeySeparator);
-        AddNoJsonEscapeUtf8(List[i].Value);
-        AddNoJsonEscapeUtf8(ValueSeparator);
+        AddString(List[i].Name);
+        AddString(KeySeparator);
+        AddString(List[i].Value);
+        AddString(ValueSeparator);
       end;
     SetText(result);
   finally
@@ -10887,6 +10888,8 @@ begin
 end;
 
 function TRttiJson.ValueIterateCount(Data: pointer): integer;
+var
+  vt: TSynInvokeableVariantType;
 begin
   result := -1; // unsupported
   if Data <> nil then
@@ -10897,25 +10900,30 @@ begin
         begin
           Data := PPointer(Data)^; // TObject are stored by reference
           if Data <> nil then
-           case ValueRtlClass of
-             // vcStrings can't be supported since TStrings.Items[] is a getter
-             vcCollection:
-               result := TCollection(Data).Count;
-             vcList,
-             vcObjectList:
-               result := TList(Data).Count;
-             vcSynList,
-             vcSynObjectList:
-               result := TSynList(Data).Count;
-             vcRawUtf8List:
-               result := TRawUtf8List(Data).Count;
-           end;
+            case ValueRtlClass of
+              // vcStrings can't be supported since TStrings.Items[] is a getter
+              vcCollection:
+                result := TCollection(Data).Count;
+              vcList,
+              vcObjectList:
+                result := TList(Data).Count;
+              vcSynList,
+              vcSynObjectList:
+                result := TSynList(Data).Count;
+              vcRawUtf8List:
+                result := TRawUtf8List(Data).Count;
+            end;
         end;
+      rkVariant:
+        if DocVariantType.FindSynVariantType(PVarData(Data)^.VType, vt) then
+          result := vt.IterateCount(PVarData(Data)^, {objectasvalues=}false);
     end;
 end;
 
 function TRttiJson.ValueIterate(Data: pointer; Index: PtrUInt;
-  out ResultRtti: TRttiCustom): pointer;
+  var Temp: TVarData; out ResultRtti: TRttiCustom): pointer;
+var
+  vt: TSynInvokeableVariantType;
 begin
   result := nil;
   if Data <> nil then
@@ -10964,6 +10972,13 @@ begin
                  exit;
                end;
            end;
+        end;
+      rkVariant:
+        if DocVariantType.FindSynVariantType(PVarData(Data)^.VType, vt) then
+        begin
+          vt.Iterate(Temp, PVarData(Data)^, Index); // weak copy into Temp
+          result := @Temp;
+          ResultRtti := PT_RTTI[ptVariant];
         end;
     end;
 end;
@@ -11459,7 +11474,7 @@ begin
     with TJsonWriter.CreateOwnedStream(temp) do
     try
       AddDirect('{', '"');
-      AddNoJsonEscapeUtf8(Name);
+      AddString(Name);
       AddDirect('"', ':');
       AddQuotedStringAsJson(SQLValue);
       AddDirect('}');
@@ -11874,7 +11889,7 @@ end;
 procedure JsonBufferToXML(P: PUtf8Char; const Header, NameSpace: RawUtf8;
   out result: RawUtf8);
 var
-  i, j, L: PtrInt;
+  i, j, namespaceLen: PtrInt;
   temp: TTextWriterStackBuffer;
 begin
   if P = nil then
@@ -11882,16 +11897,16 @@ begin
   else
     with TJsonWriter.CreateOwnedStream(temp) do
     try
-      AddNoJsonEscape(pointer(Header), length(Header));
-      L := length(NameSpace);
-      if L <> 0 then
-        AddNoJsonEscape(pointer(NameSpace), L);
+      AddString(Header);
+      namespaceLen := length(NameSpace);
+      if namespaceLen <> 0 then
+        AddString(NameSpace);
       AddJsonToXML(P);
-      if L <> 0 then
-        for i := 1 to L do
+      if namespaceLen <> 0 then
+        for i := 1 to namespaceLen do
           if NameSpace[i] = '<' then
           begin
-            for j := i + 1 to L do
+            for j := i + 1 to namespaceLen do
               if NameSpace[j] in [' ', '>'] then
               begin
                 AddDirect('<', '/');

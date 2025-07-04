@@ -688,7 +688,8 @@ type
     atOperatingSystemVersion,
     atServicePrincipalName,
     atUnicodePwd,
-    atAccountNameHistory);
+    atAccountNameHistory,
+    atTokenGroups);                // virtual/constructed attribute for self
 
   /// set of common Attribute Types
   TLdapAttributeTypes = set of TLdapAttributeType;
@@ -770,7 +771,8 @@ const
     'Operating-System-Version',    // atOperatingSystemVersion
     'Service-Principal-Name',      // atServicePrincipalName
     'Unicode-Pwd',                 // atUnicodePwd
-    'Account-Name-History');       // atAccountNameHistory
+    'Account-Name-History',        // atAccountNameHistory
+    'Token-Groups');               // atTokenGroups
 
   /// how all TLdapAttributeType are actually stored in the LDAP raw value
   AttrTypeStorage: array[TLdapAttributeType] of TLdapAttributeTypeStorage = (
@@ -828,7 +830,8 @@ const
     atsRawUtf8,                     // atOperatingSystemVersion
     atsRawUtf8,                     // atServicePrincipalName
     atsUnicodePwd,                  // atUnicodePwd
-    atsRawUtf8);                    // atAccountNameHistory
+    atsRawUtf8,                     // atAccountNameHistory
+    atsSid);                        // atTokenGroups
 
   /// the LDAP raw values stored as UTF-8, which do not require any conversion
   ATS_READABLE = [atsRawUtf8 .. atsIntegerAccountType];
@@ -1796,6 +1799,8 @@ type
     /// the user password for non-anonymous Bind/BindSaslKerberos
     // - if you can, use instead password-less Kerberos authentication, or
     // at least ensure the connection is secured via TLS
+    // - as an alternative, on POSIX you can specify a keytab associated with
+    // UserName as 'FILE:/full/path/to/my.keytab' into this property
     property Password: SpiUtf8
       read fPassword write fPassword;
     /// Kerberos Canonical Domain Name
@@ -2726,13 +2731,13 @@ begin
       res := DnsServices(n, NameServer);
       if res <> nil then
       begin
-        result := res[0]; // found a matching site
+        result := res[Random32(length(res))]; // return a matching site
         exit;
       end;
     end;
   end;
-  if LdapServers <> nil then
-    result := LdapServers[0] // if no site is defined, use first server
+  if LdapServers <> nil then // if no site is defined, use one of the servers
+    result := LdapServers[Random32(length(LdapServers))]
   else
     result := '';
 end;
@@ -3531,7 +3536,8 @@ const
     'operatingSystemVersion',      // atOperatingSystemVersion
     'servicePrincipalName',        // atServicePrincipalName
     'unicodePwd',                  // atUnicodePwd
-    'accountNameHistory');         // atAccountNameHistory
+    'accountNameHistory',          // atAccountNameHistory
+    'tokenGroups');                // atTokenGroups
 
   // reference names to fill the global AttrTypeNameAlt[]
   _AttrTypeNameAlt: array[0 .. high(AttrTypeNameAlt)] of RawUtf8 = (
@@ -7038,11 +7044,12 @@ function TLdapClient.SearchAllDocRaw(out Dest: TDocVariantData;
 var
   n, recv: integer;
   dom: PSid;
-  l: ISynLog;
+  ilog: ISynLog;
 begin
   // setup context and resultset
   if Assigned(fLog) then
-    fLog.EnterLocal(l, 'SearchAllDocRaw max=% perpage=%', [MaxCount, PerPage], self);
+    fLog.EnterLocal(ilog, 'SearchAllDocRaw max=% perpage=%',
+      [MaxCount, PerPage], self);
   dom := nil;
   if not (roNoSddlDomainRid in Options) then
     dom := pointer(DomainSid); // RID resolution from cached Domain SID
@@ -7075,8 +7082,8 @@ begin
     if fSearchRange <> nil then
       SearchRangeEnd(Dest, Options, ObjectAttributeField); // as TDocVariant
   end;
-  if Assigned(l) then
-    l.Log(sllDebug, 'SearchAllDocRaw=% count=% recv=%',
+  if Assigned(ilog) then
+    ilog.Log(sllDebug, 'SearchAllDocRaw=% count=% recv=%',
       [BOOL_STR[result], n, KBNoSpace(recv)], self);
   // eventually sort by field names (if specified)
   if roSortByName in Options then
@@ -8017,27 +8024,42 @@ var
   datain, dataout: RawByteString;
 begin
   result := false;
+  if StartWithExact(aPassword, 'FILE:') then
+    exit; // don't cheat with this server credentials :)
   InvalidateSecContext(client);
-  InvalidateSecContext(server);
   try
     try
-      while ClientSspiAuthWithPassword(
-              client, datain, aUser, aPassword, fKerberosSpn, dataout) and
-            ServerSspiAuth(server, dataout, datain) do ;
-      if aFullUserName <> nil then
-        ServerSspiAuthUser(server, aFullUserName^);
-      {$ifdef OSWINDOWS}
-      // on Windows, ensure this user is part of AllowGroupBySid()
-      if (fGroupSid = nil) or
-         ServerSspiAuthGroup(server, fGroupSid) then
-      {$endif OSWINDOWS}
-        result := true;
-    except
-      result := false;
+      if (aFullUserName = nil)
+         {$ifdef OSWINDOWS} and (fGroupSid = nil) {$endif} then
+        // simple aUser/aPassword credential check needs no server side
+        // - see as reference mag_auth_basic() in NGINX's mod_auth_gssapi.c
+        result := ClientSspiAuthWithPassword(client, 'onlypass',
+                    aUser, aPassword, fKerberosSpn, dataout)
+      else
+      begin
+        // more user information currently need a ServerSspiAuth() context
+        InvalidateSecContext(server);
+        try
+          while ClientSspiAuthWithPassword(client, datain,
+                  aUser, aPassword, fKerberosSpn, dataout) and
+                ServerSspiAuth(server, dataout, datain) do ;
+          if aFullUserName <> nil then
+            ServerSspiAuthUser(server, aFullUserName^);
+          {$ifdef OSWINDOWS}
+          // on Windows, ensure this user is part of AllowGroupBySid()
+          if (fGroupSid = nil) or
+             ServerSspiAuthGroup(server, fGroupSid) then
+          {$endif OSWINDOWS}
+            result := true;
+        finally
+          FreeSecContext(server);
+        end;
+      end;
+    finally
+      FreeSecContext(client);
     end;
-  finally
-    FreeSecContext(server);
-    FreeSecContext(client);
+  except
+    result := false;
   end;
 end;
 

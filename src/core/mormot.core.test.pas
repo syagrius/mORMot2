@@ -30,7 +30,8 @@ uses
   mormot.core.rtti,
   mormot.core.perf,
   mormot.core.log,
-  mormot.core.threads;
+  mormot.core.threads,
+  mormot.net.client;
 
 
 { ************ Unit-Testing classes and functions }
@@ -209,6 +210,10 @@ type
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
     function CheckEqual(const a, b: RawByteString; const msg: RawUtf8 = ''): boolean; overload;
     /// used by the published methods to run test assertion against UTF-8/Ansi strings
+    // - will ignore the a+b string codepages, and call SortDynArrayRawByteString()
+    // - if a<>b, will fail and include '#<>#' text before the supplied msg
+    function CheckEqualShort(const a, b: shortstring; const msg: RawUtf8 = ''): boolean;
+    /// used by the published methods to run test assertion against UTF-8/Ansi strings
     // - if Trim(a)<>Trim(b), will fail and include '#<>#' text before the supplied msg
     function CheckEqualTrim(const a, b: RawByteString; const msg: RawUtf8 = ''): boolean;
     /// used by the published methods to run test assertion against pointers/classes
@@ -294,6 +299,10 @@ type
     class procedure AddRandomTextParagraph(WR: TTextWriter; WordCount: integer;
       LastPunctuation: AnsiChar = '.'; const RandomInclude: RawUtf8 = '';
       NoLineFeed: boolean = false);
+    /// safely download some reference material (e.g. from api.github.com)
+    // - with proper retry if the server denies it, due to a rate limit
+    function DownloadFile(const uri: RawUtf8; localfile: TFileName = '';
+      retry: integer = 3): RawByteString;
     /// execute a method possibly in a dedicated TLoggedWorkThread
     // - OnTask() should take some time running, to be worth a thread execution
     // - won't create more background threads than currently available CPU cores,
@@ -796,6 +805,15 @@ begin
     DoCheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
+function TSynTestCase.CheckEqualShort(const a, b: shortstring; const msg: RawUtf8): boolean;
+begin
+  inc(fAssertions);
+  result := (a = b);
+  if not result or
+     (tcoLogEachCheck in fOptions) then
+    DoCheckUtf8(result, EQUAL_MSG, [a, b, msg]);
+end;
+
 function TSynTestCase.CheckEqualTrim(const a, b: RawByteString; const msg: RawUtf8): boolean;
 begin
   result := CheckEqual(TrimU(a), TrimU(b), msg);
@@ -1080,6 +1098,30 @@ begin
     WR.AddDirect('b', 'l', 'a');
     WR.AddDirect(LastPunctuation);
   end;
+end;
+
+function TSynTestCase.DownloadFile(const uri: RawUtf8;
+  localfile: TFileName; retry: integer): RawByteString;
+var
+  status: integer;
+  info: string;
+begin
+  if localfile <> '' then
+    if not IsExpandedPath(localfile) then
+      localfile := WorkDir + localfile;
+  repeat
+    result := HttpGetWeak(uri, localfile, @status);
+    FormatString('DownloadFile %=% retry=% [%]',
+      [uri, status, retry, EscapeToShort(result)], info);
+    fOwner.DoLog(sllTrace, '%', [info]);
+    if status = HTTP_SUCCESS then
+      exit;
+    AddConsole(info); // notify something if not as expected (rate limit?)
+    dec(retry);
+    if retry <= 0 then
+      exit;
+    SleepHiRes(10);
+  until false;
 end;
 
 threadvar

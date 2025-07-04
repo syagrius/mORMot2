@@ -260,6 +260,7 @@ type
     procedure OrmGetTable(params: PUtf8Char);
     procedure OrmGetConvertOutBodyAsPlainJson(const FieldsCsv: RawUtf8;
       Options: TOrmWriterOptions);
+    function StatusCodeToText(Code: cardinal): PRawUtf8; override;
     /// register the interface-based SOA URIs to Server.Router multiplexer
     // - abstract implementation which is to be overridden
     class procedure UriComputeRoutes(Router: TRestRouter; Server: TRestServer); virtual;
@@ -1819,6 +1820,7 @@ type
     function GetNoAjaxJson: boolean;
       {$ifdef HASINLINE}inline;{$endif}
     function GetAuthenticationSchemesCount: integer;
+    function StatusCodeToText(Code: cardinal): PRawUtf8; virtual;
     /// ensure the thread will be taken into account during process
     procedure OnBeginCurrentThread(Sender: TThread); override;
     procedure OnEndCurrentThread(Sender: TThread); override;
@@ -4456,6 +4458,14 @@ begin
   end;
 end;
 
+function TRestServerUriContext.StatusCodeToText(Code: cardinal): PRawUtf8;
+begin
+  if fServer = nil then
+    result := inherited StatusCodeToText(Code) // standard English
+  else
+    result := fServer.StatusCodeToText(Code); // may be overriden
+end;
+
 class procedure TRestServerUriContext.UriComputeRoutes(
   Router: TRestRouter; Server: TRestServer);
 begin
@@ -4934,7 +4944,7 @@ end;
 
 function TAuthSession.GetRemoteOS: RawUtf8;
 begin
-  result := ToTextOS(integer(fRemoteOsVersion));
+  ShortStringToAnsi7String(ToTextOS(integer(fRemoteOsVersion)), result);
 end;
 
 const
@@ -5613,7 +5623,7 @@ var
   i: PtrInt;
 begin
   for i := 0 to fSspiAuthContextCount - 1 do
-    FreeSecContext(fSspiAuthContext[i]);
+    FreeSecContext(fSspiAuthContext[i]); // abort NTLM pending auths (unlikely)
   inherited Destroy;
 end;
 
@@ -5655,7 +5665,7 @@ begin
       // no auth data sent, reply with supported auth method(s)
       Ctxt.Call.OutHead := SECPKGNAMEHTTPWWWAUTHENTICATE;
       Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
-      StatusCodeToReason(HTTP_UNAUTHORIZED, Ctxt.Call.OutBody);
+      Ctxt.Call.OutBody := Ctxt.StatusCodeToText(HTTP_UNAUTHORIZED)^;
       exit;
     end;
     browserauth := true;
@@ -5693,7 +5703,7 @@ begin
       Ctxt.Call.OutHead := (SECPKGNAMEHTTPWWWAUTHENTICATE + ' ') +
                              BinToBase64(outdata);
       Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
-      StatusCodeToReason(HTTP_UNAUTHORIZED, Ctxt.Call.OutBody);
+      Ctxt.Call.OutBody := Ctxt.StatusCodeToText(HTTP_UNAUTHORIZED)^;
     end
     else
       Ctxt.Returns(['result', '',
@@ -6409,6 +6419,11 @@ end;
 function TRestServer.GetAuthenticationSchemesCount: integer;
 begin
   result := length(fSessionAuthentication);
+end;
+
+function TRestServer.StatusCodeToText(Code: cardinal): PRawUtf8;
+begin
+  result := mormot.core.text.StatusCodeToText(Code); // standard English
 end;
 
 function TRestServer.GetRecordVersionMax(TableIndex: integer): TRecordVersion;

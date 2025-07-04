@@ -1871,7 +1871,7 @@ type
   TMemoryMapText = class(TSynPersistent)
   protected
     fLines: PPointerArray;
-    fLinesMax: integer;
+    fLinesMax: integer; // pre-guessed lines capacity
     fCount: integer;
     fMapEnd: PUtf8Char;
     fMap: TMemoryMap;
@@ -5700,7 +5700,7 @@ var
   var
     t: PAlgoCompressTrailer;
     tmplen: PtrInt;
-    tmp: array[word] of byte;
+    tmp: TBuffer64K;
     Trailer: TAlgoCompressTrailer absolute tmp;
   begin
     result := false;
@@ -9295,7 +9295,7 @@ var
 begin
   if fMap.Buffer = nil then
     exit;
-  fLinesMax := fMap.FileSize div AverageLineLength + 8;
+  fLinesMax := fMap.FileSize div AverageLineLength + 8; // wild guess
   GetMem(fLines, fLinesMax * SizeOf(pointer));
   P := pointer(fMap.Buffer);
   fMapEnd := P + fMap.Size;
@@ -10975,7 +10975,7 @@ begin
       B := P;
       c := NextUtf8Ucs4(P) - $1f5ff;
       if c <= cardinal(high(TEmoji)) then
-        W.AddNoJsonEscapeUtf8(EMOJI_TAG[TEmoji(c)])
+        W.AddString(EMOJI_TAG[TEmoji(c)])
       else
         W.AddNoJsonEscape(B, P - B);
     until P^ = #0;

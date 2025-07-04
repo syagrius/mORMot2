@@ -529,7 +529,7 @@ type
     B: PUtf8Char;
     /// direct access to the low-level last position in the buffer
     // - you should not use this field directly
-    // - points in fact to 16 bytes before the buffer ending
+    // - points in fact 16 bytes before the actual buffer ending
     BEnd: PUtf8Char;
     /// the data will be written to the specified Stream
     // - aStream may be nil: in this case, it MUST be set before using any
@@ -730,15 +730,11 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 chars to the buffer
     // - does not escape chars according to the JSON RFC
-    // - called by inlined AddNoJsonEscape() if Len >= fTempBufSize
+    // - called by inlined AddNoJsonEscape() if Len >= AvailableBytes
     procedure AddNoJsonEscapeBig(P: pointer; Len: PtrInt);
     /// append some UTF-8 chars to the buffer - inlined for small content
     // - does not escape chars according to the JSON RFC
     procedure AddNoJsonEscape(P: pointer; Len: PtrInt); overload;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// append some UTF-8 chars to the buffer
-    // - does not escape chars according to the JSON RFC
-    procedure AddNoJsonEscapeUtf8(const text: RawByteString);
       {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 encoded chars to the buffer, from a RTL string type
     // - does not escape chars according to the JSON RFC
@@ -780,9 +776,9 @@ type
     procedure AddStrings(const Values: array of RawUtf8); overload;
     /// append an UTF-8 string several times
     procedure AddStrings(const Text: RawUtf8; count: PtrInt); overload;
-    /// append a ShortString
+    /// append a ShortString - and ensure has space for 255 chars (including Text)
     procedure AddShort(const Text: ShortString); overload;
-    /// append a ShortString - or at least a small buffer < 256 chars
+    /// append a ShortString - or at least a small buffer typically < 256 chars
     procedure AddShort(Text: PUtf8Char; TextLen: PtrInt); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append a TShort8 - Text should be not '', and up to 8 chars long
@@ -1229,7 +1225,9 @@ type
     fEchoStart: PtrInt;
     fEchoBuf: RawUtf8;
     fEchos: array of TOnTextWriterEcho;
-    fWriteCRLF, fEchoPendingExecuteBackground: boolean;
+    fWriteLineFeed: cardinal;
+    fWriteLineFeedLen: byte;
+    fEchoPendingExecuteBackground: boolean;
     fBack: TEchoWriterBack;
     function EchoFlush: PtrInt;
     procedure EchoPendingToBackground(aLevel: TSynLogLevel);
@@ -2072,7 +2070,7 @@ var
 /// the default Exception handler for logging
 // - defined here to be called e.g. by ESynException.CustomLog() as default
 function DefaultSynLogExceptionToStr(WR: TTextWriter;
-  const Context: TSynLogExceptionContext): boolean;
+  const Context: TSynLogExceptionContext; WithAdditionalInfo: boolean): boolean;
 
 {$endif NOEXCEPTIONINTERCEPT}
 
@@ -2597,17 +2595,12 @@ function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar = ',';
 function GuidToString(
   {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): string;
 
-type
-  /// stack-allocated ASCII string, used by GuidToShort() function
-  TGuidShortString = string[38];
-  PGuidShortString = ^TGuidShortString;
-
-  /// convert a TGuid into its standard uppercase text representation with the {}
-  // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
+/// convert a TGuid into its standard uppercase text representation with the {}
+// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
 function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid): TGuidShortString; overload;
+  guid: TGuid): TShortGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a TGuid into its standard uppercase text representation with the {}
@@ -2615,11 +2608,11 @@ function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
 procedure GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid; out dest: TGuidShortString); overload;
+  guid: TGuid; out dest: TShortGuid); overload;
 
 /// convert a TGuid into lowercase '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
 function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid): TGuidShortString;
+  guid: TGuid): TShortGuid;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert some text into its TGuid binary value
@@ -3970,7 +3963,7 @@ end;
 
 procedure Int18ToText(Value: cardinal; Text: PUtf8Char);
 begin
-  PCardinal(Text)^ := PtrUInt(((Value shr 12) and $3f) or
+  PCardinal(Text)^ := PtrUInt(((Value shr 12) and $3f) or // 6-bit per char
                               (((Value shr 6) and $3f) shl 8) or
                               ((Value and $3f) shl 16)) + $202020;
 end;
@@ -4602,13 +4595,13 @@ begin
       if P[Len - 2] = '0' then
         if P[Len - 3] = '0' then
           if P[Len - 4] = '0' then
-            dec(Len, 5) // 'xxx.0000' -> 'xxx'
+            dec(Len, 5)   // 'xxx.0000' -> 'xxx'
           else
             dec(Len, 3) // 'xxx.1000' -> 'xxx.1'
         else
           dec(Len, 2) // 'xxx.1200' -> 'xxx.12'
       else
-        dec(Len); // 'xxx.1220' -> 'xxx.123'
+        dec(Len);  // 'xxx.1220' -> 'xxx.123'
   MoveFast(P^, B[1], Len);
   inc(B, Len);
 end;
@@ -4960,7 +4953,7 @@ var
 begin
   if (P <> nil) and
      (Len > 0) then
-    if Len < fTempBufSize * 2 then
+    if Len < fTempBufSize * 2 then // also happen when FlushToStream is needed
       repeat
         D := B + 1;
         direct := BEnd - D; // guess biggest size available in fTempBuf at once
@@ -4968,12 +4961,8 @@ begin
         begin
           if Len < direct then
             direct := Len;
-          // append UTF-8 bytes to fTempBuf
-          if direct > 0 then
-          begin
-            MoveFast(P^, D^, direct);
-            inc(B, direct);
-          end;
+          MoveFast(P^, D^, direct); // fill fTempBuf as much as possible
+          inc(B, direct);
           dec(Len, direct);
           if Len = 0 then
             break;
@@ -4997,15 +4986,13 @@ procedure TTextWriter.AddNoJsonEscape(P: pointer; Len: PtrInt);
 begin
   if (P <> nil) and
      (Len > 0) then
-    if Len < fTempBufSize then // can be inlined for small chunk
+    if BEnd - B >= Len then // note: PtrInt(BEnd - B) could be < 0
     begin
-      if BEnd - B <= Len then  // note: PtrInt(BEnd - B) could be < 0
-        FlushToStream;
-      MoveFast(P^, B[1], Len);
+      MoveFast(P^, B[1], Len); // efficient inlining for small chunks
       inc(B, Len);
     end
     else
-      AddNoJsonEscapeBig(P, Len); // big chunks (hardly the case)
+      AddNoJsonEscapeBig(P, Len); // big chunks or need flush (hardly the case)
 end;
 
 procedure TTextWriter.AddNoJsonEscape(P: pointer);
@@ -5051,17 +5038,12 @@ begin
   end;
 end;
 
-procedure TTextWriter.AddNoJsonEscapeUtf8(const text: RawByteString);
-begin
-  AddNoJsonEscape(pointer(text), length(text));
-end;
-
 procedure TTextWriter.AddRawJson(const json: RawJson);
 begin
   if json = '' then
     AddShort(NULL_LOW, 4)
   else
-    AddNoJsonEscape(pointer(json), length(json));
+    AddString(json);
 end;
 
 procedure TTextWriter.AddNoJsonEscapeString(const s: string);
@@ -5460,9 +5442,19 @@ begin
 end;
 
 procedure TTextWriter.AddString(const Text: RawUtf8);
-begin
-  if Text <> '' then
-    AddNoJsonEscape(pointer(Text), PStrLen(PtrInt(Text) - _STRLEN)^);
+var
+  l: PtrInt;
+begin // inlined AddNoJsonEscape(pointer(text), length(text))
+  if pointer(Text) = nil then
+    exit;
+  l := PStrLen(PAnsiChar(pointer(Text)) - _STRLEN)^;
+  if BEnd - B >= l then // note: PtrInt(BEnd - B) could be < 0
+  begin
+    MoveFast(pointer(Text)^, B[1], l); // efficient inlining for small chunks
+    inc(B, l);
+  end
+  else
+    AddNoJsonEscapeBig(pointer(Text), l);
 end;
 
 procedure TTextWriter.AddSpaced(Text: PUtf8Char; TextLen, Width: PtrInt);
@@ -6236,7 +6228,16 @@ begin
   if Assigned(fWriter.OnFlushToStream) then
     ESynException.RaiseUtf8('Unexpected %.Create', [self]);
   fWriter.OnFlushToStream := FlushToStream; // register
-  fWriteCRLF := twoEndOfLineCRLF in fWriter.CustomOptions;
+  if twoEndOfLineCRLF in fWriter.CustomOptions then
+  begin
+    fWriteLineFeed := $0a0d; // #13#10 - typical on Windows
+    fWriteLineFeedLen := 2;
+  end
+  else
+  begin
+    fWriteLineFeed := $0a;  // #10 - as on POSIX
+    fWriteLineFeedLen := 1;
+  end
 end;
 
 destructor TEchoWriter.Destroy;
@@ -6292,9 +6293,8 @@ end;
 
 procedure TEchoWriter.AddEndOfLine(aLevel: TSynLogLevel);
 begin
-  if fWriteCRLF then
-    fWriter.AddDirect(#13);
-  fWriter.AddDirect(#10);
+  PCardinal(fWriter.B + 1)^ := fWriteLineFeed; // fast append #13 or #13#10
+  inc(fWriter.B, fWriteLineFeedLen);
   if fEchos <> nil then
     EchoAddEndOfLine(aLevel); // redirection
 end;
@@ -6581,11 +6581,11 @@ begin
       c := byte(P^) - 48;
       if c > 9 then
         break;
-      {$ifdef CPU32DELPHI}
+      {$ifdef HASSLOWMUL64}
       result := result shl 3 + result + result;
       {$else}
       result := result * 10;
-      {$endif CPU32DELPHI}
+      {$endif HASSLOWMUL64}
       inc(result, c);
       inc(P);
       if Dec <> 0 then
@@ -6618,7 +6618,7 @@ begin
     case Dec of
       0, 1:
         result := result * 10000;
-      {$ifdef CPU32DELPHI}
+      {$ifdef HASSLOWMUL64}
       2:
         result := result shl 10 - result shl 4 - result shl 3;
       3:
@@ -6632,7 +6632,7 @@ begin
         result := result * 100;
       4:
         result := result * 10;
-      {$endif CPU32DELPHI}
+      {$endif HASSLOWMUL64}
     end;
   if minus then
     result := -result;
@@ -10000,53 +10000,37 @@ end;
 {$ifndef NOEXCEPTIONINTERCEPT}
 
 function DefaultSynLogExceptionToStr(WR: TTextWriter;
-  const Context: TSynLogExceptionContext): boolean;
+  const Context: TSynLogExceptionContext; WithAdditionalInfo: boolean): boolean;
+{$ifdef OSWINDOWS} // no TSynLogExceptionContext.AdditionalInfo() on POSIX
 var
-  extcode: cardinal;
-  extnames: TPShortStringDynArray;
-  extname: PShortString;
-  i: PtrInt;
+  s: shortstring;
+{$endif OSWINDOWS}
 begin
   WR.AddClassName(Context.EClass);
   if (Context.ELevel = sllException) and
      (Context.EInstance <> nil) and
      (Context.EClass <> EExternalException) then
   begin
-    extcode := Context.AdditionalInfo(extnames);
-    if extcode <> 0 then
-    begin
-      WR.AddDirect(' ', '0', 'x');
-      WR.AddBinToHexDisplayLower(@extcode, SizeOf(extcode));
-      for i := 0 to high(extnames) do
-      begin
-        {$ifdef OSWINDOWS}
-        WR.AddShort(' [.NET/CLR unhandled ');
-        {$else}
-        WR.AddShort(' [unhandled ');
-        {$endif OSWINDOWS}
-        extname := extnames[i];
-        if extname^[0] <> #0 then
-          if extname^[1] = '_' then // trim e.g. TDotNetException initial _ char
-            WR.AddNoJsonEscape(@extname^[2], ord(extname^[0]) - 1)
-          else
-            WR.AddShort(extname^);
-        WR.AddShort('Exception]');
-      end;
-    end;
+    {$ifdef OSWINDOWS}
+    if WithAdditionalInfo and
+       Context.AdditionalInfo(s) then
+      WR.AddShort(s); // e.g. ' [.NET/CLR unhandled StackOverflowException]'
+    {$endif OSWINDOWS}
     WR.AddDirect(' ');
-    if PClass(WR)^ = TTextWriter then
-      {$ifdef UNICODE}
-      WR.AddOnSameLineW(pointer(Context.EInstance.Message), 0)
-      {$else}
-      WR.AddOnSameLine(pointer(Context.EInstance.Message))
-      {$endif UNICODE}
+    if PClass(WR)^ = TTextWriter then // no WriteObject() yet
+      WR.AddOnSameLineString(Context.EInstance.Message)
     else
       WR.WriteObject(Context.EInstance); // use RTTI for JSON serialization
   end
   else if Context.ECode <> 0 then
   begin
     WR.AddDirect(' ', '(');
+    {$ifdef OSWINDOWS}
+    WinErrorShort(PtrUInt(Context.ECode), @s); // decode most known error codes
+    WR.AddShort(s);
+    {$else}
     WR.AddPointer(Context.ECode);
+    {$endif OSWINDOWS}
     WR.AddDirect(')');
   end;
   result := false; // caller should append "at EAddr" and the stack trace
@@ -10058,7 +10042,7 @@ begin
   if Assigned(TSynLogExceptionToStrCustom) then
     result := TSynLogExceptionToStrCustom(WR, Context)
   else
-    result := DefaultSynLogExceptionToStr(WR, Context);
+    result := DefaultSynLogExceptionToStr(WR, Context, {addinfo=}true);
 end;
 
 {$endif NOEXCEPTIONINTERCEPT}
@@ -11089,13 +11073,13 @@ begin
 end;
 
 function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid): TGuidShortString;
+  guid: TGuid): TShortGuid;
 begin
   GuidToShort(Guid, result);
 end;
 
 procedure GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid; out dest: TGuidShortString);
+  guid: TGuid; out dest: TShortGuid);
 begin
   dest[0] := #38;
   dest[1] := '{';
@@ -11103,7 +11087,7 @@ begin
 end;
 
 function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid: TGuid): TGuidShortString;
+  guid: TGuid): TShortGuid;
 begin
   result[0] := #36;
   GuidToText(@result[1], @guid, @TwoDigitsHexLower);
@@ -11113,7 +11097,7 @@ end;
 function GuidToString({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
   guid: TGuid): string;
 var
-  tmp: TGuidShortString;
+  tmp: TShortGuid;
 begin
   GuidToShort(guid, tmp);
   Ansi7ToString(@tmp[1], 38, result);

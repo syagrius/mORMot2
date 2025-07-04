@@ -407,6 +407,10 @@ type
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
     procedure CheckSignature(const headpayload: RawUtf8;
       const signature: RawByteString; var Jwt: TJwtContent); override;
+    function GetSignatureSize: integer;
+      {$ifdef HASINLINE} inline; {$endif}
+    function GetSignatureAlgo: TSignAlgo;
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// initialize the JWT processing using SHA3 algorithm
     // - the supplied set of claims are expected to be defined in the JWT payload
@@ -430,14 +434,12 @@ type
     /// low-level read access to the internal signature structure
     property SignPrepared: TSynSigner
       read fSignPrepared;
-    {$ifndef ISDELPHI2009} // avoid Delphi 2009 F2084 Internal Error: DT5830
-    /// the digital signature size, in byte
+    /// the digital signature size, in bytes
     property SignatureSize: integer
-      read fSignPrepared.SignatureSize;
+      read GetSignatureSize;
     /// the TSynSigner raw algorithm used for digital signature
     property SignatureAlgo: TSignAlgo
-      read fSignPrepared.Algo;
-    {$endif ISDELPHI2009}
+      read GetSignatureAlgo;
   end;
 
   /// meta-class for TJwtSynSignerAbstract creations
@@ -445,6 +447,20 @@ type
 
 
 type
+  /// implements JSON Web Tokens using non-standard 'HS1' (HMAC SHA-1) algorithm
+  // - resulting signature size will be of 160 bits
+  TJwtHS1 = class(TJwtSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
+  /// implements JSON Web Tokens using 'HS224' (HMAC SHA-224) algorithm
+  // - resulting signature size will be of 224 bits
+  TJwtHS224 = class(TJwtSynSignerAbstract)
+  protected
+    function GetAlgo: TSignAlgo; override;
+  end;
+
   /// implements JSON Web Tokens using 'HS256' (HMAC SHA-256) algorithm
   // - as defined in @http://tools.ietf.org/html/rfc7518 paragraph 3.2
   // - our HMAC SHA-256 implementation used is thread safe, and very fast
@@ -532,10 +548,11 @@ type
 
 const
   /// how TJwtSynSignerAbstract algorithms are identified in the JWT
-  // - SHA-1 will fallback to HS256 (since there will never be SHA-1 support)
+  // - SHA-1 is non-standard and may suffer from collisions so should not be used
+  // on production even if it is likely to be the fastest (especially with SHA-NI)
   // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
   JWT_TEXT: array[TSignAlgo] of RawUtf8 = (
-    'HS256',
+    'HS1',
     'HS256',
     'HS384',
     'HS512',
@@ -544,15 +561,15 @@ const
     'S3384',
     'S3512',
     'S3S128',
-    'S3S256');
+    'S3S256',
+    'HS224');
 
   /// able to instantiate any of the TJwtSynSignerAbstract instance expected
-  // - SHA-1 will fallback to TJwtHS256 (since SHA-1 will never be supported)
-  // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
+  // - SHA-1 and SHA-3 algorithms are non-standard so are for internal use only
   // - typical use is the following:
   // ! result := JWT_CLASS[algo].Create(master, round, claims, [], expirationMinutes);
   JWT_CLASS: array[TSignAlgo] of TJwtSynSignerAbstractClass = (
-    TJwtHS256,
+    TJwtHS1,
     TJwtHS256,
     TJwtHS384,
     TJwtHS512,
@@ -561,7 +578,8 @@ const
     TJwtS3384,
     TJwtS3512,
     TJwtS3S128,
-    TJwtS3S256);
+    TJwtS3S256,
+    TJwtHS224);
 
 
 { ************** JWT Implementation of ES256 Algorithm }
@@ -1400,6 +1418,16 @@ end;
 
 { TJwtSynSignerAbstract }
 
+function TJwtSynSignerAbstract.GetSignatureAlgo: TSignAlgo;
+begin
+  result := fSignPrepared.Algo
+end;
+
+function TJwtSynSignerAbstract.GetSignatureSize: integer;
+begin
+  result := fSignPrepared.SignatureSize;
+end;
+
 constructor TJwtSynSignerAbstract.Create(const aSecret: RawUtf8;
   aSecretPbkdf2Round: integer; aClaims: TJwtClaims;
   const aAudience: array of RawUtf8; aExpirationMinutes: integer;
@@ -1429,7 +1457,7 @@ begin
     exit;
   signer := fSignPrepared; // thread-safe re-use of prepared TSynSigner
   signer.Update(pointer(headpayload), length(headpayload));
-  signer.Final(temp);
+  signer.Final(@temp);
 {  writeln('payload=',headpayload);
    writeln('sign=',bintohex(@temp,SignatureSize));
    writeln('expected=',bintohex(pointer(signature),SignatureSize)); }
@@ -1445,7 +1473,7 @@ var
 begin
   signer := fSignPrepared;
   signer.Update(pointer(headpayload), length(headpayload));
-  signer.Final(temp);
+  signer.Final(@temp);
   result := BinToBase64Uri(@temp, fSignPrepared.SignatureSize);
 end;
 
@@ -1455,6 +1483,19 @@ begin
   inherited Destroy;
 end;
 
+{ TJwtHSHA1}
+
+function TJwtHS1.GetAlgo: TSignAlgo;
+begin
+  result := saSha1;
+end;
+
+{ TJwtHS224 }
+
+function TJwtHS224.GetAlgo: TSignAlgo;
+begin
+  result := saSha224;
+end;
 
 { TJwtHS256 }
 

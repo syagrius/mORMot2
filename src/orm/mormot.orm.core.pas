@@ -7241,7 +7241,7 @@ begin
     if FieldBitGet(Fields, i) then
     begin
       W.AddDirect('"');
-      W.AddNoJsonEscape(pointer(nfo^.Name), length(nfo^.Name));
+      W.AddString(nfo^.Name);
       W.AddDirect('"', ':');
       nfo^.GetJsonValues(self, W);
       W.AddComma;
@@ -11384,7 +11384,7 @@ begin // '{"Table":[...,"PUT",{object},...]}'
 end;
 
 const
-  BATCH_VERB: array[TRestBatchEncoding] of TShort8 = (
+  BATCH_VERB: array[TRestBatchEncoding] of TShort7 = (
     '"POST',    // encPost
     '"SIMPLE',  // encSimple
     '"',        // encPostHex

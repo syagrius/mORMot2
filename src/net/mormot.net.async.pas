@@ -104,7 +104,8 @@ type
     /// low-level 8-bit flags used by the state machine about this connection
     fFlags: TPollAsyncConnectionFlags;
     /// internal 8-bit flags e.g. for fRW[] or IOCP or to mark AddGC()
-    fInternalFlags: set of (ifWriteWait, ifFromGC, ifInGC, ifSeparateWLock);
+    fInternalFlags: set of (
+      ifWriteWait, ifFromGC, ifInGC, ifSeparateWLock, ifProcessing);
     /// the current (reusable) read data buffer of this connection
     fRd: TRawByteStringBuffer;
     /// the current (reusable) write data buffer of this connection
@@ -973,10 +974,12 @@ type
     procedure BeforeProcessRead; override;
     // redirect to fHttp.ProcessRead()
     function OnRead: TPollAsyncSocketOnReadWrite; override;
-    // DoRequest gathered all output in fWr buffer to be sent at once
-    function FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
     // redirect to fHttp.ProcessWrite()
     function AfterWrite: TPollAsyncSocketOnReadWrite; override;
+    // DoRequest gathered all output in fWr buffer to be sent at once
+    function FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
+    // handle ifProcessing flag
+    procedure OnClose; override;
     // quickly reject incorrect requests (payload/timeout/OnBeforeBody)
     function DoReject(status: integer): TPollAsyncSocketOnReadWrite;
     function DecodeHeaders: integer; virtual; // e.g. hfConnectionUpgrade override
@@ -1992,12 +1995,12 @@ begin
     if c.IsDangling then
       exit;
     // final acquisition of connection's read+write locks for this thread
-    if (not c.WaitLock({writer=}false, 1000)) or
+    if (not c.WaitLock({writer=}false, 500)) or
        ((ifSeparateWLock in c.fInternalFlags) and
-        (not c.WaitLock({writer=}true, 1000))) then
+        (not c.WaitLock({writer=}true, 500))) then
     begin
-      c.fRWSafe[0].ForceLock; // locks should be available within 1000 ms
-      c.fRWSafe[1].ForceLock
+      c.fRWSafe[0].ForceLock; // locks should be available within 0.5 second
+      c.fRWSafe[1].ForceLock;
     end;
     // call OnClose virtual method once
     if not (fClosed in c.fFlags) then
@@ -3611,6 +3614,9 @@ begin
     sec := Qword(NowTix) div 1000; // when 32-bit second resolution is fine
     if sec <> fLastOperationSec then
     begin
+      if sec < fLastOperationSec then // should append once every 136 years :)
+        DoLog(sllError, 'ProcessIdleTix 32-bit overflow: %<%',
+          [sec, fLastOperationSec], self);
       fLastOperationSec := sec;
       IdleEverySecond;
     end;
@@ -3626,7 +3632,8 @@ begin
       DoLog(sllWarning, 'ProcessIdleTix catched %', [E], self);
   end;
   // note: this method should be non-blocking and return quickly
-  // e.g. overriden in TWebSocketAsyncConnections to send pending frames
+  // e.g. overriden in TWebSocketAsyncConnections to send pending frames, or
+  // start a TLoggedWorkThread in THttpServerSocketGeneric.RefreshBlackListUri
 end;
 
 procedure TAsyncConnections.SetOnIdle(
@@ -4465,6 +4472,17 @@ begin
   fWr.Reset; // we could reuse the buffer
 end;
 
+procedure THttpAsyncServerConnection.OnClose;
+begin
+  inherited OnClose; // set fClosed flag
+  if ifProcessing in fInternalFlags then
+  begin
+    exclude(fInternalFlags, ifProcessing); // if not properly done in AfterWrite
+    if Assigned(fServer) then
+      LockedDec32(@fServer.fCurrentProcess);
+  end;
+end;
+
 procedure THttpAsyncServerConnection.BeforeProcessRead;
 var
   endtix: Int64;
@@ -4624,6 +4642,11 @@ begin
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone;   // ContentStream.Free
   fHttp.Process.Clear; // CompressContentAndFinalizeHead may have allocated it
+  if ifProcessing in fInternalFlags then
+  begin
+    exclude(fInternalFlags, ifProcessing);
+    LockedDec32(@fServer.fCurrentProcess);
+  end;
   if Assigned(fServer.fOnAfterResponse) then
     DoAfterResponse;
   if fHttp.State <> hrsResponseDone then
@@ -4793,6 +4816,8 @@ begin
   else
     fRequest.Recycle(
       fConnectionID, fReadThread, fHandle, fRequestFlags, GetConnectionOpaque);
+  include(fInternalFlags, ifProcessing);
+  LockedInc32(@fServer.fCurrentProcess);
   fRequest.Prepare(fHttp, fRemoteIP, fServer.fAuthorize);
   // let the associated THttpAsyncServer execute the request
   if fServer.DoRequest(fRequest) then
@@ -5142,6 +5167,15 @@ begin
       fInterningTix := tix;
     end;
   end;
+  // BlackListUri regular refresh support
+  if (fBlackListUriNextTix <> 0) and
+     (fAsync.LastOperationSec >= fBlackListUriNextTix) then
+    RefreshBlackListUri(fAsync.LastOperationSec);
+  {$ifdef OSPOSIX}
+  if Assigned(fSspiKeyTab) and
+     fSspiKeyTab.TryRefresh(fAsync.fLastOperationMS) then
+    fAsync.DoLog(sllDebug, 'IdleEverySecond: refreshed %', [fSspiKeyTab], self);
+  {$endif OSPOSIX}
 end;
 
 procedure THttpAsyncServer.AppendHttpDate(var Dest: TRawByteStringBuffer);

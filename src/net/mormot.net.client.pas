@@ -473,6 +473,13 @@ type
       sockettimeout: cardinal = 10000; redirectmax: integer = 0): TFileName;
   end;
 
+  /// the flags as returned by IWGetAlternate.State
+  // - gasProcessing will be set e.g. if THttpServer.CurrentProcess > 0
+  // - gasPartials will be set e.g. if THttpPartials.IsVoid = false
+  TWGetAlternateState = set of (
+    gasProcessing,
+    gasPartials);
+
   /// interface called by THttpClientSocket.WGet() for alternate download
   // - THttpPeerCache implements e.g. a local peer-to-peer download cache
   // - as set to THttpClientSocketWGet.Alternate optional parameter
@@ -519,6 +526,8 @@ type
     /// check if the network interface defined in Settings did actually change
     // - you may want to recreate the alternate downloading instance
     function NetworkInterfaceChanged: boolean;
+    /// returns the current state of this instance
+    function State: TWGetAlternateState;
   end;
 
   /// internal low-level execution context for THttpClientSocket.Request
@@ -844,6 +853,7 @@ function WGet(const url: RawUtf8; const destfile: TFileName;
 
 function ToText(wgs: TWGetStep): PShortString; overload;
 function ToText(wgs: TWGetSteps; trimmed: boolean = true): RawUtf8; overload;
+function ToText(st: TWGetAlternateState; trimmed: boolean = true): RawUtf8; overload;
 
 var
   /// global overriden value for the GetSystemProxyUri() function
@@ -1906,7 +1916,8 @@ function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
 /// retrieve the content of a web page, with ignoreTlsCertError=true for https
 // - typically used to retrieve reference material online for testing
 // - can optionally use a local file as convenient offline cache
-function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName = ''): RawByteString;
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName = '';
+  outStatus: PInteger = nil): RawByteString;
 
 
 { ************** Send Email using the SMTP Protocol }
@@ -2587,6 +2598,11 @@ end;
 function ToText(wgs: TWGetSteps; trimmed: boolean): RawUtf8;
 begin
   result := GetSetName(TypeInfo(TWGetSteps), wgs, trimmed);
+end;
+
+function ToText(st: TWGetAlternateState; trimmed: boolean): RawUtf8;
+begin
+  result := GetSetName(TypeInfo(TWGetAlternateState), st, trimmed);
 end;
 
 var
@@ -3630,7 +3646,7 @@ begin
   if (Sender = nil) or
      not IdemPChar(pointer(Authenticate), pointer(SECPKGNAMEHTTP_UPPER)) then
     exit;
-  unauthstatus := Context.status; // either 401 or 407
+  unauthstatus := Context.status; // either 401 (http auth) or 407 (proxy auth)
   bak := Context.header;
   InvalidateSecContext(sc);
   try
@@ -5695,17 +5711,27 @@ begin
   {$endif LINUX_RAWDEBUGVOIDHTTPGET}
 end;
 
-function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName): RawByteString;
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName;
+  outStatus: PInteger): RawByteString;
+var
+  status: integer;
 begin
   if aLocalFile <> '' then // try from local cache
   begin
     result := StringFromFile(aLocalFile); // useful e.g. during regression tests
     if result <> '' then
+    begin
+      if outStatus <> nil then
+        outStatus^ := HTTP_SUCCESS; // emulates proper download
       exit;
+    end;
   end;
   result := HttpGet(aUri, {inhead=}'', {outhead=}nil, {notsock=}false,
-    {outstatus=}nil, {timeout=}0, {forcesocket=}false, {ignorecerterror=}true);
-  if (aLocalFile <> '') and
+    @status, {timeout=}0, {forcesocket=}false, {ignorecerterror=}true);
+  if outStatus <> nil then
+    outStatus^ := status;
+  if (status = HTTP_SUCCESS) and
+     (aLocalFile <> '') and
      (result <> '') then
     FileFromString(result, aLocalFile);
 end;
@@ -5867,6 +5893,7 @@ type
     // INewSocketAddressCache methods
     function Search(const Host: RawUtf8; out NetAddr: TNetAddr): boolean;
     procedure Add(const Host: RawUtf8; const NetAddr: TNetAddr);
+    procedure Force(const Host, IP: RawUtf8);
     procedure Flush(const Host: RawUtf8);
     procedure SetTimeOut(aSeconds: integer);
   end;
@@ -5895,6 +5922,17 @@ procedure TNewSocketAddressCache.Add(const Host: RawUtf8;
 begin
   fData.DeleteDeprecated;   // flush cache only when we may need some new space
   fData.Add(Host, NetAddr); // do nothing if already added in another thread
+end;
+
+procedure TNewSocketAddressCache.Force(const Host, IP: RawUtf8);
+var
+  addr: TNetAddr;
+begin
+  if not NetIsIP4(pointer(IP)) or
+     not addr.SetFromIP4(IP, true) then
+    exit;
+  fData.DeleteDeprecated;   // flush cache only when we may need some new space
+  fData.AddOrUpdate(Host, addr); // force change
 end;
 
 procedure TNewSocketAddressCache.Flush(const Host: RawUtf8);

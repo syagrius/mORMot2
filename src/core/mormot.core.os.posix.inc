@@ -5,6 +5,8 @@
    POSIX API calls for FPC, as used by mormot.core.os.pas
 }
 
+{$ifdef FPC}
+
 uses
   baseunix,
   unix,
@@ -31,9 +33,17 @@ uses
   initc; // we statically link the libc for some raw calls
 
 {$ifdef UNICODE}
-  'mORMot assumes no UNICODE on POSIX, i.e. as TFileName = PChar = PUtf8Char'
+  'mORMot assumes no UNICODE on POSIX FPC, i.e. as TFileName = PChar = PUtf8Char'
 {$endif UNICODE}
 
+{$else}
+
+// rough preparation for Delphi compatibility - not finished at all
+uses
+  System.IOUtils,
+  System.SyncObjs;
+
+{$endif FPC}
 
 // define some raw text functions, to avoid linking mormot.core.text
 
@@ -44,7 +54,7 @@ procedure _fmt(const Fmt: string; const Args: array of const;
 procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8); forward;
 function _GetNextSpaced(var P: PAnsiChar): RawUtf8; forward;
 function _GetNextCardinal(var P: PAnsiChar): PtrUInt; forward;
-function PosExtString(Str: PChar): PChar; forward;
+function PosExtString(Str: PChar): PChar; forward; // to extract extension
 
 procedure WrDeb(const t: ShortString; const p; l: PtrInt); // internal use below
 var
@@ -92,13 +102,14 @@ end;
 { ****************** Unicode, Time, File process }
 
 function SortDynArrayFileName(const A, B): integer;
-begin // case-sensitive extension, then filename comparison on POSIX
+begin // file extension, then file name case-sensitive comparison on POSIX
   result := 0;
-  if @A = @B then
+  if pointer(A) = pointer(B) then
     exit;
-  result := StrComp(PosExtString(pointer(A)), PosExtString(pointer(B)));
+  result := {$ifdef UNICODE}StrCompW{$else}StrComp{$endif}(
+              PosExtString(pointer(A)), PosExtString(pointer(B)));
   if result = 0 then
-    result := StrComp(pointer(A), pointer(B)); // fast case-sensitive order
+    result := {$ifdef UNICODE}StrCompW{$else}StrComp{$endif}(pointer(A), pointer(B));
 end;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
@@ -929,12 +940,10 @@ begin
   result := UnixMSTimeUtc;
 end;
 
-{$undef OSPTHREADS}
 {$undef HAS_PTHREADSETNAMENP}
 {$undef HAS_PTHREADSETAFFINITY}
 
 {$ifdef OSPTHREADSLIB}
-  {$define OSPTHREADS}
 var
   {$ifdef OSLINUX}
   // pthread_setname_np for Linux https://stackoverflow.com/a/7989973/458259
@@ -952,7 +961,6 @@ var
 
 {$ifdef OSPTHREADSSTATIC}
   // note: pthread_setname_np() has no consistent API across POSIX systems
-  {$define OSPTHREADS}
 
 {$ifdef OSDARWIN}
 // we specify link to clib='c' as in rtl/darwin/pthread.inc
@@ -989,7 +997,7 @@ begin
   {$endif OSLINUX}
 end;
 
-{$ifdef OSPTHREADS}
+{$ifdef HAS_OSPTHREADS}
 
 { TOSLightLock }
 
@@ -1054,7 +1062,7 @@ begin
   LeaveCriticalSection(fMutex);
 end;
 
-{$endif OSPTHREADS}
+{$endif HAS_OSPTHREADS}
 
 
 procedure SetUnixThreadName(ThreadID: TThreadID; const Name: RawByteString);
@@ -1166,12 +1174,6 @@ end;
 
 
 {$ifndef NOEXCEPTIONINTERCEPT}
-
-function TSynLogExceptionContext.AdditionalInfo(
-  out ExceptionNames: TPShortStringDynArray): cardinal;
-begin
-  result := 0; // Windows/CLR specific by now
-end;
 
 var
   _RawLogException: TOnRawLogException;
@@ -1605,8 +1607,20 @@ begin
 end;
 
 function GetErrorText(error: integer): RawUtf8;
+var
+  s, err: shortstring;
 begin
-  result := StrError(error); // from FPC RTL: using a OS-specific array of const
+  s := StrError(error); // from FPC RTL: using a OS-specific array of const
+  OsErrorShort(error, @err, {noint=}true); // 'E###' from this unit
+  if err[0] <> #0 then
+  begin
+    AppendShortTwoChars(ord(' ') + ord('(') shl 8, @err);
+    AppendShort(s, err);
+    AppendShortChar(')', @err);
+    FastSetString(result, @err[1], ord(err[0]));
+  end
+  else
+    FastSetString(result, @s[1], ord(s[0]));
 end;
 
 function TMemoryMap.DoMap(aCustomOffset: Int64): boolean;
@@ -1865,7 +1879,7 @@ end;
 
 {$endif OSLINUXANDROID}
 
-{$ifdef OSLINUX} { the systemd API is Linux-specific }
+{$ifdef OSLINUX} { the systemd, eventfd or getrandom APIs are Linux-specific }
 
 const
   SD_NAMES: array[0..5] of PAnsiChar = (
@@ -1886,10 +1900,6 @@ const
   syscall_nr_getrandom = 355;
   {$endif CPUX86}
   // other archs (like aarch64) are properly defined - see https://syscall.sh
-
-var
-  __LinuxGetRandomFailed, __LinuxEventFdFailed: boolean;
-
 
 { TSystemD }
 
@@ -1949,10 +1959,13 @@ begin
   end;
 end;
 
+{$ifdef HASGETRANDOM} // validated on Linux i386, x86_64 and aarch64
+var
+  __LinuxGetRandomFailed: boolean;
+
 function LinuxGetRandom(buf: pointer; len: PtrInt): boolean;
 begin
   result := false;
-  {$ifdef HASGETRANDOM} // validated on Linux i386, x86_64 and aarch64
   if (KernelRevision < $031100) or // introduced in Kernel 3.17
      __LinuxGetRandomFailed then
     exit;
@@ -1960,10 +1973,17 @@ begin
     result := true // "man getrandom" states to read up to 256 bytes in one call
   else
     __LinuxGetRandomFailed := true; // won't retry on syscall failure
-  {$endif HASGETRANDOM}
 end;
+{$else}
+function LinuxGetRandom(buf: pointer; len: PtrInt): boolean;
+begin
+  result := false;
+end;
+{$endif HASGETRANDOM}
 
 {$ifdef HASEVENTFD} // validated on Linux i386, x86_64 and aarch64
+var
+  __LinuxEventFdFailed: boolean;
 const
   EFD_SEMAPHORE = $00000001;
   EFD_NONBLOCK  = O_NONBLOCK;
@@ -1990,12 +2010,6 @@ begin
   __LinuxEventFdFailed := true; // don't retry next type
   result := 0;
 end;
-{$else}
-function LinuxEventFD(nonblocking, semaphore: boolean): integer;
-begin
-  result := 0; // non implemented (not validated by our tests) on this arch
-end;
-{$endif HASEVENTFD}
 
 function LinuxEventFDRead(fd: integer): Int64;
 var
@@ -2021,6 +2035,26 @@ function LinuxEventFDWait(fd: integer; ms: integer): boolean;
 begin
   result := WaitReadPending(fd, ms);
 end;
+{$else}
+function LinuxEventFD(nonblocking, semaphore: boolean): integer;
+begin
+  result := 0; // non implemented (not validated by our tests) on this arch
+end;
+
+function LinuxEventFDRead(fd: integer): Int64;
+begin
+  result := -1;
+end;
+
+procedure LinuxEventFDWrite(fd: integer; count: QWord);
+begin
+end;
+
+function LinuxEventFDWait(fd: integer; ms: integer): boolean;
+begin
+  result := false;
+end;
+{$endif HASEVENTFD}
 
 {$endif OSLINUX}
 
@@ -2045,7 +2079,7 @@ begin
   result :=  __StdOutIsTTY;
 end;
 
-procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
+procedure TextColorCmd(Color: TConsoleColor; var s: TShort7);
 const
   TERM_CTRL: PUtf8Char = '04261537';
 begin
@@ -2063,7 +2097,7 @@ end;
 procedure TextColorAppend(Color: TConsoleColor; var s: RawUtf8);
   {$ifdef HASINLINE} inline; {$endif}
 var
-  c: TShort8;
+  c: TShort7;
 begin
   TextColorCmd(Color, c);
   AppendShortToUtf8(c, s);
@@ -2071,7 +2105,7 @@ end;
 
 procedure TextColor(Color: TConsoleColor);
 var
-  c: TShort8;
+  c: TShort7;
 begin
   TextColorCmd(Color, c);
   if c[0] = #0 then
@@ -2286,6 +2320,13 @@ begin
     result := true
   else
     folder := '';
+end;
+
+function IsExpandedPath(const FileName: TFileName): boolean;
+begin
+  result := (FileName = '') or
+            ((FileName[1] = '/') and
+             (Pos('..', FileName) = 0)); // seems already expanded
 end;
 
 procedure _ComputeSystemPath(kind: TSystemPath; var result: TFileName);
@@ -2616,6 +2657,11 @@ end;
 
 {$ifdef OSBSDDARWIN}
 
+procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  BsdErrorShort(Code, Dest, NoInt);
+end;
+
 function IsValidPid(pid: cardinal): boolean;
 begin
   result := pid <> 0;
@@ -2937,6 +2983,11 @@ end;
 
 {$else} // Linux (and Android) specific code
 
+procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  LinuxErrorShort(Code, Dest, NoInt);
+end;
+
 procedure FindNameValue(p: PUtf8Char; const up: ShortString; var res: RawUtf8);
 var
   L: PtrInt;
@@ -3055,7 +3106,9 @@ begin
     exit;
   result := FileRead(h, dest, SizeOf(dest) - 1); // read up to 4KB
   if result >= 0 then
-    PAnsiChar(@dest)[result] := #0;
+    PAnsiChar(@dest)[result] := #0
+  else
+    result := 0; // don't return length = -1 on reading error
   FileClose(h);
 end;
 
@@ -4345,7 +4398,7 @@ var
   n, l: TSsize;
   wait: cardinal;
   endtix: Int64;
-  tmp: array[word] of byte; // 64KB stack buffer
+  tmp: TBuffer64K;
 
   function RedirectOutput(flush: boolean; var redir: RawByteString): boolean;
   var
@@ -4803,12 +4856,18 @@ begin
       SetLinuxDistrib(dist);
       release := dist;
     end;
-    if (OS_KIND = osLinux) and
-       ((PosEx('RH', release) > 0) or
-        (PosEx('Red Hat', release) > 0)) then
-      OS_KIND := osRedHat;
+    if OS_KIND = osLinux then
+      if (PosEx('RH', release) > 0) or
+         (PosEx('Red Hat', release) > 0) then
+        OS_KIND := osRedHat
+      else if (FpAccess('/usr/bin/apt', F_OK) = 0) or
+              (FpAccess('/usr/bin/apt-get', F_OK) = 0) then
+        OS_KIND := osApt  // seems Debian-based
+      else if FpAccess('/usr/bin/rpm', F_OK) = 0 then
+        OS_KIND := osRpm; // seems RPM-based
   end;
   {$endif OSANDROID}
+  OS_DISTRI := LinuxDistribution(OS_KIND);
   cache := nil;
   SystemInfo.dwNumberOfProcessors := 0;
   CpuInfoLinux := StringFromFileNoSize('/proc/cpuinfo'); // too big for LoadProcFile
@@ -4944,7 +5003,7 @@ begin
   @LeaveCriticalSection    := @tm.LeaveCriticalSection;
   {$endif NODIRECTTHREADMANAGER}
   {$ifdef OSDARWIN}
-  OSVersionText := Join([ToText(OSVersion32), ' (', OSVersionText, ')']);
+  OSVersionText := Join([ToTextU(OSVersion32), ' (', OSVersionText, ')']);
   mach_timebase_info(mach_timeinfo);
   mach_timecoeff := mach_timeinfo.Numer / mach_timeinfo.Denom;
   mach_timenanosecond := (mach_timeinfo.Numer = 1) and

@@ -658,7 +658,8 @@ type
     property LogLevel: TSynLogLevels
       read fLogLevel;
     /// tune the InternalLogResponse() output maximum size
-    // - equals 2048 by default - maximum value is 4096
+    // - equals 2048 by default - you could use e.g. MaxInt for no size limit
+    // of valid UTF-8 response content
     property LogResponseMaxBytes: integer
       read fLogResponseMaxBytes write fLogResponseMaxBytes;
 
@@ -1314,6 +1315,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     procedure SetOutSetCookie(const aOutSetCookie: RawUtf8); virtual;
     procedure SetOutCookie(const aName, aValue: RawUtf8);
+    function StatusCodeToText(Code: cardinal): PRawUtf8; virtual;
   public
     /// access to all input/output parameters at TRestServer.Uri() level
     // - process should better call Results() or Success() methods to set the
@@ -2082,9 +2084,21 @@ end;
 
 procedure TRest.InternalLogResponse(const aContent: RawByteString;
   const aContext: shortstring; Level: TSynLogLevel);
-begin // caller checked that self<>nil and sllServiceReturn in fLogLevel
-  fLogFamily.Add.LogEscape(Level, '%', [aContext],
-    pointer(aContent), length(aContent), self, fLogResponseMaxBytes);
+var
+  len, max: PtrInt;
+  p: PUtf8Char;
+begin // caller checked that (self <> nil) and (Level in fLogLevel)
+  p := pointer(aContent);
+  if p = nil then
+    exit;
+  len := PStrLen(p - _STRLEN)^;
+  max := fLogResponseMaxBytes;
+  if max < MAX_LOGESCAPE then
+    // safe ouput of the content, with proper escape if needed (e.g. binary)
+    fLogFamily.Add.LogEscape(Level, '%', [aContext], p, len, self, max)
+  else
+    // direct huge UTF-8 or escaped content output - without aContext
+    fLogFamily.Add.Log(Level, aContent, self, max);
 end;
 
 function TRest.Enter(TextFmt: PUtf8Char; const TextArgs: array of const;
@@ -4191,10 +4205,15 @@ begin
   end;
 end;
 
+function TRestUriContext.StatusCodeToText(Code: cardinal): PRawUtf8;
+begin
+  result := mormot.core.text.StatusCodeToText(Code); // standard English
+end;
+
 procedure TRestUriContext.Error(const ErrorMessage: RawUtf8;
   Status, CacheControlMaxAgeSec: integer);
 var
-  msg: RawUtf8;
+  msg: PRawUtf8;
   temp: TTextWriterStackBuffer;
 begin
   fCall^.OutStatus := Status;
@@ -4204,32 +4223,31 @@ begin
     fCall^.OutBody := ErrorMessage;
     if CacheControlMaxAgeSec <> 0 then
       // Cache-Control is ignored for errors
-      fCall^.OutHead := 'Cache-Control: max-age=' +
-        UInt32ToUtf8(CacheControlMaxAgeSec);
+      FormatUtf8('Cache-Control: max-age=%', [CacheControlMaxAgeSec], fCall^.OutHead);
     exit;
   end;
   if ErrorMessage = '' then
-    StatusCodeToReason(Status, msg)
+    msg := StatusCodeToText(Status) // customizable method (also in fServer)
   else
-    msg := ErrorMessage;
+    msg := @ErrorMessage;
   with TJsonWriter.CreateOwnedStream(temp) do
   try
     AddShort('{'#13#10'"errorCode":');
-    Add(fCall^.OutStatus);
-    if (msg <> '') and
-       (msg[1] = '{') and
-       (msg[length(msg)] = '}') then
+    Add(Status);
+    if (msg^ <> '') and
+       (msg^[1] = '{') and
+       (msg^[length(msg^)] = '}') then
     begin
       // detect and append the error message as JSON object
       AddShort(','#13#10'"error":'#13#10);
-      AddNoJsonEscape(pointer(msg), length(msg));
+      AddString(msg^);
       AddDirect(#13, #10, '}');
     end
     else
     begin
       // regular error message as JSON text
       AddShort(','#13#10'"errorText":"');
-      AddJsonEscape(pointer(msg));
+      AddJsonEscape(pointer(msg^));
       AddDirect('"', #13, #10, '}');
     end;
     SetText(fCall^.OutBody);

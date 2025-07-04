@@ -2912,6 +2912,7 @@ begin
     if i < 0 then
       exit;
     p := @p[i + 3]; // p^ = bot.html in http://www.google.com/bot.html
+    dec(l, i + 3);
     case PCardinal(p)^ and $00ffffff of
       // Googlebot/2.1 (+http://www.google.com/bot.html)
       ord('b') + ord('o') shl 8 + ord('t') shl 16,
@@ -2939,6 +2940,18 @@ begin
       // Mozilla/5.0 (compatible; AhrefsBot/6.1; +http://ahrefs.com/robot/)
       ord('r') + ord('o') shl 8 + ord('b') shl 16:
         result := true;
+    else // +https://developer.amazon.com/support/amazonbot) Chrome/119.0.6045
+      begin
+        i := ByteScanIndex(pointer(p), l, ord(')'));
+        if i < 0 then
+          exit;
+        inc(p, i);
+        if p[-1] = '/' then
+          dec(p);
+        if PCardinal(p - 3)^ and $00ffffff =
+             ord('b') + ord('o') shl 8 + ord('t') shl 16 then
+          result := true; // http*://*bot)
+      end;
     end;
   end;
 end;
@@ -4844,7 +4857,7 @@ begin
     // also try the public blacklist of IPv4 (if any)
     if not result and
        (fBlackList.SubNet <> nil) then
-      result := fBlackList.Match(ip4);
+      result := fBlackList.Match(ip4); // - done within the main TOSLightLock
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -5492,8 +5505,8 @@ var
   poslen: PWordArray; // pos1,len1, pos2,len2, ... 16-bit pairs
   wr: TTextDateWriter;
 const
-  SCHEME: array[boolean] of string[7]  = ('http', 'https');
-  HTTP:   array[boolean] of string[15] = ('HTTP/1.1', 'HTTP/1.0');
+  _SCHEME: array[boolean] of string[7]  = ('http', 'https');
+  _HTTP:   array[boolean] of string[15] = ('HTTP/1.1', 'HTTP/1.0');
 begin
   // optionally merge calls
   if Assigned(fOnContinue) then
@@ -5536,7 +5549,7 @@ begin
   v := pointer(fVariable);
   n := length(fVariable);
   poslen := pointer(fUnknownPosLen); // 32-bit array into 16-bit pos,len pairs
-  fSafe.Lock;
+  fSafe.Lock; // fast non-reentrant TOSLightLock
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -5629,7 +5642,7 @@ begin
               wr.AddDirect('/'); // TRestHttpServer may have trimmed it
             wr.AddString(RawUtf8(Context.Url)); // full request = raw Url
             wr.AddDirect(' ');
-            wr.AddShorter(HTTP[hsrHttp10 in Context.Flags]);
+            wr.AddShorter(_HTTP[hsrHttp10 in Context.Flags]);
           end;
         hlvRequest_Hash:
           wr.AddUHex(reqcrc, #0);
@@ -5640,11 +5653,11 @@ begin
         hlvRequest_Uri:
           wr.AddString(RawUtf8(Context.Url)); // include arguments
         hlvScheme:
-          wr.AddShorter(SCHEME[hsrHttps in Context.Flags]);
+          wr.AddShorter(_SCHEME[hsrHttps in Context.Flags]);
         hlvSent:
           wr.AddShort(KBNoSpace(Context.Sent));
         hlvServer_Protocol:
-           wr.AddShorter(HTTP[hsrHttp10 in Context.Flags]);
+           wr.AddShorter(_HTTP[hsrHttp10 in Context.Flags]);
         hlvStatus:
           wr.AddU(Context.StatusCode);
         hlvStatus_Text:
@@ -6962,7 +6975,7 @@ var
   last, first: cardinal;
   p: THttpAnalyzerPeriod;
   rd: TFastReader;
-  tmp: array[0..4095] of AnsiChar; // first 4KB should be enough (with metadata)
+  tmp: TBuffer4K; // first 4KB should be enough (with metadata)
   unc: array[0..6143] of AnsiChar; // partially decompressed content
 begin
   RecordZero(@Info, TypeInfo(THttpMetricsHeader));

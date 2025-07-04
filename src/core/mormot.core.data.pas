@@ -569,7 +569,7 @@ type
   protected
     fName: RawUtf8;
     fReader: TFastReader;
-    fReaderTemp: PRawByteString;
+    fReaderTemp: PRawByteString; // could be pre-assigned to reuse a big buffer
     fLoadFromLastUncompressed, fSaveToLastUncompressed: integer;
     fLoadFromLastAlgo: TAlgoCompress;
     /// low-level virtual methods implementing the persistence reading
@@ -1823,14 +1823,14 @@ type
 
 {.$define DYNARRAYHASHCOLLISIONCOUNT} // to be defined also in test.core.base
 
-{$ifndef CPU32DELPHI} // Delphi Win32 compiler doesn't like Lemire algorithm
+{$ifndef HASSLOWMUL64} // Delphi Win32 compiler doesn't like Lemire algorithm
 
   {$define DYNARRAYHASH_LEMIRE}
   // use the Lemire 64-bit multiplication for faster hash reduction
   // see https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction
   // - generate more collisions with crc32c, but is always faster -> enabled
 
-{$endif CPU32DELPHI}
+{$endif HASSLOWMUL64}
 
 // use Power-Of-Two sizes for smallest HashTables[], to reduce the hash with AND
 // - and Delphi Win32 is not efficient at 64-bit multiplication, anyway
@@ -3364,7 +3364,8 @@ end;
 
 function TSynList.Exists(item: pointer): boolean;
 begin
-  result := IndexOf(item) >= 0;
+  result := (fCount > 0) and
+            PtrUIntScanExists(pointer(fList), fCount, PtrUInt(item));
 end;
 
 function TSynList.Get(index: integer): pointer;
@@ -3712,7 +3713,7 @@ procedure TObjectStore.SaveTo(out aBuffer: RawByteString;
   BufferOffset: integer);
 var
   writer: TBufferWriter;
-  temp: array[word] of byte;
+  temp: TBuffer64K;
 begin
   if BufLen <= SizeOf(temp) then
     writer := TBufferWriter.Create(TRawByteStringStream, @temp, SizeOf(temp))
@@ -11490,7 +11491,7 @@ begin
     end;
   // setup internal function wrappers
   GetDataFromJson := _GetDataFromJson;
-  HashSeed := Random32Not0; // random at startup, to avoid hash flooding
+  HashSeed := SharedRandom.Generator.Next; // avoid hash flooding
 end;
 
 

@@ -78,7 +78,7 @@ const
   /// human-friendly alias to open a file for exclusive writing ($20)
   fmShareRead      = fmShareDenyWrite;
   /// human-friendly alias to open a file for exclusive reading ($30)
-  fmShareWrite     = fmShareDenyRead;
+  fmShareWrite     = {$ifdef DELPHIPOSIX} fmShareDenyNone {$else} fmShareDenyRead {$endif};
   /// human-friendly alias to open a file with no read/write exclusion ($40)
   fmShareReadWrite = fmShareDenyNone;
 
@@ -272,13 +272,15 @@ const
   // response from the other endpoint
   NORESPONSE_CONTENT_TYPE = '!NORESPONSE';
 
+  BOTBUSTER_RESPONSE = 'Botbusters message: "I ain''t ''fraid of no bot"';
+
   /// HTTP body from RFC 2324 e.g. for banned IP or hsoRejectBotUserAgent
   HTTP_BANIP_RESPONSE: string[191] =
     'HTTP/1.0 418 I''m a teapot'#13#10 +
     'Content-Length: 111'#13#10 +
     'Content-Type: text/plain'#13#10#13#10 +
     'Server refuses to brew coffee because it is currently a teapot.'#13#10 +
-    'Botbusters message: "I ain''t ''fraid of no bot"';
+    BOTBUSTER_RESPONSE;
 
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
   // - can be used e.g. in logs, or anything accepting a ShortString
@@ -383,7 +385,10 @@ type
     osAmazon,
     osCoreOS,
     osAlpine,
-    osAndroid);
+    osAndroid,
+    osApt,
+    osRpm);
+  TOperatingSystems = set of TOperatingSystem;
 
   /// the recognized Windows versions
   // - defined even outside OSWINDOWS to access e.g. from monitoring tools
@@ -432,11 +437,21 @@ type
       utsrelease: array[0..2] of byte);
   end;
 
+  /// notable Linux distributions, organized by their package management system
+  TLinuxDistribution = (
+    ldNotLinux,
+    ldUndefined,
+    ldApt,
+    ldRpm,
+    ldPacman,
+    ldPortage,
+    ldAndroid);
+
 const
   /// the recognized MacOS versions, as plain text
   // - indexed from OSVersion32.utsrelease[2] kernel revision
   // - see https://en.wikipedia.org/wiki/MacOS_version_history#Releases
-  MACOS_NAME: array[8 .. 25] of RawUtf8 = (
+  MACOS_NAME: array[8 .. 26] of TShort23 = (
     '10.4 Tiger',
     '10.5 Leopard',
     '10.6 Snow Leopard',
@@ -454,42 +469,43 @@ const
     '13 Ventura',
     '14 Sonoma',
     '15 Sequoia',
-    '16 Next');
+    '26 Tahoe',
+    '27 Next');
 
   /// the recognized Windows versions, as plain text
   // - defined even outside OSWINDOWS to allow process e.g. from monitoring tools
-  WINDOWS_NAME: array[TWindowsVersion] of RawUtf8 = (
-    '',
-    '2000',
-    'XP',
-    'XP 64bit',
-    'Server 2003',
-    'Server 2003 R2',
-    'Vista',
-    'Vista 64bit',
-    'Server 2008',
-    'Server 2008 64bit',
-    '7',
-    '7 64bit',
-    'Server 2008 R2',
-    'Server 2008 R2 64bit',
-    '8',
-    '8 64bit',
-    'Server 2012',
-    'Server 2012 64bit',
-    '8.1',
-    '8.1 64bit',
-    'Server 2012 R2',
-    'Server 2012 R2 64bit',
-    '10',
-    '10 64bit',
-    'Server 2016',
-    'Server 2016 64bit',
-    '11',
-    '11 64bit',
-    'Server 2019 64bit',
-    'Server 2022 64bit',
-    'Server 2025 64bit');
+  WINDOWS_NAME: array[TWindowsVersion] of TShort23 = (
+    '',                     // wUnknown
+    '2000',                 // w2000
+    'XP',                   // wXP
+    'XP 64bit',             // wXP_64
+    'Server 2003',          // wServer2003
+    'Server 2003 R2',       // wServer2003_R2
+    'Vista',                // wVista
+    'Vista 64bit',          // wVista_64
+    'Server 2008',          // wServer2008
+    'Server 2008 64bit',    // wServer2008_64
+    '7',                    // wSeven
+    '7 64bit',              // wSeven_64
+    'Server 2008 R2',       // wServer2008_R2
+    'Server 2008 R2 64bit', // wServer2008_R2_64
+    '8',                    // wEight
+    '8 64bit',              // wEight_64
+    'Server 2012',          // wServer2012
+    'Server 2012 64bit',    // wServer2012_64
+    '8.1',                  // wEightOne
+    '8.1 64bit',            // wEightOne_64
+    'Server 2012 R2',       // wServer2012R2
+    'Server 2012 R2 64bit', // wServer2012R2_64
+    '10',                   // wTen
+    '10 64bit',             // wTen_64
+    'Server 2016',          // wServer2016
+    'Server 2016 64bit',    // wServer2016_64
+    '11',                   // wEleven
+    '11 64bit',             // wEleven_64
+    'Server 2019 64bit',    // wServer2019_64
+    'Server 2022 64bit',    // wServer2022_64
+    'Server 2025 64bit');   // wServer2025_64
 
   /// the recognized Windows versions which are 32-bit
   WINDOWS_32 = [
@@ -510,42 +526,44 @@ const
      wEleven];
 
   /// translate one operating system (and distribution) into a its common name
-  OS_NAME: array[TOperatingSystem] of RawUtf8 = (
-    'Unknown',
-    'Windows',
-    'Linux',
-    'OSX',
-    'BSD',
-    'POSIX',
-    'Arch',
-    'Aurox',
-    'Debian',
-    'Fedora',
-    'Gentoo',
-    'Knoppix',
-    'Mint',
-    'Mandrake',
-    'Mandriva',
-    'Novell',
-    'Ubuntu',
-    'Slackware',
-    'Solaris',
-    'Suse',
-    'Synology',
-    'Trustix',
-    'Clear',
-    'United',
-    'RedHat',
-    'LFS',
-    'Oracle',
-    'Mageia',
-    'CentOS',
-    'Cloud',
-    'Xen',
-    'Amazon',
-    'CoreOS',
-    'Alpine',
-    'Android');
+  OS_NAME: array[TOperatingSystem] of TShort15 = (
+    'Unknown',      // osUnknown
+    'Windows',      // osWindows
+    'Linux',        // osLinux
+    'OSX',          // osOSX
+    'BSD',          // osBSD
+    'POSIX',        // osPOSIX
+    'Arch',         // osArch
+    'Aurox',        // osAurox
+    'Debian',       // osDebian
+    'Fedora',       // osFedora
+    'Gentoo',       // osGentoo
+    'Knoppix',      // osKnoppix
+    'Mint',         // osMint
+    'Mandrake',     // osMandrake
+    'Mandriva',     // osMandriva
+    'Novell',       // osNovell
+    'Ubuntu',       // osUbuntu
+    'Slackware',    // osSlackware
+    'Solaris',      // osSolaris
+    'Suse',         // osSuse
+    'Synology',     // osSynology
+    'Trustix',      // osTrustix
+    'Clear',        // osClear
+    'United',       // osUnited
+    'RedHat',       // osRedHat
+    'LFS',          // osLFS
+    'Oracle',       // osOracle
+    'Mageia',       // osMageia
+    'CentOS',       // osCentOS
+    'Cloud',        // osCloud
+    'Xen',          // osXen
+    'Amazon',       // osAmazon
+    'CoreOS',       // osCoreOS
+    'Alpine',       // osAlpine
+    'Android',      // osAndroid
+    'Debian-based', // osApt - any Debian-based flavor
+    'Rpm-based');   // osRpm - any RedHat-based flavor
 
   /// translate one operating system (and distribution) into a single character
   // - may be used internally e.g. for a HTTP User-Agent header, as with
@@ -578,20 +596,31 @@ const
     'R', // RedHat
     'l', // LFS
     'O', // Oracle
-    'G', // Mageia
+    'g', // Mageia
     'c', // CentOS
     'd', // Cloud
     'x', // Xen
     'Z', // Amazon
     'r', // CoreOS
     'p', // Alpine
-    'J'  // Android (J=JVM)
+    'J', // Android (J=JVM)
+    '1', // Apt-based
+    '2'  // Rpm-based
     );
 
   /// the operating systems items which actually have a Linux kernel
-  OS_LINUX = [
-    osLinux,
-    osArch .. osAndroid];
+  OS_LINUX = [osLinux, osArch .. osSlackware, osSuse, osTrustix .. osRpm];
+
+  /// used to recognize the package management system used by a Linux OS
+  LINUX_DIST: array[TLinuxDistribution] of TOperatingSystems = (
+    [osUnknown, osWindows, osOSX, osBSD, osPOSIX, osSolaris, osSynology],  // ldNotLinux
+    [osLinux, osSlackware, osClear, osLFS, osXen, osAlpine],               // ldUndefined
+    [osDebian, osKnoppix, osMint, osUbuntu, osApt],                          // ldApt
+    [osAurox, osFedora, osMandrake, osMandriva, osNovell, osSuse, osTrustix, // ldRpm
+     osUnited, osRedHat, osOracle, osMageia, osCentOS, osCloud, osAmazon, osRpm],
+    [osArch],                                                              // ldPacman
+    [osGentoo, osCoreOs],                                                  // ldPortage
+    [osAndroid]);                                                          // ldAndroid
 
   /// the compiler family used
   COMP_TEXT = {$ifdef FPC}'Fpc'{$else}'Delphi'{$endif};
@@ -674,10 +703,13 @@ var
   // - use if PosEx('Wine', OSVersionInfoEx) > 0 then to check for Wine presence
   OSVersionInfoEx: RawUtf8;
   /// the current Operating System version, as retrieved for the current process
-  // and computed by ToTextOS(OSVersionInt32)
+  // and computed by ToTextOSU(OSVersionInt32)
   // - contains e.g. 'Windows Vista' or 'Ubuntu Linux 5.4.0' or
   // 'macOS 13 Ventura 22.3.0'
   OSVersionShort: RawUtf8;
+
+  /// the current Linux Distribution, depending on its package management system
+  OS_DISTRI: TLinuxDistribution;
 
   {$ifdef OSWINDOWS}
   /// on Windows, the Update Build Revision as shown with the "ver/winver" command
@@ -736,39 +768,73 @@ var
 
 /// convert an Operating System type into its human-friendly text representation
 // - returns e.g. 'Windows Vista' or 'Windows 10 22H2' or 'Ubuntu' or
-// 'macOS 13 Ventura'
-function ToText(const osv: TOperatingSystemVersion): RawUtf8; overload;
+// 'macOS 13 Ventura' or 'Windows Server 2022 64bit 21H2'
+function ToText(const osv: TOperatingSystemVersion): TShort47; overload;
+
+/// convert an Operating System type into its human-friendly text representation
+function ToTextU(const osv: TOperatingSystemVersion): RawUtf8; overload;
 
 /// low-level function used internally by ToText(osv) to detect Windows versions
-function WinOsBuild(const osv: TOperatingSystemVersion;
-  firstchar: AnsiChar = #0): TShort8;
+// - append e.g. ' 25H2' with sep = ' ' - see also WindowsDisplayVersion
+procedure AppendOsBuild(const osv: TOperatingSystemVersion; dest: PAnsiChar;
+  sep: AnsiChar = #0);
+
+/// returns '' or the detected Windows Version, e.g. ' 25H2' with sep=' '
+function WinOsBuild(const osv: TOperatingSystemVersion; sep: AnsiChar): TShort7;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// convert an Operating System type into its one-word text representation
 // - returns e.g. 'Vista' or 'Ubuntu' or 'OSX'
-function OsvToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
-  {$ifdef HASINLINE} inline; {$endif}
-
-/// internal function called when inlining ToTextShort()
-function OsvToTextShorter(const osv: TOperatingSystemVersion): PRawUtf8;
+function OsvToShort(const osv: TOperatingSystemVersion): PShortString;
 
 /// convert a 32-bit Operating System type into its full text representation
 // - including the kernel revision (not the distribution version) on POSIX systems
 // - returns e.g. 'Windows Vista', 'Windows 11 64-bit 21H2 22000' or
 // 'Ubuntu Linux 5.4.0'
-function ToTextOS(osint32: integer): RawUtf8;
+function ToTextOS(osint32: integer): TShort47;
+
+/// convert a 32-bit Operating System type into its full RawUtf8 representation
+// - returns e.g. 'Windows Server 2022 64bit 21H2 20349'
+function ToTextOSU(osint32: integer): RawUtf8;
 
 /// check if the current OS (i.e. OS_KIND value) match a description
 // - will handle osPosix and osLinux as generic detection of those systems
 // - osUnknown will always return true
 function MatchOS(os: TOperatingSystem): boolean;
 
+/// recognize the Linux distribution for a given Operating System
+function LinuxDistribution(os: TOperatingSystem): TLinuxDistribution;
+
 /// return the best known ERROR_* system error message constant texts
 // - without the 'ERROR_' prefix, but in a cross-platform way
 // - as used by WinErrorText() and some low-level Windows API wrappers
 function WinErrorConstant(Code: cardinal): PShortString;
 
-/// return the error code number, and its ERROR_* constant (if known)
-function WinErrorShort(Code: cardinal): ShortString;
+/// return the error code number, and its regular constant on Windows (if known)
+// - e.g. WinErrorShort(5) = '5 ERROR_ACCESS_DENIED' or
+// WinErrorShort($c00000fd) = 'c00000fd EXCEPTION_STACK_OVERFLOW'
+function WinErrorShort(Code: cardinal; NoInt: boolean = false): TShort47; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// return the error code number, and its regular constant on Windows (if known)
+procedure WinErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = false); overload;
+
+/// return the error code number, and its regular constant on Linux (if known)
+procedure LinuxErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = false);
+
+/// return the error code number, and its regular constant on Bsd (if known)
+procedure BsdErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = false);
+
+/// return the error code number, and its regular constant on the current OS
+// - redirect to WinErrorShort/LinuxErrorShort/BsdErrorShort() functions
+// - e.g. OsErrorShort(5) = '5 ERROR_ACCESS_DENIED' on Windows or '5 EIO' on POSIX
+procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = false); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// return the error code number, and its regular constant on the current OS
+// - redirect to WinErrorShort/LinuxErrorShort/BsdErrorShort() functions
+// - e.g. OsErrorShort(5) = '5 ERROR_ACCESS_DENIED' on Windows or '5 EIO' on POSIX
+function OsErrorShort(Code: cardinal; NoInt: boolean = false): TShort47; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// append the error as ' ERROR_*' constant and return TRUE if known
@@ -2707,13 +2773,7 @@ const
   {$endif OSLINUXX86}
   {$endif OSLINUXX64}
 
-type
-  /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
-  TFileAge = TUnixTime;
-
-  /// system-specific structure holding a non-recursive mutex
-  TOSLightMutex = TRTLCriticalSection;
-
+{$undef HAS_OSPTHREADS}
 {$ifdef OSLINUX}
   {$define OSPTHREADSLIB}    // direct pthread calls were tested on Linux only
 {$endif OSLINUX}
@@ -2726,6 +2786,7 @@ type
 
 // some pthread_mutex_*() API defined here for proper inlining
 {$ifdef OSPTHREADSLIB}
+{$define HAS_OSPTHREADS}
 var
   {%H-}pthread: pointer; // access to pthread.so e.g. for mormot.lib.static
   pthread_mutex_lock:    function(mutex: pointer): integer; cdecl;
@@ -2733,10 +2794,20 @@ var
   pthread_mutex_unlock:  function(mutex: pointer): integer; cdecl;
 {$endif OSPTHREADSLIB}
 {$ifdef OSPTHREADSSTATIC}
+{$define HAS_OSPTHREADS}
 function pthread_mutex_lock(mutex: pointer): integer; cdecl;
 function pthread_mutex_trylock(mutex: pointer): integer; cdecl;
 function pthread_mutex_unlock(mutex: pointer): integer; cdecl;
 {$endif OSPTHREADSSTATIC}
+
+type
+  /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
+  TFileAge = TUnixTime;
+
+  {$ifdef FPC}
+  /// system-specific structure holding a non-recursive mutex
+  TOSLightMutex = TRTLCriticalSection;
+  {$endif FPC}
 
 {$endif OSWINDOWS}
 
@@ -2886,8 +2957,8 @@ procedure SetLastError(error: integer);
 
 /// returns a given error code as plain text
 // - redirects to WinErrorText(error, nil) on Windows, or StrError() on POSIX
+// - e.g. GetErrorText(10) = 'ECHILD (No child processes)' on Linux
 function GetErrorText(error: integer): RawUtf8;
-  {$ifdef HASINLINE} inline; {$endif}
 
 {$ifdef OSWINDOWS}
 
@@ -3028,7 +3099,9 @@ function NowUtc: TDateTime;
 // - i.e. current number of seconds elapsed since Unix epoch 1/1/1970
 // - use e.g. fast clock_gettime(CLOCK_REALTIME_COARSE) under Linux,
 // or GetSystemTimeAsFileTime under Windows
-// - returns a 64-bit unsigned value, so is "Year2038bug" free
+// - returns a 64-bit unsigned value, so is "Year2038bug" free - internal
+// 32-bit storage may use either proper unsigned cardinal (so overflow in
+// 2106) or most likely the TUnixTimeMinimal epoch (valid up to 2152)
 function UnixTimeUtc: TUnixTime;
 
 /// returns the current UTC date/time as a millisecond-based c-encoded time
@@ -3091,9 +3164,10 @@ type
     /// the logging level corresponding to this exception
     // - may be either sllException or sllExceptionOS
     ELevel: TSynLogLevel;
-    /// retrieve some extended information about a given Exception
-    // - on Windows, recognize most DotNet CLR Exception Names
-    function AdditionalInfo(out ExceptionNames: TPShortStringDynArray): cardinal;
+    {$ifdef OSWINDOWS}
+    /// retrieve some DotNet CLR extended information about a given Exception
+    function AdditionalInfo(var dest: shortstring): boolean;
+    {$endif OSWINDOWS}
   end;
 
   /// the global function signature expected by RawExceptionIntercept()
@@ -3131,6 +3205,9 @@ function FileExists(const FileName: TFileName; FollowLink: boolean = true;
 // - on Windows, will support FileName longer than MAX_PATH
 function DirectoryExists(const FileName: TFileName;
   FollowLink: boolean = true): boolean;
+
+/// check if this filename is in the 'c:\...' or '/full/path' pattern
+function IsExpandedPath(const FileName: TFileName): boolean;
 
 /// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a path
 function SafePathName(const Path: TFileName): boolean;
@@ -4023,7 +4100,7 @@ function Win32Utf8ToAnsi(P: pointer; L, CP: integer; var A: RawByteString): bool
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 /// get DotNet exception class names from HRESULT - published for testing purpose
-procedure Win32DotNetExceptions(code: cardinal; var names: TPShortStringDynArray);
+function Win32DotNetExceptions(code: cardinal; var dest: ShortString): boolean;
 {$endif NOEXCEPTIONINTERCEPT}
 
 /// ask the Operating System to convert a file URL to a local file path
@@ -4257,18 +4334,17 @@ type
   // - methods are reentrant, i.e. calling Lock twice in a raw would not deadlock
   // - our light locks are expected to be kept a very small amount of time (a
   // few CPU cycles): use TSynLocker or TOSLock if the lock may block too long
-  // - TryLock/UnLock can be used to thread-safely acquire a shared resource,
-  // in a re-entrant way
+  // - TryLock/UnLock can be used also to thread-safely acquire a shared
+  // resource in a re-entrant way, as e.g. for sockets in TPollAsyncConnection
   {$ifdef USERECORDWITHMETHODS}
   TMultiLightLock = record
   {$else}
   TMultiLightLock = object
   {$endif USERECORDWITHMETHODS}
   private
-    Flags: PtrUInt;
+    Flags: PtrUInt;      // is also the reentrant > 0 counter
     ThreadID: TThreadID; // pointer on POSIX, DWORD on Windows
-    ReentrantCount: TThreadIDInt;
-    procedure LockSpin; // called by the Lock method when inlined
+    procedure LockSpin;  // called by the Lock method when inlined
   public
     /// to be called if the instance has not been filled with 0
     // - e.g. not needed if TMultiLightLock is defined as a class field
@@ -4287,7 +4363,8 @@ type
     function TryLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
     /// acquire this lock for the current thread, ignore any previous state
-    // - could be done to safely acquire and finalize a resource
+    // - could be done to safely acquire and finalize a resource, as used e.g.
+    // in TPollAsyncSockets.CloseConnection
     // - this method is reentrant: you can call Lock/UnLock on this thread
     procedure ForceLock;
     /// check if the reentrant lock has been acquired
@@ -4295,7 +4372,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// leave an exclusive reentrant lock
     procedure UnLock;
-      {$ifdef CPUINTEL}{$ifdef HASINLINE} inline; {$endif}{$endif}
+      {$ifdef HASINLINE} inline; {$endif}
   end;
   PMultiLightLock = ^TMultiLightLock;
 
@@ -4475,14 +4552,14 @@ type
     /// enter an OS lock
     // - notice: this method IS reentrant/recursive
     procedure Lock;
-      {$ifdef FPC} inline; {$endif}
+      {$ifdef FPC} inline; {$endif} { Delphi can't inline EnterCriticalSection }
     /// try to enter an OS lock
     // - if returned true, caller should eventually call UnLock()
     function TryLock: boolean;
-      {$ifdef FPC} inline; {$endif}
+      {$ifdef FPC} inline; {$endif} { Delphi can't inline TryEnterCriticalSection }
     /// leave an OS lock
     procedure UnLock;
-      {$ifdef FPC} inline; {$endif}
+      {$ifdef FPC} inline; {$endif} { Delphi can't inline LeaveCriticalSection }
   end;
   POSLock = ^TOSLock;
 
@@ -4615,7 +4692,7 @@ type
   TSynLocker = object
   {$endif USERECORDWITHMETHODS}
   private
-    fSection: TRTLCriticalSection;
+    fSection: TOSLock;
     fRW: TRWLock;
     fPaddingUsedCount: byte;
     fInitialized: boolean;
@@ -4948,7 +5025,7 @@ type
   protected
     fSafe: TRWLock;
   public
-    /// access to the associated upgradable TRWLock instance
+    /// access to the associated upgradable and reentrant TRWLock instance
     // - call Safe methods to protect multi-thread access on this storage
     property Safe: TRWLock
       read fSafe;
@@ -5020,7 +5097,7 @@ function Random64: QWord;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
-// - calls internally the overloaded Random32 function, ensuring Random32(max)<max
+// - returns 0 <= Random32(max) < max, calling the overloaded Random32 function
 // - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
 // randomness, but is twice slower (even with AES-NI)
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
@@ -5186,17 +5263,17 @@ var
   // should also call TSynLogFamily.OnThreadEnded/TSynLog.NotifyThreadEnded
   SetThreadName: procedure(ThreadID: TThreadID; const Format: RawUtf8;
     const Args: array of const);
+  /// retrieve the thread name, as set by SetThreadName()
+  // - if enough, direct CurrentThreadNameShort function is slightly faster
+  // - will return the CurrentThreadNameShort^ threadvar 31 chars value or
+  // the full thread name as set via mormot.core.log's SetThreadName()
+  GetCurrentThreadName: function: RawUtf8;
 
 /// low-level access to the thread name, as set by SetThreadName()
 // - since threadvar can't contain managed strings, it is defined as TShort31,
 // so is limited to 31 chars, which is enough since POSIX truncates to 16 chars
 // and SetThreadName does trim meaningless patterns
 function CurrentThreadNameShort: PShortString;
-
-/// retrieve the thread name, as set by SetThreadName()
-// - if possible, direct CurrentThreadNameShort function is slightly faster
-// - will return the CurrentThreadNameShort^ threadvar 31 chars value
-function GetCurrentThreadName: RawUtf8;
 
 /// returns the thread id and the thread name as a ShortString
 // - returns e.g. 'Thread 0001abcd [shortthreadname]'
@@ -6156,15 +6233,15 @@ end;
 
 { ****************** Gather Operating System Information }
 
-const // cf https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions
-  DESKTOP_INT: array[0 .. 18] of cardinal = (
+const // cf https://preview.changewindows.org/platforms/pc
+  DESKTOP_INT: array[0 .. 19] of cardinal = (
      10240,  10586,  14393,  15063,  16299,  17134,  17763,  18362,  18363,
      19041,  19042,  19043,  19044,  19045,  22000,  22621,  22631,  26100,
-     27686); // detect 25H2 Canary builds since 15/8/2024
+     26200,  27881); // detect 26H2 Canary builds since 19/6/2025
   DESKTOP_TXT: array[0 .. high(DESKTOP_INT), 0 .. 3] of AnsiChar = (
     '1507', '1511', '1607', '1703', '1709', '1803', '1809', '1903', '1909',
     '2004', '20H2', '21H1', '21H2', '22H2', '21H2', '22H2', '23H2', '24H2',
-    '25H2');
+    '25H2', '26H2'); // stored as 32-bit cardinal = array[0..3] of AnsiChar
   SERVER_INT: array[0 .. 10] of cardinal = (
     14393,  16299,  17134,  17763,  18362,  18363,  19041,  19042,  20348,
     25398,  26100);
@@ -6185,52 +6262,73 @@ begin
   result := 0;
 end;
 
-function WinOsBuild(const osv: TOperatingSystemVersion; firstchar: AnsiChar): TShort8;
+procedure AppendOsBuild(const osv: TOperatingSystemVersion; dest: PAnsiChar;
+  sep: AnsiChar);
 var
-  c: cardinal;
+  txt4: cardinal; // = array[0..3] of AnsiChar
 begin
-  result[0] := #0;
   if osv.os <> osWindows then
     exit;
-  c := osv.winbuild;
+  txt4 := osv.winbuild;
   case  osv.win of
     wTen, wTen_64, wEleven, wEleven_64: // desktop versions
-      c := FindOsBuild(c, high(DESKTOP_INT), @DESKTOP_INT, @DESKTOP_TXT);
+      txt4 := FindOsBuild(txt4, high(DESKTOP_INT), @DESKTOP_INT, @DESKTOP_TXT);
     wServer2016, wServer2016_64, wServer2019_64, wServer2022_64, wServer2025_64:
-      c := FindOsBuild(c, high(SERVER_INT), @SERVER_INT, @SERVER_TXT);
+      txt4 := FindOsBuild(txt4, high(SERVER_INT), @SERVER_INT, @SERVER_TXT);
   else
     exit;
   end;
-  if c <> 0 then
-    if firstchar = #0 then
-    begin
-      result[0] := #4; // e.g. '21H2' for firstchar=#0
-      PCardinal(@result[1])^ := c;
-    end
-    else
-    begin
-      result[0] := #5; // e.g. ' 21H2' for firstchar=' '
-      result[1] := firstchar;
-      PCardinal(@result[2])^ := c;
-    end;
+  if txt4 = 0 then
+    exit;
+  if sep <> #0 then
+    AppendShortChar(sep, dest); // e.g. ' 21H2' for sep=' '
+  PCardinal(@dest[ord(dest[0]) + 1])^ := txt4;
+  inc(dest[0], 4);
 end;
 
-function ToText(const osv: TOperatingSystemVersion): RawUtf8;
+function WinOsBuild(const osv: TOperatingSystemVersion; sep: AnsiChar): TShort7;
 begin
-  result := OS_NAME[osv.os];
+  result[0] := #0;
+  AppendOsBuild(osv, @result, sep);
+end;
+
+procedure AppendOsv(const osv: TOperatingSystemVersion; var dest: Shortstring);
+begin
   case osv.os of
     osWindows:
       begin
-        Join(['Windows ', WINDOWS_NAME[osv.win]], result);
-        AppendShortToUtf8(WinOsBuild(osv, ' '), result);
+        AppendShort('Windows ', dest);
+        AppendShort(WINDOWS_NAME[osv.win], dest);
+        AppendOsBuild(osv, @dest, ' ');
+        exit;
       end;
-    osOSX:
+    osOSX: // guess end-user MacOS Name from Darwin version number
       if osv.utsrelease[2] in [low(MACOS_NAME) .. high(MACOS_NAME)] then
-        Join(['macOS ', MACOS_NAME[osv.utsrelease[2]]], result);
+      begin
+        AppendShort('macOS ', dest);
+        AppendShort(MACOS_NAME[osv.utsrelease[2]], dest);
+        exit;
+      end;
   end;
+  AppendShort(OS_NAME[osv.os], dest);
 end;
 
-function OsvToTextShorter(const osv: TOperatingSystemVersion): PRawUtf8;
+function ToText(const osv: TOperatingSystemVersion): TShort47;
+begin
+  result[0] := #0;
+  AppendOsv(osv, result);
+end;
+
+function ToTextU(const osv: TOperatingSystemVersion): RawUtf8;
+var
+  tmp: TShort47;
+begin
+  tmp[0] := #0;
+  AppendOsv(osv, tmp);
+  FastSetString(result, @tmp[1], ord(tmp[0]));
+end;
+
+function OsvToShort(const osv: TOperatingSystemVersion): PShortString;
 begin
   result := nil;
   case osv.os of
@@ -6245,34 +6343,40 @@ begin
     result := @OS_NAME[osv.os];
 end;
 
-function OsvToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
-begin
-  result := OsvToTextShorter(osv)^;
-end;
-
-const
-  LINUX_TEXT: array[boolean] of string[7] = (
-    '', 'Linux ');
-
-function ToTextOS(osint32: integer): RawUtf8;
+function ToTextOS(osint32: integer): TShort47;
 var
   osv: TOperatingSystemVersion absolute osint32;
 begin
+  result[0] := #0;
   if osint32 = 0 then
-  begin
-    result := '';
     exit;
-  end;
-  result := ToText(osv);
+  AppendOsv(osv, result);
   if (osv.os = osWindows) and
      (osv.winbuild <> 0) then
+  begin
     // include the Windows build number, e.g. 'Windows 11 64bit 21H2 22000'
-    result := _fmt('%s %d', [result, osv.winbuild]);
+    AppendShortChar(' ', @result);
+    AppendShortCardinal(osv.winbuild, result);
+  end;
   if (osv.os >= osLinux) and
      (osv.utsrelease[2] <> 0) then
-    // include kernel number to the distribution name, e.g. 'Ubuntu Linux 5.4.0'
-    result := _fmt('%s %s%d.%d.%d', [result, LINUX_TEXT[osv.os in OS_LINUX],
-      osv.utsrelease[2], osv.utsrelease[1], osv.utsrelease[0]]);
+  begin
+    // include kernel number to the distribution name
+    if osv.os in (OS_LINUX - [osAndroid]) then
+      AppendShort(' Linux ', result) // e.g. 'Ubuntu Linux 5.4.0'
+    else
+      AppendShortChar(' ', @result);
+    AppendShortCardinal(osv.utsrelease[2], result);
+    AppendShortChar('.', @result);
+    AppendShortCardinal(osv.utsrelease[1], result);
+    AppendShortChar('.', @result);
+    AppendShortCardinal(osv.utsrelease[0], result);
+  end;
+end;
+
+function ToTextOSU(osint32: integer): RawUtf8;
+begin
+  ShortStringToAnsi7String(ToTextOS(osint32), result);
 end;
 
 function MatchOS(os: TOperatingSystem): boolean;
@@ -6295,33 +6399,29 @@ begin
     end;
 end;
 
+function LinuxDistribution(os: TOperatingSystem): TLinuxDistribution;
+begin
+  for result := succ(low(result)) to high(result) do
+    if os in LINUX_DIST[result] then
+      exit;
+  result := ldNotLinux;
+end;
+
 // PUtf8Char for system error text reduces the executable size vs RawUtf8
 // on Delphi (aligned to 4 bytes), but not on FPC (aligned to 16 bytes), and
-// enumerates allow cross-platform error support outside of the Windows unit
+// enumerates allow cross-platform error support (e.g. in centralized servers)
 
 const
   NULL_STR: string[1] = '';
 
-{$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
-var
-  _GetEnumNameRttiTmp: string[127]; // output 'TEnumTypeName#value'
-{$endif FPC_REQUIRES_PROPER_ALIGNMENT}
-
 function _GetEnumNameRtti(Info: pointer; Value: integer): PShortString;
 begin
-  if Value < 0 then
-  begin
-    result := @NULL_STR;
-    exit;
-  end;
-  // minimal version with no Kind, EnumBaseType nor Value min/max check
-  {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+  // will properly be implemented in mormot.core.rtti.pas
+  result := @NULL_STR;
   // no arm32 support yet - see fpc_shortstr_enum_intern() in sstrings.inc
-  result := @_GetEnumNameRttiTmp;
-  result^ := PShortString(@PByteArray(Info)[1])^;
-  AppendShortChar('#', pointer(result));
-  AppendShortCardinal(Value, result^);
-  {$else}
+  {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
+  if Value < 0 then
+    exit;
   // quickly jump over Kind + NameLen + Name +  OrdType + Min + Max + EnumBaseType
   result := @PAnsiChar(Info)[PByteArray(Info)[1] + (1 + 1 + 1 + 4 + 4 +
     SizeOf(pointer) {$ifdef FPC_PROVIDE_ATTR_TABLE} + SizeOf(pointer) {$endif})];
@@ -6403,24 +6503,43 @@ type
     INVALID_SECURITY_DESCR, _1339, BAD_INHERITANCE_ACL, SERVER_DISABLED,
     SERVER_NOT_DISABLED);
   // O(log(n)) binary search in WINERR_SORTED[] constants
-  TWinErrorOne = (
+  TWinErrorSorted = (
+    // some EXCEPTION_* in range $80000000 .. $800000ff
+    DATATYPE_MISALIGNMENT, BREAKPOINT, SINGLE_STEP,
+    // some security-related HRESULT errors (negative 32-bit values first)
     CRYPT_E_BAD_ENCODE, CRYPT_E_SELF_SIGNED, CRYPT_E_BAD_MSG, CRYPT_E_REVOKED,
     CRYPT_E_NO_REVOCATION_CHECK, CRYPT_E_REVOCATION_OFFLINE, TRUST_E_BAD_DIGEST,
     TRUST_E_NOSIGNATURE, CERT_E_EXPIRED, CERT_E_CHAINING, CERT_E_REVOKED,
+    // some EXCEPTION_* in range $c0000000 .. $c00000ff
+    ACCESS_VIOLATION, IN_PAGE_ERROR, INVALID_HANDLE_,
+    NONCONTINUABLE_EXCEPTION, ILLEGAL_INSTRUCTION,
+    INVALID_DISPOSITION, ARRAY_BOUNDS_EXCEEDED, FLT_DENORMAL_OPERAND,
+    FLT_DIVIDE_BY_ZERO, FLT_INEXACT_RESULT, FLT_INVALID_OPERATION,
+    FLT_OVERFLOW, FLT_STACK_CHECK, FLT_UNDERFLOW, INT_DIVIDE_BY_ZERO,
+    INT_OVERFLOW, PRIV_INSTRUCTION, STACK_OVERFLOW_,
+    // sparse system errors
     ALREADY_EXISTS, MORE_DATA, ACCOUNT_EXPIRED, NO_SYSTEM_RESOURCES,
-    PASSWORD_MUST_CHANGE, ERROR_ACCOUNT_LOCKED_OUT,
-    WSAEFAULT, WSAEINVAL, WSAEMFILE, WSAEWOULDBLOCK, WSAENOTSOCK, WSAENETDOWN,
-    WSAENETUNREACH, WSAENETRESET, WSAECONNABORTED, WSAECONNRESET, WSAENOBUFS,
-    WSAETIMEDOUT, WSAECONNREFUSED, WSATRY_AGAIN,
-    WINHTTP_TIMEOUT, WINHTTP_OPERATION_CANCELLED, WINHTTP_CANNOT_CONNECT,
-    WINHTTP_CLIENT_AUTH_CERT_NEEDED, WINHTTP_INVALID_SERVER_RESPONSE);
+    RPC_S_SERVER_UNAVAILABLE, PASSWORD_MUST_CHANGE, ACCOUNT_LOCKED_OUT,
+    // main Windows Socket API (WSA*) errors
+    EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, ENETDOWN,
+    ENETUNREACH, ENETRESET, ECONNABORTED, ECONNRESET, ENOBUFS,
+    ETIMEDOUT, ECONNREFUSED, TRY_AGAIN,
+    // most common WinHttp API errors (in range 12000...12152)
+    TIMEOUT, OPERATION_CANCELLED, CANNOT_CONNECT,
+    CLIENT_AUTH_CERT_NEEDED, INVALID_SERVER_RESPONSE);
 const
-  WINERR_SORTED: array[TWinErrorOne] of cardinal = (
+  WINERR_SORTED: array[TWinErrorSorted] of cardinal = (
+    // some EXCEPTION_* in range $80000000 .. $800000ff
+    $80000002, $80000003, $80000004,
     // some security-related HRESULT errors (negative 32-bit values first)
     $80092002, $80092007, $8009200d, $80092010, $80092012, $80092013, $80096010,
     $800b0100, $800b0101, $800b010a, $800b010c,
+    // some EXCEPTION_* in range $c0000000 .. $c00000ff
+    $c0000005, $c0000006, $c0000008, $c000001d, $c0000025, $c0000026,
+    $c000008c, $c000008d, $c000008e, $c000008f, $c0000090, $c0000091,
+    $c0000092, $c0000093, $c0000094, $c0000095, $c0000096, $c00000fd,
     // sparse system errors
-    183, 234, 701, 1450, 1907, 1909,
+    183, 234, 701, 1450, 1722, 1907, 1909,
     // main Windows Socket API (WSA) errors
     10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
     10060, 10061, 11002,
@@ -6447,17 +6566,34 @@ begin
     1315 .. 1315 + ord(high(TWinError1315)):
       result := GetEnumNameRtti(TypeInfo(TWinError1315), Code - 1315);
   else
-    result := GetEnumNameRtti(TypeInfo(TWinErrorOne),
+    result := GetEnumNameRtti(TypeInfo(TWinErrorSorted),
       FastFindIntegerSorted(@WINERR_SORTED, ord(high(WINERR_SORTED)), Code));
   end;
 end;
 
-function WinErrorShort(Code: cardinal): ShortString;
+function WinErrorShort(Code: cardinal; NoInt: boolean): TShort47;
 begin
-  result[0] := #0;
-  AppendShortCardinal(Code, result);
-  AppendWinErrorText(Code, result, ' ');
+  WinErrorShort(Code, @result, NoInt);
 end;
+
+procedure WinErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  Dest^[0] := #0;
+  if NoInt then
+    AppendWinErrorText(Code, Dest^, #0)
+  else
+  begin
+    if integer(Code) < 0 then
+      AppendShortIntHex(Code, Dest^) // e.g. '80092002 CRYPT_E_BAD_ENCODE'
+    else
+      AppendShortCardinal(Code, Dest^); // e.g. '5 ERROR_ACCESS_DENIED'
+    AppendWinErrorText(Code, Dest^, ' ');
+  end;
+end;
+
+const
+  _PREFIX: array[0..4] of string[15] = (
+    'WSA', 'ERROR_WINHTTP_', '', 'EXCEPTION_', 'ERROR_');
 
 function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
   Sep: AnsiChar): boolean;
@@ -6467,14 +6603,90 @@ begin
   result := false;
   txt := WinErrorConstant(Code);
   if txt^[0] = #0 then
-    exit;
+    exit; // unknown
   if Sep <> #0 then
     AppendShortChar(Sep, @Dest);
-  if (Code < 10000) or
-     (Code > 11999) then
-    AppendShort('ERROR_', Dest); // if not WSA*
+  case Code of
+    10000 .. 11999:
+      Code := 0;  // main Windows Socket API errors
+    12000 .. 12152:
+      Code := 1;  // most common WinHttp API errors
+    1722, $80092002 .. $800b010c:
+      Code := 2;  // no prefix for security-related HRESULT errors
+    $80000000 .. $800000ff, $c0000000 .. $c00000ff:
+      Code := 3;  // EXCEPTION_* constants
+  else
+    Code := 4;    // regular Windows ERROR_* constant
+  end;
+  AppendShort(_PREFIX[Code], Dest);
   AppendShort(txt^, Dest);
+  if Dest[ord(Dest[0])] = '_' then
+    dec(Dest[0]); // 'EXCEPTION_STACK_OVERFLOW_' -> 'EXCEPTION_STACK_OVERFLOW'
   result := true;
+end;
+
+type
+  // the main errors returned on Linux, in their ordinal order
+  TLinuxError = (
+    lSUCCESS, lPERM, lNOENT, lSRCH, lINTR, lIO, lNXIO, l2BIG, lNOEXEC, lBADF, lCHILD, lAGAIN, lNOMEM, lACCES,
+    lFAULT, lNOTBLK, lBUSY, lEXIST, lXDEV, lNODEV, lNOTDIR, lISDIR, lINVAL, lNFILE, lMFILE, lNOTTY,
+    lTXTBSY, lFBIG, lNOSPC, lSPIPE, lROFS, lMLINK, lPIPE, lDOM, lRANGE, lDEADLK, lNAMETOOLONG, lNOLCK,
+    lNOSYS, lNOTEMPTY, lLOOP, lWOULDBLOCK, lNOMSG, lIDRM, lCHRNG, lL2NSYNC, lL3HLT, lL3RST, lLNRNG,
+    lUNATCH, lNOCSI, lL2HLT, lBADE, lBADR, lXFULL, lNOANO, lBADRQC, lBADSLT, lDEADLOCK, lBFONT, lNOSTR,
+    lNODATA, lTIME, lNOSR, lNONET, lNOPKG, lREMOTE, lNOLINK, lADV, lSRMNT, lCOMM, lPROTO, lMULTIHOP,
+    lDOTDOT, lBADMSG, lOVERFLOW, lNOTUNIQ, lBADFD, lREMCHG, lLIBACC, lLIBBAD, lLIBSCN, lLIBMAX, lLIBEXEC,
+    lILSEQ, lRESTART, lSTRPIPE, lUSERS, lNOTSOCK, lDESTADDRREQ, lMSGSIZE, lPROTOTYPE, lNOPROTOOPT,
+    lPROTONOSUPPORT, lSOCKTNOSUPPORT, lOPNOTSUPP, lPFNOSUPPORT, lAFNOSUPPORT, lADDRINUSE, lADDRNOTAVAIL,
+    lNETDOWN, lNETUNREACH, lNETRESET, lCONNABORTED, lCONNRESET, lNOBUFS, lISCONN, lNOTCONN, lSHUTDOWN,
+    lTOOMANYREFS, lTIMEDOUT, lCONNREFUSED, lHOSTDOWN, lHOSTUNREACH, lALREADY, lINPROGRESS, lSTALE,
+    lUCLEAN, lNOTNAM, lNAVAIL, lISNAM, lREMOTEIO, lDQUOT, lNOMEDIUM, lMEDIUMTYPE);
+
+  // the main errors returned on BSD (and Darwin), in their ordinal order
+  // - only the main common set of errors is defined, not higher divergent values
+  TBsdError = (
+    bSUCCESS, bPERM, bNOENT, bSRCH, bINTR, bIO, bNXIO, b2BIG, bNOEXEC, bBADF, bCHILD, bDEADLK, bNOMEM, bACCES,
+    bFAULT, bNOTBLK, bBUSY, bEXIST, bXDEV, bNODEV, bNOTDIR, bISDIR, bINVAL, bNFILE, bMFILE, bNOTTY,
+    bTXTBSY, bFBIG, bNOSPC, bSPIPE, bROFS, bMLINK, bPIPE, bDOM, bRANGE, bAGAIN, bINPROGRESS, bALREADY,
+    bNOTSOCK, bDESTADDRREQ, bMSGSIZE, bPROTOTYPE, bNOPROTOOPT, bPROTONOSUPPORT, bSOCKTNOSUPPORT,
+    bOPNOTSUPP, bPFNOSUPPORT, bAFNOSUPPORT, bADDRINUSE, bADDRNOTAVAIL, bNETDOWN, bNETUNREACH, bNETRESET,
+    bCONNABORTED, bCONNRESET, bNOBUFS, bISCONN, bNOTCONN, bSHUTDOWN, bTOOMANYREFS, bTIMEDOUT,
+    bCONNREFUSED, bLOOP, bNAMETOOLONG, bHOSTDOWN, bHOSTUNREACH, bNOTEMPTY, bPROCLIM, bUSERS, bDQUOT,
+    bSTALE, bREMOTE, bBADRPC, bRPCMISMATCH, bPROGUNAVAIL, bPROGMISMATCH, bPROCUNAVAIL, bNOLCK, bNOSYS,
+    bFTYPE, bAUTH, bNEEDAUTH);
+
+procedure PosixErrorShort(Code, Max: cardinal; Dest: PShortString;
+  Info: pointer; NoInt: boolean);
+var
+  ps: PShortString;
+  d: PAnsiChar;
+begin
+  Dest^[0] := #0;
+  if not NoInt then
+    AppendShortCardinal(Code, Dest^); // e.g. '1 EPERM'
+  if Code > Max then
+    exit;
+  if not NoInt then
+    AppendShortChar(' ', pointer(Dest));
+  ps := GetEnumNameRtti(Info, Code);
+  d := @Dest^[ord(Dest^[0]) + 1];
+  inc(Dest^[0], ord(ps^[0]));
+  d[0] := 'E'; // ignore 'l' or 'b' and write 'E' instead
+  MoveFast(ps^[2], d[1], ord(ps^[0]) - 1);
+end;
+
+procedure LinuxErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  PosixErrorShort(Code, ord(high(TLinuxError)), Dest, TypeInfo(TLinuxError), NoInt);
+end;
+
+procedure BsdErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  PosixErrorShort(Code, ord(high(TBsdError)), Dest, TypeInfo(TBsdError), NoInt);
+end;
+
+function OsErrorShort(Code: cardinal; NoInt: boolean): TShort47;
+begin
+  OsErrorShort(Code, @result, NoInt); // redirect to Win/Linux/BsdErrorShort()
 end;
 
 const
@@ -7800,10 +8012,10 @@ begin
         ctxt.EClass := PPointer(Obj)^;
         ctxt.EInstance := Exception(Obj);
         ctxt.EAddr := PtrUInt(Addr);
-        if Obj.InheritsFrom(EExternal) then
+        if Obj.InheritsFrom(EExternal) then // e.g. EDivByZero or EMathError
           ctxt.ELevel := sllExceptionOS
         else
-          ctxt.ELevel := sllException;
+          ctxt.ELevel := sllException; // regular "raise" exception
         ctxt.ETimestamp := UnixTimeUtc;
         ctxt.EStack := pointer(Frame);
         ctxt.EStackCount := FrameCount;
@@ -9800,7 +10012,7 @@ end;
 
 { **************** TSynLocker Threading Features }
 
-// as reference, take a look at Linus insight
+// as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
 {$ifdef CPUINTEL}
 procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
@@ -9848,7 +10060,7 @@ end;
 procedure TLightLock.Lock;
 begin
   // we tried a dedicated asm but it was slower: inlining is preferred
-  if not LockedExc(Flags, 1, 0) then
+  if not LockedExc(Flags, {to=}1, {from=}0) then
     LockSpin;
 end;
 
@@ -9857,7 +10069,7 @@ begin
   {$ifdef CPUINTEL}
   Flags := 0; // non reentrant locks need no additional thread safety
   {$else}
-  LockedExc(Flags, 0, 1); // ARM can be weak-ordered
+  LockedExc(Flags, {to=}0, {from=}1); // ARM can be weak-ordered
   // https://preshing.com/20121019/this-is-why-they-call-it-a-weakly-ordered-cpu
   {$endif CPUINTEL}
 end;
@@ -9865,7 +10077,7 @@ end;
 function TLightLock.TryLock: boolean;
 begin
   result := (Flags = 0) and // first check without any (slow) atomic opcode
-            LockedExc(Flags, 1, 0);
+            LockedExc(Flags, {to=}1, {from=}0);
 end;
 
 function TLightLock.IsLocked: boolean;
@@ -9890,7 +10102,6 @@ procedure TMultiLightLock.Init;
 begin
   Flags := 0;
   ThreadID := TThreadID(0);
-  ReentrantCount := 0;
 end;
 
 procedure TMultiLightLock.Done;
@@ -9907,16 +10118,9 @@ end;
 
 procedure TMultiLightLock.UnLock;
 begin
-  dec(ReentrantCount);
-  if ReentrantCount <> 0 then
-    exit;
-  {$ifdef CPUINTEL}
-  Flags := 0;
-  {$else}
-  LockedExc(Flags, 0, 1); // ARM can be weak-ordered
-  // https://preshing.com/20121019/this-is-why-they-call-it-a-weakly-ordered-cpu
-  {$endif CPUINTEL}
-  ThreadID := TThreadID(0);
+  if Flags = 1 then
+    ThreadID := TThreadID(0); // paranoid
+  LockedDec(Flags, 1);
 end;
 
 function TMultiLightLock.TryLock: boolean;
@@ -9924,29 +10128,27 @@ var
   tid: TThreadID;
 begin
   tid := GetCurrentThreadId;
-  if Flags = 0 then                // is not locked
-    if LockedExc(Flags, 1, 0) then // atomic acquisition
+  if Flags = 0 then    // is not locked
+    if LockedExc(Flags, {to=}1, {from=}0) then // try atomic acquisition
     begin
       ThreadID := tid;
-      ReentrantCount := 1;
-      result := true;          // acquired this lock
+      result := true;  // acquired the lock
     end
     else
-      result := false          // impossible to acquire this lock
-  else if ThreadID <> tid then // locked by another thread
-    result := false
+      result := false  // impossible to acquire this lock
+  else if ThreadID <> tid then
+    result := false // locked by another thread
   else
   begin
-    inc(ReentrantCount);       // locked by this thread - make it reentrant
-    result := true;
+    inc(Flags);     // make it reentrant
+    result := true; // locked by this thread
   end;
 end;
 
 procedure TMultiLightLock.ForceLock;
 begin
-  Flags := PtrUInt(-1); // forced acquisition, whatever the current state is
+  Flags := MaxInt; // forced acquisition, whatever the current state is
   ThreadID := GetCurrentThreadId;
-  ReentrantCount := MaxInt; // make this method reentrant
 end;
 
 function TMultiLightLock.IsLocked: boolean;
@@ -9978,7 +10180,7 @@ var
 begin
   // if not writing, atomically increase the RD counter in the upper flag bits
   f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-  if not LockedExc(Flags, f + 2, f) then
+  if not LockedExc(Flags, {to=}f + 2, {from=}f) then
     ReadLockSpin;
 end;
 
@@ -9988,7 +10190,7 @@ var
 begin
   // if not writing, atomically increase the RD counter in the upper flag bits
   f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-  result := LockedExc(Flags, f + 2, f);
+  result := LockedExc(Flags, {to=}f + 2, {from=}f);
 end;
 
 procedure TRWLightLock.ReadUnLock;
@@ -10012,7 +10214,7 @@ var
 begin
   f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock
   result := (Flags = f) and
-            LockedExc(Flags, f + 1, f);
+            LockedExc(Flags, {to=}f + 1, {from=}f);
 end;
 
 procedure TRWLightLock.WriteLock;
@@ -10087,7 +10289,7 @@ var
 begin
   // if not writing, atomically increase the RD counter in the upper flag bits
   f := Flags and not 1; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
-  if not LockedExc(Flags, f + 4, f) then
+  if not LockedExc(Flags, {to=}f + 4, {from=}f) then
     ReadOnlyLockSpin;
 end;
 
@@ -10100,7 +10302,7 @@ begin
     spin := DoSpin(spin);
     f := Flags and not 1; // retry ReadOnlyLock
   until (Flags = f) and
-        LockedExc(Flags, f + 4, f);
+        LockedExc(Flags, {to=}f + 4, {from=}f);
 end;
 
 {$endif ASMX64}
@@ -10127,7 +10329,7 @@ begin
   repeat
     f := Flags and not 3; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
     if (Flags = f) and
-       LockedExc(Flags, f + 2, f) then
+       LockedExc(Flags, {to=}f + 2, {from=}f) then
       break;
     spin := DoSpin(spin);
   until false;
@@ -10163,7 +10365,7 @@ begin
   repeat
     f := Flags and not 1; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
     if (Flags = f) and
-       LockedExc(Flags, f + 1, f) then
+       LockedExc(Flags, {to=}f + 1, {from=}f) then
       if (Flags and 2 = 2) and
          (LastReadWriteLockThread <> tid) then
         // there is a pending ReadWriteLock but not on this thread
@@ -10367,7 +10569,7 @@ end;
 
 procedure TSynLocker.InitFromClass;
 begin
-  InitializeCriticalSection(fSection);
+  fSection.Init;
   fInitialized := true;
 end;
 
@@ -10382,7 +10584,7 @@ begin
   fLockCount := 0;
   fPaddingUsedCount := 0;
   fRW.Init;
-  InitializeCriticalSection(fSection);
+  fSection.Init;
   fInitialized := true;
 end;
 
@@ -10398,7 +10600,7 @@ begin
       VarClearProc(v^.Data); // won't include varAny = SetPointer
     inc(v);
   end;
-  DeleteCriticalSection(fSection);
+  fSection.Done;
   fInitialized := false;
 end;
 
@@ -10425,7 +10627,7 @@ begin
   case fRWUse of
     uSharedLock:
       begin
-        mormot.core.os.EnterCriticalSection(fSection);
+        fSection.Lock;
         inc(fLockCount);
       end;
     uRWLock:
@@ -10439,7 +10641,7 @@ begin
     uSharedLock:
       begin
         dec(fLockCount);
-        mormot.core.os.LeaveCriticalSection(fSection);
+        fSection.UnLock;
       end;
     uRWLock:
       fRW.UnLock(context);
@@ -10479,7 +10681,7 @@ end;
 function TSynLocker.TryLock: boolean;
 begin
   result := (fRWUse = uSharedLock) and
-            (mormot.core.os.TryEnterCriticalSection(fSection) <> 0);
+            fSection.TryLock;
   if result then
     inc(fLockCount);
 end;
@@ -10942,12 +11144,12 @@ end;
 
 procedure GlobalLock;
 begin
-  mormot.core.os.EnterCriticalSection(GlobalCriticalSection.CS);
+  GlobalCriticalSection.Lock;
 end;
 
 procedure GlobalUnLock;
 begin
-  mormot.core.os.LeaveCriticalSection(GlobalCriticalSection.CS);
+  GlobalCriticalSection.UnLock;
 end;
 
 var
@@ -11045,7 +11247,7 @@ var
 begin
   spin := SPIN_COUNT;
   while (Target <> Comperand) or
-        not LockedExc(Target, NewValue, Comperand) do
+        not LockedExc(Target, {to=}NewValue, {from=}Comperand) do
     spin := DoSpin(spin);
 end;
 
@@ -11110,7 +11312,7 @@ end;
 procedure _SetThreadName(ThreadID: TThreadID; const Format: RawUtf8;
   const Args: array of const);
 begin
-  // do nothing - properly implemented in mormot.core.log
+  // do nothing - properly implemented in mormot.core.log using FormatUtf8()
 end;
 
 procedure SetCurrentThreadName(const Format: RawUtf8; const Args: array of const);
@@ -11129,9 +11331,11 @@ threadvar // do not publish for compilation within Delphi packages
 function CurrentThreadNameShort: PShortString;
 begin
   result := @_CurrentThreadName;
+  if result^[0] > #31 then
+    result := @NULCHAR; // paranoid range check
 end;
 
-function GetCurrentThreadName: RawUtf8;
+function _GetCurrentThreadName: RawUtf8;
 begin
   ShortStringToAnsi7String(_CurrentThreadName, result);
 end;
@@ -11424,7 +11628,7 @@ begin
   TrimDualSpaces(OSVersionInfoEx);
   {$ifndef OSLINUXANDROID} TrimDualSpaces(BiosInfoText); {$endif}
   TrimDualSpaces(CpuInfoText);
-  OSVersionShort := ToTextOS(OSVersionInt32);
+  OSVersionShort := ToTextOSU(OSVersionInt32);
   InitializeExecutableInformation;
   JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
   JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
@@ -11434,6 +11638,7 @@ begin
   // minimal stubs which will be properly implemented in other mormot.core units
   GetExecutableLocation := _GetExecutableLocation; // mormot.core.log
   SetThreadName         := _SetThreadName;
+  GetCurrentThreadName  := _GetCurrentThreadName;
   ShortToUuid           := _ShortToUuid;           // mormot.core.text
   AppendShortUuid       := _AppendShortUuid;
   GetEnumNameRtti       := _GetEnumNameRtti;       // mormot.core.rtti

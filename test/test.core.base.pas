@@ -24,6 +24,7 @@ uses
   mormot.core.datetime,
   mormot.crypt.core,
   mormot.crypt.secure,
+  mormot.crypt.ecc,
   mormot.core.perf,
   mormot.core.search,
   mormot.core.log,
@@ -282,8 +283,8 @@ type
     procedure _TSynFilter;
     /// low-level TSynValidate classes
     procedure _TSynValidate;
-    /// low-level TSynLogFile class
-    procedure _TSynLogFile;
+    /// low-level TSynLogFile class and OS detection
+    procedure Debugging;
     /// client side geniune 64 bit identifiers generation
     procedure _TSynUniqueIdentifier;
     {$ifdef OSWINDOWS}
@@ -450,6 +451,26 @@ begin
   {$endif CPU64}
 end;
 
+function BSRdwordPurePascal(c: cardinal): cardinal;
+const
+  _debruijn32: array[0..31] of byte = (
+    0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30,
+    8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31);
+begin // http://graphics.stanford.edu/~seander/bithacks.html#IntegerLogDeBruijn
+  if c <> 0 then
+  begin
+    c := c or (c shr 1);
+    c := c or (c shr 2);
+    c := c or (c shr 4);
+    c := c or (c shr 8);
+    c := c or (c shr 16);
+    c := c * $07c4acdd; // explicit step for 32-bit truncation
+    result := _debruijn32[c shr 27];
+  end
+  else
+    result := 255;
+end;
+
 procedure TTestCoreBase.Bits;
 const
   N = 1000000;
@@ -500,13 +521,20 @@ const
       {$ifdef FPC}
       CheckEqual(popcnt(v), c);
       {$endif FPC}
+      c := BSRdwordPurePascal(v);
+      CheckEqual(c, BSRdword(v));
+      CheckEqual(c, BSRqword(v), 'bsrq1');
       v := v * v * 19;
+      CheckEqual(BSRdwordPurePascal(v), BSRdword(v));
       c := GetBitsCount64(v, POINTERBITS);
       CheckEqual(GetBitsCountPtrInt(v), c);
       {$ifdef FPC}
       CheckEqual(popcnt(v), c);
       {$endif FPC}
       v := random32;
+      c := BSRdwordPurePascal(v);
+      CheckEqual(c, BSRdword(v));
+      CheckEqual(c, BSRqword(v), 'bsrq2');
       {$ifdef CPU64}
       v := v or (PtrUInt(Random32) shl 32);
       {$endif CPU64}
@@ -517,6 +545,7 @@ const
       CheckEqual(popcnt(v), c);
       {$endif FPC}
     end;
+    CheckEqual(BSRdwordPurePascal(0), BSRdword(0));
     timer.Start;
     for i := 1 to N do
       GetBitsCountPtrInt(i);
@@ -3452,6 +3481,7 @@ begin
   Check(n < 2, 'unique Random32'); // n=1 have been seen once
   timer.Start;
   Check(Random32(0) = 0);
+  Check(Random32(1) = 0);
   for i := 1 to 100000 do
     Check(Random32(i) < cardinal(i));
   for i := 0 to 100000 do
@@ -7551,6 +7581,7 @@ var
   k: TWellKnownSid;
   s: RawUtf8;
   s1, s2: RawSid;
+  ss: TShort47;
   {$ifdef OSWINDOWS}
   known: TWellKnownSids;
   sids: TRawUtf8DynArray;
@@ -7570,6 +7601,56 @@ begin
     CheckEqual(s, RawSidToText(s2));
     CheckUtf8(SidCompare(pointer(s1), pointer(s2)) = 0, s);
   end;
+  // some cross-platform Windows/Linux/BSD error detection
+  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
+  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb');
+  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecB');
+  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecB');
+  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
+  Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
+  Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
+  Check(WinErrorConstant(12002)^ = 'TIMEOUT', 'wecf');
+  Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
+  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
+  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
+  Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
+  Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
+  Check(WinErrorConstant(12152)^ = 'INVALID_SERVER_RESPONSE', 'weck');
+  Check(WinErrorConstant(87)^ = 'INVALID_PARAMETER', 'wecl');
+  Check(WinErrorConstant(1315)^ = 'INVALID_ACCOUNT_NAME', 'wecm');
+  Check(WinErrorConstant(1331)^ = 'ACCOUNT_DISABLED', 'wecn');
+  Check(WinErrorConstant(1342)^ = 'SERVER_NOT_DISABLED', 'weco');
+  Check(WinErrorShort(0) = '0 ERROR_SUCCESS', 'w0');
+  Check(WinErrorShort(5) = '5 ERROR_ACCESS_DENIED', 'wa');
+  Check(WinErrorShort(12002) = '12002 ERROR_WINHTTP_TIMEOUT', 'w1');
+  Check(WinErrorShort($800b010a) = '800b010a CERT_E_CHAINING', 'w2');
+  Check(WinErrorShort($80000003) = '80000003 EXCEPTION_BREAKPOINT', 'w3');
+  Check(WinErrorShort(1722) = '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
+  Check(WinErrorShort(12152) = '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
+  Check(WinErrorShort($c00000fd) = 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
+  Check(WinErrorShort(244, {noint=}false) = '244', '244w');
+  Check(WinErrorShort(245, {noint=}true) = '', '245w');
+  BsdErrorShort(1, @ss);
+  Check(ss = '1 EPERM', '1bsd');
+  BsdErrorShort(5, @ss);
+  Check(ss = '5 EIO', '5bsd');
+  BsdErrorShort(40, @ss);
+  Check(ss = '40 EMSGSIZE', '40bsd');
+  BsdErrorShort(81, @ss);
+  Check(ss = '81 ENEEDAUTH', '81bsd');
+  BsdErrorShort(82, @ss);
+  Check(ss = '82', '82bsd');
+  LinuxErrorShort(1, @ss);
+  Check(ss = '1 EPERM', '1lin');
+  LinuxErrorShort(5, @ss);
+  Check(ss = '5 EIO', '5lin');
+  LinuxErrorShort(124, @ss);
+  Check(ss = '124 EMEDIUMTYPE', '124');
+  LinuxErrorShort(125, @ss);
+  Check(ss = '125', '125');
+  Check(OsErrorShort(244, {noint=}false) = '244', '244a');
+  Check(OsErrorShort(244, {noint=}true) = '', '244b');
   // validate Windows specific SID function, especially about the current user
   {$ifdef OSWINDOWS}
   CurrentRawSid(s1, wttProcess);
@@ -7594,27 +7675,13 @@ begin
     else
       CheckUtf8(not CurrentUserHasGroup(s), s);
   end;
+  Check(OSErrorShort(5) = '5 ERROR_ACCESS_DENIED', '5ead');
+  Check(OSErrorShort(5, true) = 'ERROR_ACCESS_DENIED', '5ead2');
+  {$else}
+  Check(OSErrorShort(1) = '1 EPERM', '1eperm');
+  Check(OSErrorShort(5) = '5 EIO', '5eio');
+  Check(OSErrorShort(5, true) = 'EIO', '5eio2');
   {$endif OSWINDOWS}
-  // some cross-platform Windows error detection
-  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb');
-  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecB');
-  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecB');
-  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
-  Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
-  Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
-  Check(WinErrorConstant(12002)^ = 'WINHTTP_TIMEOUT', 'wecf');
-  Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
-  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
-  Check(WinErrorConstant($800b010d)^ = '', 'wech');
-  Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
-  Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
-  Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
-  Check(WinErrorConstant(12152)^ = 'WINHTTP_INVALID_SERVER_RESPONSE', 'weck');
-  Check(WinErrorConstant(87)^ = 'INVALID_PARAMETER', 'wecl');
-  Check(WinErrorConstant(1315)^ = 'INVALID_ACCOUNT_NAME', 'wecm');
-  Check(WinErrorConstant(1331)^ = 'ACCOUNT_DISABLED', 'wecn');
-  Check(WinErrorConstant(1342)^ = 'SERVER_NOT_DISABLED', 'weco');
 end;
 
 const
@@ -8712,7 +8779,16 @@ begin
   Check(not IsHttpUserAgentBot(DefaultUserAgent(self)),
     'Mozilla/5.0 (Linux x64; mORMot) TCB/2 mormot2tests');
   Check(IsHttpUserAgentBot(
-    'Googlebot/2.1 (+http://www.google.com/bot.html)'));
+    'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ' +
+    'Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) ' +
+    'Chrome/119.0.6045.214 Safari/537.36'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ' +
+    'Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot)'));
+  Check(IsHttpUserAgentBot(
+    'Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot/)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)'));
   Check(IsHttpUserAgentBot(
     'Googlebot/2.1 (+http://www.google.org/bot.html)'));
   Check(IsHttpUserAgentBot(
@@ -8992,7 +9068,7 @@ begin
   end;
 end;
 
-procedure TTestCoreBase._TSynLogFile;
+procedure TTestCoreBase.Debugging;
 
   procedure Test(const LOG: RawUtf8; ExpectedDate: TDateTime);
   var
@@ -9012,11 +9088,9 @@ procedure TTestCoreBase._TSynLogFile;
       Check(L.LevelUsed = [sllEnter, sllLeave, sllDebug]);
       Check(L.RunningUser = 'MySelf');
       Check(L.CPU = '2*0-15-1027');
-      {$ifdef OSWINDOWS}
       Check(L.OS = wXP);
       Check(L.ServicePack = 3);
       Check(not L.Wow64);
-      {$endif OSWINDOWS}
       Check(L.Freq = 0);
       CheckSame(L.StartDateTime, 40640.502882, 1 / SecsPerDay);
       if CheckFailed(L.Count = 3) then
@@ -9039,10 +9113,13 @@ procedure TTestCoreBase._TSynLogFile;
 var
   tmp: array[0..512] of AnsiChar;
   msg, n, v: RawUtf8;
-  os: TOperatingSystem;
+  os, os2: TOperatingSystem;
+  ld: TLinuxDistribution;
+  islinux: boolean;
   osv: TOperatingSystemVersion;
   len: integer;
 begin
+  // validate UserAgentParse()
   Check(not UserAgentParse('toto (mozilla)', n, v, os));
   Check(UserAgentParse('myprogram/3.1.0.2W', n, v, os));
   Check(n = 'myprogram');
@@ -9056,32 +9133,52 @@ begin
   Check(n = 'myprogram');
   Check(v = '3.1.2');
   check(os = osWindows);
+  // validate TOperatingSystemVersion
   osv.os := osWindows;
   osv.win := wSeven;
   osv.winbuild := 0;
-  CheckEqual(ToText(osv), 'Windows 7');
+  CheckEqualShort(ToText(osv), 'Windows 7');
   osv.win := wTen_64;
-  CheckEqual(ToText(osv), 'Windows 10 64bit');
+  CheckEqualShort(ToText(osv), 'Windows 10 64bit');
   osv.winbuild := 10240;
-  CheckEqual(ToText(osv), 'Windows 10 64bit 1507');
+  CheckEqualShort(ToText(osv), 'Windows 10 64bit 1507');
   osv.winbuild := 10241;
-  CheckEqual(ToText(osv), 'Windows 10 64bit 1507');
+  CheckEqualShort(ToText(osv), 'Windows 10 64bit 1507');
   osv.win := wTen;
   osv.winbuild := 19045;
-  CheckEqual(ToText(osv), 'Windows 10 22H2');
+  CheckEqualShort(ToText(osv), 'Windows 10 22H2');
   osv.win := wEleven;
   osv.winbuild := 22000;
-  CheckEqual(ToText(osv), 'Windows 11 21H2');
+  CheckEqualShort(ToText(osv), 'Windows 11 21H2');
   osv.winbuild := 22621;
-  CheckEqual(ToText(osv), 'Windows 11 22H2');
+  CheckEqualShort(ToText(osv), 'Windows 11 22H2');
   osv.win := wEleven_64;
   osv.winbuild := 26100;
-  CheckEqual(ToText(osv), 'Windows 11 64bit 24H2');
+  CheckEqualShort(ToText(osv), 'Windows 11 64bit 24H2');
   osv.winbuild := 26100;
-  CheckEqual(ToTextOS(cardinal(osv)), 'Windows 11 64bit 24H2 26100');
+  CheckEqualShort(ToTextOS(cardinal(osv)), 'Windows 11 64bit 24H2 26100');
+  osv.winbuild := 26210;
+  CheckEqualShort(ToTextOS(cardinal(osv)), 'Windows 11 64bit 25H2 26210');
   osv.win := wServer2022_64;
   osv.winbuild := 20349;
-  CheckEqual(ToTextOS(cardinal(osv)), 'Windows Server 2022 64bit 21H2 20349');
+  CheckEqualShort(ToText(osv), 'Windows Server 2022 64bit 21H2');
+  CheckEqual(ToTextOSU(cardinal(osv)), 'Windows Server 2022 64bit 21H2 20349');
+  // validate OS definitions logic
+  for os := low(os) to high(os) do
+  begin
+    islinux := false;
+    for ld := succ(low(ld)) to high(ld) do
+      if os in LINUX_DIST[ld] then
+        if not CheckFailed(not islinux, 'os twice') then
+          if not CheckFailed(LinuxDistribution(os) = ld, 'ld') then
+            islinux := true;
+    Check((os in OS_LINUX) = islinux, 'islinux');
+    Check(islinux = not (os in LINUX_DIST[ldNotLinux]));
+    Check(islinux = (LinuxDistribution(os) <> ldNotLinux));
+    for os2 := low(os) to high(os) do
+      Check((OS_INITIAL[os2] = OS_INITIAL[os]) = (os2 = os), 'OS_INITIAL');
+  end;
+  // validate SyslogMessage()
   FillcharFast(tmp, SizeOf(tmp), 1);
   len := SyslogMessage(sfAuth, ssCrit, 'test', '', '', tmp, SizeOf(tmp), false);
   // Check(len=65); // <-- different for every PC, due to PC name differences
@@ -9095,6 +9192,7 @@ begin
   Check(len < 300, 'truncated to avoid buffer overflow');
   Check(tmp[len - 1] = '+');
   Check(tmp[len] = #1);
+  // validate TSynLogFile
   Test('D:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.4 (2011-04-07 11:09:06)'#13#10 +
     'Host=MyPC User=MySelf CPU=2*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545 ' +
     'Instance=D:\Dev\MyLibrary.dll'#13#10 +
@@ -10153,16 +10251,11 @@ procedure TTestCoreBase.WindowsSpecificApi;
 
   procedure Win32DotNetException(code: cardinal; const expected: RawUtf8);
   var
-    e: TPShortStringDynArray;
-    i: PtrInt;
-    v: RawUtf8;
+    s: ShortString;
   begin
-    Check(e = nil);
-    Win32DotNetExceptions(code, e);
-    CheckEqual(v, '');
-    for i := 0 to high(e) do
-      Append(v, [e[i]^, ' ']);
-    CheckEqual(v, expected);
+    s[0] := #0;
+    Check(Win32DotNetExceptions(code, s) = (expected <> ''));
+    CheckEqual(ShortStringToAnsi7String(s), expected);
   end;
 
 var
@@ -10174,8 +10267,9 @@ begin
   // validate DotNet exceptions error code recognition
   Win32DotNetException(0, '');
   Win32DotNetException(9234, '');
-  Win32DotNetException($800703E9, '_StackOverflow ');
-  Win32DotNetException($80131500, '_ _SUDSGenerator _SUDSParser ');
+  Win32DotNetException($800703E9, ' [.NET/CLR unhandled StackOverflowException]');
+  Win32DotNetException($80131500,
+    ' [.NET/CLR unhandled Exception SUDSGeneratorException SUDSParserException]');
   // validate UAC specific functions
   Check(IsSystemFolder('c:\program files'));
   Check(IsSystemFolder('c:\program Files\toto'));

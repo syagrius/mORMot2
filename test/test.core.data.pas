@@ -746,75 +746,85 @@ begin
   // manual tests
   mustache := TSynMustache.Parse(
     'Hello {{name}}'#13#10'You have just won {{value}} dollars!');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   TDocVariant.NewFast(doc);
   doc.name := 'Chris';
   doc.value := 10000;
   html := mustache.Render(doc);
-  Check(html = 'Hello Chris'#13#10'You have just won 10000 dollars!');
+  CheckEqual(html, 'Hello Chris'#13#10'You have just won 10000 dollars!');
   mustache := TSynMustache.Parse(
     '{{=<% %>=}}Hello <%name%><%={{ }}=%>'#13#10'You have just won {{& value }} dollars!');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   doc := _ObjFast(['name', 'Chris', 'value', 1000]);
   html := mustache.Render(doc);
-  Check(html = 'Hello Chris'#13#10'You have just won 1000 dollars!');
+  CheckEqual(html, 'Hello Chris'#13#10'You have just won 1000 dollars!');
   mustache := TSynMustache.Parse(
     'Hello {{value.name}}'#13#10'You have just won {{value.value}} dollars!');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   html := mustache.RenderJson(
     '{value:{name:"Chris",value:10000}}');
-  Check(html = 'Hello Chris'#13#10'You have just won 10000 dollars!');
+  CheckEqual(html, 'Hello Chris'#13#10'You have just won 10000 dollars!');
   mustache := TSynMustache.Parse(
     '* {{name}}'#13#10'* {{age}}'#13#10'* {{company}}'#13#10'* {{{company}}}');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   html := mustache.RenderJson(
     '{name:"Chris",company:"<b>Synopse</b>"}');
-  Check(html =
+  CheckEqual(html,
     '* Chris'#13#10'* '#13#10'* &lt;b&gt;Synopse&lt;/b&gt;'#13#10'* <b>Synopse</b>');
   mustache := TSynMustache.Parse(
     '* {{name}}'#13#10'* {{age}}'#13#10'* {{company}}'#13#10'* {{&company}}');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   html := mustache.RenderJson(
     '{name:"Chris",company:"<b>Synopse</b>"}');
-  Check(html =
+  CheckEqual(html,
     '* Chris'#13#10'* '#13#10'* &lt;b&gt;Synopse&lt;/b&gt;'#13#10'* <b>Synopse</b>');
   mustache := TSynMustache.Parse(
     'Shown.{{#person}}Never shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:false}');
-  Check(html = 'Shown.end');
+  CheckEqual(html, 'Shown.end');
   mustache := TSynMustache.Parse(
     'Shown.{{#person}}Also shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:true}');
-  Check(html = 'Shown.Also shown!end');
+  CheckEqual(html, 'Shown.Also shown!end');
   html := mustache.RenderJson('{person:"toto"}');
-  Check(html = 'Shown.Also shown!end');
+  CheckEqual(html, 'Shown.Also shown!end');
   html := mustache.RenderJson('{person:false}');
-  Check(html = 'Shown.end');
+  CheckEqual(html, 'Shown.end');
   mustache := TSynMustache.Parse(
     'Shown.{{#person}}As {{name}}!{{/person}}end{{name}}');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:{age:10,name:"toto"}}');
-  Check(html = 'Shown.As toto!end');
+  CheckEqual(html, 'Shown.As toto!end');
+  mustache := TSynMustache.Parse(
+    'Shown.{{#person}}As {{name}}!{{/}}end{{name}}');
+  CheckEqual(mustache.SectionMaxCount, 1, 'nonempty1');
+  html := mustache.RenderJson('{person:{age:10,name:"toto"}}');
+  CheckEqual(html, 'Shown.As toto!end');
   mustache := TSynMustache.Parse(
     'Shown.{{^person}}Never shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:true}');
-  Check(html = 'Shown.end');
+  CheckEqual(html, 'Shown.end');
+  mustache := TSynMustache.Parse(
+    'Shown.{{^person}}Never shown!{{/}}end');
+  CheckEqual(mustache.SectionMaxCount, 1, 'nonemptyinv');
+  html := mustache.RenderJson('{person:true}');
+  CheckEqual(html, 'Shown.end');
   mustache := TSynMustache.Parse(
     'Shown.{{^person}}Never shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:{age:10,name:"toto"}}');
-  Check(html = 'Shown.end');
+  CheckEqual(html, 'Shown.end');
   mustache := TSynMustache.Parse(
     'Shown.{{^person}}Also shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person:false}');
-  Check(html = 'Shown.Also shown!end');
+  CheckEqual(html, 'Shown.Also shown!end');
   mustache := TSynMustache.Parse(
     'Shown.{{^person}}Also shown!{{/person}}end');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson('{person2:2}');
   CheckEqual(html, 'Shown.Also shown!end');
   Check({%H-}helpers = nil, 'compiler initialized');
@@ -834,71 +844,73 @@ begin
   mustache := TSynMustache.Parse(
     '{{jsonhelper {a:1,b:2} }},titi');
   html := mustache.RenderJson('', nil, helpers);
-  Check(html = 'a=1,b=2,titi');
+  CheckEqual(html, 'a=1,b=2,titi');
   mustache := TSynMustache.Parse(
     '{{jsonhelper {a:1,nested:{c:{d:[1,2]}},b:10}}}}toto');
   html := mustache.RenderJson('', nil, helpers);
-  Check(html = 'a=1,b=10}toto');
+  CheckEqual(html, 'a=1,b=10}toto');
   mustache := TSynMustache.Parse(
     '{{#a}}'#$A'{{one}}'#$A'{{/a}}'#$A);
   html := mustache.RenderJson('{a:{one:1}}');
-  Check(html = '1'#$A);
+  CheckEqual(html, '1'#$A);
   mustache := TSynMustache.Parse(
     '{{#a}}{{one}}{{#b}}{{one}}{{two}}{{/b}}{{/a}}');
   html := mustache.RenderJson('{a:{one:1},b:{two:2}}');
-  Check(html = '112');
+  CheckEqual(html, '112');
   mustache := TSynMustache.Parse(
     '{{>partial}}'#$A'3');
   html := mustache.RenderJson('{}', TSynMustachePartials.CreateOwned(['partial',
     '1'#$A'2']));
-  Check(html = '1'#$A'23', 'external partials');
+  CheckEqual(html, '1'#$A'23', 'external partials');
   mustache := TSynMustache.Parse(
     '{{<partial}}1'#$A'2{{name}}{{/partial}}{{>partial}}4');
   html := mustache.RenderJson('{name:3}');
-  Check(html = '1'#$A'234', 'internal partials');
+  CheckEqual(html, '1'#$A'234', 'internal partials');
   mustache := TSynMustache.Parse(
     'My favorite things:'#$A'{{#things}}{{-index}}. {{.}}'#$A'{{/things}}');
-  Check(mustache.SectionMaxCount = 1);
+  CheckEqual(mustache.SectionMaxCount, 1);
   html := mustache.RenderJson(
     '{things:["Peanut butter", "Pen spinning", "Handstands"]}');
-  Check(html = 'My favorite things:'#$A'1. Peanut butter'#$A'2. Pen spinning'#$A
+  CheckEqual(html, 'My favorite things:'#$A'1. Peanut butter'#$A'2. Pen spinning'#$A
     + '3. Handstands'#$A, '-index pseudo variable');
-  mustache := TSynMustache.Parse(
-    '{{#things}}{{.}}{{/things}}');
+  mustache := TSynMustache.Parse('{{#things}}{{.}}{{/things}}');
   html := mustache.RenderJson('{things:["one", "two", "three"]}');
-  check(html = 'onetwothree');
+  CheckEqual(html, 'onetwothree');
+  mustache := TSynMustache.Parse('{{#things}}{{.}}{{/}}');
+  html := mustache.RenderJson('{things:["one", "two", "three"]}');
+  CheckEqual(html, 'onetwothree', 'empty');
   mustache := TSynMustache.Parse(
     '{{#things}}{{#-first}}{{.}}{{/-first}}{{/things}} {{pi}}');
   html := mustache.RenderJson('{things:["one", "two", "three"],pi:3.1415}');
-  check(html = 'one 3.1415');
+  CheckEqual(html, 'one 3.1415');
   mustache := TSynMustache.Parse(
     '{{#things}}{{^-first}}, {{/-first}}{{.}}{{/things}}');
   html := mustache.RenderJson('{things:["one", "two", "three"]}');
-  check(html = 'one, two, three');
+  CheckEqual(html, 'one, two, three');
   mustache := TSynMustache.Parse(
     '{{#things}}{{.}}{{^-last}}, {{/-last}}{{/things}}');
   html := mustache.RenderJson('{things:["one", "two", "three"]}');
-  check(html = 'one, two, three');
+  CheckEqual(html, 'one, two, three');
   mustache := TSynMustache.Parse(
     '{{#things}}{{#-last}}{{.}}{{/-last}}{{/things}}');
   html := mustache.RenderJson('{things:["one", "two", "three"]}');
-  check(html = 'three');
+  CheckEqual(html, 'three');
   mustache := TSynMustache.Parse(
     '{{#things}}{{#-odd}}{{.}}{{/-odd}}{{/things}}');
   html := mustache.RenderJson('{things:["one", "two", "three"]}');
-  check(html = 'onethree');
+  CheckEqual(html, 'onethree');
   mustache := TSynMustache.Parse(
     '{{"Hello}} {{name}}'#13#10'{{"You have just won}} {{value}} {{"dollars}}!');
-  Check(mustache.SectionMaxCount = 0);
+  CheckEqual(mustache.SectionMaxCount, 0);
   html := mustache.RenderJson('{name:?,value:?}', [], ['Chris', 10000], nil, nil,
     MustacheTranslate);
-  Check(html = 'Bonjour Chris'#$D#$A'Vous venez de gagner 10000 dollars!');
+  CheckEqual(html, 'Bonjour Chris'#$D#$A'Vous venez de gagner 10000 dollars!');
   mustache := TSynMustache.Parse(
     '1+3={{tval}} - is it 4?{{#if tval=4}} yes!{{/if}}');
   html := mustache.RenderJson('{tval:4}', nil, TSynMustache.HelpersGetStandardList);
-  check(html = '1+3=4 - is it 4? yes!');
+  CheckEqual(html, '1+3=4 - is it 4? yes!');
   html := mustache.RenderJson('{tval:5}', nil, TSynMustache.HelpersGetStandardList);
-  check(html = '1+3=5 - is it 4?');
+  CheckEqual(html, '1+3=5 - is it 4?');
   mustache := TSynMustache.Parse(
     '{{newguid}}');
   html := mustache.RenderJson('{}', nil, TSynMustache.HelpersGetStandardList);
@@ -912,21 +924,39 @@ begin
     '<li><strong>{{name}}</strong></li>'#$D#$A'{{/first}}'#$D#$A +
     '{{#link}}'#$D#$A'<li><a href="{{url}}">{{name}}</a></li>'#$D#$A'{{/link}}'#$D#$A +
     '{{/items}}'#$D#$A#$D#$A'{{#empty}}'#$D#$A'<p>The list is empty.</p>'#$D#$A'{{/empty}}');
-  Check(mustache.SectionMaxCount = 2);
+  CheckEqual(mustache.SectionMaxCount, 2);
   html := mustache.RenderJson(JSON_COLORS);
   CheckEqual(TrimU(html), RES_COLORS, 'RenderJson');
   Check(LoadJson(colors, JSON_COLORS, TypeInfo(TMustacheColors)));
   html := mustache.RenderData(colors, TypeInfo(TMustacheColors));
   CheckEqual(TrimU(html), RES_COLORS, 'RenderData1');
   mustache := TSynMustache.Parse(
+    '<h1>{{header}}</h1>'#$D#$A'{{#items}}'#$D#$A'{{#first}}'#$D#$A +
+    '<li><strong>{{name}}</strong></li>'#$D#$A'{{/}}'#$D#$A +
+    '{{#link}}'#$D#$A'<li><a href="{{url}}">{{name}}</a></li>'#$D#$A'{{/}}'#$D#$A +
+    '{{/}}'#$D#$A#$D#$A'{{#empty}}'#$D#$A'<p>The list is empty.</p>'#$D#$A'{{/}}');
+  CheckEqual(mustache.SectionMaxCount, 2, 'empty');
+  html := mustache.RenderJson(JSON_COLORS);
+  CheckEqual(TrimU(html), RES_COLORS, 'RenderJson1Empty');
+  html := mustache.RenderData(colors, TypeInfo(TMustacheColors));
+  CheckEqual(TrimU(html), RES_COLORS, 'RenderData1Empty');
+  mustache := TSynMustache.Parse(
     '{{#users}}'#$D#$A'{{^Connected}}'#$D#$A +
     '- {{Name}} {{Firstname}} ({{Connected}})<BR>'#$D#$A'{{/Connected}}'#$D#$A'{{/users}}');
-  Check(mustache.SectionMaxCount = 2);
+  CheckEqual(mustache.SectionMaxCount, 2);
   html := mustache.RenderJson(JSON_LOR);
   checkEqual(html, RES_LOR);
   Check(LoadJson(lor, JSON_LOR, TypeInfo(TMustacheLOR)));
   html := mustache.RenderData(lor, TypeInfo(TMustacheLOR));
   checkEqual(html, RES_LOR, 'RenderData2');
+  mustache := TSynMustache.Parse(
+    '{{#users}}'#$D#$A'{{^Connected}}'#$D#$A +
+    '- {{Name}} {{Firstname}} ({{Connected}})<BR>'#$D#$A'{{/}}'#$D#$A'{{/}}');
+  CheckEqual(mustache.SectionMaxCount, 2, 'empty');
+  html := mustache.RenderJson(JSON_LOR);
+  checkEqual(html, RES_LOR, 'RenderJson2Empty');
+  html := mustache.RenderData(lor, TypeInfo(TMustacheLOR));
+  checkEqual(html, RES_LOR, 'RenderData2Empty');
 
   // run official {{mustache}} regression tests suite
   TRttiJson.RegisterFromText(TypeInfo(TMustacheTest), __TMustacheTest,
@@ -935,10 +965,10 @@ begin
     JSONPARSER_TOLERANTOPTIONS, []);
   for spec := 0 to High(MUSTACHE_SPECS) do
   begin
-    mustacheJson := HttpGetWeak(
+    mustacheJson := DownloadFile(
       'https://raw.githubusercontent.com/mustache/spec/' +
       'master/specs/' + StringToAnsi7(MUSTACHE_SPECS[spec]) + '.json',
-      WorkDir + MUSTACHE_SPECS[spec] + '.json');
+      MUSTACHE_SPECS[spec] + '.json');
     RecordLoadJsonInPlace(mus, pointer(mustacheJson), TypeInfo(TMustacheTests));
     Check(length(mus.tests) > 5, 'mustacheJson load');
     for i := 0 to high(mus.tests) do
@@ -3265,14 +3295,14 @@ begin
   Check(JA.D = '1234');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayWithoutF), '');
 
-  discogsJson := HttpGetWeak(
+  discogsJson := DownloadFile(
     'https://api.discogs.com/artists/45/releases?page=1&per_page=100',
-    WorkDir + discogsFileName);
+    discogsFileName);
   Check(IsValidJson(discogsJson), 'discogsJson');
 
-  zendframeworkJson := HttpGetWeak(
+  zendframeworkJson := DownloadFile(
     'https://api.github.com/users/zendframework/repos',
-    WorkDir + zendframeworkFileName);
+    zendframeworkFileName);
   Check(IsValidJson(zendframeworkJson), 'zendJson');
 
   TestGit([jpoIgnoreUnknownProperty], []);
@@ -5056,6 +5086,8 @@ var
   end;
 
 begin
+  Check(@PBsonVariantData(nil)^.VBlob = @PVarData(nil)^.VAny);
+  Check(@PBsonVariantData(nil)^.VText = @PVarData(nil)^.VAny);
   // see http://docs.mongodb.org/manual/reference/object-id
   oid.FromText('507f191e810c19729de860ea');
   CheckEqual(oid.UnixCreateTime, bswap32($507f191e));
@@ -7866,11 +7898,15 @@ var
 begin
   for i := 0 to 200 do
     TestOne(RawUtf8OfChar(AnsiChar(i), i));
-  TestOne('hello' + by1(32, 10000) + 'hello' + by1(32, 1000) + 'world');
-  TestOne('hello' + by1($33, 10000) + 'hello' + by1($33, 1000) + 'world');
+  TestOne('hello' + by1(32, 10000) +
+          'hello' + by1(32, 1000) + 'world');
+  TestOne('hello' + by1($33, 10000) +
+          'hello' + by1($33, 1000) + 'world');
   for i := 1 to 150 do
-    TestOne('hello' + by1(i, Random32(200)) + 'hello' + by1(i + 100, Random32(200)) + 'world');
-  TestOne('hello' + by4($3031333, 10000) + 'hello' + by4($3031333, 1000) + 'world');
+    TestOne('hello' + by1(i, Random32(200)) +
+            'hello' + by1(i + 100, Random32(200)) + 'world');
+  TestOne('hello' + by4($3031333, 10000) +
+          'hello' + by4($3031333, 1000) + 'world');
   for i := 0 to 1000 do
   begin
     s := RawUtf8OfChar(' ', 20);
@@ -7888,15 +7924,15 @@ begin
     SetLength(comp1, AlgoSynLZ.Compressdestlen(length(s)));
     complen1 := SynLZCompress1(Pointer(s), length(s), pointer(comp1));
     Check(complen1 < length(comp1));
-    Check(complen1 = complen2);
+    CheckEqual(complen1, complen2);
     Check(CompareMem(pointer(comp1), pointer(comp2), complen1));
-    Check(SynLZDecompressdestlen(pointer(comp1)) = length(s));
-    Check(SynLZDecompressdestlen(pointer(comp2)) = length(s));
+    CheckEqual(SynLZDecompressdestlen(pointer(comp1)), length(s));
+    CheckEqual(SynLZDecompressdestlen(pointer(comp2)), length(s));
     SetLength(dec1, Length(s));
-    Check(SynLZDecompress1pas(Pointer(comp1), complen1, pointer(dec1)) = length(s));
+    CheckEqual(SynLZDecompress1pas(Pointer(comp1), complen1, pointer(dec1)), length(s));
     Check(CompareMem(pointer(dec1), pointer(s), length(s)));
     SetLength(dec2, Length(s));
-    Check(SynLZDecompress1(Pointer(comp2), complen2, pointer(dec2)) = length(s));
+    CheckEqual(SynLZDecompress1(Pointer(comp2), complen2, pointer(dec2)), length(s));
     Check(CompareMem(pointer(dec1), pointer(s), length(s)));
     {$endif CPUINTEL}
   end;
@@ -7929,7 +7965,9 @@ procedure TTestCoreCompression._TAlgoCompress;
     begin
       t := RawUtf8OfChar(AnsiChar(i), i){%H-}+{%H-}t;
       s := RawUtf8OfChar(AnsiChar(i), i){%H-}+{%H-}s;
-      Check(algo.Decompress(algo.Compress(s)) = t);
+      s2 := algo.Compress(s);
+      Check(s2 <> '');
+      Check(algo.Decompress(s2) = t);
     end;
     plain := 0;
     comp := 0;
@@ -7969,7 +8007,7 @@ procedure TTestCoreCompression._TAlgoCompress;
 
 begin
   TestAlgo(AlgoSynLZ);
-  TestAlgo(AlgoRleLZ); // don't compress better, but validate the class
+  TestAlgo(AlgoRleLZ); // don't compress much better, but validate the class
   TestAlgo(AlgoRle);   // don't compress exe nor log, but validate the class
   Check(AlgoSynLZ.AlgoName = 'synlz');
   {$ifdef OSWINDOWS}

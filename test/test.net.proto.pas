@@ -51,6 +51,7 @@ type
     hasinternet: boolean;
     // for _THttpPeerCache
     peercacheopt: THttpRequestExtendedOptions;
+    peercachedirect: THttpPeerCache;
     // for _TUriTree
     reqone, reqtwo: RawUtf8;
     request: integer;
@@ -212,17 +213,15 @@ const
   MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('', 'one', 'and 2');
 
 const
-  // some reference from https://github.com/OAI/OpenAPI-Specification and others
-  OpenApiRef: array[0..4] of RawUtf8 = (
-    'v2.0/json/petstore-simple.json',
-    'v3.0/petstore.json',
+  // some reference OpenAPI/Swagger definitions
+  OpenApiRef: array[0 .. 3] of RawUtf8 = (
     'https://petstore.swagger.io/v2/swagger.json',
+    'https://petstore3.swagger.io/api/v3/openapi.json',
     'https://qdrant.github.io/qdrant/redoc/v1.8.x/openapi.json',
     'https://platform-api-staging.vas.com/api/v1/swagger.json');
-  OpenApiName: array[0..high(OpenApiRef)] of RawUtf8 = (
+  OpenApiName: array[0 .. high(OpenApiRef)] of RawUtf8 = (
     'Pets2',
     'Pets3',
-    'PetStore',
     'Qdrant',
     'VAS');
 
@@ -230,7 +229,7 @@ procedure TNetworkProtocols.OpenAPI;
 var
   i: PtrInt;
   fn: TFileName;
-  u, url, dto, client: RawUtf8;
+  key, prev, url, dto, client: RawUtf8;
   api: TRawUtf8DynArray;
   oa: TOpenApiParser;
   timer: TPrecisionTimer;
@@ -240,19 +239,18 @@ begin
   CheckEqual(FindCustomEnum(MYENUM2TXT, ''), 0);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and'), 0);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 3'), 0);
-  for i := 1 to high(RESERVED_KEYWORDS) do
-    CheckUtf8(StrComp(pointer(RESERVED_KEYWORDS[i - 1]),
-      pointer(RESERVED_KEYWORDS[i])) < 0, RESERVED_KEYWORDS[i]);
   for i := 0 to high(RESERVED_KEYWORDS) do
   begin
-    u := RESERVED_KEYWORDS[i];
-    Check(IsReservedKeyWord(u));
-    inc(u[1], 32); // lowercase
-    Check(IsReservedKeyWord(u));
-    LowerCaseSelf(u);
-    Check(IsReservedKeyWord(u));
-    u := u + 's';
-    Check(not IsReservedKeyWord(u));
+    key := RESERVED_KEYWORDS[i];
+    CheckUtf8(StrComp(pointer(prev), pointer(key)) < 0, key);
+    prev := key;
+    Check(IsReservedKeyWord(key));
+    inc(key[1], 32);    // lowercase first char
+    Check(IsReservedKeyWord(key));
+    LowerCaseSelf(key); // lowercase all chars
+    Check(IsReservedKeyWord(key));
+    key := key + 's';
+    Check(not IsReservedKeyWord(key));
     Check(not IsReservedKeyWord(UInt32ToUtf8(i)));
   end;
   SetLength(api, length(OpenApiRef));
@@ -262,14 +260,11 @@ begin
       fn := FormatString('%OpenApi%.json', [WorkDir, OpenApiName[i]]);
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
-        continue;
+        continue; // already downloaded and formatted
       url := OpenApiRef[i];
-      if not IdemPChar(pointer(url), 'HTTP') then
-        url := Join(['https://raw.githubusercontent.com/OAI/' +
-                 'OpenAPI-Specification/main/examples/', url]);
-      JsonBufferReformat(pointer(HttpGetWeak(url)), api[i]);
+      JsonBufferReformat(pointer(DownloadFile(url)), api[i]);
       if api[i] <> '' then
-        FileFromString(api[i], fn);
+        FileFromString(api[i], fn); // it is a valid JSON file
     end;
   for i := 0 to high(api) do
     if api[i] <> '' then
@@ -284,6 +279,11 @@ begin
         //oa.Options := oa.Options + [opoClientOnlySummary];
         //oa.Options := oa.Options + [opoDtoNoDescription, opoClientNoDescription];
         oa.ParseJson(api[i]);
+        // ensure there was something properly parsed
+        Check(oa.Version <> oavUnknown, 'version');
+        Check(oa.Title <> '', 'title');
+        Check(oa.Operations <> nil, 'operations');
+        // generate the dto/client units
         dto := oa.GenerateDtoUnit;
         client := oa.GenerateClientUnit;
         Check((opoGenerateSingleApiUnit in oa.Options) or (dto <> ''), 'dto');
@@ -947,6 +947,12 @@ begin
   Check(NetIsIP4('1.2.3.4', @c));
   CheckEqual(c, $04030201);
   // validate DNS client with some known values
+  CheckEqual(ord(drrOPT), 41);
+  CheckEqual(ord(drrHTTPS), 65);
+  CheckEqual(ord(drrSPF), 99);
+  CheckEqual(ord(drrEUI64), 109);
+  CheckEqual(ord(drrTKEY), 249);
+  CheckEqual(ord(drrAMTRELAY), 260);
   CheckEqual(DnsLookup(''), '');
   CheckEqual(DnsLookup('localhost'), '127.0.0.1');
   CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
@@ -1759,8 +1765,8 @@ begin
     Check(sub.SaveToBinary = bin, 'loadtext');
     Check(sub.Match('1.2.3.4'));
     Check(not sub.Match('1.2.3.5'));
-    txt := HttpGetWeak('https://raw.githubusercontent.com/firehol/blocklist-ipsets/' +
-      'refs/heads/master/firehol_level1.netset', WorkDir + 'firehol.netset');
+    txt := DownloadFile('https://raw.githubusercontent.com/firehol/blocklist-ipsets/' +
+      'refs/heads/master/firehol_level1.netset', 'firehol.netset');
     if txt <> '' then
     begin
       sub.Clear;
@@ -1797,8 +1803,8 @@ begin
       for i := 1 to 20000 do
         Check(not IP4SubNetMatch(pointer(bin), $01010101), 'IP4SubNetMatch');
       NotifyTestSpeed('blacklist direct', 20000, 0, @timer);
-      txt := HttpGetWeak('https://www.spamhaus.org/drop/drop.txt',
-        WorkDir + 'spamhaus.netset');
+      txt := DownloadFile('https://www.spamhaus.org/drop/drop.txt',
+        'spamhaus.netset');
       if txt <> '' then
       begin
         Check(sub.AddFromText(txt) < 1000, 'spamhaus within firehol');
@@ -1855,6 +1861,9 @@ begin
   result := HTTP_SUCCESS;
   Ctxt.OutContent := FakeGif(Ctxt.Url);
   Ctxt.OutContentType := 'image/gif';
+  Check(Assigned(peercachedirect));
+  CheckEqual(peercachedirect.HttpServer.CurrentProcess, 1, 'hpcState');
+  Check(gasProcessing in peercachedirect.State, 'hpcStateRequest');
 end;
 
 procedure TNetworkProtocols.RunPeerCacheDirect(Sender: TObject);
@@ -1871,10 +1880,31 @@ var
   tls: TNetTlsContext;
   popt: PHttpRequestExtendedOptions;
   localserver: THttpServer;
+
+  procedure WaitNotProcessing(const Context: string);
+  var
+    endtix: Int64;
+  begin
+    if not (gasProcessing in hpc.State) then
+    begin
+      Check(true, Context); // most common case
+      exit;
+    end;
+    endtix := GetTickCount64 + 500; // never wait forever
+    repeat
+      SleepHiRes(10); // let the HTTP thread finalize its course
+    until (not (gasProcessing in hpc.State)) or
+          (GetTickCount64 > endtix);
+    CheckUtf8(not (gasProcessing in hpc.State),
+      '%=%', [Context, ToText(hpc.State)]);
+  end;
+
 begin
   hcs := nil;
   localserver := THttpServer.Create('8889', nil, nil, 'local', 2);
   try
+    peercachedirect := hpc;
+    Check(hpc.State = [], 'hpcState1');
     localserver.OnRequest := OnPeerCacheRequest; // return the URL
     hpc.OnDirectOptions := OnPeerCacheDirect;
     try
@@ -1927,18 +1957,21 @@ begin
         CheckEqual(ctyp, 'image/gif');
         len := hcs.ContentLength;
         CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+        WaitNotProcessing('hpcState2');
         // GET twice to retrieve from cache
         status := hcs.Get(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
         CheckEqual(Sha256(hcs.Content), hash);
+        WaitNotProcessing('hpcState3');
         // HEAD should work with cache
         status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
         CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+        WaitNotProcessing('hpcState4');
         // prepare local requests on cache in pcfBearer mode (like a peer)
         hpc.MessageInit(pcfBearer, 0, msg2);
         CheckEqual(msg2.IP4, hpc.IP4);
@@ -1956,22 +1989,27 @@ begin
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp, 'ctyp from cached content');
         CheckEqual(Sha256(hcs.Content), hash);
+        WaitNotProcessing('hpcState5');
         // HEAD on cache in pcfBearer mode
         status := hcs.Head('dummies', HTTP_TIMEOUT, dtok);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, '');
+        WaitNotProcessing('hpcState6');
         // HEAD should work without cache and call directly the http server
         Check(DeleteFile(cache));
         status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
+        WaitNotProcessing('hpcState7');
       end;
     finally
       hcs.Free;
     end;
   finally
+    WaitNotProcessing('hpcStateFinal');
+    peercachedirect := nil;
     hpc.Settings.Free;
     hpc.Free;
     localserver.Free;
@@ -2172,7 +2210,7 @@ var
   U: TUri;
   h: PUtf8Char;
   l: PtrInt;
-  dig: THash512Rec;
+  dig: THashDigest;
 
   procedure Check4;
   begin
@@ -2302,14 +2340,19 @@ begin
   check(U.From('https://ictuswin.com/toto/titi'));
   h := HttpRequestLength('Content-Lengths: 100'#13#10, l);
   check(h = nil);
+  FillCharFast(dig, SizeOf(dig), 0);
+  CheckEqual(ord(dig.Algo), 0);
   l := HttpRequestHash(hfSHA256, U, 'etag: "1234"'#13#10, dig);
   CheckEqual(l, SizeOf(THash256));
-  CheckEqual(Sha256DigestToString(dig.Lo),
+  Check(dig.Algo = hfSHA256);
+  CheckEqual(Sha256DigestToString(dig.Bin.Lo),
     'cc991f15d823e419ef45f8b94e6759c4f992056c1c1a64cc79338c49f9720273');
+  FillCharFast(dig, SizeOf(dig), 0);
   l := HttpRequestHash(hfSHA256, U,
     'Content-Length: 100'#13#10'Last-Modified: 2025', dig);
   CheckEqual(l, SizeOf(THash256));
-  CheckEqual(Sha256DigestToString(dig.Lo),
+  Check(dig.Algo = hfSHA256);
+  CheckEqual(Sha256DigestToString(dig.Bin.Lo),
     '9b23e3b9894578f2709eca35aa9afad277ab5aa4afe9344192f59535719ac734');
 end;
 

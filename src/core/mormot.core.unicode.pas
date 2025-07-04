@@ -549,7 +549,7 @@ type
     // - use this array like AnsiToWide: array[byte] of word
     property AnsiToWide: TWordDynArray
       read fAnsiToWide;
-    /// direct access to the Unicode-To-Ansi lookup table
+    /// direct access to the UTF-16 to Ansi lookup table
     // - use this array like WideToAnsi: array[word] of byte
     // - any unhandled WideChar will return ord('?')
     property WideToAnsi: TByteDynArray
@@ -1418,14 +1418,14 @@ function IdemPCharW(p: PWideChar; up: PUtf8Char): boolean;
 // - returns true if the item matched
 // - ignore case - upTextStart must be already in upper case
 // - chars are compared as 7-bit Ansi only (no accentuated chars, nor UTF-8)
-// - see StartWithExact() from mormot.core.text for a case-sensitive version
+// - see StartWithExact() from this unit for a case-sensitive version
 function StartWith(const text, upTextStart: RawUtf8): boolean;
 
 /// check case-insensitive matching ending of text in upTextEnd
 // - returns true if the item matched
 // - ignore case - upTextEnd must be already in upper case
 // - chars are compared as 7-bit Ansi only (no accentuated chars, nor UTF-8)
-// - see EndWithExact() from mormot.core.text for a case-sensitive version
+// - see EndWithExact() from this unit for a case-sensitive version
 function EndWith(const text, upTextEnd: RawUtf8): boolean;
 
 /// returns the index of a case-insensitive matching ending of p^ in upArray[]
@@ -1852,13 +1852,13 @@ type
 
 /// check case-sensitive matching starting of text in start
 // - returns true if the item matched
-// - see StartWith() from mormot.core.unicode for a case-insensitive version
+// - see StartWith() from this unit for a case-insensitive version
 function StartWithExact(const text, textStart: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// check case-sensitive matching ending of text in ending
 // - returns true if the item matched
-// - see EndWith() from mormot.core.unicode for a case-insensitive version
+// - see EndWith() from this unit for a case-insensitive version
 function EndWithExact(const text, textEnd: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -1957,13 +1957,6 @@ function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
 /// check all character within text are spaces or control chars
 // - i.e. a faster alternative to  if TrimU(text)='' then
 function IsVoid(const text: RawUtf8): boolean;
-
-/// fill all bytes of this memory buffer with zeros, i.e. 'toto' -> #0#0#0#0
-// - will write the memory buffer directly, if this string instance is not shared
-// (i.e. has refcount = 1), to avoid zeroing still-used values
-// - may be used to cleanup stack-allocated content
-// ! ... finally FillZero(secret); end;
-procedure FillZero(var secret: RawByteString); overload;
 
 /// fill all bytes of this UTF-8 string with zeros, i.e. 'toto' -> #0#0#0#0
 // - will write the memory buffer directly, if this string instance is not shared
@@ -2249,7 +2242,7 @@ procedure SnakeCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8); overload;
 function SnakeCase(const text: RawUtf8): RawUtf8; overload;
 
 const
-  // published for unit testing (e.g. if properly sorted)
+  // published for unit testing in TNetworkProtocols.OpenAPI (e.g. if sorted)
   RESERVED_KEYWORDS: array[0..91] of RawUtf8 = (
     'ABSOLUTE', 'ABSTRACT', 'ALIAS', 'AND', 'ARRAY', 'AS', 'ASM', 'ASSEMBLER',
     'BEGIN', 'CASE', 'CLASS', 'CONST', 'CONSTREF', 'CONSTRUCTOR', 'DESTRUCTOR',
@@ -3210,7 +3203,7 @@ begin
     end
     else if PtrUInt(source) >= PtrUInt(len) + 4 then
       break;
-    c := utf8[source^]; // number of expected extra bytes
+    c := utf8[source^]; // number of expected extra bytes (1..6)
     inc(source);
     if c = UTF8_ASCII then
       continue // last 1..3 chars
@@ -3945,7 +3938,12 @@ end;
 
 function TSynAnsiConvert.Utf8ToAnsi(const u: RawUtf8): RawByteString;
 begin
-  Utf8BufferToAnsi(pointer(u), length(u), result);
+  if (u = '') or
+     {$ifdef HASCODEPAGE} (GetCodePage(u) = fCodePage) {$else}
+     IsAnsiCompatible(PAnsiChar(pointer(u)), Length(u)) {$endif HASCODEPAGE} then
+    result := u
+  else
+    Utf8BufferToAnsi(pointer(u), length(u), result);
 end;
 
 function TSynAnsiConvert.Utf8ToAnsiBuffer2K(const S: RawUtf8;
@@ -7808,7 +7806,8 @@ end;
 
 function PosExI(const SubStr, S: RawUtf8; Offset: PtrUInt; Lookup: PNormTable): PtrInt;
 begin
-  if Lookup = nil then
+  if (Lookup = nil) or
+     (Lookup = @NormToNorm) then
     {$ifdef CPUX86}
     result := PosEx(SubStr, S, Offset)
     {$else}
@@ -8250,16 +8249,6 @@ begin
       inc(p);
     until p^ = #0;
   result := true;
-end;
-
-procedure FillZero(var secret: RawByteString);
-begin
-  if secret = '' then
-    exit;
-  with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
-    if refCnt = 1 then // avoid GPF if const
-      FillCharFast(pointer(secret)^, length, 0);
-  FastAssignNew(secret); // dec refCnt
 end;
 
 procedure FillZero(var secret: RawUtf8);

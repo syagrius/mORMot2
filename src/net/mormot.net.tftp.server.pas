@@ -216,7 +216,8 @@ destructor TTftpConnectionThread.Destroy;
 begin
   Terminate;
   fContext.Shutdown;
-  fOwner.fConnection.Remove(self); // ownobject=false: just decrease Count
+  if Assigned(fOwner.fConnection) then // may be nil from fOwner.Destroy
+    fOwner.fConnection.Remove(self); // ownobject=false: just decrease Count
   inherited Destroy;
   Freemem(fLastSent);
   FreeMem(fContext.Frame);
@@ -371,7 +372,10 @@ destructor TTftpServerThread.Destroy;
 begin
   inherited Destroy;
   fFileCache.Free;
-  FreeAndNil(fConnection); // paranoid
+  FreeAndNil(fConnection); // paranoid (usually done in OnShutdown)
+  {$ifdef OSPOSIX}
+  FreeAndNil(fPosixFileNames);
+  {$endif OSPOSIX}
 end;
 
 procedure TTftpServerThread.OnShutdown;
@@ -380,10 +384,7 @@ begin
   if fConnection = nil then
     exit;
   NotifyShutdown;
-  FreeAndNil(fConnection);
-  {$ifdef OSPOSIX}
-  FreeAndNil(fPosixFileNames);
-  {$endif OSPOSIX}
+  FreeAndNil(fConnection); // nil for TTftpConnectionThread.Destroy
 end;
 
 procedure TTftpServerThread.NotifyShutdown;

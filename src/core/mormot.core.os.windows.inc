@@ -26,7 +26,7 @@ begin
   tmp.Done;
 end; // warning: Delphi 7/2007 UnicodeToUtf8() RTL doesn't handle surrogates
 
-function IsExtendedPathName(Name: PWideChar): boolean;
+function IsExtendedPathName(Name: PWideChar): boolean; // in '\\?\...' format
 begin
   result := (Name <> nil) and
             (Name[0] = '\') and
@@ -42,7 +42,7 @@ begin
   Len := Len * 2 + 2; // in bytes, +2 to include ending #0
   if (Len <= MAX_PATH * 2) or
      ((Len <= SizeOf(Temp) - 8) and
-      IsExtendedPathName(Name)) then
+      IsExtendedPathName(Name)) then // in '\\?\...' format
   begin
     MoveFast(Name^, Temp[0], Len); // we can use the supplied UTF-16 file name
     exit;
@@ -583,6 +583,11 @@ end;
 function GetErrorText(error: integer): RawUtf8;
 begin
   result := WinErrorText(error);
+end;
+
+procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
+begin
+  WinErrorShort(Code, Dest, NoInt);
 end;
 
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
@@ -1197,17 +1202,22 @@ begin
     end;
 end;
 
+function IsExpandedPath(const FileName: TFileName): boolean;
+begin
+  result := (FileName = '') or
+     ((FileName[2] = ':') and
+      (length(FileName) < MAX_PATH) and
+      (ord(FileName[1]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
+      (Pos('..', FileName) = 0)); // seems already expanded
+end;
+
 function ExpandFileName(const FileName: TFileName): TFileName;
 var
   w, fp: PWideChar;
   t1, t2: TW32Temp;
 begin
   result := FileName;
-  if (FileName = '') or
-     ((FileName[2] = ':') and 
-      (length(FileName) < MAX_PATH) and
-      (ord(FileName[1]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
-      (Pos('..', FileName) = 0)) then
+  if IsExpandedPath(FileName) then
     exit; // it seems to be already expanded 
   w := W32(FileName, t1);
   if w = nil then
@@ -1478,7 +1488,7 @@ begin
 end;
 
 type
-  // avoid linking of ComObj.pas just for EOleSysError
+  // avoid linking of ComObj.pas just for EOleSysError - same for Delphi and FPC
   EOleSysError = class(Exception)
   public
     ErrorCode: cardinal;
@@ -1490,8 +1500,8 @@ type
   // https://docs.microsoft.com/en-us/archive/blogs/yizhang/interpreting-hresults-returned-from-netclr-0x8013xxxx
   // see also https://referencesource.microsoft.com/#mscorlib/system/__hresults.cs
   TDotNetException = (
-    _Access,                            // $8013151A
-    _AmbiguousMatch,                    // $8000211D
+    _Access,                            // $8013151a
+    _AmbiguousMatch,                    // $8000211d
     _appdomainUnloaded,                 // $80131015
     _Application,                       // $80131600
     _Argument,                          // $80070057
@@ -1499,7 +1509,7 @@ type
     _ArgumentOutOfRange,                // $80131502
     _Arithmetic,                        // $80070216
     _ArrayTypeMismatch,                 // $80131503
-    _BadImageFormat,                    // $8007000B
+    _BadImageFormat,                    // $8007000b
     _CannotUnloadappdomain,             // $80131015
     _ContextMarshal,                    // $80090020
     _Cryptographic,                     // $80004001
@@ -1510,7 +1520,7 @@ type
     _DivideByZero,                      // $80020012
     _DllNotFound,                       // $80131524
     _DuplicateWaitObject,               // $80131529
-    _EndOfStream,                       // $00801338
+    _EndOfStream,                       // $80070026
     _EntryPointNotFound,                // $80131522
     _,                                  // $80131500 - name is plain Exception
     _ExecutionEngine,                   // $80131506
@@ -1526,7 +1536,7 @@ type
     _InvalidFilterCriteria,             // $80131601
     _InvalidOleVariantType,             // $80131531
     _InvalidOperation,                  // $80131509
-    _InvalidProgram,                    // $8013153A
+    _InvalidProgram,                    // $8013153a
     _IO,                                // $80131620
     _IsolatedStorage,                   // $80131450
     _MarshalDirective,                  // $80131535
@@ -1540,21 +1550,21 @@ type
     _NotImplemented,                    // $80004001
     _NotSupported,                      // $80131515
     _NullReference,                     // $80004003
-    _OutOfMemory,                       // $8007000E
+    _OutOfMemory,                       // $8007000e
     _Overflow,                          // $80131516
     _PlatformNotSupported,              // $80131539
     _Policy,                            // $80131416
     _Rank,                              // $80131517
     _ReflectionTypeLoad,                // $80131602
-    _Remoting,                          // $8013150B
-    _RemotingTimeout,                   // $8013150B
+    _Remoting,                          // $8013150b
+    _RemotingTimeout,                   // $8013150b
     _SafeArrayTypeMismatch,             // $80131533
     _SafeArrayRankMismatch,             // $80131538
-    _Security,                          // $8013150A
+    _Security,                          // $8013150a
     _SEH,                               // $80004005
-    _Serialization,                     // $8013150C
-    _Server,                            // $8013150E
-    _StackOverflow,                     // $800703E9
+    _Serialization,                     // $8013150c
+    _Server,                            // $8013150e
+    _StackOverflow,                     // $800703e9
     _SUDSGenerator,                     // $80131500
     _SUDSParser,                        // $80131500
     _SynchronizationLock,               // $80131518
@@ -1573,8 +1583,8 @@ type
     _InClassConstructor,                // $80131543
     _KeyNotFound,                       // $80131577
     _InsufficientStack,                 // $80131578
-    _InsufficientMemory,                // $8013153D
-    _Verification,                      // $8013150D
+    _InsufficientMemory,                // $8013153d
+    _Verification,                      // $8013150d
     _HostProtection,                    // $80131640
     _MinGrantFailed,                    // $80131417
     _Crypto,                            // $80131430
@@ -1584,120 +1594,135 @@ type
     _TypeMismatch);                     // $80028ca0
 const
   DOTNET_EXCEPTIONHRESULT: array[TDotNetException] of cardinal = (
-    $8013151A,
-    $8000211D,
-    $80131015,
-    $80131600,
-    $80070057,
-    $80004003,
-    $80131502,
-    $80070216,
-    $80131503,
-    $8007000B,
-    $80131015,
-    $80090020,
-    $80004001,
-    $80131431,
-    $80131537,
-    $80070003,
-    $80030003,
-    $80020012,
-    $80131524,
-    $80131529,
-    $00801338,
-    $80131522,
-    $80131500,
-    $80131506,
-    $80004005,
-    $80131507,
-    $80131621,
-    $80131018,
-    $80070002,
-    $80131537,
-    $80131508,
-    $80004002,
-    $80131527,
-    $80131601,
-    $80131531,
-    $80131509,
-    $8013153A,
-    $80131620,
-    $80131450,
-    $80131535,
-    $80131510,
-    $80131511,
-    $80131532,
-    $80131512,
-    $80131513,
-    $80131514,
-    $80131528,
-    $80004001,
-    $80131515,
-    $80004003,
-    $8007000E,
-    $80131516,
-    $80131539,
-    $80131416,
-    $80131517,
-    $80131602,
-    $8013150B,
-    $8013150B,
-    $80131533,
-    $80131538,
-    $8013150A,
-    $80004005,
-    $8013150C,
-    $8013150E,
-    $800703E9,
-    $80131500,
-    $80131500,
-    $80131518,
-    $80131501,
-    $80131603,
-    $80131604,
-    $80138002,
-    $80131530,
-    $80131519,
-    $80131520,
-    $80131521,
-    $80131534,
-    $80131522,
-    $80131013,
-    $80070005,
-    $80131543,
-    $80131577,
-    $80131578,
-    $8013153D,
-    $8013150D,
-    $80131640,
-    $80131417,
-    $80131430,
-    $80131431,
-    $8002000a,
-    $80131047,
-    $80028ca0);
+    $8013151a,  // AccessException
+    $8000211d,  // AmbiguousMatchException
+    $80131015,  // appdomainUnloadedException
+    $80131600,  // ApplicationException
+    $80070057,  // ArgumentException
+    $80004003,  // ArgumentNullException
+    $80131502,  // ArgumentOutOfRangeException
+    $80070216,  // ArithmeticException
+    $80131503,  // ArrayTypeMismatchException
+    $8007000b,  // BadImageFormatException
+    $80131015,  // CannotUnloadappdomainException
+    $80090020,  // ContextMarshalException
+    $80004001,  // CryptographicException
+    $80131431,  // CryptographicUnexpectedOperationException
+    $80131537,  // CustomAttributeFormatException
+    $80070003,  // DirectoryNotFoundException
+    $80030003,  // DirectoryNotFound2Exception
+    $80020012,  // DivideByZeroException
+    $80131524,  // DllNotFoundException
+    $80131529,  // DuplicateWaitObjectException
+    $80070026,  // EndOfStreamException
+    $80131522,  // EntryPointNotFoundException
+    $80131500,  // Exception
+    $80131506,  // ExecutionEngineException
+    $80004005,  // ExternalException
+    $80131507,  // FieldAccessException
+    $80131621,  // FileLoadException
+    $80131018,  // FileLoad2Exception
+    $80070002,  // FileNotFoundException
+    $80131537,  // FormatException
+    $80131508,  // IndexOutOfRangeException
+    $80004002,  // InvalidCastException
+    $80131527,  // InvalidComObjectException
+    $80131601,  // InvalidFilterCriteriaException
+    $80131531,  // InvalidOleVariantTypeException
+    $80131509,  // InvalidOperationException
+    $8013153a,  // InvalidProgramException
+    $80131620,  // IOException
+    $80131450,  // IsolatedStorageException
+    $80131535,  // MarshalDirectiveException
+    $80131510,  // MethodAccessException
+    $80131511,  // MissingFieldException
+    $80131532,  // MissingManifestResourceException
+    $80131512,  // MissingMemberException
+    $80131513,  // MissingMethodException
+    $80131514,  // MulticastNotSupportedException
+    $80131528,  // NotFiniteNumberException
+    $80004001,  // NotImplementedException
+    $80131515,  // NotSupportedException
+    $80004003,  // NullReferenceException
+    $8007000e,  // OutOfMemoryException
+    $80131516,  // OverflowException
+    $80131539,  // PlatformNotSupportedException
+    $80131416,  // PolicyException
+    $80131517,  // RankException
+    $80131602,  // ReflectionTypeLoadException
+    $8013150b,  // RemotingException
+    $8013150b,  // RemotingTimeoutException
+    $80131533,  // SafeArrayTypeMismatchException
+    $80131538,  // SafeArrayRankMismatchException
+    $8013150a,  // SecurityException
+    $80004005,  // SEHException
+    $8013150c,  // SerializationException
+    $8013150e,  // ServerException
+    $800703e9,  // StackOverflowException
+    $80131500,  // SUDSGeneratorException
+    $80131500,  // SUDSParserException
+    $80131518,  // SynchronizationLockException
+    $80131501,  // SystemException
+    $80131603,  // TargetException
+    $80131604,  // TargetInvocationException
+    $80138002,  // TargetParameterCountException
+    $80131530,  // ThreadAbortException
+    $80131519,  // ThreadInterruptedException
+    $80131520,  // ThreadStateException
+    $80131521,  // ThreadStopException
+    $80131534,  // TypeInitializationException
+    $80131522,  // TypeLoadException
+    $80131013,  // TypeUnloadedException
+    $80070005,  // UnauthorizedAccessException
+    $80131543,  // InClassConstructorException
+    $80131577,  // KeyNotFoundException
+    $80131578,  // InsufficientStackException
+    $8013153d,  // InsufficientMemoryException
+    $8013150d,  // VerificationException
+    $80131640,  // HostProtectionException
+    $80131417,  // MinGrantFailedException
+    $80131430,  // CryptoException
+    $80131431,  // CryptoUnexOperException
+    $8002000a,  // Overflow2Exception
+    $80131047,  // InvalidNameException
+    $80028ca0); // TypeMismatchException
 
-procedure Win32DotNetExceptions(code: cardinal; var names: TPShortStringDynArray);
+function Win32DotNetExceptions(code: cardinal; var dest: ShortString): boolean;
 var
   e: TDotNetException;
+  ps: PByteArray;
+  p: PAnsiChar;
 begin
+  result := false;
+  if integer(code) >= 0 then // not $80xxxxxx values
+    exit;
+  dest[0] := #0;
   for e := low(e) to high(e) do
     // manual loop: the same error code can appear several times
     if DOTNET_EXCEPTIONHRESULT[e] = code then
-      PtrArrayAdd(names, GetEnumNameRtti(TypeInfo(TDotNetException), ord(e)));
+    begin
+      ps := pointer(GetEnumNameRtti(TypeInfo(TDotNetException), ord(e)));
+      if ps^[0] = 0 then
+        continue;
+      if dest[0] = #0 then
+        dest := ' [.NET/CLR unhandled'
+      else if ord(dest[0]) + ps^[0] > 240 then
+        break; // paranoid
+      p := @dest[ord(dest[0]) + 1];
+      p^ := ' '; // replace leading '_' by ' '
+      MoveFast(ps^[2], p[1], ps^[0] - 1);
+      inc(dest[0], ps^[0]);
+      AppendShort('Exception', dest);
+      result := true;
+    end;
+  if result then
+    AppendShortChar(']', @dest)
 end;
 
-function TSynLogExceptionContext.AdditionalInfo(
-  out ExceptionNames: TPShortStringDynArray): cardinal;
+function TSynLogExceptionContext.AdditionalInfo(var dest: shortstring): boolean;
 begin
-  if ClassInheritsFromName(EClass, 'EOleSysError') then
-  begin
-    result := EOleSysError(EInstance).ErrorCode;
-    if result > $80000000 then
-      Win32DotNetExceptions(result, ExceptionNames);
-  end
-  else
-    result := 0;
+  result := ClassInheritsFromName(EClass, 'EOleSysError') and
+            Win32DotNetExceptions(EOleSysError(EInstance).ErrorCode, dest);
 end;
 
 var
@@ -1735,7 +1760,7 @@ type
     case {IsOsException:} boolean of
       true:
         (ExceptionInformation: array[0..14] of PtrUInt);
-      false:
+      false: // ExceptionCode = cRtlException
         (ExceptAddr: PtrUInt;
          ExceptObject: Exception);
   end;
@@ -1760,7 +1785,7 @@ begin
   backuphandler := _RawLogException;
   if Assigned(backuphandler) then // paranoid check (tested before calling)
     try
-      _RawLogException := nil; // disable nested exception
+      _RawLogException := nil; // disable nested exception at API level
       ctxt.ECode := Exc.ExceptionCode;
       if (Exc.ExceptionCode = cRtlException) and
          (Exc.ExceptObject <> nil) then
@@ -5248,31 +5273,28 @@ var
 begin
   {$ifdef ASMX86}
   {$ifndef HASNOSSE2}
-  if not (cfSSE2 in CpuFeatures) then
+  if not (cfSSE2 in CpuFeatures) then // introduced in year 2000 with Pentium 4
   begin
+    ConsoleWrite('WARNING: too old CPU - recompile with HASNOSSE2', ccLightRed);
     // avoid illegal opcode in MoveFast() and SynLZ functions
     {$ifdef ISDELPHI} // FPC_X86 already redirect to FastCode RTL Move()
     RedirectCode(@MoveFast, @System.Move);
     {$endif ISDELPHI}
-    RedirectCode(@SynLZcompress1, @SynLZcompress1Pas);
-    RedirectCode(@SynLZdecompress1, @SynLZdecompress1Pas);
-    ConsoleWrite('WARNING: too old CPU - recompile with HASNOSSE2', ccLightRed);
+    RedirectCode(@SynLZdecompress1, @SynLZdecompress1Pas); // bypass SSE2 code
+    RedirectCode(@ByteScanIndex,    @ByteScanIndexPas);
+    RedirectCode(@IntegerScanIndex, @IntegerScanIndexPas);
+    RedirectCode(@WordScanIndex,    @WordScanIndexPas);
     // note: FillCharFast is handled by mormot.core.base via ERMSB
-    // and Byte/Word/IntegerScanIndex() are likely to GPF at runtime
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86}
   // late-binding of newest Windows APIs
   DoWin32PWideCharToUtf8 := @_DoWin32PWideCharToUtf8; // or mormot.core.unicode
   h := GetModuleHandle(kernel32);
-  GetTickCount64 := GetProcAddress(h, 'GetTickCount64'); // Vista+
-  if not Assigned(GetTickCount64) then
-    GetTickCount64 := @GetTickCount64ForXP;
   GetSystemTimePreciseAsFileTime :=
     GetProcAddress(h, 'GetSystemTimePreciseAsFileTime'); // Win8+
   if not Assigned(GetSystemTimePreciseAsFileTime) then
     GetSystemTimePreciseAsFileTime := @GetSystemTimeAsFileTime;
-  CreateSymbolicLinkW := GetProcAddress(h, 'CreateSymbolicLinkW'); // Vista+
   QueryPerformanceFrequency(PInt64(@_QueryPerformanceFrequency)^);
   if _QueryPerformanceFrequency = 0 then
     raise Exception.Create('QueryPerformanceFrequency=0'); // paranoid
@@ -5300,16 +5322,21 @@ begin
     ((machine = IMAGE_FILE_MACHINE_I386) or
      (machine = IMAGE_FILE_MACHINE_AMD64));
     {$endif CPUINTEL}
-  QueryFullProcessImageNameW := GetProcAddress(h, 'QueryFullProcessImageNameW'); // Vista+
+  // Vista+ kernel32.dll APIs
+  GetTickCount64 := GetProcAddress(h, 'GetTickCount64'); // Vista+
+  if not Assigned(GetTickCount64) then
+    GetTickCount64 := @GetTickCount64ForXP;
+  QueryFullProcessImageNameW     := GetProcAddress(h, 'QueryFullProcessImageNameW');
   GetLogicalProcessorInformation := GetProcAddress(h, 'GetLogicalProcessorInformation');
-  InitializeSRWLock       := GetProcAddress(h, 'InitializeSRWLock'); // Vista+
-  AcquireSRWLockExclusive := GetProcAddress(h, 'AcquireSRWLockExclusive');
-  ReleaseSRWLockExclusive := GetProcAddress(h, 'ReleaseSRWLockExclusive');
+  CreateSymbolicLinkW            := GetProcAddress(h, 'CreateSymbolicLinkW');
+  InitializeSRWLock              := GetProcAddress(h, 'InitializeSRWLock');
+  AcquireSRWLockExclusive        := GetProcAddress(h, 'AcquireSRWLockExclusive');
+  ReleaseSRWLockExclusive        := GetProcAddress(h, 'ReleaseSRWLockExclusive');
   if not Assigned(InitializeSRWLock) or
      not Assigned(AcquireSRWLockExclusive) or
      not Assigned(ReleaseSRWLockExclusive) then
   begin // SRW was introduced with Vista: on XP, fallback to our TLightLock
-    InitializeSRWLock := @InitializeSRWLockForXP;
+    InitializeSRWLock       := @InitializeSRWLockForXP;
     AcquireSRWLockExclusive := @AcquireSRWLockExclusiveForXP;
     ReleaseSRWLockExclusive := @ReleaseSRWLockExclusiveForXP;
   end;
@@ -5430,12 +5457,14 @@ begin
     _fmt('Windows %s (%d.%d.%d)', [WINDOWS_NAME[Vers],
       dwMajorVersion, dwMinorVersion, dwBuildNumber], OSVersionText);
     if wServicePackMajor <> 0 then
-      insert(_fmt('SP%d ', [wServicePackMajor]), OSVersionText, PosExChar('(', OSVersionText));
+      insert(_fmt('SP%d ', [wServicePackMajor]), OSVersionText,
+        PosExChar('(', OSVersionText));
   end;
   if WindowsUbr <> 0 then
     insert(_fmt('.%d', [WindowsUbr]), OSVersionText, length(OSVersionText));
-  if WindowsDisplayVersion <> '' then
-    insert(WindowsDisplayVersion + ' ', OSVersionText, PosExChar('(', OSVersionText));
+  if WindowsDisplayVersion <> '' then // append e.g. '25H2'
+    insert(WindowsDisplayVersion + ' ', OSVersionText,
+      PosExChar('(', OSVersionText));
   if OSVersionInfoEx <> '' then
     OSVersionText := OSVersionText + ' - ' + OSVersionInfoEx;
   if reg.ReadOpen(wrLocalMachine,

@@ -4691,14 +4691,14 @@ begin
               asize := 0;
             end;
           varVariant:
-            {$ifdef CPU32DELPHI}
+            {$ifdef DISPINVOKEBYVALUE}
             begin
               v^ := PVarData(a)^;
               asize := SizeOf(TVarData); // pushed by value
             end;
             {$else}
             v^ := PPVarData(a)^^; // pushed by reference (as other parameters)
-            {$endif CPU32DELPHI}
+            {$endif DISPINVOKEBYVALUE}
           varDouble,
           varCurrency,
           varDate,
@@ -5028,7 +5028,7 @@ begin
     result := false
   else if (NameLen > 4) and
           (Name[0] = '_') and
-          IntGetPseudoProp(IdemPPChar(@Name[1], @_GETMETHOD), dv, variant(Dest)) then
+      IntGetPseudoProp(IdemPPChar(@Name[1], @_GETMETHOD), dv, variant(Dest)) then
     result := true
   else
   begin
@@ -5096,11 +5096,9 @@ end;
 
 procedure TDocVariant.Iterate(var Dest: TVarData;
   const V: TVarData; Index: integer);
-var
-  Data: TDocVariantData absolute V;
 begin // note: IterateCount() may accept IsObject values[]
-  if cardinal(Index) < cardinal(Data.VCount) then
-    Dest := TVarData(Data.VValue[Index]) // make weak value copy
+  if cardinal(Index) < cardinal(TDocVariantData(V).VCount) then
+    Dest := TVarData(TDocVariantData(V).VValue[Index]) // make weak value copy
   else
     TSynVarData(Dest).VType := varEmpty;
 end;

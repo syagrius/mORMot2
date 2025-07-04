@@ -333,6 +333,7 @@ type
     // RecvPending() to check for the actual state of the connection
     function HasData: integer;
     /// wrapper around WaitFor / RecvPending / Recv methods for a given time
+    // - will return up to 64KB of pending data in the socket receiving queue
     function RecvWait(ms: integer; out data: RawByteString;
       terminated: PTerminated = nil): TNetResult;
     /// low-level receiving of some data of known length from this socket
@@ -380,6 +381,8 @@ type
     /// you can call this method to change the default timeout of 10 minutes
     // - is likely to flush the cache
     procedure SetTimeOut(aSeconds: integer);
+    /// you can force a customized IP resolution for this host name
+    procedure Force(const Host, IP: RawUtf8);
   end;
 
 
@@ -689,6 +692,7 @@ type
     // - not available on BSD
     Kind: TMacAddressKind;
   end;
+  PMacAddress = ^TMacAddress;
   TMacAddressDynArray = array of TMacAddress;
 
 const
@@ -707,6 +711,7 @@ function GetMacAddressesText(WithoutName: boolean = true;
 /// flush the GetIPAddressesText/GetMacAddresses internal caches
 // - may be called to force detection after HW configuration change (e.g. when
 // wifi has been turned on)
+// - this method is thread-safe about its internal caches
 procedure MacIPAddressFlush;
 
 {$ifdef OSWINDOWS}
@@ -720,7 +725,7 @@ function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 /// get the local MAC address used to reach a computer, from its IP or Host name
 // - return the local interface as a TMacAddress, with all its available info
 // - under Windows, will call the GetBestInterface() API to retrieve a IfIndex
-// - on POSIX, will call GetLocalIpAddress() to retrive a local IP
+// - on POSIX, will call GetLocalIpAddress() to retrieve a local IP
 // - always eventually makes a lookup to the GetMacAddresses() list per IfIndex
 // (Windows) or IP (POSIX)
 function GetLocalMacAddress(const Remote: RawUtf8; var Mac: TMacAddress): boolean;
@@ -2806,26 +2811,26 @@ begin
     result := addr.SetFrom(address, '', nlUnix)
   else if not ToCardinal(port, p, {minimal=}1) or
           ({%H-}p > 65535) then
-    result := nrNotFound
+    result := nrNotFound // port should be valid
   else if (address = '') or
           IsLocalHost(pointer(address)) or
           PropNameEquals(address, 'localhost') or
           (address = cAnyHost) then // for client: '0.0.0.0' -> '127.0.0.1'
     result := addr.SetIP4Port(cLocalhost32, p)
   else if NetIsIP4(pointer(address), @ip4) then
-    result := addr.SetIP4Port(ip4, p)
+    result := addr.SetIP4Port(ip4, p) // from IPv4 '1.2.3.4"
   else
   begin
     if Assigned(NewSocketAddressCache) then
       if NewSocketAddressCache.Search(address, addr) then
       begin
         fromcache := true;
-        result := addr.SetPort(p);
+        result := addr.SetPort(p); // from cache
         exit;
       end
       else
         tobecached := true;
-    result := addr.SetFrom(address, port, layer);
+    result := addr.SetFrom(address, port, layer); // actual DNS resolution
   end;
 end;
 
@@ -2931,6 +2936,7 @@ begin
   // resolve the TNetAddr of the address:port layer - maybe from cache
   fromcache := false;
   tobecached := false;
+  PInteger(@addr)^ := 0; // rough init - enough for addr.IP() = ''
   if dobind then
     result := addr.SetFrom(address, port, layer)
   else
@@ -3295,7 +3301,7 @@ function TNetSocketWrap.RecvWait(ms: integer;
   out data: RawByteString; terminated: PTerminated): TNetResult;
 var
   read: integer;
-  tmp: array[word] of byte; // use a buffer to avoid RecvPending() syscall
+  tmp: TBuffer64K; // use stack buffer to avoid RecvPending() syscall
 begin
   result := NetEventsToNetResult(WaitFor(ms, [neRead, neError]));
   if Assigned(terminated) and
@@ -3825,7 +3831,7 @@ var
     Tix: integer;
   end;
 
-  // GetMacAddresses / GetMacAddressesText cache
+  // GetMacAddresses / GetMacAddressesText cache - refreshed every 65 seconds
   MacAddresses: array[{UpAndDown=}boolean] of record
     Safe: TLightLock;
     Tix: integer;
@@ -3834,11 +3840,34 @@ var
   end;
 
 procedure MacIPAddressFlush;
+var
+  ip: TIPAddress;
+  ud: boolean;
 begin
-  Finalize(IPAddresses);
-  FillCharFast(IPAddresses, SizeOf(IPAddresses), 0);
-  Finalize(MacAddresses);
-  FillCharFast(MacAddresses, SizeOf(MacAddresses), 0);
+  for ip := low(ip) to high(ip) do
+    with IPAddresses[ip] do
+    begin
+      Safe.Lock;
+      try
+        Text := '';
+        Tix := 0;
+      finally
+        Safe.UnLock;
+      end;
+    end;
+  for ud := low(ud) to high(ud) do
+    with MacAddresses[ud] do
+    begin
+      Safe.Lock;
+      try
+        Addresses := nil;
+        Tix := 0;
+        Text[false] := '';
+        Text[true] := '';
+      finally
+        Safe.UnLock;
+      end;
+    end;
 end;
 
 procedure GetIPCSV(const Sep: RawUtf8; Kind: TIPAddress; out Text: RawUtf8);
@@ -5413,7 +5442,7 @@ var
   ip32: cardinal;
 begin
   result := NetIsIP4(pointer(ip4), @ip32) and
-            IP4SubNetMatch(pointer(bin), ip32);
+            IP4SubNetMatch(pointer(bin), ip32{%H-});
 end;
 
 
@@ -5657,7 +5686,7 @@ begin
 end;
 
 const
-  BINDTXT: array[boolean] of string[4] = (
+  BINDTXT: array[boolean] of string[7] = (
     'open', 'bind');
   BINDMSG: array[boolean] of string = (
     'Is a server available on this address:port?',
@@ -5773,7 +5802,7 @@ procedure TCrtSocket.OpenBind(const aServer, aPort: RawUtf8; doBind,
   aTLS: boolean; aLayer: TNetLayer; aSock: TNetSocket; aReusePort: boolean);
 var
   retry: integer;
-  head: RawUtf8;
+  s: RawUtf8;
   res: TNetResult;
   addr: TNetAddr;
 begin
@@ -5824,12 +5853,12 @@ begin
             SockSendLine(['Proxy-Authorization: Basic ', Tunnel.UserPasswordBase64]);
           SockSendFlush(#13#10);
           repeat
-            SockRecvLn(head);
-            if NetStartWith(pointer(head), 'HTTP/') and
-               (length(head) > 11) and
-               (head[10] = '2') then // 'HTTP/1.1 2xx xxxx' success
+            SockRecvLn(s);
+            if NetStartWith(pointer(s), 'HTTP/') and
+               (length(s) > 11) and
+               (s[10] = '2') then // 'HTTP/1.1 2xx xxxx' success
               res := nrOK;
-          until head = '';
+          until s = ''; // end of response headers
         end;
       except
         on E: Exception do
@@ -5849,30 +5878,27 @@ begin
     else
       // direct client connection
       retry := {$ifdef OSBSD} 10 {$else} 2 {$endif};
+    s := fServer;
     {$ifdef OSPOSIX}
     // check if aServer is 'unix:/path/to/myapp.socket' with default nlTcp
     if (aLayer = nlTcp) and
-       NetStartWith(pointer(fServer), 'UNIX:') then
+       NetStartWith(pointer(s), 'UNIX:') then
     begin
       aLayer := nlUnix;
-      delete(fServer, 1, 5);
+      delete(s, 1, 5);
     end;
     {$endif OSPOSIX}
     //if Assigned(OnLog) then
     //  OnLog(sllTrace, 'Before NewSocket', [], self);
-    res := NewSocket(fServer, fPort, aLayer, doBind,
-      fTimeout, fTimeout, fTimeout, retry, fSock, @addr, aReusePort);
+    res := NewSocket(s, fPort, aLayer, doBind, fTimeout, fTimeout, fTimeout,
+                     retry, fSock, @addr, aReusePort);
     //if Assigned(OnLog) then
     //  OnLog(sllTrace, 'After NewSocket=%', [ToText(res)^], self);
-    {$ifdef OSPOSIX}
-    if aLayer = nlUnix then
-      fServer := aServer; // keep the full server name if reused after Close
-    {$endif OSPOSIX}
     addr.IP(fRemoteIP, true);
-    fSocketFamily := addr.Family;
     if res <> nrOK then
       raise ENetSock.Create('%s %s.OpenBind(%s:%s) [remoteip=%s]',
         [BINDMSG[doBind], ClassNameShort(self)^, fServer, fPort, fRemoteIP], res);
+    fSocketFamily := addr.Family;
   end
   else
   begin
@@ -6529,7 +6555,7 @@ function TCrtSocket.SockReceiveString(
   NetResult: PNetResult; RawError: system.PInteger): RawByteString;
 var
   read: integer;
-  tmp: array[word] of byte; // 64KB is big enough for INetTls or the socket API
+  tmp: TBuffer64K; // big enough for INetTls or the socket API
 begin
   read := SizeOf(tmp);
   if TrySockRecv(@tmp, read, {StopBeforeLength=}true, NetResult, RawError) and

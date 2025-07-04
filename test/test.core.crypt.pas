@@ -11,6 +11,7 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.text,
   mormot.core.buffers,
   mormot.core.unicode,
@@ -45,6 +46,8 @@ type
     procedure CatalogRunCert(Context: TObject);
     procedure CatalogRunStore(Context: TObject);
     procedure RsaSlow(Context: TObject);
+    procedure Rfc(a: TSignAlgo; const P, S: RawUtf8; c, l: integer;
+      const exp, msg: RawUtf8);
   published
     /// MD5 (and MD4) hashing functions
     procedure _MD5;
@@ -94,6 +97,8 @@ type
     procedure Pkcs11;
     /// validate client-server DIGEST access authentication
     procedure Digest;
+    /// test the TKerberosKeyTab class
+    procedure _TKerberosKeyTab;
     /// High-Level Cryptography Catalog
     procedure Catalog;
     /// compute some performance numbers, mostly against regression
@@ -124,6 +129,18 @@ begin
     SHA.Update(@s[i], 1);
   SHA.Final(Digest);
   result := IsEqual(Digest, TDig);
+end;
+
+// https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
+procedure TTestCoreCrypto.Rfc(a: TSignAlgo; const P, S: RawUtf8; c, l: integer;
+  const exp, msg: RawUtf8);
+var
+  sign: TSynSigner;
+  res: RawByteString;
+begin
+  res := sign.Pbkdf2(a, P, S, c, l);
+  CheckEqual(length(res), l);
+  CheckEqual(BinToHexLower(res), exp, msg);
 end;
 
 procedure TTestCoreCrypto._SHA1;
@@ -173,6 +190,15 @@ begin
     Include(CpuFeatures, cfSHA);
   end;
   {$endif ASMX64}
+  // see https://datatracker.ietf.org/doc/html/rfc6070
+  Rfc(saSha1, 'password', 'salt', 1, 20,
+      '0c60c80f961f0e71f3a9b524af6012062fe037a6', '1 round');
+  Rfc(saSha1, 'password', 'salt', 2, 20,
+      'ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957', '2 rounds');
+  Rfc(saSha1, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
+    4096, 25, '3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038', 'bigger');
+  Rfc(saSha1, 'pass'#0'word', 'sa'#0'lt', 4096, 16,
+      '56fa6aa75548099dcc37d7f03425e0c3', 'truncated');
 end;
 
 procedure TTestCoreCrypto._SHA256;
@@ -243,15 +269,10 @@ procedure TTestCoreCrypto._SHA256;
     SetLength(Digests, 2);
     check(IsZero(Digests[0]));
     check(IsZero(Digests[1]));
-    Pbkdf2HmacSha256('password', 'salt', 2, Digests);
-    check(IsEqual(Digests[0], Digest.Lo));
-    check(not IsEqual(Digests[1], Digest.Lo));
-    check(Sha256DigestToString(Digests[1]) =
-      '830651afcb5c862f0b249bd031f7a67520d136470f5ec271ece91c07773253d9');
     Pbkdf2HmacSha256('password', 'salt', 4096, Digest.Lo);
     check(Sha256DigestToString(Digest.Lo) = DIG4096);
     FillZero(Digest.b);
-    sign.Pbkdf2(saSha256, 'password', 'salt', 4096, Digest);
+    sign.Pbkdf2(saSha256, 'password', 'salt', 4096, @Digest);
     check(Sha256DigestToString(Digest.Lo) = DIG4096);
     c := 'a';
     sha.Init;
@@ -286,6 +307,19 @@ begin
     Include(CpuFeatures, cfSHA);
   end;
   {$endif ASMX64}
+// https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
+  Rfc(saSha224, 'password', 'salt', 1, 20,
+      '3c198cbdb9464b7857966bd05b7bc92bc1cc4e6e', '1 round');
+  Rfc(saSha224, 'password', 'salt', 2, 20,
+      '93200ffa96c5776d38fa10abdf8f5bfc0054b971', '2 rounds');
+  Rfc(saSha224, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
+    4096, 25, '056c4ba438ded91fc14e0594e6f52b87e1f3690c0dc0fbc057', 'bigger');
+  Rfc(saSha256, 'password', 'salt', 1, 20,
+      '120fb6cffcf8b32c43e7225256c4f837a86548c9', '1 round');
+  Rfc(saSha256, 'password', 'salt', 2, 20,
+      'ae4d0c95af6b46d32d0adff928f06dd02a303f8e', '2 rounds');
+  Rfc(saSha256, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
+    4096, 25, '348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c', 'bigger');
 end;
 
 procedure TTestCoreCrypto._RC4;
@@ -368,7 +402,7 @@ procedure TTestCoreCrypto._SHA512;
       Pbkdf2HmacSha512(password, secret, rounds, dig.b);
       Check(Sha512DigestToString(dig.b) = expected);
       FillZero(dig.b);
-      sign.Pbkdf2(saSha512, password, secret, rounds, dig);
+      sign.Pbkdf2(saSha512, password, secret, rounds, @dig);
       Check(Sha512DigestToString(dig.b) = expected);
     end;
   end;
@@ -460,17 +494,17 @@ procedure TTestCoreCrypto._SHA512;
     CheckEqual(Sha256DigestToString(dig.Lo),
       '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
     HmacSha384('Jefe', 'what do ya want for nothing?', dig.b384);
-    Check(Sha384DigestToString(dig.b384) = 'af45d2e376484031617f78d2b58a6b1' +
+    CheckEqual(Sha384DigestToString(dig.b384), 'af45d2e376484031617f78d2b58a6b1' +
       'b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649');
     Pbkdf2HmacSha384('password', 'salt', 4096, dig.b384);
-    Check(Sha384DigestToString(dig.b384) = '559726be38db125bc85ed7895f6e3cf574c7a01c' +
+    CheckEqual(Sha384DigestToString(dig.b384), '559726be38db125bc85ed7895f6e3cf574c7a01c' +
       '080c3447db1e8a76764deb3c307b94853fbe424f6488c5f4f1289626');
     Pbkdf2HmacSha512('passDATAb00AB7YxDTT', 'saltKEYbcTcXHCBxtjD', 1, dig.b);
-    Check(Sha512DigestToString(dig.b) = 'cbe6088ad4359af42e603c2a33760ef9d4017a7b2aad10af46' +
+    CheckEqual(Sha512DigestToString(dig.b), 'cbe6088ad4359af42e603c2a33760ef9d4017a7b2aad10af46' +
       'f992c660a0b461ecb0dc2a79c2570941bea6a08d15d6887e79f32b132e1c134e9525eeddd744fa');
     Pbkdf2HmacSha384('passDATAb00AB7YxDTTlRH2dqxDx19GDxDV1zFMz7E6QVqK',
       'saltKEYbcTcXHCBxtjD2PnBh44AIQ6XUOCESOhXpEp3HrcG', 1, dig.b384);
-    Check(Sha384DigestToString(dig.b384) =
+    CheckEqual(Sha384DigestToString(dig.b384),
       '0644a3489b088ad85a0e42be3e7f82500ec189366' +
       '99151a2c90497151bac7bb69300386a5e798795be3cef0a3c803227');
     { // rounds=100000 is slow, so not tested by default
@@ -502,6 +536,19 @@ begin
     Include(CpuFeatures, cfSSE41);
   end;
   {$endif ASMX64}
+// https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
+  Rfc(saSha384, 'password', 'salt', 1, 20,
+      'c0e14f06e49e32d73f9f52ddf1d0c5c719160923', '1 round');
+  Rfc(saSha384, 'password', 'salt', 2, 20,
+      '54f775c6d790f21930459162fc535dbf04a93918', '2 rounds');
+  Rfc(saSha384, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
+    4096, 25, '819143ad66df9a552559b9e131c52ae6c5c1b0eed18f4d283b', 'bigger');
+  Rfc(saSha512, 'password', 'salt', 1, 20,
+      '867f70cf1ade02cff3752599a3a53dc4af34c7a6', '1 round');
+  Rfc(saSha512, 'password', 'salt', 2, 20,
+      'e1d9c16aa681708a45f5c7c4e215ceb66e011a2e', '2 rounds');
+  Rfc(saSha512, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
+    4096, 25, '8c0511f4c6e597c6ac6315d8f0362e225f3c501495ba23b868', 'bigger');
 end;
 
 procedure TTestCoreCrypto._SHA3;
@@ -602,7 +649,7 @@ procedure TTestCoreCrypto._SHA3;
     checkEqual(Sha512DigestToString(h512.b), DK);
     FillZero(h512.b);
     check(Sha512DigestToString(h512.b) <> DK);
-    sign.Pbkdf2(saSha3512, 'pass', 'salt', 1000, h512);
+    sign.Pbkdf2(saSha3512, 'pass', 'salt', 1000, @h512);
     checkEqual(Sha512DigestToString(h512.b), DK);
     FillZero(h512.b);
     check(Sha512DigestToString(h512.b) <> DK);
@@ -645,11 +692,12 @@ begin
   // same benchmarks as in Prng()
   timer.Start;
   Check(Random32(0) = 0);
+  Check(Random32(1) = 0);
   for i := 1 to 50000 do
     Check(Random32(i) < cardinal(i));
   for i := 0 to 50000 do
     Check(Random32(maxInt - i) < cardinal(maxInt - i));
-  NotifyTestSpeed('Lecuyer Random32', [], 50000 * 2, 50000 * 8, @timer);
+  NotifyTestSpeed('Lecuyer Random32', [], 100003, 100003 * 4, @timer);
   SetLength(big, 100000);
   timer.Start;
   RandomBytes(pointer(big), length(big));
@@ -703,6 +751,8 @@ begin
     Check(not CompareMem(@b1, @b2, SizeOf(b1)));
     CheckEqual(a1.FillRandom(0), '');
     CheckEqual(a1.FillRandomHex(0), '');
+    Check(a1.Random32(0) = 0);
+    Check(a1.Random32(1) = 0);
     for i := 1 to 2000 do
     begin
       s1 := '';
@@ -780,11 +830,12 @@ begin
   // some raw benchmark
   timer.Start;
   CheckEqual(p.Random32(0), 0);
+  CheckEqual(p.Random32(1), 0);
   for i := 1 to 50000 do
     Check(p.Random32(i) < cardinal(i));
   for i := 0 to 50000 do
     Check(p.Random32(maxInt - i) < cardinal(maxInt - i));
-  NotifyTestSpeed('% Random32', [name], 50000 * 2, 50000 * 8, @timer);
+  NotifyTestSpeed('% Random32', [name], 100003, 100003 * 4, @timer);
   SetLength(big, 100000);
   timer.Start;
   p.FillRandom(pointer(big), length(big));
@@ -1110,7 +1161,7 @@ begin
       [jrcIssuer, jrcExpirationTime, jrcIssuedAt, jrcJWTID], [], 60));
     secret.Free;
   end;
-  for a := saSha256 to high(a) do
+  for a := low(a) to high(a) do
     Benchmark(JWT_CLASS[a].Create(
       'secret', 0, [jrcIssuer, jrcExpirationTime], []), 'mORMot');
   secret := TEccCertificateSecret.CreateNew(nil);
@@ -1663,13 +1714,13 @@ begin
     P := pointer(buf);
     inc(P, unalign);
     FillIncreasing(pointer(P), $12345670, HASHESMAX shr 2);
-    Check(Hash32Test(P, @crc32cfast, exp321));
-    Check(Hash32Test(P, @crc32c, exp322));
-    Check(Hash32Test(P, @xxHash32, exp323));
+    Check(Hash32Test(P, @crc32cfast,    exp321));
+    Check(Hash32Test(P, @crc32c,        exp322));
+    Check(Hash32Test(P, @xxHash32,      exp323));
     if Assigned(AesNiHash32) then
       Check(Hash32Test(P, @AesNiHash32, exp324));
-    Check(Hash32Test(P, @crc32fast, exp325));
-    Check(Hash64Test(P, @crc32cTwice, exp641));
+    Check(Hash32Test(P, @crc32fast,     exp325));
+    Check(Hash64Test(P, @crc32cTwice,   exp641));
     if Assigned(AesNiHash64) then
       Check(Hash64Test(P, @AesNiHash64, exp642));
     Check(Hash128Test(P, @crc32c128, msg), msg{%H-});
@@ -2126,7 +2177,6 @@ begin
   CheckEqual(SizeOf(TSha3), SHA3_CONTEXT_SIZE);
   Check(SizeOf(TSha512) > SizeOf(TSha256));
   Check(SizeOf(TSha3) > SizeOf(TSha512));
-  Check(SizeOf(TSha3) > SizeOf(THmacSha512));
   CheckEqual(SizeOf(TSha384), SizeOf(TSha384512));
   CheckEqual(SizeOf(TSha512), SizeOf(TSha384512));
   CheckEqual(SizeOf(TSha512_256), SizeOf(TSha384512));
@@ -2463,8 +2513,10 @@ begin
     for i := 16 to 100 do
     begin
       orig := RandomAnsi7(i);
+      CheckEqual(length(orig), i);
       cts.iv := iv.b;
       crypted := cts.EncryptCts(orig);
+      CheckEqual(length(crypted), i);
       cts.iv := iv.b;
       s2 := cts.DecryptCts(crypted);
       CheckEqual(s2, orig);
@@ -2977,6 +3029,204 @@ begin
     finally
       dig.Free;
     end;
+  end;
+end;
+
+const
+  // $ klist -kt test.keytab
+  // KVNO Timestamp           Principal      Password
+  // ---- ------------------- ------------------------------------------------------
+  //    1 26/06/2025 16:23:40 toto@MY.LAN    titi
+  //    1 26/06/2025 16:23:40 toto2@MY.LAN   tutu
+  KEYTAB_REF: array[0.. $8c] of byte = (
+    $05, $02, $00, $00, $00, $41, $00, $01, $00, $06, $4d, $59, $2e, $4c, $41,
+    $4e, $00, $04, $74, $6f, $74, $6f, $00, $00, $00, $01, $68, $5d, $57, $ec,
+    $01, $00, $12, $00, $20, $c4, $f2, $ec, $2e, $9b, $04, $8c, $7f, $db, $82,
+    $65, $e0, $15, $79, $f7, $fd, $4f, $33, $16, $4f, $b7, $29, $0a, $52, $86,
+    $72, $98, $bf, $a2, $b7, $94, $ab, $00, $00, $00, $01, $00, $00, $00, $42,
+    $00, $01, $00, $06, $4d, $59, $2e, $4c, $41, $4e, $00, $05, $74, $6f, $74,
+    $6f, $32, $00, $00, $00, $01, $68, $5d, $57, $ec, $01, $00, $12, $00, $20,
+    $18, $94, $1a, $0e, $92, $78, $d6, $d9, $78, $f3, $b5, $bb, $a7, $a1, $99,
+    $50, $c6, $c1, $2c, $78, $6e, $26, $ba, $ec, $ac, $d9, $4d, $0b, $cb, $6f,
+    $56, $87, $00, $00, $00, $01);
+
+procedure TTestCoreCrypto._TKerberosKeyTab;
+var
+  bin, bin2, password: RawByteString;
+  hex: RawUtf8;
+  kt, kt2: TKerberosKeyTab;
+  ktg: TKerberosKeyTabGenerator;
+  a: TSignAlgo;
+  p: PByteArray;
+  i: PtrInt;
+begin
+  // validate low-level Kerberos cryptography
+  // https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
+  a := saSha3S256;
+  bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1, @a);
+  Check(a = saSha1);
+  CheckEqual(BinToHexLower(bin), 'cdedb5281bb2f801565a1122b2563515');
+  a := saSha3S256;
+  bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES256_CTS_HMAC_SHA1_96, 1, @a);
+  Check(a = saSha1);
+  CheckEqual(BinToHexLower(bin),
+    'cdedb5281bb2f801565a1122b25635150ad1f7a04bb9f3a333ecc0e2e1f70837');
+  a := saSha3S256;
+  bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES128_CTS_HMAC_SHA1_96, 2, @a);
+  Check(a = saSha1);
+  CheckEqual(BinToHexLower(bin), '01dbee7f4a9e243e988b62c73cda935d');
+  a := saSha3S256;
+  bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES256_CTS_HMAC_SHA1_96, 2, @a);
+  Check(a = saSha1);
+  CheckEqual(BinToHexLower(bin),
+    '01dbee7f4a9e243e988b62c73cda935da05378b93244ec8f48a99e61ad799d86');
+  // https://datatracker.ietf.org/doc/html/rfc3961#appendix-A.1
+  CheckEqual(BinToHexLower(Rfc3961Nfold('012345', 64 shr 3)),
+    'be072631276b1955');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('password', 56 shr 3)),
+    '78a07b6caf85fa');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('password', 168 shr 3)),
+    '59e4a8ca7c0385c3c37b3f6d2000247cb6e6bd5b3e');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 64 shr 3)),
+    '6b65726265726f73');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 128 shr 3)),
+    '6b65726265726f737b9b5b2b93132b93');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 168 shr 3)),
+    '8372c236344e5f1550cd0747e15d62ca7a5a3bcea4');
+  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 256 shr 3)),
+    '6b65726265726f737b9b5b2b93132b935c9bdcdad95c9899c4cae4dee6d6cae4');
+  // https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
+  bin := MakeKerberosKey('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1);
+  CheckEqual(BinToHexLower(bin), '42263c6e89f4fc28b8df68ee09799f15');
+  bin := MakeKerberosKey('password', 'ATHENA.MIT.EDUraeburn',
+    ENCTYPE_AES256_CTS_HMAC_SHA1_96, 1);
+  CheckEqual(BinToHexLower(bin),
+    'fe697b52bc0d3ce14432ba036a92e65bbb52280990a2fa27883998d72af30161');
+  // [MS-KILE] "4.4 AES 128 Key Creation"
+  p := FastNewRawByteString(password, 120 * 3);
+  for i := 1 to 120 do
+  begin
+    p[0] := $ef;
+    p[1] := $bf;
+    p[2] := $bf;
+    p := @p[3];
+  end;
+  Check(p = @PByteArray(password)[length(password)]);
+  bin := MakeKerberosKeySeed(password, 'DOMAIN.COMhostclient.domain.com',
+    ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1000);
+  CheckEqual(BinToHexLower(bin), 'c7730daa23521bc16ab83cbee3b37f41');
+  bin := Rfc3962SeedtoKey(bin, ENCTYPE_AES128_CTS_HMAC_SHA1_96);
+  CheckEqual(BinToHexLower(bin), 'b82ee122531c2d94821ac755bccb5879');
+  // validate high-level TKerberosKeyTab wrapper
+  FastSetRawByteString(bin, @KEYTAB_REF[0], length(KEYTAB_REF));
+  CheckHash(bin, $1849920F);
+  Check(BufferIsKeyTab(bin), 'bin1');
+  kt := TKerberosKeyTab.Create;
+  kt2 := TKerberosKeyTab.Create;
+  try
+    Check(kt.LoadFromBinary(bin), 'LoadFromString');
+    if not CheckEqual(length(kt.Entry), 2, 'entry') then
+      exit;
+    with kt.Entry[0] do
+    begin
+      CheckEqual(TimeStamp, 1750947820);
+      CheckEqual(KeyVersion, 1);
+      CheckEqual(NameType, 1);
+      CheckEqual(EncType, ENCTYPE_AES256_CTS_HMAC_SHA1_96);
+      CheckEqual(Principal, 'toto@MY.LAN');
+      CheckEqual(length(Key), SizeOf(THash256));
+      hex := BinToHexLower(Key);
+      CheckEqual(hex, 'c4f2ec2e9b048c7fdb8265e01579f7fd4f33164fb7290a52867298bfa2b794ab');
+      bin := MakeKerberosKey('titi', 'MY.LANtoto', EncType);
+      CheckEqual(BinToHexLower(bin), hex);
+    end;
+    with kt.Entry[1] do
+    begin
+      CheckEqual(TimeStamp, 1750947820);
+      CheckEqual(KeyVersion, 1);
+      CheckEqual(NameType, 1);
+      CheckEqual(EncType, ENCTYPE_AES256_CTS_HMAC_SHA1_96);
+      CheckEqual(Principal, 'toto2@MY.LAN');
+      CheckHash(Key, $D101D374);
+      Check(MakeKerberosKey('tutu', 'MY.LANtoto2', EncType) = Key);
+    end;
+    Check(kt.Exists(kt.Entry[0]));
+    Check(kt.Exists(kt.Entry[1]));
+    CheckEqual(length(kt.Entry), 2, 'kt2');
+    CheckEqual(length(kt2.Entry), 0, 'kt20');
+    Check(not kt2.Exists(kt.Entry[0]));
+    Check(not kt2.Exists(kt.Entry[1]));
+    kt2.Add(kt.Entry[1]);
+    CheckEqual(length(kt2.Entry), 1, 'kt21');
+    Check(not kt2.Exists(kt.Entry[0]));
+    Check(kt2.Exists(kt.Entry[1]));
+    Check(kt2.Exists(kt2.Entry[0]));
+    Check(CompareEntry(kt.Entry[1], kt2.Entry[0]));
+    kt2.AddFrom(kt, ['toto']);
+    CheckEqual(length(kt2.Entry), 1, 'kt21 filter');
+    kt2.AddFrom(kt, []);
+    CheckEqual(length(kt2.Entry), 2, 'kt22 no dup');
+    Check(kt2.Exists(kt.Entry[0]));
+    Check(kt2.Exists(kt.Entry[1]));
+    Check(CompareEntry(kt.Entry[1], kt2.Entry[0]));
+    Check(CompareEntry(kt.Entry[0], kt2.Entry[1]));
+    bin2 := kt.SaveToBinary;
+    CheckHash(bin2, $1849920F, 'same saved');
+    Check(BufferIsKeyTab(bin2), 'bin2');
+    bin2 := kt2.SaveToBinary;
+    CheckHash(bin2, $67233E99, 'not the same order');
+    Check(BufferIsKeyTab(bin2), 'bin3');
+    Check(kt.LoadFromBinary(bin2), 'LoadFromString2');
+    if CheckEqual(length(kt.Entry), 2, 'entry') then
+    begin
+      Check(CompareEntry(kt.Entry[0], kt2.Entry[0]));
+      Check(CompareEntry(kt.Entry[1], kt2.Entry[1]));
+      Check(not CompareEntry(kt.Entry[0], kt2.Entry[1]));
+      Check(not CompareEntry(kt.Entry[1], kt2.Entry[0]));
+      bin2 := kt.SaveToBinary;
+      CheckHash(bin2, $67233E99);
+      Check(BufferIsKeyTab(bin2), 'bin2');
+      Check(not kt.Delete(10));
+      Check(kt.Delete(0), 'deleted');
+      Check(kt.Add(kt2.Entry[0]));
+      bin2 := kt.SaveToBinary;
+      CheckHash(bin2, $1849920F, 'delete saved');
+      Check(BufferIsKeyTab(bin2), 'bin2');
+      Check(kt.Delete(1), 'delete1');
+      if CheckEqual(length(kt.Entry), 1, 'deleted1') then
+        Check(CompareEntry(kt.Entry[0], kt2.Entry[1]));
+      Check(kt.Delete(0), 'delete0');
+      CheckEqual(length(kt.Entry), 0, 'flushed');
+    end;
+  finally
+    kt2.Free;
+    kt.Free;
+  end;
+  // TKerberosKeyTabGenerator should recreate the same exact KEYTAB_REF content
+  ktg := TKerberosKeyTabGenerator.Create;
+  try
+    Check(ktg.AddNew('toto@MY.LAN',  'titi'), 'toto@MY.LAN');
+    Check(ktg.AddNew('toto2@my.lan', 'tutu'), 'toto2@MY.LAN');
+    if CheckEqual(length(ktg.Entry), 2) then
+    begin
+      CheckHash(ktg.Entry[1].Key, $D101D374);
+      Check(ktg.Entry[1].Timestamp > 1750947820);
+      Check(ktg.Entry[1].Timestamp > 1750947820);
+      Check(UnixTimeUtc - ktg.Entry[0].Timestamp < 2, 'UnixTimeUtc');
+      ktg.Entry[0].Timestamp := 1750947820; // as in KEYTAB_REF
+      ktg.Entry[1].Timestamp := 1750947820;
+      bin := ktg.SaveToBinary;
+      Check(BufferIsKeyTab(bin), 'ktg');
+      CheckHash(bin, $1849920F);
+      Check(bin = bin2);
+    end;
+  finally
+    ktg.Free;
   end;
 end;
 
