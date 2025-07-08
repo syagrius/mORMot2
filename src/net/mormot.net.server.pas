@@ -4313,13 +4313,13 @@ begin
     result := true; // success
   except
     on E: Exception do
-      begin
-        // intercept and return Internal Server Error 500 on any fatal exception
-        Ctxt.RespStatus := HTTP_SERVERERROR;
-        Ctxt.SetErrorMessage('%: %', [E, E.Message]);
-        IncStat(grException);
-        // will keep soClose as result to shutdown the connection
-      end;
+    begin
+      // intercept and return Internal Server Error 500 on any fatal exception
+      Ctxt.RespStatus := HTTP_SERVERERROR;
+      Ctxt.SetErrorMessage('%: %', [E, E.Message]);
+      IncStat(grException);
+      // will keep soClose as result to shutdown the connection
+    end;
   end;
 end;
 
@@ -4627,17 +4627,17 @@ end;
 function THttpServerSocketGeneric.Authorization(var Http: THttpRequestContext;
   Opaque: Int64): TAuthServerResult;
 var
-  auth, authend: PUtf8Char;
+  auth, b64, b64end: PUtf8Char;
   user, pass, url: RawUtf8;
   bin, bout: RawByteString;
   ctx: TSecContext;
 begin
   // parse the 'Authorization: basic/digest/negotiate <magic>' header
+  result := asrRejected;
+  auth := FindNameValue(pointer(Http.Headers), 'AUTHORIZATION: ');
+  if auth = nil then
+    exit;
   try
-    result := asrRejected;
-    auth := FindNameValue(pointer(Http.Headers), 'AUTHORIZATION: ');
-    if auth = nil then
-      exit;
     case fAuthorize of
       hraBasic:
         if IdemPChar(auth, 'BASIC ') and
@@ -4668,10 +4668,10 @@ begin
         // - see TRestServerAuthenticationSspi.Auth() for NTLM / three-way
         if IdemPChar(auth, 'NEGOTIATE ') then
         begin
-          inc(auth, 10); // parse 'Authorization: Negotiate <base64 encoding>'
-          authend := PosChar(auth, #13);
-          if (authend = nil) or
-             not Base64ToBin(PAnsiChar(auth), authend - auth, bin) or
+          b64 := auth + 10; // parse 'Authorization: Negotiate <base64 encoding>'
+          b64end := PosChar(b64, #13);
+          if (b64end = nil) or
+             not Base64ToBin(PAnsiChar(b64), b64end - auth, bin) or
              IdemPChar(pointer(bin), 'NTLM') then // two-way Kerberos only
             exit;
           {$ifdef OSPOSIX}
@@ -4683,22 +4683,28 @@ begin
             if ServerSspiAuth(ctx, bin, bout) then
             begin
               ServerSspiAuthUser(ctx, user);
-              Http.ResponseHeaders := 'WWW-Authenticate: Negotiate ' +
-                mormot.core.buffers.BinToBase64(bout) + #13#10;
+              Http.ResponseHeaders := BinToBase64(bout,
+                'WWW-Authenticate: Negotiate ', #13#10, {magic=}false);
               result := asrMatch;
             end;
           finally
             FreeSecContext(ctx);
           end;
-        end
+        end;
     else
       exit;
     end;
     if result = asrMatch then
       Http.BearerToken := user; // see THttpServerRequestAbstract.Prepare
   except
-    result := asrRejected; // any processing error should silently fail the auth
-  end
+    on E: Exception do
+    begin
+      fLogClass.Add.Log(sllTrace, 'Authorization: % from %', [PClass(E)^, auth], self);
+      result := asrRejected; // any processing error should silently fail the auth
+    end;
+  end;
+  fLogClass.Add.Log(sllTrace, 'Authorization(%): % %',
+    [ToText(fAuthorize)^, ToText(result)^, user], self);
 end;
 
 function THttpServerSocketGeneric.ComputeRejectBody(
@@ -4985,7 +4991,7 @@ begin
           on E: Exception do
             // do not stop thread on TLS or socket error
             if Assigned(fSock.OnLog) then
-              fSock.OnLog(sllTrace, 'Execute: % [%]', [E, E.Message], self);
+              fSock.OnLog(sllTrace, 'Execute: % [%]', [PClass(E)^, E.Message], self);
         end
       else if Assigned(fThreadPool) then
       begin

@@ -3415,8 +3415,8 @@ var
     tmp: ShortString;
   begin
     Ansi7StringToShortString(fServiceMethod^.InterfaceDotMethodName, tmp);
-    ContentToShortAppend(pointer(fServiceParameters), fServiceParametersLen, tmp);
-    fLog.LogText(sllServiceCall, @tmp[1], Server);
+    fServer.InternalLogResponse(fServiceParameters, fServiceParametersLen,
+      fServiceMethod^.InterfaceDotMethodName, sllServiceCall);
   end;
 
 begin
@@ -7167,7 +7167,7 @@ var
       except
         on E: Exception do
           InternalLog('Delete % session: opaque connection raised %',
-            [Ctxt, ClassNameShort(E)^], sllWarning);
+            [Ctxt, PClass(E)^], sllWarning);
       end;
   end;
 

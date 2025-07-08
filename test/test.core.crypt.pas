@@ -48,6 +48,8 @@ type
     procedure RsaSlow(Context: TObject);
     procedure Rfc(a: TSignAlgo; const P, S: RawUtf8; c, l: integer;
       const exp, msg: RawUtf8);
+    procedure Kdf(a: TSignAlgo; const key, exp, msg: RawUtf8;
+      const lab: RawUtf8 = 'kerberos'; const ctx: RawUtf8 = '');
   published
     /// MD5 (and MD4) hashing functions
     procedure _MD5;
@@ -140,7 +142,19 @@ var
 begin
   res := sign.Pbkdf2(a, P, S, c, l);
   CheckEqual(length(res), l);
-  CheckEqual(BinToHexLower(res), exp, msg);
+  CheckEqualHex(res, exp, msg);
+end;
+
+// https://www.rfc-editor.org/rfc/rfc8009#page-13
+procedure TTestCoreCrypto.Kdf(a: TSignAlgo; const key, exp, msg, lab, ctx: RawUtf8);
+var
+  sign: TSynSigner;
+  bin, res: RawByteString;
+begin
+  Check(HexToBin(pointer(key), length(key), bin));
+  res := sign.KdfSP800(a, length(exp) shr 1, bin, lab, ctx);
+  CheckEqual(length(res), length(exp) shr 1);
+  CheckEqualHex(res, exp, msg);
 end;
 
 procedure TTestCoreCrypto._SHA1;
@@ -320,6 +334,16 @@ begin
       'ae4d0c95af6b46d32d0adff928f06dd02a303f8e', '2 rounds');
   Rfc(saSha256, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
     4096, 25, '348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c', 'bigger');
+  // https://www.rfc-editor.org/rfc/rfc8009#page-13
+  Kdf(saSha256, '3705D96080C17728A0E800EAB6E0D23C',
+   'B31A018A48F54776F403E9A396325DC3',
+   'Kc128', HexToBin('0000000299'));
+  Kdf(saSha256, '3705D96080C17728A0E800EAB6E0D23C',
+   '9B197DD1E8C5609D6E67C3E37C62C72E',
+   'Ke128', HexToBin('00000002AA'));
+  Kdf(saSha256, '3705D96080C17728A0E800EAB6E0D23C',
+   '9FDA0E56AB2D85E1569A688696C26A6C',
+   'Kc128', HexToBin('0000000255'));
 end;
 
 procedure TTestCoreCrypto._RC4;
@@ -549,6 +573,16 @@ begin
       'e1d9c16aa681708a45f5c7c4e215ceb66e011a2e', '2 rounds');
   Rfc(saSha512, 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt',
     4096, 25, '8c0511f4c6e597c6ac6315d8f0362e225f3c501495ba23b868', 'bigger');
+  // https://www.rfc-editor.org/rfc/rfc8009#page-13
+  Kdf(saSha384, '6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52',
+   'EF5718BE86CC84963D8BBB5031E9F5C4BA41F28FAF69E73D',
+   'Kc256', HexToBin('0000000299'));
+  Kdf(saSha384, '6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52',
+   '56AB22BEE63D82D7BC5227F6773F8EA7A5EB1C825160C38312980C442E5C7E49',
+   'Ke256', HexToBin('00000002AA'));
+  Kdf(saSha384, '6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52',
+   '69B16514E3CD8E56B82010D5C73012B622C4D00FFC23ED1F',
+   'Ki256', HexToBin('0000000255'));
 end;
 
 procedure TTestCoreCrypto._SHA3;
@@ -627,7 +661,7 @@ procedure TTestCoreCrypto._SHA3;
       'Sha3 XOF vector');
     encrypted := instance.Cypher('secret', 'toto');
     CheckEqual(mormot.core.text.BinToHex(encrypted), 'BF013A29');
-    CheckEqual(BinToHexLower(encrypted), 'bf013a29');
+    CheckEqualHex(encrypted, 'bf013a29');
     for s := 0 to 3 do
     begin
       secret := RandomWinAnsi(s * 3);
@@ -691,8 +725,8 @@ begin
   {$endif USE_OPENSSL}
   // same benchmarks as in Prng()
   timer.Start;
-  Check(Random32(0) = 0);
-  Check(Random32(1) = 0);
+  CheckEqual(Random32(0), 0);
+  CheckEqual(Random32(1), 0);
   for i := 1 to 50000 do
     Check(Random32(i) < cardinal(i));
   for i := 0 to 50000 do
@@ -1729,17 +1763,14 @@ begin
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
-  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 3)),
-    '1ac907');
-  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5)),
-    '1ac9075cd4');
+  CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 3), '1ac907');
+  CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5), '1ac9075cd4');
   buf := 'bar';
-  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5)),
-    'bc0c655e01');
-  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 50)),
+  CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5), 'bc0c655e01');
+  CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 50),
     'bc0c655e016bc2931d85a2e675181adcef7f581f76df2739da74' +
     'faac41627be2f7f415c89e983fd0ce80ced9878641cb4876');
-  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA256, pointer(buf), length(buf), 50)),
+  CheckEqualHex(hasher.Mgf1(hfSHA256, pointer(buf), length(buf), 50),
     '382576a7841021cc28fc4c0948753fb8312090cea942ea4c4e73' +
     '5d10dc724b155f9f6069f289d61daca0cb814502ef04eae1');
   {$ifdef USE_OPENSSL}
@@ -3066,46 +3097,43 @@ begin
   bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1, @a);
   Check(a = saSha1);
-  CheckEqual(BinToHexLower(bin), 'cdedb5281bb2f801565a1122b2563515');
+  CheckEqualHex(bin, 'cdedb5281bb2f801565a1122b2563515');
   a := saSha3S256;
   bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES256_CTS_HMAC_SHA1_96, 1, @a);
   Check(a = saSha1);
-  CheckEqual(BinToHexLower(bin),
+  CheckEqualHex(bin,
     'cdedb5281bb2f801565a1122b25635150ad1f7a04bb9f3a333ecc0e2e1f70837');
   a := saSha3S256;
   bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES128_CTS_HMAC_SHA1_96, 2, @a);
   Check(a = saSha1);
-  CheckEqual(BinToHexLower(bin), '01dbee7f4a9e243e988b62c73cda935d');
+  CheckEqualHex(bin, '01dbee7f4a9e243e988b62c73cda935d');
   a := saSha3S256;
   bin := MakeKerberosKeySeed('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES256_CTS_HMAC_SHA1_96, 2, @a);
   Check(a = saSha1);
-  CheckEqual(BinToHexLower(bin),
+  CheckEqualHex(bin,
     '01dbee7f4a9e243e988b62c73cda935da05378b93244ec8f48a99e61ad799d86');
   // https://datatracker.ietf.org/doc/html/rfc3961#appendix-A.1
-  CheckEqual(BinToHexLower(Rfc3961Nfold('012345', 64 shr 3)),
-    'be072631276b1955');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('password', 56 shr 3)),
-    '78a07b6caf85fa');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('password', 168 shr 3)),
+  CheckEqualHex(Rfc3961Nfold('012345', 64 shr 3), 'be072631276b1955');
+  CheckEqualHex(Rfc3961Nfold('password', 56 shr 3), '78a07b6caf85fa');
+  CheckEqualHex(Rfc3961Nfold('password', 168 shr 3),
     '59e4a8ca7c0385c3c37b3f6d2000247cb6e6bd5b3e');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 64 shr 3)),
-    '6b65726265726f73');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 128 shr 3)),
+  CheckEqualHex(Rfc3961Nfold('kerberos', 64 shr 3), '6b65726265726f73');
+  CheckEqualHex(Rfc3961Nfold('kerberos', 128 shr 3),
     '6b65726265726f737b9b5b2b93132b93');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 168 shr 3)),
+  CheckEqualHex(Rfc3961Nfold('kerberos', 168 shr 3),
     '8372c236344e5f1550cd0747e15d62ca7a5a3bcea4');
-  CheckEqual(BinToHexLower(Rfc3961Nfold('kerberos', 256 shr 3)),
+  CheckEqualHex(Rfc3961Nfold('kerberos', 256 shr 3),
     '6b65726265726f737b9b5b2b93132b935c9bdcdad95c9899c4cae4dee6d6cae4');
   // https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
   bin := MakeKerberosKey('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1);
-  CheckEqual(BinToHexLower(bin), '42263c6e89f4fc28b8df68ee09799f15');
+  CheckEqualHex(bin, '42263c6e89f4fc28b8df68ee09799f15');
   bin := MakeKerberosKey('password', 'ATHENA.MIT.EDUraeburn',
     ENCTYPE_AES256_CTS_HMAC_SHA1_96, 1);
-  CheckEqual(BinToHexLower(bin),
+  CheckEqualHex(bin,
     'fe697b52bc0d3ce14432ba036a92e65bbb52280990a2fa27883998d72af30161');
   // [MS-KILE] "4.4 AES 128 Key Creation"
   p := FastNewRawByteString(password, 120 * 3);
@@ -3119,9 +3147,9 @@ begin
   Check(p = @PByteArray(password)[length(password)]);
   bin := MakeKerberosKeySeed(password, 'DOMAIN.COMhostclient.domain.com',
     ENCTYPE_AES128_CTS_HMAC_SHA1_96, 1000);
-  CheckEqual(BinToHexLower(bin), 'c7730daa23521bc16ab83cbee3b37f41');
+  CheckEqualHex(bin, 'c7730daa23521bc16ab83cbee3b37f41');
   bin := Rfc3962SeedtoKey(bin, ENCTYPE_AES128_CTS_HMAC_SHA1_96);
-  CheckEqual(BinToHexLower(bin), 'b82ee122531c2d94821ac755bccb5879');
+  CheckEqualHex(bin, 'b82ee122531c2d94821ac755bccb5879');
   // validate high-level TKerberosKeyTab wrapper
   FastSetRawByteString(bin, @KEYTAB_REF[0], length(KEYTAB_REF));
   CheckHash(bin, $1849920F);
@@ -3141,9 +3169,10 @@ begin
       CheckEqual(Principal, 'toto@MY.LAN');
       CheckEqual(length(Key), SizeOf(THash256));
       hex := BinToHexLower(Key);
-      CheckEqual(hex, 'c4f2ec2e9b048c7fdb8265e01579f7fd4f33164fb7290a52867298bfa2b794ab');
+      CheckEqual(hex,
+        'c4f2ec2e9b048c7fdb8265e01579f7fd4f33164fb7290a52867298bfa2b794ab');
       bin := MakeKerberosKey('titi', 'MY.LANtoto', EncType);
-      CheckEqual(BinToHexLower(bin), hex);
+      CheckEqualHex(bin, hex);
     end;
     with kt.Entry[1] do
     begin
@@ -4574,7 +4603,7 @@ begin
     for i := 1 to 100 do
       Check(c.Verify(pointer(hash), hfSHA256, bin), 'verifloop');
     NotifyTestSpeed('RS256 verify', 100, 0, @timer);
-    CheckEqual(BinToHexLower(hash), _hash);
+    CheckEqualHex(hash, _hash);
   finally
     c.Free;
   end;

@@ -1837,169 +1837,6 @@ type
     function ReadEnumEntries: TRawUtf8DynArray;
   end;
 
-  /// TSynWindowsPrivileges enumeration synchronized with WinAPI
-  // - see https://docs.microsoft.com/en-us/windows/desktop/secauthz/privilege-constants
-  TWinSystemPrivilege = (
-    wspCreateToken,
-    wspAssignPrimaryToken,
-    wspLockMemory,
-    wspIncreaseQuota,
-    wspUnsolicitedInput,
-    wspMachineAccount,
-    wspTCB,
-    wspSecurity,
-    wspTakeOwnership,
-    wspLoadDriver,
-    wspSystemProfile,
-    wspSystemTime,
-    wspProfSingleProcess,
-    wspIncBasePriority,
-    wspCreatePageFile,
-    wspCreatePermanent,
-    wspBackup,
-    wspRestore,
-    wspShutdown,
-    wspDebug,
-    wspAudit,
-    wspSystemEnvironment,
-    wspChangeNotify,
-    wspRemoteShutdown,
-    wspUndock,
-    wspSyncAgent,
-    wspEnableDelegation,
-    wspManageVolume,
-    wspImpersonate,
-    wspCreateGlobal,
-    wspTrustedCredmanAccess,
-    wspRelabel,
-    wspIncWorkingSet,
-    wspTimeZone,
-    wspCreateSymbolicLink);
-
-  /// TSynWindowsPrivileges set synchronized with WinAPI
-  TWinSystemPrivileges = set of TWinSystemPrivilege;
-
-  /// define which WinAPI token is to be retrieved
-  // - define the execution context, i.e. if the token is used for the current
-  // process or the current thread
-  // - used e.g. by TSynWindowsPrivileges or mormot.core.os.security
-  TWinTokenType = (
-    wttProcess,
-    wttThread);
-
-  /// manage available privileges on Windows platform
-  // - not all available privileges are active for all process
-  // - for usage of more advanced WinAPI, explicit enabling of privilege is
-  // sometimes needed
-  {$ifdef USERECORDWITHMETHODS}
-  TSynWindowsPrivileges = record
-  {$else}
-  TSynWindowsPrivileges = object
-  {$endif USERECORDWITHMETHODS}
-  private
-    fAvailable: TWinSystemPrivileges;
-    fEnabled: TWinSystemPrivileges;
-    fDefEnabled: TWinSystemPrivileges;
-    fToken: THandle;
-    function SetPrivilege(wsp: TWinSystemPrivilege; on: boolean): boolean;
-    procedure LoadPrivileges;
-  public
-    /// initialize the object dedicated to management of available privileges
-    // - aTokenPrivilege can be used for current process or current thread
-    procedure Init(aTokenPrivilege: TWinTokenType = wttProcess;
-      aLoadPrivileges: boolean = true);
-    /// finalize the object and relese Token handle
-    // - aRestoreInitiallyEnabled parameter can be used to restore initially
-    // state of enabled privileges
-    procedure Done(aRestoreInitiallyEnabled: boolean = true);
-    /// enable privilege
-    // - if aPrivilege is already enabled return true, if operation is not
-    // possible (required privilege doesn't exist or API error) return false
-    function Enable(aPrivilege: TWinSystemPrivilege): boolean; overload;
-    /// enable one or several privilege(s) from a set
-    // - if aPrivilege is already enabled return true, if operation is not
-    // possible (required privilege doesn't exist or API error) return false
-    function Enable(aPrivilege: TWinSystemPrivileges): boolean; overload;
-    /// disable privilege
-    // - if aPrivilege is already disabled return true, if operation is not
-    // possible (required privilege doesn't exist or API error) return false
-    function Disable(aPrivilege: TWinSystemPrivilege): boolean;
-    /// set of available privileges for current process/thread
-    property Available: TWinSystemPrivileges
-      read fAvailable;
-    /// set of enabled privileges for current process/thread
-    property Enabled: TWinSystemPrivileges
-      read fEnabled;
-    /// low-level access to the privileges token handle
-    property Token: THandle
-      read fToken;
-  end;
-
-  /// which information was returned by GetProcessInfo() overloaded functions
-  // - wpaiPID is set when PID was retrieved
-  // - wpaiBasic with ParentPID/BasePriority/ExitStatus/PEBBaseAddress/AffinityMask
-  // - wpaiPEB with SessionID/BeingDebugged
-  // - wpaiCommandLine and wpaiImagePath when CommandLine and ImagePath are set
-  TWinProcessAvailableInfos = set of (
-    wpaiPID,
-    wpaiBasic,
-    wpaiPEB,
-    wpaiCommandLine,
-    wpaiImagePath);
-
-  /// information returned by GetProcessInfo() overloaded functions
-  TWinProcessInfo = record
-    /// which information was returned within this structure
-    AvailableInfo: TWinProcessAvailableInfos;
-    /// the Process ID
-    PID: cardinal;
-    /// the Parent Process ID
-    ParentPID: cardinal;
-    /// Terminal Services session identifier associated with this process
-    SessionID: cardinal;
-    /// points to the low-level internal PEB structure
-    // - you can not directly access this memory, unless ReadProcessMemory()
-    // with proper wspDebug priviledge API is called
-    PEBBaseAddress: pointer;
-    /// GetProcessAffinityMask-like value
-    AffinityMask: cardinal;
-    /// process priority
-    BasePriority: integer;
-    /// GetExitCodeProcess-like value
-    ExitStatus: integer;
-    /// indicates whether the specified process is currently being debugged
-    BeingDebugged: byte;
-    /// command-line string passed to the process
-    CommandLine: SynUnicode;
-    /// path of the image file for the process
-    ImagePath: SynUnicode;
-  end;
-
-  PWinProcessInfo = ^TWinProcessInfo;
-  TWinProcessInfoDynArray = array of TWinProcessInfo;
-
-
-function ToText(p: TWinSystemPrivilege): PShortString; overload;
-
-/// calls OpenProcessToken() or OpenThreadToken() to get the current token
-// - caller should then run CloseHandle() once done with the Token handle
-function RawTokenOpen(wtt: TWinTokenType; access: cardinal): THandle;
-
-/// low-level retrieveal of raw binary information for a given token
-// - returns the number of bytes retrieved into buf.buf
-// - caller should then run buf.Done to release the buf result memory
-function RawTokenGetInfo(tok: THandle; tic: TTokenInformationClass;
-  var buf: TSynTempBuffer): cardinal;
-
-/// retrieve low-level process information, from the Windows API
-// - will set the needed wspDebug / SE_DEBUG_NAME priviledge during the call
-procedure GetProcessInfo(aPid: cardinal; out aInfo: TWinProcessInfo); overload;
-
-/// retrieve low-level process(es) information, from the Windows API
-// - will set the needed wspDebug / SE_DEBUG_NAME priviledge during the call
-procedure GetProcessInfo(const aPidList: TCardinalDynArray;
-  out aInfo: TWinProcessInfoDynArray); overload;
-
 /// rough detection of 'c:\windows' and 'c:\program files' folders
 function IsSystemFolder(const Folder: TFileName): boolean;
 
@@ -2026,37 +1863,6 @@ function ReadRegString(Key: THandle; const Path, Value: string): string;
 function DelayedProc(var api; var lib: THandle;
   libname: PChar; procname: PAnsiChar): boolean;
 
-{ some Windows API redefined here for Delphi and FPC consistency }
-
-type
-  TTimeZoneName = array[0..31] of WideChar;
-  TTimeZoneInformation = record
-    Bias: integer;
-    StandardName: TTimeZoneName;
-    StandardDate: TSystemTime;
-    StandardBias: integer;
-    DaylightName: TTimeZoneName;
-    DaylightDate: TSystemTime;
-    DaylightBias: integer;
-  end;
-
-  TDynamicTimeZoneInformation = record
-    TimeZone: TTimeZoneInformation; // XP information
-    TimeZoneKeyName: array[0..127] of WideChar;
-    DynamicDaylightTimeDisabled: boolean;
-  end;
-
-function GetTimeZoneInformation(var info: TTimeZoneInformation): DWORD;
-  stdcall; external kernel32;
-
-/// allow to change the current system time zone on Windows
-// - don't use this low-level function but the high-level mormot.core.search
-// TSynTimeZone.ChangeOperatingSystemTimeZone method
-// - will set the needed wspSystemTime / SE_SYSTEMTIME_NAME priviledge
-// - will select the proper API before and after Vista, if needed
-// - raise EOSException on failure
-procedure SetSystemTimeZone(const info: TDynamicTimeZoneInformation);
-
 const
   /// Windows file APIs have hardcoded MAX_PATH = 260 :(
   // - but more than 260 chars are possible with the \\?\..... prefix
@@ -2077,205 +1883,6 @@ type
 // - all the low-level file functions of this unit (e.g. FileCreate or FileOpen)
 // will use this function to support file names longer than MAX_PATH
 function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean = false): PWideChar;
-
-type
-  HCRYPTPROV = pointer;
-  HCRYPTKEY = pointer;
-  HCRYPTHASH = pointer;
-  HCERTSTORE = pointer;
-
-  CRYPTOAPI_BLOB = record
-    cbData: DWORD;
-    pbData: PByteArray;
-  end;
-  CRYPT_INTEGER_BLOB = CRYPTOAPI_BLOB;
-  CERT_NAME_BLOB     = CRYPTOAPI_BLOB;
-  CRYPT_OBJID_BLOB   = CRYPTOAPI_BLOB;
-
-  CRYPT_BIT_BLOB = record
-    cbData: DWORD;
-    pbData: PByteArray;
-    cUnusedBits: DWORD;
-  end;
-
-  CRYPT_ALGORITHM_IDENTIFIER = record
-    pszObjId: PAnsiChar;
-    Parameters: CRYPT_OBJID_BLOB;
-  end;
-
-  CERT_PUBLIC_KEY_INFO = record
-    Algorithm: CRYPT_ALGORITHM_IDENTIFIER;
-    PublicKey: CRYPT_BIT_BLOB;
-  end;
-
-  CERT_EXTENSION = record
-    pszObjId: PAnsiChar;
-    fCritical: BOOL;
-    Blob: CRYPT_OBJID_BLOB;
-  end;
-  PCERT_EXTENSION = ^CERT_EXTENSION;
-  CERT_EXTENSIONS = array[word] of CERT_EXTENSION;
-  PCERT_EXTENSIONS = ^CERT_EXTENSIONS;
-
-  CERT_INFO = record
-    dwVersion: DWORD;
-    SerialNumber: CRYPT_INTEGER_BLOB;
-    SignatureAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
-    Issuer: CERT_NAME_BLOB;
-    NotBefore: TFileTime;
-    NotAfter: TFileTime;
-    Subject: CERT_NAME_BLOB;
-    SubjectPublicKeyInfo: CERT_PUBLIC_KEY_INFO;
-    IssuerUniqueId: CRYPT_BIT_BLOB;
-    SubjectUniqueId: CRYPT_BIT_BLOB;
-    cExtension: DWORD;
-    rgExtension: PCERT_EXTENSIONS;
-  end;
-  PCERT_INFO = ^CERT_INFO;
-
-  CERT_CONTEXT = record
-    dwCertEncodingType: DWORD;
-    pbCertEncoded: PByte;
-    cbCertEncoded: DWORD;
-    pCertInfo: PCERT_INFO;
-    hCertStore: HCERTSTORE;
-  end;
-  PCCERT_CONTEXT = ^CERT_CONTEXT;
-  PPCCERT_CONTEXT = ^PCCERT_CONTEXT;
-
-  CRYPT_KEY_PROV_PARAM = record
-    dwParam: DWORD;
-    pbData: PByte;
-    cbData: DWORD;
-    dwFlags: DWORD;
-  end;
-  PCRYPT_KEY_PROV_PARAM = ^CRYPT_KEY_PROV_PARAM;
-
-  CRYPT_KEY_PROV_INFO = record
-    pwszContainerName: PWideChar;
-    pwszProvName: PWideChar;
-    dwProvType: DWORD;
-    dwFlags: DWORD;
-    cProvParam: DWORD;
-    rgProvParam: PCRYPT_KEY_PROV_PARAM;
-    dwKeySpec: DWORD;
-  end;
-  PCRYPT_KEY_PROV_INFO = ^CRYPT_KEY_PROV_INFO;
-
-  CRYPT_OID_INFO = record
-    cbSize: DWORD;
-    pszOID: PAnsiChar;
-    pwszName: PWideChar;
-    dwGroupId: DWORD;
-    Union: record
-      case integer of
-        0: (dwValue: DWORD);
-        1: (Algid: DWORD);
-        2: (dwLength: DWORD);
-    end;
-    ExtraInfo: CRYPTOAPI_BLOB;
-  end;
-  PCRYPT_OID_INFO = ^CRYPT_OID_INFO;
-
-  PCCRL_CONTEXT = pointer;
-  PPCCRL_CONTEXT = ^PCCRL_CONTEXT;
-  PCRYPT_ATTRIBUTE = pointer;
-
-  CRYPT_SIGN_MESSAGE_PARA = record
-    cbSize: DWORD;
-    dwMsgEncodingType: DWORD;
-    pSigningCert: PCCERT_CONTEXT;
-    HashAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
-    pvHashAuxInfo: pointer;
-    cMsgCert: DWORD;
-    rgpMsgCert: PPCCERT_CONTEXT;
-    cMsgCrl: DWORD;
-    rgpMsgCrl: PPCCRL_CONTEXT;
-    cAuthAttr: DWORD;
-    rgAuthAttr: PCRYPT_ATTRIBUTE;
-    cUnauthAttr: DWORD;
-    rgUnauthAttr: PCRYPT_ATTRIBUTE;
-    dwFlags: DWORD;
-    dwInnerContentType: DWORD;
-    HashEncryptionAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
-    pvHashEncryptionAuxInfo: pointer;
-  end;
-
-  PFN_CRYPT_GET_SIGNER_CERTIFICATE = function(pvGetArg: pointer;
-    dwCertEncodingType: DWORD; pSignerId: PCERT_INFO;
-    hMsgCertStore: HCERTSTORE): PCCERT_CONTEXT; stdcall;
-  CRYPT_VERIFY_MESSAGE_PARA = record
-    cbSize: DWORD;
-    dwMsgAndCertEncodingType: DWORD;
-    hCryptProv: HCRYPTPROV;
-    pfnGetSignerCertificate: PFN_CRYPT_GET_SIGNER_CERTIFICATE;
-    pvGetArg: pointer;
-  end;
-
-  PUNICODE_STRING = ^UNICODE_STRING;
-  UNICODE_STRING = packed record
-    Length: word;
-    MaximumLength: word;
-    {$ifdef CPUX64}
-    _align: array[0..3] of byte;
-    {$endif CPUX64}
-    Buffer: PWideChar;
-  end;
-
-  /// direct access to the Windows CryptoApi
-  {$ifdef USERECORDWITHMETHODS}
-  TWinCryptoApi = record
-  {$else}
-  TWinCryptoApi = object
-  {$endif USERECORDWITHMETHODS}
-  private
-    /// if the presence of this API has been tested
-    Tested: boolean;
-    /// if this API has been loaded
-    Handle: THandle;
-    /// used when inlining Available method
-    procedure Resolve;
-  public
-    /// acquire a handle to a particular key container within a
-    // particular cryptographic service provider (CSP)
-    AcquireContextA: function(var phProv: HCRYPTPROV; pszContainer: PAnsiChar;
-      pszProvider: PAnsiChar; dwProvType: DWORD; dwFlags: DWORD): BOOL; stdcall;
-    /// releases the handle of a cryptographic service provider (CSP) and a
-    // key container
-    ReleaseContext: function(hProv: HCRYPTPROV; dwFlags: PtrUInt): BOOL; stdcall;
-    /// transfers a cryptographic key from a key BLOB into a cryptographic
-    // service provider (CSP)
-    ImportKey: function(hProv: HCRYPTPROV; pbData: pointer; dwDataLen: DWORD;
-      hPubKey: HCRYPTKEY; dwFlags: DWORD; var phKey: HCRYPTKEY): BOOL; stdcall;
-    /// customizes various aspects of a session key's operations
-    SetKeyParam: function(hKey: HCRYPTKEY; dwParam: DWORD; pbData: pointer;
-      dwFlags: DWORD): BOOL; stdcall;
-    /// releases the handle referenced by the hKey parameter
-    DestroyKey: function(hKey: HCRYPTKEY): BOOL; stdcall;
-    /// encrypt the data designated by the key held by the CSP module
-    // referenced by the hKey parameter
-    Encrypt: function(hKey: HCRYPTKEY; hHash: HCRYPTHASH; Final: BOOL;
-      dwFlags: DWORD; pbData: pointer; var pdwDataLen: DWORD; dwBufLen: DWORD): BOOL; stdcall;
-    /// decrypts data previously encrypted by using the CryptEncrypt function
-    Decrypt: function(hKey: HCRYPTKEY; hHash: HCRYPTHASH; Final: BOOL;
-      dwFlags: DWORD; pbData: pointer; var pdwDataLen: DWORD): BOOL; stdcall;
-    /// fills a buffer with cryptographically random bytes
-    // - since Windows Vista with Service Pack 1 (SP1), an AES counter-mode
-    // based PRNG specified in NIST Special Publication 800-90 is used
-    GenRandom: function(hProv: HCRYPTPROV; dwLen: DWORD; pbBuffer: pointer): BOOL; stdcall;
-    /// converts a security descriptor to a string format
-    ConvertSecurityDescriptorToStringSecurityDescriptorA: function(
-      SecurityDescriptor: PSECURITY_DESCRIPTOR; RequestedStringSDRevision: DWORD;
-      SecurityInformation: DWORD; var StringSecurityDescriptor: PAnsiChar;
-      StringSecurityDescriptorLen: LPDWORD): BOOL; stdcall;
-
-    /// try to load the CryptoApi on this system
-    function Available: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// wrapper around ConvertSecurityDescriptorToStringSecurityDescriptorA()
-    // - see also SecurityDescriptorToText() function in mormot.core.os.security
-    function SecurityDescriptorToText(sd: pointer; out text: RawUtf8): boolean;
-  end;
 
 const
   NO_ERROR  = Windows.NO_ERROR; // = ERROR_SUCCESS
@@ -2302,42 +1909,6 @@ const
 
   INVALID_HANDLE_VALUE = Windows.INVALID_HANDLE_VALUE; // = HANDLE(-1)
   ENGLISH_LANGID       = $0409;
-
-  PROV_RSA_FULL        = 1;
-  PROV_RSA_AES         = 24;
-  CRYPT_NEWKEYSET      = 8;
-  CRYPT_VERIFYCONTEXT  = DWORD($F0000000);
-  PLAINTEXTKEYBLOB     = 8;
-  CUR_BLOB_VERSION     = 2;
-  KP_IV                = 1;
-  KP_MODE              = 4;
-  CALG_AES_128         = $660E;
-  CALG_AES_192         = $660F;
-  CALG_AES_256         = $6610;
-  CRYPT_MODE_CBC       = 1;
-  CRYPT_MODE_ECB       = 2;
-  CRYPT_MODE_OFB       = 3;
-  CRYPT_MODE_CFB       = 4;
-  CRYPT_MODE_CTS       = 5;
-  HCRYPTPROV_NOTTESTED = HCRYPTPROV(-1);
-  NTE_BAD_KEYSET       = HRESULT($80090016);
-
-var
-  CryptoApi: TWinCryptoApi;
-
-/// protect some data for the current user, using Windows DPAPI
-// - the application can specify a secret salt text, which should reflect the
-// current execution context, to ensure nobody could decrypt the data without
-// knowing this application-specific AppSecret value
-// - will use CryptProtectData DPAPI function call under Windows
-// - see https://msdn.microsoft.com/en-us/library/ms995355
-// - this function is Windows-only, could be slow, and you don't know which
-// algorithm is really used on your system, so using our mormot.crypt.core.pas
-// CryptDataForCurrentUser() is probably a safer (and cross-platform) alternative
-// - also note that DPAPI has been closely reverse engineered - see e.g.
-// https://www.passcape.com/index.php?section=docsys&cmd=details&id=28
-function CryptDataForCurrentUserDPAPI(const Data, AppSecret: RawByteString;
-  Encrypt: boolean): RawByteString;
 
 const
   WINDOWS_CERTSTORE: array[TSystemCertificateStore] of PWideChar = (
@@ -2912,17 +2483,6 @@ procedure DeleteCriticalSectionIfNeeded(var cs: TRTLCriticalSection);
 procedure GetSystemTime(out result: TSystemTime);
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
-/// set the current system time as UTC timestamp
-// - we define two functions with diverse signature to circumvent the FPC RTL
-// TSystemTime field order inconsistency
-// - warning: do not call this function directly, but rather mormot.core.datetime
-// TSynSystemTime.ChangeOperatingSystemTime cross-platform method instead
-{$ifdef OSWINDOWS}
-function SetSystemTime(const utctime: TSystemTime): boolean;
-{$else}
-function SetSystemTime(utctime: TUnixTime): boolean;
-{$endif OSWINDOWS}
-
 /// returns the current Local time as TSystemTime from the OS
 // - under Delphi/Windows, directly call the homonymous Win32 API
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
@@ -2986,6 +2546,14 @@ procedure WinCheck(const Context: ShortString; Code: integer;
 
 /// raise an Exception from the last module error using WinErrorText()
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
+
+{$else}
+/// set the current system time as UTC timestamp
+// - we define two functions with diverse signature to circumvent the FPC RTL
+// TSystemTime field issue - Windows version is in mormot.core.os.security
+// - warning: do not call this function directly, but rather mormot.core.datetime
+// TSynSystemTime.ChangeOperatingSystemTime cross-platform method instead
+function SetSystemTime(utctime: TUnixTime): boolean;
 
 {$endif OSWINDOWS}
 
@@ -3971,19 +3539,6 @@ function GetDiskPartitions: TDiskPartitions;
 /// call several Operating System APIs to gather 512-bit of entropy information
 procedure XorOSEntropy(var e: THash512Rec);
 
-/// low-level function returning some random binary from the Operating System
-// - will call /dev/urandom or /dev/random under POSIX, and CryptGenRandom API
-// on Windows then return TRUE, or fallback to mormot.core.base gsl_rng_taus2
-// generator and return FALSE if the system API failed
-// - on POSIX, only up to 256 bytes (2048-bits) are retrieved from /dev/urandom
-// or /dev/random as stated by "man urandom" Usage - then padded with our
-// L'Ecuyer gsl_rng_taus2 random generator
-// - so you may consider that the output Buffer is always filled with random
-// - you should not have to call this procedure, but faster and safer TAesPrng
-// from mormot.crypt.core - also consider the TSystemPrng class
-function FillSystemRandom(Buffer: PByteArray; Len: integer;
-  AllowBlocking: boolean): boolean;
-
 type
   /// available console colors
   TConsoleColor = (
@@ -4145,6 +3700,17 @@ function StringFromFileNoSize(const FileName: TFileName): RawByteString;
 // - in respect to StringFromFileNoSize(), this will make a single read()
 procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8); overload;
 {$endif OSLINUXANDROID}
+
+/// low-level function returning some random binary from the Operating System
+// - Windows version calling the CryptGenRandom API is in mormot.core.os.security
+// - on POSIX, only up to 256 bytes (2048-bits) are retrieved from /dev/urandom
+// or /dev/random as stated by "man urandom" Usage - then padded with our
+// L'Ecuyer gsl_rng_taus2 random generator
+// - so you may consider that the output Buffer is always filled with random
+// - you should not have to call this low-level procedure, but faster and safer
+// TAesPrng from mormot.crypt.core - also consider the TSystemPrng class
+function FillSystemRandom(Buffer: PByteArray; Len: integer;
+  AllowBlocking: boolean): boolean;
 
 {$endif OSWINDOWS}
 
