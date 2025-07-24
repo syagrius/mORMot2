@@ -1477,22 +1477,23 @@ type
   /// convenient wrapper to a PASN1_TIME instance
   ASN1_TIME = object
   public
+    /// may return 0 if ASN1_TIME_to_tm() is not supported on oldest OpenSSL
     function ToDateTime: TDateTime;
   end;
   PASN1_TIME = ^ASN1_TIME;
 
   _anonymous_type_1 = record
     case integer of
-      0: (ptr: PUtf8Char);
-      1: (boolean: ASN1_BOOLEAN);
-      2: (asn1_string: PASN1_STRING);
-      3: (_object: PASN1_OBJECT);
-      4: (_integer: PASN1_INTEGER);
-      5: (enumerated: PASN1_ENUMERATED);
-      6: (bit_string: PASN1_BIT_STRING);
-      7: (octet_string: PASN1_OCTET_STRING);
-      8: (printablestring: PASN1_PRINTABLESTRING);
-      9: (t61string: PASN1_T61STRING);
+      0:  (ptr: PUtf8Char);
+      1:  (boolean: ASN1_BOOLEAN);
+      2:  (asn1_string: PASN1_STRING);
+      3:  (_object: PASN1_OBJECT);
+      4:  (_integer: PASN1_INTEGER);
+      5:  (enumerated: PASN1_ENUMERATED);
+      6:  (bit_string: PASN1_BIT_STRING);
+      7:  (octet_string: PASN1_OCTET_STRING);
+      8:  (printablestring: PASN1_PRINTABLESTRING);
+      9:  (t61string: PASN1_T61STRING);
       10: (ia5string: PASN1_IA5STRING);
       11: (generalstring: PASN1_GENERALSTRING);
       12: (bmpstring: PASN1_BMPSTRING);
@@ -2006,7 +2007,7 @@ type
 
   // minimal C-like definitions to mimic unixtype FPC unit on Windows
   clong = PtrInt;
-  time_t = PtrInt;
+  time_t = PtrInt; // may suffer Year2038 issue on CPU32 - not used in practice
   ptime_t = ^time_t;
 
   timeval = record
@@ -8010,7 +8011,7 @@ begin
   if @self = nil then
     result := 0
   else
-    result := X509_REVOKED_get0_revocationDate(@self).ToDateTime;
+    result := X509_REVOKED_get0_revocationDate(@self).ToDateTime; // may be 0
 end;
 
 function X509_REVOKED.Reason: integer;
@@ -8075,7 +8076,7 @@ begin
   if @self = nil then
     result := 0
   else
-    result := X509_CRL_get_lastUpdate(@self).ToDateTime;
+    result := X509_CRL_get_lastUpdate(@self).ToDateTime; // may return 0
 end;
 
 function X509_CRL.NextUpdate: TDateTime;
@@ -8894,7 +8895,7 @@ begin
   n1 := Len;
   n2 := PASN1_STRING(another).Len;
   result := (n1 = n2) and
-            CompareMem(Data, PASN1_STRING(another).Data, n1);
+    mormot.core.base.CompareMem(Data, PASN1_STRING(another).Data, n1);
 end;
 
 
@@ -8951,7 +8952,7 @@ begin
      (ASN1_TIME_to_tm(@self, @t) = OPENSSLSUCCESS) then
     result := TmToDateTime(t)
   else
-    result := 0; // deprecated
+    result := 0; // e.g. on deprecated OpenSSL without ASN1_TIME_to_tm()
 end;
 
 
@@ -9318,7 +9319,7 @@ begin
   if @self = nil then
     result := 0
   else
-    result := X509_getm_notBefore(@self).ToDateTime;
+    result := X509_getm_notBefore(@self).ToDateTime; // 0 if no ASN1_TIME_to_tm()
 end;
 
 function X509.NotAfter: TDateTime;
@@ -10136,7 +10137,7 @@ begin
           get_error := RawSocketErrNo; // try to get additional info from OS
           if get_error <> NO_ERROR then
             result := RawUtf8(format('%s (%d %s)',
-                        [result, get_error, GetErrorText(get_error)]));
+                        [result, get_error, GetErrorShort(get_error)]));
         end;
     end; // non-fatal SSL_ERROR_WANT_* codes are unexpected here
   end

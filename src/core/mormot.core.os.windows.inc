@@ -26,13 +26,11 @@ begin
   tmp.Done;
 end; // warning: Delphi 7/2007 UnicodeToUtf8() RTL doesn't handle surrogates
 
-function IsExtendedPathName(Name: PWideChar): boolean; // in '\\?\...' format
+function IsExtendedPathNameW(Name: PWideChar): boolean; // in '\\?\...' format
 begin
   result := (Name <> nil) and
-            (Name[0] = '\') and
-            (Name[1] = '\') and
-            (Name[2] = '?') and
-            (Name[3] = '\');
+            (PCardinalArray(Name)[0] = ord('\') + ord('\') shl 16) and
+            (PCardinalArray(Name)[1] = ord('?') + ord('\') shl 16);
 end;
 
 procedure ExtendedPathName(Name: PWideChar; Len: PtrInt; var Temp: TW32Temp);
@@ -42,7 +40,7 @@ begin
   Len := Len * 2 + 2; // in bytes, +2 to include ending #0
   if (Len <= MAX_PATH * 2) or
      ((Len <= SizeOf(Temp) - 8) and
-      IsExtendedPathName(Name)) then // in '\\?\...' format
+      IsExtendedPathNameW(Name)) then // in '\\?\...' format
   begin
     MoveFast(Name^, Temp[0], Len); // we can use the supplied UTF-16 file name
     exit;
@@ -64,6 +62,11 @@ end;
 
 {$ifdef UNICODE}
 
+function IsExtendedPathName(const Name: TFileName): boolean;
+begin
+  result := IsExtendedPathNameW(pointer(Name)); // string=PWideChar
+end;
+
 function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean): PWideChar;
 var
   len: PtrInt;
@@ -71,19 +74,40 @@ begin
   result := pointer(FileName);
   len := length(FileName);
   if (len = 0) or
-     ((len < MAX_PATH) and
-      not DoCopy) then
+     ((not DoCopy) and // temp copy is forced e.g. for GetFileVersionInfoSizeW()
+      ((len < MAX_PATH) or
+       IsExtendedPathName(FileName))) then
     exit; // most common case could direclty use FileName[] UTF-16 content
   ExtendedPathName(pointer(FileName), len, Temp);
   result := @Temp;
 end;
 
-procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
+procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string); inline;
 begin
-  SetString(fn, P, StrLenW(P)); // TFileName is UnicodeString
+  SetString(s, P, l); // TFileName is UnicodeString
+end;
+
+procedure SetStringFromAnsi7Buffer(var d: string; s: PByteArray; l: PtrInt);
+var
+  dst: PWordArray;
+begin
+  SetString(d, nil, l);
+  dst := pointer(d);
+  if dst <> nil then
+    repeat
+      dec(l);
+      dst[l] := s[l]; // fast direct conversion using 7-bit WideChar -> AnsiChar
+    until l = 0;
 end;
 
 {$else}
+
+function IsExtendedPathName(const Name: TFileName): boolean; // string=PAnsiChar
+begin
+  result := (Name <> '') and
+            (PCardinal(Name)^ = ord('\') + ord('\') shl 8 +
+                                ord('?') shl 16 + ord('\') shl 24);
+end;
 
 procedure W32Convert(const FileName: TFileName; var Temp: TW32Temp);
 var
@@ -101,7 +125,9 @@ begin
   if FileName = '' then
     exit;
   len := length(FileName);
-  if (len < MAX_PATH) and
+  if ((len < MAX_PATH) or
+      ((len < W32_MAX) and
+       IsExtendedPathName(FileName))) and
      IsAnsiCompatible(pointer(FileName), len) then
     // most common cases do not need any Unicode conversion
     for i := 0 to len do // includes #0 terminator
@@ -113,34 +139,45 @@ begin
   result := @Temp;
 end;
 
-procedure Win32PWideCharToFileNameConv(P: PWideChar; L: PtrInt; var fn: TFileName);
+procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string);
 var
-  u: SynUnicode;
-begin
-  SetString(u, P, l);
-  fn := TFileName(u); // let the RTL do the conversion
-end;
+  i: PtrInt;
 
-procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
-var
-  l, i: PtrInt;
+  procedure DoSynUnicodeConv;
+  var
+    u: SynUnicode; // transient UTF-16 variable
+  begin
+    SetString(u, P, l);
+    s := string(u); // let the RTL do the conversion
+  end;
+
 begin
-  l := StrLenW(P);
   if IsAnsiCompatibleW(P, l) then // most common case
   begin
-    SetString(fn, nil, l);
+    SetString(s, nil, l);
     for i := 0 to l - 1 do
-      PByteArray(fn)[i] := PWordArray(P)[i]; // fast direct conversion
+      PByteArray(s)[i] := PWordArray(P)[i]; // fast direct conversion
   end
   {$ifdef FPC}
   else if DefaultRTLFileSystemCodePage = CP_UTF8 then // happens with Lazarus
-    DoWin32PWideCharToUtf8(P, l, RawUtf8(fn)) // use RTL or mormot.core.unicode
+    DoWin32PWideCharToUtf8(P, l, RawUtf8(s)) // use RTL or mormot.core.unicode
   {$endif FPC}
   else
-    Win32PWideCharToFileNameConv(P, l, fn);
+    DoSynUnicodeConv;
+end;
+
+procedure SetStringFromAnsi7Buffer(var d: string; s: PAnsiChar; l: PtrInt);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  SetString(d, s, l);
 end;
 
 {$endif UNICODE}
+
+procedure Win32PWideCharToFileName(P: PWideChar; out fn: TFileName);
+begin
+  Win32PWideCharToString(P, StrLenW(P), string(fn));
+end;
 
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
@@ -258,6 +295,18 @@ begin // case-insensitive extension, then filename using plain string/PChar
   result := StrICompPChar(PosExtString(pointer(A)), PosExtString(pointer(B)));
   if result = 0 then
     result := AnsiCompareFileName(string(A), string(B)); // as user-expected
+end;
+
+// https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+function TDirectoryBrowser.Make(const fn: TFileName): TFileName;
+begin
+  if not fExtendedPath and
+     (length(fCurrentDir) + length(fn) >= MAX_PATH - 5) then
+  begin
+    fExtendedPath := true;
+    fCurrentDir := '\\?\' + fCurrentDir;  // use long path prefix from now on
+  end;
+  result := fCurrentDir + fn;
 end;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
@@ -514,56 +563,58 @@ begin
   result := Windows.GetModuleHandle(lpModuleName); // call either A or W API
 end;
 
-function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
+function WinError(err: cardinal; src: pointer; ss: PShortString; s: PString): boolean;
 var
-  bak: integer;
-  flags, len: PtrUInt;
-  src: pointer;
+  errbak, flags, len: PtrUInt;
   tmp: array[0..511] of WideChar;
-  tmps: ShortString absolute tmp;
 begin
-  tmps[0] := #0;
-  if (ModuleName = nil) and
-     AppendWinErrorText(Code, tmps, #0) then
-  begin
-    // return directly the known standard system error code constant
-    FastSetString(result, @tmps[1], ord(tmps[0]));
-    exit;
-  end;
-  bak := GetLastError;
-  src := nil;
+  errbak := GetLastError;
   flags := FORMAT_MESSAGE_FROM_SYSTEM;
-  if ModuleName <> nil then
-  begin
-    // module specific error codes
-    src := pointer(GetModuleHandle(ModuleName));
-    if src <> nil then
-      flags := FORMAT_MESSAGE_FROM_HMODULE;
-  end;
-  // first try if there is an English message version of this error code
-  len := FormatMessageW(flags, src, Code, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
-  if len <= 0 then
+  if src <> nil then // Module specific error codes - no fallback to system
+    flags := FORMAT_MESSAGE_FROM_HMODULE;
+  // first try if there is an English message version of this error err
+  len := FormatMessageW(flags, src, err, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
+  if len = 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
-    len := FormatMessageW(flags, src, Code, 0, @tmp, SizeOf(tmp), nil);
-  if (len <= 0) and
-     (src <> nil) then
-  begin
-    // fallback to the system error message if this module as no such code
-    result := WinErrorText(Code);
-    SetLastError(bak);
-    exit;
-  end;
-  // return the formatted error message as trimmed UTF-8
-  while (len > 0) and
+    len := FormatMessageW(flags, src, err, 0, @tmp, SizeOf(tmp), nil);
+  SetLastError(errbak);
+  while (len <> 0) and
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
     dec(len); // trim right
-  Win32PWideCharToUtf8(@tmp, len, result);
-  SetLastError(bak);
+  if s <> nil then
+    Win32PWideCharToString(@tmp, len, s^)
+  else if len <> 0 then
+    ss^[0] := AnsiChar(UnicodeToUtf8(@ss^[1], 255, @tmp, len)); // RTL
+  result := len <> 0;
 end;
 
-function GetErrorText(error: integer): RawUtf8;
+function WinApiErrorString(Code: cardinal; ModuleName: PChar): string;
+var
+  tmp: TShort47;
 begin
-  result := WinErrorText(error);
+  if ModuleName <> nil then // first try from the supplied library name
+    if WinError(Code, pointer(GetModuleHandle(ModuleName)), nil, @result) then
+      exit;
+  tmp[0] := #0;
+  if AppendWinErrorText(Code, tmp, #0) then // try known system constants
+    SetStringFromAnsi7Buffer(result, @tmp[1], ord(tmp[0]))
+  else
+    WinError(Code, nil, nil, @result); // fallback to FormatMessageW()
+end;
+
+function WinApiErrorShort(Code: cardinal; ModuleName: PChar): shortstring;
+begin
+  if ModuleName <> nil then // first try from the supplied library name
+    if WinError(Code, pointer(GetModuleHandle(ModuleName)), @result, nil) then
+      exit;
+  GetErrorShortVar(Code, result); // regular system information
+end;
+
+procedure GetErrorShortVar(error: integer; var dest: ShortString);
+begin
+  dest[0] := #0;
+  if not AppendWinErrorText(error, dest, #0) then // try known system constants
+    WinError(error, nil, @dest, nil); // fallback to FormatMessageW
 end;
 
 procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
@@ -577,7 +628,7 @@ var
 begin
   code := GetLastError;
   raise ModuleException.CreateFmt('%s error [%s] (0x%x)',
-    [ModuleName, string(WinErrorText(code, ModuleName)), code]);
+    [ModuleName, WinApiErrorString(code, ModuleName), code]);
 end;
 
 function WinLastError(const Context: ShortString; Code: integer): string;
@@ -585,7 +636,7 @@ begin
   if Code = 0 then
     Code := GetLastError;
   result := Format('%s error [%s] (0x%x)',
-    [Context, string(WinErrorText(Code)), code]);
+    [Context, WinApiErrorString(Code), code]);
 end;
 
 procedure RaiseLastError(const Context: ShortString;
@@ -676,7 +727,7 @@ end;
 {$ifdef ISDELPHI20062007} // circumvent Delphi 2007 RTL inlining issue
 function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 begin
-  result := SysUtils.AnsiCompareFileName(S1,S2);
+  result := SysUtils.AnsiCompareFileName(S1, S2);
 end;
 {$endif ISDELPHI20062007}
 
@@ -1026,6 +1077,14 @@ begin
             DeleteFileW(W32(aFileName, tmp));
 end;
 
+function RemoveDir(const aDirName: TFileName): boolean;
+var
+  tmp: TW32Temp;
+begin
+  result := (aDirName <> '') and
+            RemoveDirectoryW(W32(aDirName, tmp));
+end;
+
 function FileShare(aMode: integer): DWord;
 begin
   case (aMode and $f0) of
@@ -1203,7 +1262,7 @@ begin
   w := W32(FileName, t1);
   if w = nil then
     exit;
-  if not IsExtendedPathName(w) then // W32() may have converted to extended-length
+  if not IsExtendedPathNameW(w) then // W32() may have converted to extended-length
     if GetFullPathNameW(w, high(t2), @t2, fp) = 0 then
       exit
     else
@@ -1307,6 +1366,11 @@ end;
 procedure ReleaseSRWLockExclusiveForXP(var P: TOSLightMutex); stdcall;
 begin
   TLightLock(P).UnLock;
+end;
+
+function GetTickSec: cardinal;
+begin
+  result := GetTickCount64 div MilliSecsPerSec;
 end;
 
 function GetUptimeSec: cardinal;
@@ -2641,10 +2705,10 @@ var
   var
     str: pointer;
     sz: DWord;
-    u: SynUnicode;
+    u: TSynTempBuffer;
   begin
-    u := Utf8Decode(lngnfo + From);
-    if VerQueryValueW(pt, pointer(u), str, sz) and
+    sz := 0;
+    if VerQueryValueW(pt, Utf8ToWin32PWideChar(lngnfo + From, u), str, sz) and
        (sz > 0) then
       Win32PWideCharToUtf8(str, Res);
   end;
@@ -2683,15 +2747,15 @@ begin
            (siz2 >= 4) then
         begin
           _fmt('\StringFileInfo\%4.4x%4.4x\', [trans^[0], trans^[1]], lngnfo);
-          ReadResourceByName('CompanyName', CompanyName);
-          ReadResourceByName('FileDescription', FileDescription);
-          ReadResourceByName('FileVersion', FileVersion);
-          ReadResourceByName('InternalName', InternalName);
-          ReadResourceByName('LegalCopyright', LegalCopyright);
-          ReadResourceByName('OriginalFilename',OriginalFilename);
-          ReadResourceByName('ProductName', ProductName);
-          ReadResourceByName('ProductVersion', ProductVersion);
-          ReadResourceByName('Comments', Comments);
+          ReadResourceByName('CompanyName',      CompanyName);
+          ReadResourceByName('FileDescription',  FileDescription);
+          ReadResourceByName('FileVersion',      FileVersion);
+          ReadResourceByName('InternalName',     InternalName);
+          ReadResourceByName('LegalCopyright',   LegalCopyright);
+          ReadResourceByName('OriginalFilename', OriginalFilename);
+          ReadResourceByName('ProductName',      ProductName);
+          ReadResourceByName('ProductVersion',   ProductVersion);
+          ReadResourceByName('Comments',         Comments);
         end;
         result := true;
       end;
@@ -4671,6 +4735,7 @@ var
   i: integer;
   siz: DWord;
 begin
+  // 1. minimal fallback to support of very old 32-bit CPU without SSE2
   {$ifdef ASMX86}
   {$ifndef HASNOSSE2}
   if not (cfSSE2 in CpuFeatures) then // introduced in year 2000 with Pentium 4
@@ -4688,7 +4753,7 @@ begin
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86}
-  // late-binding of newest Windows APIs
+  // 2. late-binding of newest Windows APIs
   DoWin32PWideCharToUtf8 := @_DoWin32PWideCharToUtf8; // or mormot.core.unicode
   h := GetModuleHandle(kernel32);
   GetSystemTimePreciseAsFileTime :=
@@ -4740,14 +4805,13 @@ begin
     AcquireSRWLockExclusive := @AcquireSRWLockExclusiveForXP;
     ReleaseSRWLockExclusive := @ReleaseSRWLockExclusiveForXP;
   end;
-  // retrieve system information
+  // 3. retrieve system information
   TimeZoneLocalBias := -GetLocalTimeOffset;
   FillcharFast(SystemInfo, SizeOf(SystemInfo), 0);
   if Assigned(GetNativeSystemInfo) then
     GetNativeSystemInfo(SystemInfo)
   else
     Windows.GetSystemInfo(SystemInfo);
-  crc32c128(@StartupRandom, @SystemInfo, SizeOf(SystemInfo));
   GetMem(P, 10); // ensure that using MIN_PTR_VALUE won't break anything
   if (PtrUInt(P) > MIN_PTR_VALUE) and
      (PtrUInt(SystemInfo.lpMinimumApplicationAddress) <= MIN_PTR_VALUE) then
@@ -4757,10 +4821,8 @@ begin
   mem.dwLength := SizeOf(mem);
   if GlobalMemoryStatusEx(mem) then
     SystemMemorySize := mem.ullTotalPhys;
-  crc32c128(@StartupRandom, @mem, SizeOf(mem));
   OSVersionInfo.dwOSVersionInfoSize := SizeOf(OSVersionInfo);
   GetVersionEx(OSVersionInfo);
-  crc32c128(@StartupRandom, @OSVersionInfo, SizeOf(OSVersionInfo));
   Vers := wUnknown;
   with OSVersionInfo do
     // see https://msdn.microsoft.com/en-us/library/windows/desktop/ms724833
@@ -4840,7 +4902,7 @@ begin
       OSVersionInfoEx := TrimU('Wine ' + TrimU(OSVersionInfoEx));
     end;
   end;
-  // retrieve Software/Hardware information from Registry
+  // 4. retrieve Software/Hardware information from Registry
   if reg.ReadOpen(wrLocalMachine, 'Software\Microsoft\Windows NT\CurrentVersion') then
   begin
     WindowsUbr := reg.ReadDword('UBR');
@@ -4902,7 +4964,6 @@ begin
     siz := SizeOf(proc[0]) * length(proc);
     if GetLogicalProcessorInformation(proc[0], @siz) then
     begin
-      crc32c128(@StartupRandom, pointer(proc), siz);
       for i := 0 to (siz div SizeOf(proc[0])) - 1 do
         with proc[i] do
           case Relationship of
@@ -4946,6 +5007,17 @@ begin
     CpuSockets := 1; // e.g. on XP prior to SP3
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
+  // 5. compute some minimal entropy using the just retrieved info
+  CoCreateGuid(StartupEntropy); // very fast, and won't hurt
+  {$ifdef CPUINTEL}
+  if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
+    StartupEntropy.Lo := StartupEntropy.Lo xor Rdtsc; // fast and unpredictable
+  RdRand32(@StartupEntropy.c2, 2); // no-op on older CPUs
+  {$endif CPUINTEL}
+  crc32c128(@StartupEntropy, @SystemInfo, SizeOf(SystemInfo));
+  crc32c128(@StartupEntropy, @mem, SizeOf(mem));
+  crc32c128(@StartupEntropy, @OSVersionInfo, SizeOf(OSVersionInfo));
+  // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 
 procedure FinalizeSpecificUnit;

@@ -2595,6 +2595,7 @@ end;
 
 function TSynMonitorSize.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
 end;
 
@@ -2602,6 +2603,7 @@ end;
 
 function TSynMonitorOneSize.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
 end;
 
@@ -2609,6 +2611,7 @@ end;
 
 function TSynMonitorThroughput.GetAsText: TShort16;
 begin
+  result[0] := #0;
   AppendKB(fBytesPerSec, result, not fTextNoSpace);
   AppendShortTwoChars(ord('/') + ord('s') shl 8, @result);
 end;
@@ -2855,7 +2858,7 @@ end;
 function TSynMonitor.ComputeDetailsJson: RawUtf8;
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -3833,7 +3836,8 @@ end;
 
 function TSystemUse.HistoryData(aProcessID, aDepth: integer): TSystemUseDataDynArray;
 var
-  i, n, last: PtrInt;
+  i, j, n, last: PtrInt;
+  res: ^TSystemUseData;
 begin
   result := nil;
   if self = nil then
@@ -3850,20 +3854,23 @@ begin
            (n > aDepth) then
           n := aDepth;
         SetLength(result, n); // make ordered copy
+        res := pointer(result);
         for i := 0 to n - 1 do
         begin
-          if i <= fDataIndex then
-            result[i] := Data[fDataIndex - i]
+          j := fDataIndex - i;
+          if j >= 0 then
+            res^ := Data[j]
           else
           begin
-            result[i] := Data[last];
+            res^ := Data[last];
             dec(last);
           end;
-          if PInt64(@result[i].Timestamp)^ = 0 then
-          begin
-            SetLength(result, i); // truncate to latest available sample
+          if PInt64(@res^.Timestamp)^ = 0 then
+          begin // truncate to latest available sample
+            SetLength(result, i); // keep result[0]..result[i-1]
             break;
           end;
+          inc(res);
         end;
       end;
   finally
@@ -4378,8 +4385,8 @@ begin
 end;
 
 const
-  _ROMSIZ: array[0..3] of string[2] = ('MB', 'GB', '??', '??');
-  _VOLT:   array[0..3] of string[3] = ('5', '3.3', '2.9', '?');
+  _ROMSIZ: array[0..3] of TShort3 = ('MB', 'GB', '??', '??');
+  _VOLT:   array[0..3] of TShort3 = ('5', '3.3', '2.9', '?');
 
 procedure CacheSize8(b: PtrUInt; var res: RawUtf8);
 var

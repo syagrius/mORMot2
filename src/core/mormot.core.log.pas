@@ -1068,7 +1068,7 @@ type
     fWriterStream: TStream;
     fFileName: TFileName;
     fFileRotationBytes: cardinal; // see OnFlushToStream
-    fNextFlushTix10, fNextFileRotateDailyTix10: cardinal; // see OnFlushToStream
+    fNextFlushTix32, fNextFileRotateDailyTix32: cardinal; // see OnFlushToStream
     fStreamPositionAfterHeader: cardinal;
     fStartTimestampDateTime: TDateTime;
     fWriterClass: TJsonWriterClass;
@@ -2658,7 +2658,7 @@ begin
   // main decoding loop
   level := 0;
   abbr := read.VarUInt32;
-  typname := '';
+  typname[0] := #0;
   while abbr <> 0 do
   begin
     with Abbrev[abbr] do
@@ -2688,7 +2688,7 @@ begin
         if low_pc < high_pc then
         begin
           s := debug.fSymbols.NewPtr;
-          if (typname <> '') and
+          if (typname[0] <> #0) and
              (typname[ord(typname[0])] <> '.') then
             AppendShortCharSafe('.', @typname);
           // DWARF2 symbols are emitted as UPPER by FPC -> lower for esthetics
@@ -2705,7 +2705,7 @@ begin
               ((Tag = DW_TAG_class_type) or
                (Tag = DW_TAG_structure_type)) then
       begin
-        typname := '';
+        typname[0] := #0;
         for i := 0 to AttrsCount - 1 do
           with Attrs[i] do
             if (attr = DW_AT_name) and
@@ -2725,7 +2725,7 @@ begin
           (abbr = 0) do
     begin
       if level = 1 then
-        typname := '';
+        typname[0] := #0;
       // skip entries signaling that no more child entries are following
       dec(level);
       if read.EOF then
@@ -3807,8 +3807,6 @@ type
     fToConsoleSafe: TLightLock; // topmost to ensure aarch64 alignment
     fEvent: TSynEvent;
     fToCompress: TFileName;
-    fStartTix: Int64;
-    fSecondElapsed: cardinal;
     fToConsole: TAutoFlushThreadToConsole;
     procedure Execute; override;
     procedure AddToConsole(const s: RawUtf8; c: TConsoleColor);
@@ -3824,7 +3822,6 @@ var
 constructor TAutoFlushThread.Create;
 begin
   fEvent := TSynEvent.Create;
-  fStartTix := mormot.core.os.GetTickCount64;
   inherited Create(false);
 end;
 
@@ -3890,12 +3887,12 @@ procedure TAutoFlushThread.Execute;
 var
   i: PtrInt;
   tmp: TFileName;
-  waitms, tix10, lasttix10: cardinal;
+  waitms, tix32, lasttix32: cardinal;
   log: TSynLog;
   files: TSynLogDynArray;
 begin
   waitms := MilliSecsPerSec;
-  lasttix10 := 0;
+  lasttix32 := 0;
   repeat
     fEvent.WaitFor(waitms);
     if Terminated then
@@ -3921,8 +3918,8 @@ begin
       else if waitms = 111 then
         waitms := 500;
       // 3. regularly flush (and maybe rotate) log content on disk
-      tix10 := mormot.core.os.GetTickCount64 shr MilliSecsPerSecShl;
-      if lasttix10 = tix10 then
+      tix32 := GetTickSec;
+      if lasttix32 = tix32 then
         continue; // checking once per second is enough
       if Terminated or
          SynLogFileFreeing then
@@ -3942,14 +3939,14 @@ begin
            SynLogFileFreeing then // avoid GPF
           break;
         log := files[i];
-        if (log.fNextFlushTix10 <> 0) and
-           (tix10 >= log.fNextFlushTix10) and
+        if (log.fNextFlushTix32 <> 0) and
+           (tix32 >= log.fNextFlushTix32) and
            (log.fWriter <> nil) and
            (log.fWriter.PendingBytes > 1) then
           // write pending data after TSynLogFamily.AutoFlushTimeOut seconds
           log.Flush({forcediskwrite=}false); // may also set pendingRotate flag
       end;
-      lasttix10 := tix10;
+      lasttix32 := tix32;
     except
       // on stability issue, start identifying this thread
       if not Terminated then
@@ -4861,7 +4858,7 @@ begin
     FreeAndNilSafe(fWriterStream);
   finally
     fFlags := [];
-    exclude(fPendingFlags, pendingRotate); // reset it after FlushFinal
+    exclude(fPendingFlags, pendingRotate); // reset it (after FlushFinal)
     GlobalThreadLock.UnLock;
   end;
 end;
@@ -5144,7 +5141,7 @@ end;
 {$ifdef OSLINUX}
 procedure SystemdEcho(Level: TSynLogLevel; const Text: RawUtf8);
 var
-  tmp: TShort16;
+  priority: TShort16;
   mtmp: RawUtf8;
   jvec: array[0..1] of TIoVec;
 const
@@ -5154,9 +5151,9 @@ begin
      not sd.IsAvailable then
     // should be at last "20200615 08003008  "
     exit;
-  FormatShort16('PRIORITY=%', [LOG_TO_SYSLOG[Level]], tmp);
-  jvec[0].iov_base := @tmp[1];
-  jvec[0].iov_len := length(tmp);
+  FormatShort16('PRIORITY=%', [LOG_TO_SYSLOG[Level]], priority);
+  jvec[0].iov_base := @priority[1];
+  jvec[0].iov_len := ord(priority[0]);
   // skip time "20200615 08003008  ." which should not be part of the jvec[]
   TrimCopy(Text, 18 - 8, Utf8TruncatedLength(Text, 1500) - (18 - 8 - 1), mtmp);
   // systemd truncates to LINE_MAX = 2048 anyway and expects valid UTF-8
@@ -5760,19 +5757,12 @@ begin
 end;
 
 procedure TSynLog.AddErrorMessage(Error: cardinal);
-{$ifdef OSWINDOWS}
 var
   msg: ShortString;
-{$endif OSWINDOWS}
 begin
   fWriter.AddDirect(' ', '"');
-  {$ifdef OSWINDOWS}
-  msg[0] := #0;
-  if AppendWinErrorText(Error, msg, {sep=}#0) then
-    fWriter.AddShort(msg)
-  else
-  {$endif OSWINDOWS}
-    fWriter.AddOnSameLine(pointer(GetErrorText(Error)));
+  GetErrorShortVar(Error, msg);
+  fWriter.AddOnSameLine(@msg[0], ord(msg[0]));
   fWriter.AddDirect('"', ' ', '(');
   fWriter.AddU(Error);
   fWriter.AddDirect(')', ' ');
@@ -5971,11 +5961,26 @@ begin
 end;
 
 procedure TSynLog.ComputeFileName;
+
+  function SetName(Args: array of const): boolean;
+  var
+    i: PtrInt;
+  begin
+    fFileName := MakeString([fFamily.fDestinationPath, MakeString(Args),
+                             fFamily.fDefaultExtension]);
+    result := false;
+    for i := 0 to high(SynLogFile) do
+      if (SynLogFile[i] <> self) and
+         (AnsiCompareFileName(SynLogFile[i].fFileName, fFileName) = 0) then
+        exit; // happens with multiple TSynLog classes
+    result := true;
+  end;
+
 var
-  timeNow, hourRotate, timeBeforeRotate: TDateTime;
+  hourRotate, beforeRotate: TDateTime;
+  dup: integer;
   fn: TFileName;
-  i, j: PtrInt;
-  dup: boolean;
+  classn: RawUtf8;
 begin
   fn := fFamily.fCustomFileName;
   if fn = '' then
@@ -5992,7 +5997,7 @@ begin
         Utf8ToFileName(ProgramName, fn);
   // prepare for any file rotation
   fFileRotationBytes := 0;
-  fNextFileRotateDailyTix10 := 0;
+  fNextFileRotateDailyTix32 := 0; // checked in OnFlushToStrem
   if fFamily.fRotateFileCount > 0 then
   begin
     if fFamily.fRotateFileSizeKB > 0 then
@@ -6000,17 +6005,15 @@ begin
     if fFamily.fRotateFileDailyAtHour in [0..23] then
     begin
       hourRotate := EncodeTime(fFamily.fRotateFileDailyAtHour, 0, 0, 0);
-      timeNow := Time; // local time hour
-      if hourRotate < timeNow then
-        hourRotate := hourRotate + 1; // will happen tomorrow
-      timeBeforeRotate := hourRotate - timeNow;
-      fNextFileRotateDailyTix10 := (GetTickCount64 +
-        trunc(timeBeforeRotate * MilliSecsPerDay)) shr MilliSecsPerSecShl;
+      beforeRotate := hourRotate - Time; // use local time hour
+      if beforeRotate <= 1 / MinsPerDay then // hour passed, or within 1 minute
+        beforeRotate := beforeRotate + 1; // trigger tomorrow
+      fNextFileRotateDailyTix32 := GetTickSec + trunc(beforeRotate * SecsPerDay);
     end;
   end;
   // file name should include current timestamp if no rotation is involved
   if (fFileRotationBytes = 0) and
-     (fNextFileRotateDailyTix10 = 0) then
+     (fNextFileRotateDailyTix32 = 0) then
     fn := FormatString('% %',
       [fn, NowToFileShort(fFamily.LocalTimestamp)]);
   {$ifdef OSWINDOWS}
@@ -6026,24 +6029,24 @@ begin
   if fFamily.fPerThreadLog = ptOneFilePerThread then
     fn := FormatString('% %',
       [fn, PointerToHexShort({%H-}pointer(GetCurrentThreadId))]);
-  fFileName := FormatString('%%%',
-    [fFamily.fDestinationPath, fn, fFamily.fDefaultExtension]);
-  // ensure this file name is unique among all opened files
-  for j := 2 to 10 do
+  // include inherited TSynLog class name as suffix
+  if PClass(self)^ <> TSynLog then
   begin
-    dup := false;
-    for i := 0 to high(SynLogFile) do
-      if (SynLogFile[i] <> self) and
-         (SynLogFile[i].fFileName = fFileName) then
-      begin
-        dup := true; // happens with multiple TSynLog classes
-        break;
-      end;
-    if not dup then
-      exit;
-    fFileName := FormatString('%%-%%',
-      [fFamily.fDestinationPath, fn, j, fFamily.fDefaultExtension]);
+    classn := ToText(PClass(self)^);
+    if IdemPChar(pointer(classn), 'TSYNLOG') then
+      delete(classn, 1, 7)  // TSynLogSecondary -> 'secondary'
+    else if classn[1] = 'T' then
+      delete(classn, 1, 1); // TCustomLog -> 'customlog'
+    LowerCaseSelf(classn);
+    if SetName([fn, '-', classn]) then
+      exit; // exename-secondary.log is not yet active
   end;
+  // ensure this file name is unique among all opened files
+  if SetName([fn]) then
+    exit; // exename.log is not already used
+  for dup := 2 to MAX_SYNLOGFAMILY + 3 do // absolute max = MAX_SYNLOGFAMILY = 7
+    if SetName([fn, '-', dup]) then
+      exit; // exename-#.log does not exist
   ESynLogException.RaiseUtf8('Duplicated %.FileName=%', [self, fFileName]);
 end;
 
@@ -6084,12 +6087,12 @@ begin
     if fWriterClass = nil then // may be overriden by an inherited class
       fWriterClass := TJsonWriter; // mormot.core.json.pas is linked
     fWriter := fWriterClass.Create(fWriterStream, fFamily.BufferSize);
-    fWriter.CustomOptions := fWriter.CustomOptions
-      + [twoEnumSetsAsTextInRecord, // debug-friendly text output
-         twoFullSetsAsStar,
-         twoForceJsonExtended,
-         twoNoWriteToStreamException,   // if TFileStreamNoWriteError is not set
-         twoFlushToStreamNoAutoResize]; // stick to BufferSize
+    fWriter.CustomOptions :=
+      [twoEnumSetsAsTextInRecord, // debug-friendly text output
+       twoFullSetsAsStar,
+       twoForceJsonExtended];
+    fWriter.FlushToStreamNoAutoResize := true; // stick to BufferSize
+    fWriter.NoWriteToStreamException := true;  // if TFileStreamNoWriteError is not set
   end;
   // create fWriterEcho instance
   if fWriterEcho = nil then
@@ -6112,28 +6115,28 @@ end;
 
 procedure TSynLog.OnFlushToStream(Text: PUtf8Char; Len: PtrInt);
 var
-  flushsec, tix10: cardinal;
+  flushsec, tix32: cardinal;
 begin
   // compute the next idle timestamp for the background TAutoFlushThread
-  tix10 := 0;
+  tix32 := 0;
   flushsec := fFamily.AutoFlushTimeOut;
   if flushsec <> 0 then
   begin
-    tix10 := GetTickCount64 shr MilliSecsPerSecShl; // about 1 second resolution
-    fNextFlushTix10 := tix10 + flushsec;
+    tix32 := GetTickSec;
+    fNextFlushTix32 := tix32 + flushsec;
   end;
-  // check for any PerformRotation (delayed in TSynLog.LogEnterFmt)
+  // check for any PerformRotation - delayed in TSynLog.LogEnterFmt
   if not (pendingRotate in fPendingFlags) then
-    if (fFileRotationBytes > 0) and
+    if (fFileRotationBytes > 0) and // size to rotate?
        (fWriter.WrittenBytes + PtrUInt(Len) > PtrUInt(fFileRotationBytes)) then
       include(fPendingFlags, pendingRotate)
-    else if fNextFileRotateDailyTix10 <> 0 then
+    else if fNextFileRotateDailyTix32 <> 0 then // time to rotate?
     begin
-      if tix10 = 0 then
-        tix10 := GetTickCount64 shr MilliSecsPerSecShl;
-      if tix10 >= fNextFileRotateDailyTix10 then
+      if tix32 = 0 then
+        tix32 := GetTickSec;
+      if tix32 >= fNextFileRotateDailyTix32 then
         include(fPendingFlags, pendingRotate);
-        // PerformRotation will call ComputeFileName to recompute DailyTix10
+        // PerformRotation will call ComputeFileName to recompute DailyTix32
     end;
 end;
 
@@ -6696,7 +6699,7 @@ var
   folder, dest, ext: TFileName;
   fsize: Int64;
   ftime: TUnixMSTime;
-  i: integer;
+  n: integer;
 begin
   result := false;
   if (aOldLogFileName = '') or // last call is always with ''
@@ -6713,15 +6716,15 @@ begin
     folder := EnsureDirectoryExists(aDestinationPath);
     if aAlgo <> nil then
       ext := aAlgo.AlgoFileExt;
-    i := 100;
+    n := 100;
     repeat
       dest := FormatString('%%.log%', [folder, UnixMSTimeToFileShort(ftime), ext]);
       if not FileExists(dest) then
         break;
       inc(ftime, MilliSecsPerSec); // ensure unique
-      dec(i);
-      if i = 0 then // paranoid
-        raise ESynLogException.Create('LogCompressAlgoArchive infinite loop');
+      dec(n);
+      if n = 0 then // paranoid
+        ESynLogException.RaiseU('LogCompressAlgoArchive infinite loop');
     until false;
     // compress or copy the old file, then delete it
     if (aAlgo = nil) or // no compression
@@ -8151,7 +8154,7 @@ begin
   len := Utf8TruncatedLength(P, len, destsize - (destbuffer - start) - 3);
   if not IsAnsiCompatible(P, len) then
   begin
-    PInteger(destbuffer)^ := BOM_UTF8;
+    PInteger(destbuffer)^ := BOM_UTF8; // weird enough behavior on POSIX :(
     inc(destbuffer, 3);
   end;
   MoveFast(P^, destbuffer^, len);

@@ -73,7 +73,7 @@ const
   /// system-independent CR+LF two chars, as 16-bit constant
   CRLFW = $0a0d;
   /// convert a TLineFeed value into its UTF-8 text representation
-  LINE_FEED: array[TLineFeed] of string[3] = (CRLF, #10, #13#10);
+  LINE_FEED: array[TLineFeed] of TShort3 = (CRLF, #10, #13#10);
 
   /// human-friendly alias to open a file for exclusive writing ($20)
   fmShareRead      = fmShareDenyWrite;
@@ -325,7 +325,6 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
   SecsPerYear  = 12 * SecsPerMonth;
 
   MilliSecsPerSec      = 1000;
-  MilliSecsPerSecShl   = 10; // 1 shl 10 = 1024 = rough approximation of 1000
   MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
   MilliSecsPerHour     = MilliSecsPerMin  * MinsPerHour;
   MilliSecsPerDay      = MilliSecsPerHour * HoursPerDay;
@@ -763,7 +762,8 @@ var
 
 /// some textual information about the current computer hardware, from BIOS
 // - contains e.g. 'LENOVO 20HES23B0U ThinkPad T470'
-// - is a function on Linux to avoid some syscalls at startup
+// - on Windows, will check the registry; on BSD, will read HW_MACHINE and
+// HW_MODEL; on Linux/Android will use a function to avoid some syscalls
 {$ifdef OSLINUXANDROID} function {$endif} BiosInfoText: RawUtf8;
 
 /// convert an Operating System type into its human-friendly text representation
@@ -807,7 +807,7 @@ function LinuxDistribution(os: TOperatingSystem): TLinuxDistribution;
 
 /// return the best known ERROR_* system error message constant texts
 // - without the 'ERROR_' prefix, but in a cross-platform way
-// - as used by WinErrorText() and some low-level Windows API wrappers
+// - as used by WinApiErrorString() and some low-level Windows API wrappers
 function WinErrorConstant(Code: cardinal): PShortString;
 
 /// return the error code number, and its regular constant on Windows (if known)
@@ -836,6 +836,10 @@ procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = fals
 // - e.g. OsErrorShort(5) = '5 ERROR_ACCESS_DENIED' on Windows or '5 EIO' on POSIX
 function OsErrorShort(Code: cardinal; NoInt: boolean = false): TShort47; overload;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// append the error code number, and its regular constant on the current OS
+procedure OsErrorAppend(Code: cardinal; var Dest: ShortString;
+  Sep: AnsiChar = #0; NoInt: boolean = false);
 
 /// append the error as ' ERROR_*' constant and return TRUE if known
 // - append nothing and return FALSE if Code is not known
@@ -1102,8 +1106,8 @@ var
   // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
   SystemMemorySize: PtrUInt;
 
-  /// 128-bit of entropy as retrieved during unit initialization
-  StartupRandom: THash128Rec;
+  /// 128-bit of entropy quickly gathered during unit/process initialization
+  StartupEntropy: THash128Rec;
 
 type
   /// used to retrieve version information from any EXE
@@ -1463,7 +1467,7 @@ type
     User: RawUtf8;
     /// some hash representation of this information
     // - the very same executable on the very same computer run by the very
-    // same user will always have the same Hash value
+    // same user on the same OS should always have the same Hash value
     // - is computed from the crc32c of this TExecutable fields: c0 from
     // Version32, CpuFeatures and Host, c1 from User, c2 from ProgramFullSpec
     // and c3 from InstanceFileName
@@ -2247,7 +2251,7 @@ function LinuxEventFDWait(fd: integer; ms: integer): boolean; inline;
 
 /// a wrapper to the Linux getrandom() syscall
 // - returns false if the kernel is unsupported (before 3.17) or if the
-// platform is not validated yet (only Linux x86_64 by now)
+// platform is not validated yet (only Linux i386, x86_64 and aarch64 by now)
 // - used e.g. by function FillSystemRandom() if available, since it makes a
 // single syscall, and /dev/urandom may be not available from some chroot
 function LinuxGetRandom(buf: pointer; len: PtrInt): boolean;
@@ -2319,6 +2323,10 @@ function FileTimeToDateTime(const FT: TFileTime): TDateTime;
 /// convert a Win32 64-bit FILETIME value into an Unix milliseconds time
 function FileTimeToUnixMSTime(const FT: TFileTime): TUnixMSTime;
   {$ifdef FPC} inline; {$endif}
+
+/// detect if a file name starts with the long path '\\?\' prefix
+// - https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+function IsExtendedPathName(const Name: TFileName): boolean;
 
 var
   // Slim Reader/Writer (SRW) API exclusive mode - fallback to TLightLock on XP
@@ -2516,26 +2524,36 @@ procedure SetLastError(error: integer);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 /// returns a given error code as plain text
-// - redirects to WinErrorText(error, nil) on Windows, or StrError() on POSIX
+// - redirects to WinApiErrorShort(error, nil) on Windows, or StrError() on POSIX
 // - e.g. GetErrorText(10) = 'ECHILD (No child processes)' on Linux
-function GetErrorText(error: integer): RawUtf8;
+function GetErrorText(error: integer = 0): RawUtf8;
+
+/// returns a given error code as plain text ShortString
+function GetErrorShort(error: integer = 0): ShortString;
+
+/// returns a given error code as plain text ShortString
+procedure GetErrorShortVar(error: integer; var dest: ShortString);
 
 {$ifdef OSWINDOWS}
 
-/// return the error message of a given Module
-// - first try WinErrorConstant() for system error constants (if ModuleName=nil),
-// then call FormatMessage() and override the RTL function to force the
-// ENGLISH_LANGID flag first
-// - if ModuleName does support this Code, will try it as system error
+/// return the error message - maybe of a given Module - as generic string
+// - may be used e.g. in conjunction with Exception.CreateFmt()
+// - if ModuleName does not support this Code, will also try it as system error
+// - first try WinErrorConstant() for system error constants, then call
+// FormatMessage() ensuring the ENGLISH_LANGID flag is used first
 // - replace SysErrorMessagePerModule() and SysErrorMessage() from mORMot 1
-function WinErrorText(Code: cardinal; ModuleName: PChar = nil): RawUtf8;
+function WinApiErrorString(Code: cardinal; ModuleName: PChar = nil): string;
 
-/// raise an EOSException from the last system error using WinErrorText()
+/// return the error message of a given Module as UTF-8 ShortString
+// - may be used e.g. in conjunction with Exception.CreateUtf8()
+function WinApiErrorShort(Code: cardinal; ModuleName: PChar = nil): shortstring;
+
+/// raise an EOSException from the last system error using WinApiErrorString()
 // - if Code is kept to its default 0, GetLastError is called
 procedure RaiseLastError(const Context: ShortString;
   RaisedException: ExceptClass = nil; Code: integer = 0);
 
-/// return a RaiseLastError-like error message using WinErrorText()
+/// return a RaiseLastError-like error message using WinApiErrorString()
 // - if Code is kept to its default 0, GetLastError is called
 function WinLastError(const Context: ShortString; Code: integer = 0): string;
 
@@ -2544,7 +2562,7 @@ procedure WinCheck(const Context: ShortString; Code: integer;
   RaisedException: ExceptClass = nil);
   {$ifdef HASINLINE} inline; {$endif}
 
-/// raise an Exception from the last module error using WinErrorText()
+/// raise an Exception from the last module error using WinApiErrorString()
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
 
 {$else}
@@ -2650,6 +2668,12 @@ var
 {$else}
 function GetTickCount64: Int64;
 {$endif OSWINDOWS}
+
+/// returns a system-wide current monotonic timestamp as 32-bit seconds
+// - simply wrap GetTickCount64 div 1000 on Windows, or call clock_gettime()
+// and return directly its timespec.tv_sec part on POSIX
+function GetTickSec: cardinal;
+  {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// returns how many seconds the system was up, accouting for time when
 // the computer is asleep
@@ -2761,6 +2785,8 @@ function ValidHandle(Handle: THandle): boolean;
 /// faster cross-platform alternative to sysutils homonymous function
 // - on Windows, will support FileName longer than MAX_PATH
 // - FPC on Windows is not consistent with Delphi and the expected low-level API
+// - warning: on both Windows and POSIX, this function would change the current
+// default folder for the whole process, not just the current thread
 function SetCurrentDir(const NewDir: TFileName): boolean;
 
 /// faster cross-platform alternative to sysutils homonymous function
@@ -2869,6 +2895,10 @@ function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 function DeleteFile(const aFileName: TFileName): boolean;
 
+/// redefined here to avoid warning to include "Windows" in uses clause
+// and support FileName longer than MAX_PATH
+function RemoveDir(const aDirName: TFileName): boolean;
+
 /// check if a file (or folder) exists and can be written
 // - on POSIX, call fpaccess() and check for the W_OK attribute
 // - on Windows, check faReadOnly and supports aFileName longer than MAX_PATH
@@ -2939,12 +2969,6 @@ function FileIsExecutable(const FileName: TFileName): boolean;
 
 /// check if a given file is a symbolic link
 function FileIsSymLink(const FileName: TFileName): boolean;
-
-/// compute the size of a directory's files, optionally with nested folders
-// - basic implementation using FindFirst/FindNext so won't be the fastest
-// available, nor fully accurate when files are actually (hard) links
-function DirectorySize(const FileName: TFileName; Recursive: boolean = false;
-  const Mask: TFileName = FILES_ALL): Int64;
 
 /// copy one file to another, using the Windows API if possible
 // - on POSIX, will call StreamCopyUntilEnd() between two TFileStreamEx
@@ -3094,7 +3118,7 @@ function StreamReadAll(S: TStream; Buffer: pointer; Size: PtrInt): boolean;
 /// read a File content into a string, using FileSize() to guess its length
 // - content can be binary or text
 // - returns '' if file was not found or any read error occurred
-// - uses RawByteString for byte storage, whatever the codepage is
+// - uses RawByteString for byte storage, forcing CP_UTF8 for FPC consistency
 function StringFromFile(const FileName: TFileName): RawByteString;
 
 /// read a File content from a list of potential files
@@ -3200,32 +3224,81 @@ function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil;
   NoExpand: boolean = false): TFileName; overload;
 
+/// just a wrapper around EnsureDirectoryExists({noexpand=}true) for Delphi 7
+function EnsureDirectoryExistsNoExpand(const Directory: TFileName): TFileName;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// just a wrapper around EnsureDirectoryExists(NormalizeFileName(Directory))
 function NormalizeDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil): TFileName; overload;
 
+/// compute the size of all directory's files, optionally with nested folders
+// - basic implementation using FindFirst/FindNext so won't be the fastest
+// available, nor fully accurate when files are actually (hard) links
+// - use TDirectoryBrowser to circumvent MAX_PATH issue on Windows
+function DirectorySize(const Path: TFileName; Recursive: boolean = false;
+  const FileMask: TFileName = FILES_ALL): Int64;
+
 /// delete the content of a specified directory
 // - only one level of file is deleted within the folder: no recursive deletion
-// is processed by this function (for safety)
+// is processed by this function (for safety) - see instead DirectoryDeleteAll()
 // - if DeleteOnlyFilesNotDirectory is TRUE, it won't remove the folder itself,
 // but just the files found in it
+// - use TDirectoryBrowser to circumvent MAX_PATH issue on Windows
+// - return false if any DeleteFile() or RemoveDir() did fail during the process
 // - warning: DeletedCount^ should be a 32-bit "integer" variable, not a PtrInt
 function DirectoryDelete(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; DeleteOnlyFilesNotDirectory: boolean = false;
   DeletedCount: PInteger = nil): boolean;
 
+/// delete the content of a specified directory and all its nested sub-folders
+// - just a wrapper to recursive DirectoryDeleteOlderFiles() with TimePeriod=0
+// - use TDirectoryBrowser to circumvent MAX_PATH issue on Windows
+function DirectoryDeleteAll(const Directory: TFileName): boolean;
+
 /// delete the files older than a given age in a specified directory
 // - for instance, to delete all files older than one day:
 // ! DirectoryDeleteOlderFiles(FolderName, 1);
-// - only one level of file is deleted within the folder: no recursive deletion
-// is processed by this function, unless Recursive is TRUE
-// - if Recursive=true, caller should set TotalSize^=0 to have an accurate value
-// - return false if any deprecated DeleteFile() did fail during the process
+// - TimePeriod = 0 will delete all files found, whatever timestamp they are
+// - Recursive = true will delete all nested folders
+// - use TDirectoryBrowser to circumvent MAX_PATH issue on Windows
+// - return false if any DeleteFile() or RemoveDir() did fail during the process
 function DirectoryDeleteOlderFiles(const Directory: TFileName;
   TimePeriod: TDateTime; const Mask: TFileName = FILES_ALL;
-  Recursive: boolean = false; TotalSize: PInt64 = nil): boolean;
+  Recursive: boolean = false; TotalSize: PInt64 = nil;
+  DeleteFolders: boolean = false): boolean;
 
 type
+  /// recursively search a folder and its nested sub-folders via methods
+  // - as used e.g. by DirectorySize() or DirectoryDeleteOlderFiles()
+  // - you should inherit from this class, supply some private parameters,
+  // then override OnFile and OnFolder to match your expected process
+  // - this class will detect and circumvent any MAX_PATH limitation on Windows
+  TDirectoryBrowser = class
+  protected
+    fCurrentDir: TFileName;
+    fFileMask: TFileNameDynArray;
+    fRecursive, fExtendedPath, fAborted: boolean;
+    fTotalSize: Int64;
+    fLevelCounter: PInteger; // a ProcessDir recursive counter
+    function Make(const fn: TFileName): TFileName; // handle MAX_PATH on Windows
+    procedure ProcessDir; virtual;   // main recursive method
+    procedure OnProcessDir; virtual; // executed before each folder
+    // virtual method executed for each file - true = continue, false = abort
+    function OnFile(const FileInfo: TSearchRec; const FullFileName: TFileName): boolean; virtual;
+    // virtual method executed for each folder, after OnFile() have been called
+    function OnFolder(const FullFolderName: TFileName): boolean; virtual;
+  public
+    /// prepare the process for a given folder
+    // - typical FileMasks value is [FILES_ALL] but also e.g. ['*.pas','*.pp']
+    // - FileMasks = [] will trigger only OnFolder but not OnFile
+    constructor Create(const Directory: TFileName;
+      const FileMasks: array of TFileName; Recursive: boolean = true);
+    /// this method is the main processing function
+    // - returns false if has been aborted by a OnFile() or OnFolder() method
+    function Run: boolean;
+  end;
+
   /// defines how IsDirectoryWritable() verifies a folder
   // - on Win32 Vista+, idwExcludeWinUac will check IsUacVirtualFolder()
   // - on Windows, idwExcludeWinSys will check IsSystemFolder()
@@ -3809,6 +3882,7 @@ type
     property LibraryPath: TFileName
       read fLibraryPath;
     /// if set, and no path is specified, will try from Executable.ProgramFilePath
+    // - see also the even more unsafe LibraryGlobalPath variable
     property TryFromExecutableFolder: boolean
       read fTryFromExecutableFolder write fTryFromExecutableFolder;
   end;
@@ -3818,6 +3892,17 @@ type
     lsUnTested,
     lsAvailable,
     lsNotAvailable);
+
+var
+  /// TSynLibrary.TryLoadLibrary() check for an existing library in this folder
+  // - similar to LD_LIBRARY_PATH environment on POSIX, but for this process
+  // - ensure any value defined here ends with the proper \ or / delimiter
+  // - some (set of) applications tend to supply their preferred libraries in
+  // their own shared folder, which could be specified here at startup
+  // - warning: use with caution, because this could lead to unexpected behavior
+  // or - even worse - some unattended exploits: the safest is to always
+  // specify the expected full path of a library, if possible
+  LibraryGlobalPath: TFileName;
 
 /// call once Init if State is in its default lsUntested (0) value
 function LibraryAvailable(var State: TLibraryState; Init: TProcedure): boolean;
@@ -4604,15 +4689,17 @@ function NewSynLocker: PSynLocker;
 
 type
   /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
-  // - just wrap TLecuyer with a TLighLock
-  // - should not be used, unless may be slightly faster than a threadvar
+  // - just wrap a TLecuyer generator with a TLighLock in a 20-24 bytes structure
+  // - as used by SharedRandom to implement Random32/RandomBytes/... functions
   {$ifdef USERECORDWITHMETHODS}
   TLecuyerThreadSafe = record
   {$else}
   TLecuyerThreadSafe = object
   {$endif USERECORDWITHMETHODS}
   public
+    /// protect the Generator process
     Safe: TLightLock;
+    /// all methods just redirect to this instance, with TLightLock wrapping
     Generator: TLecuyer;
     /// compute the next 32-bit generated value
     function Next: cardinal;
@@ -4624,6 +4711,8 @@ type
     procedure Fill(dest: pointer; count: integer);
     /// fill some string[31] with 7-bit ASCII random text
     procedure FillShort31(var dest: TShort31);
+    /// seed this gsl_rng_taus2 Random32 generator
+    procedure Seed(entropy: pointer; entropylen: PtrInt);
   end;
 
   TThreadIDDynArray = array of TThreadID;
@@ -4679,7 +4768,15 @@ function RandomDouble: double;
 // - will actually XOR the Dest buffer with Lecuyer numbers
 // - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
-procedure RandomBytes(Dest: PByte; Count: integer);
+procedure RandomBytes(Dest: pointer; Count: integer); overload;
+
+/// fill 128-bit buffer with random bytes from the gsl_rng_taus2 generator
+procedure RandomBytes(out Dest: THash128); overload;
+
+/// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
+// - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
+function RandomByteString(Count: integer; var Dest;
+  CodePage: cardinal = CP_RAWBYTESTRING): pointer;
 
 /// fill some string[31] with 7-bit ASCII random text
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
@@ -4697,6 +4794,10 @@ procedure RandomGuid(out result: TGuid); overload;
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// seed the global gsl_rng_taus2 Random32/RandomBytes generator
+// - use XorEntropy() and optional entropy/entropylen as derivation source
+procedure Random32Seed(entropy: pointer = nil; entropylen: PtrInt = 0);
 
 {$ifdef OSPOSIX}
 var
@@ -5975,16 +6076,17 @@ end;
 
 // PUtf8Char for system error text reduces the executable size vs RawUtf8
 // on Delphi (aligned to 4 bytes), but not on FPC (aligned to 16 bytes), and
-// enumerates allow cross-platform error support (e.g. in centralized servers)
+// enumerates let compiler generate the smallest code
+// - all errors are cross-platform, e.g. when used in centralized servers
 
 const
   NULL_STR: string[1] = '';
 
 function _GetEnumNameRtti(Info: pointer; Value: integer): PShortString;
 begin
-  // will properly be implemented in mormot.core.rtti.pas
+  // naive version - will properly be implemented in mormot.core.rtti.pas anyway
   result := @NULL_STR;
-  // no arm32 support yet - see fpc_shortstr_enum_intern() in sstrings.inc
+  // arm32 is overcomplex and would rather use typinfo and mormot.core.rtti
   {$ifndef FPC_REQUIRES_PROPER_ALIGNMENT}
   if Value < 0 then
     exit;
@@ -6072,6 +6174,11 @@ type
   TWinErrorSorted = (
     // some EXCEPTION_* in range $80000000 .. $800000ff
     DATATYPE_MISALIGNMENT, BREAKPOINT, SINGLE_STEP,
+    // some SEC_E_* errors as returned by SSPI
+    E_UNSUPPORTED_FUNCTION, E_INVALID_TOKEN, E_MESSAGE_ALTERED,
+    E_CONTEXT_EXPIRED, E_INCOMPLETE_MESSAGE, E_BUFFER_TOO_SMALL,
+    E_ILLEGAL_MESSAGE, E_CERT_UNKNOWN, E_CERT_EXPIRED, E_ENCRYPT_FAILURE,
+    E_DECRYPT_FAILURE, E_ALGORITHM_MISMATCH,
     // some security-related HRESULT errors (negative 32-bit values first)
     CRYPT_E_BAD_ENCODE, CRYPT_E_SELF_SIGNED, CRYPT_E_BAD_MSG, CRYPT_E_REVOKED,
     CRYPT_E_NO_REVOCATION_CHECK, CRYPT_E_REVOCATION_OFFLINE, TRUST_E_BAD_DIGEST,
@@ -6092,11 +6199,18 @@ type
     ETIMEDOUT, ECONNREFUSED, TRY_AGAIN,
     // most common WinHttp API errors (in range 12000...12152)
     TIMEOUT, OPERATION_CANCELLED, CANNOT_CONNECT,
-    CLIENT_AUTH_CERT_NEEDED, INVALID_SERVER_RESPONSE);
+    CLIENT_AUTH_CERT_NEEDED, INVALID_SERVER_RESPONSE,
+    // some SEC_I_* status as returned by SSPI
+    I_CONTINUE_NEEDED, I_COMPLETE_NEEDED, I_COMPLETE_AND_CONTINUE,
+    I_CONTEXT_EXPIRED, I_INCOMPLETE_CREDENTIALS, I_RENEGOTIATE);
+
 const
   WINERR_SORTED: array[TWinErrorSorted] of cardinal = (
     // some EXCEPTION_* in range $80000000 .. $800000ff
     $80000002, $80000003, $80000004,
+    // some SEC_E_* errors as returned by SSPI
+    $80090302, $80090308, $8009030F, $80090317, $80090318, $80090321,
+    $80090326, $80090327, $80090328, $80090329, $80090330, $80090331,
     // some security-related HRESULT errors (negative 32-bit values first)
     $80092002, $80092007, $8009200d, $80092010, $80092012, $80092013, $80096010,
     $800b0100, $800b0101, $800b010a, $800b010c,
@@ -6110,7 +6224,9 @@ const
     10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
     10060, 10061, 11002,
     // most common WinHttp API errors (in range 12000...12152)
-    12002, 12017, 12029, 12044, 12152);
+    12002, 12017, 12029, 12044, 12152,
+    // some SEC_I_* status as returned by SSPI
+    $00090312, $00090313, $00090314, $00090317, $00090320, $00090321);
 
 function WinErrorConstant(Code: cardinal): PShortString;
 begin
@@ -6158,8 +6274,8 @@ begin
 end;
 
 const
-  _PREFIX: array[0..4] of string[15] = (
-    'WSA', 'ERROR_WINHTTP_', '', 'EXCEPTION_', 'ERROR_');
+  _PREFIX: array[0..5] of string[15] = (
+    'WSA', 'ERROR_WINHTTP_', '', 'EXCEPTION_', 'SEC_', 'ERROR_');
 
 function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
   Sep: AnsiChar): boolean;
@@ -6181,8 +6297,11 @@ begin
       Code := 2;  // no prefix for security-related HRESULT errors
     $80000000 .. $800000ff, $c0000000 .. $c00000ff:
       Code := 3;  // EXCEPTION_* constants
+    $00090312 .. $00090321,
+    $80090302 .. $80090331:
+      Code := 4; // SEC_* SSPI constants
   else
-    Code := 4;    // regular Windows ERROR_* constant
+    Code := 5;   // regular Windows ERROR_* constant
   end;
   AppendShort(_PREFIX[Code], Dest);
   AppendShort(txt^, Dest);
@@ -6220,7 +6339,7 @@ type
     bSTALE, bREMOTE, bBADRPC, bRPCMISMATCH, bPROGUNAVAIL, bPROGMISMATCH, bPROCUNAVAIL, bNOLCK, bNOSYS,
     bFTYPE, bAUTH, bNEEDAUTH);
 
-procedure PosixErrorShort(Code, Max: cardinal; Dest: PShortString;
+procedure _PosixError(Code, Max: cardinal; Dest: PShortString;
   Info: pointer; NoInt: boolean);
 var
   ps: PShortString;
@@ -6236,23 +6355,51 @@ begin
   ps := GetEnumNameRtti(Info, Code);
   d := @Dest^[ord(Dest^[0]) + 1];
   inc(Dest^[0], ord(ps^[0]));
-  d[0] := 'E'; // ignore 'l' or 'b' and write 'E' instead
+  d[0] := 'E'; // ignore 'l' or 'b' prefix and write 'E' instead
   MoveFast(ps^[2], d[1], ord(ps^[0]) - 1);
 end;
 
 procedure LinuxErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
 begin
-  PosixErrorShort(Code, ord(high(TLinuxError)), Dest, TypeInfo(TLinuxError), NoInt);
+  _PosixError(Code, ord(high(TLinuxError)), Dest, TypeInfo(TLinuxError), NoInt);
 end;
 
 procedure BsdErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
 begin
-  PosixErrorShort(Code, ord(high(TBsdError)), Dest, TypeInfo(TBsdError), NoInt);
+  _PosixError(Code, ord(high(TBsdError)), Dest, TypeInfo(TBsdError), NoInt);
 end;
 
 function OsErrorShort(Code: cardinal; NoInt: boolean): TShort47;
 begin
   OsErrorShort(Code, @result, NoInt); // redirect to Win/Linux/BsdErrorShort()
+end;
+
+procedure OsErrorAppend(Code: cardinal; var Dest: ShortString;
+  Sep: AnsiChar; NoInt: boolean);
+var
+  os: TShort47;
+begin
+  OsErrorShort(Code, @os, NoInt); // redirect to Win/Linux/BsdErrorShort()
+  if Sep <> #0 then
+    AppendShortChar(Sep, @Dest);
+  AppendShort(os, Dest);
+end;
+
+function GetErrorShort(error: integer): ShortString;
+begin
+  if error = 0 then
+    error := GetLastError;
+  GetErrorShortVar(error, result);
+end;
+
+function GetErrorText(error: integer): RawUtf8;
+var
+  txt: shortstring;
+begin
+  if error = 0 then
+    error := GetLastError;
+  GetErrorShortVar(error, txt);
+  FastSetString(result, @txt[1], ord(txt[0]));
 end;
 
 const
@@ -6652,24 +6799,106 @@ begin
   FileClose(h);
 end;
 
-function DirectorySize(const FileName: TFileName; Recursive: boolean;
-  const Mask: TFileName): Int64;
+
+{ TDirectoryBrowser }
+
+constructor TDirectoryBrowser.Create(const Directory: TFileName;
+  const FileMasks: array of TFileName; Recursive: boolean);
 var
-  sr: TSearchRec;
-  dir: TFileName;
+  i: PtrInt;
 begin
-  result := 0;
-  dir := IncludeTrailingPathDelimiter(FileName);
-  if FindFirst(dir + Mask, faAnyFile, sr) <> 0 then
+  fCurrentDir := ExcludeTrailingPathDelimiter(Directory);
+  fRecursive := Recursive;
+  SetLength(fFileMask, length(FileMasks));
+  for i := 0 to high(FileMasks) do
+    fFileMask[i] := FileMasks[i];
+end;
+
+function TDirectoryBrowser.OnFile(const FileInfo: TSearchRec;
+  const FullFileName: TFileName): boolean;
+begin
+  inc(fTotalSize, FileInfo.Size); // default behavior for DirectorySize()
+  result := true; // continue
+end;
+
+function TDirectoryBrowser.OnFolder(const FullFolderName: TFileName): boolean;
+begin
+  result := true; // continue
+end;
+
+function TDirectoryBrowser.Run: boolean;
+begin
+  result := (fCurrentDir <> '') and
+            FileExists(fCurrentDir, {link=}true, {asdir=}true);
+  if not result then
     exit;
-  repeat
-   if SearchRecValidFile(sr, {includehidden=}true) then
-     inc(result, sr.Size)
-   else if Recursive and
-           SearchRecValidFolder(sr, {includehidden=}true) then
-     inc(result, DirectorySize(dir + sr.Name, true));
-  until FindNext(sr) <> 0;
-  FindClose(sr);
+  {$ifdef OSWINDOWS} // check if already in '\\?\...' format ?
+  fExtendedPath := IsExtendedPathName(fCurrentDir);
+  {$endif OSWINDOWS}
+  ProcessDir;
+  result := not fAborted;
+end;
+
+procedure TDirectoryBrowser.OnProcessDir;
+begin
+end;
+
+procedure TDirectoryBrowser.ProcessDir;
+var
+  f: TSearchRec;
+  prev: TFileName;
+  i, level: integer;
+begin
+  level := 0;
+  fLevelCounter := @level;
+  OnProcessDir;
+  fCurrentDir := fCurrentDir + PathDelim;
+  if fRecursive then
+    if FindFirst(Make(FILES_ALL), faDirectory, f) = 0 then
+    try
+      repeat
+        if SearchRecValidFolder(f) then
+        begin
+          prev := fCurrentDir;
+          fCurrentDir := Make(f.Name); // nested folder
+          ProcessDir;                  // recursive call
+          if fAborted then
+            exit;
+          fCurrentDir := prev; // back to the parent folder
+        end;
+      until FindNext(f) <> 0;
+    finally // OnFile/OnFolder may trigger some exception
+      FindClose(f);
+    end;
+  for i := 0 to length(fFileMask) - 1 do
+    if FindFirst(Make(fFileMask[i]), faAnyfile - faDirectory, f) = 0 then
+    try
+      repeat
+        if SearchRecValidFile(f) then
+          if not OnFile(f, Make(f.Name)) then
+          begin
+            fAborted := true;
+            exit;
+          end;
+      until FindNext(f) <> 0;
+    finally // OnFile/OnFolder may trigger some exception
+      FindClose(f);
+    end;
+  fAborted := not OnFolder(fCurrentDir); // always called last
+end;
+
+function DirectorySize(const Path: TFileName; Recursive: boolean;
+  const FileMask: TFileName): Int64;
+var
+  browse: TDirectoryBrowser;
+begin
+  browse := TDirectoryBrowser.Create(Path, [FileMask], Recursive);
+  try
+    browse.Run;
+    result := browse.fTotalSize; // as computed by the default OnFile() method
+  finally
+    browse.Free;
+  end;
 end;
 
 function DirectoryExists(const FileName: TFileName; FollowLink: boolean): boolean;
@@ -6685,7 +6914,7 @@ begin
   else if FileName[len] <> PathDelim then
     result := FileExists(FileName, FollowLink, {checkasdir=}true)
   else
-    result := FileExists(copy(FileName, 1, len - 1), FollowLink, true);
+    result := FileExists(copy(FileName, 1, len - 1), FollowLink, {asdir=}true);
 end;
 
 function SafePathName(const Path: TFileName): boolean;
@@ -6867,7 +7096,7 @@ constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
 begin
   if not ValidHandle(aHandle) then
     raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
-      [ClassNameShort(self)^, aFileName, GetErrorText(GetLastError)]);
+      [ClassNameShort(self)^, aFileName, GetErrorShort]);
   inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
   fFileName := aFileName;
   fDontReleaseHandle := aDontReleaseHandle;
@@ -6952,7 +7181,6 @@ begin
   FileWriteAll(Handle, @Buffer, Count); // and ignore any I/O error
   result := Count; // optimistic view: emulate all data was properly written
 end;
-
 
 function FileStreamSequentialRead(const FileName: TFileName): THandleStream;
 var
@@ -7380,7 +7608,7 @@ begin
       result := ''
   else
   begin
-    if NoExpand then
+    if NoExpand then // caller won't store the result, so no full path needed
       result := Directory
     else
       result := ExpandFileName(Directory);
@@ -7389,11 +7617,15 @@ begin
       if not ForceDirectories(result) then
         if RaiseExceptionOnCreationFailure <> nil then
           raise RaiseExceptionOnCreationFailure.CreateFmt(
-            'EnsureDirectoryExists(%s) failed as %s',
-            [result, GetErrorText(GetLastError)])
+            'EnsureDirectoryExists(%s) failed as %s', [result, GetErrorShort])
         else
           result := '';
   end;
+end;
+
+function EnsureDirectoryExistsNoExpand(const Directory: TFileName): TFileName;
+begin // circumvent a weird Delphi 7 compiler issue
+  result := EnsureDirectoryExists(Directory, ExceptionClass(nil), {noexpand=}true);
 end;
 
 function NormalizeDirectoryExists(const Directory: TFileName;
@@ -7403,71 +7635,79 @@ begin
     RaiseExceptionOnCreationFailure);
 end;
 
+type // state machine for DirectoryDeleteOlderFiles() / DirectoryDeleteAll()
+  TDirectoryDelete = class(TDirectoryBrowser)
+  protected
+    fDeleteBefore: TDateTime;
+    fDeleteFolders, fDeleteError: boolean;
+    fDeletedCount: integer;
+    function OnFile(const FileInfo: TSearchRec;
+      const FullFileName: TFileName): boolean; override;
+    function OnFolder(const FullFolderName: TFileName): boolean; override;
+  end;
+
+function TDirectoryDelete.OnFile(const FileInfo: TSearchRec;
+  const FullFileName: TFileName): boolean;
+begin
+  if (fDeleteBefore = 0) or
+     (SearchRecToDateTimeUtc(FileInfo) < fDeleteBefore) then
+    if DeleteFile(FullFileName) then
+    begin
+      inc(fTotalSize, FileInfo.Size);
+      inc(fDeletedCount);
+    end
+    else
+      fDeleteError := true;
+  result := true; // continue
+end;
+
+function TDirectoryDelete.OnFolder(const FullFolderName: TFileName): boolean;
+begin
+  if fDeleteFolders then
+    if not RemoveDir(FullFolderName) then
+      fDeleteError := true;
+  result := true; // continue
+end;
+
 function DirectoryDelete(const Directory: TFileName; const Mask: TFileName;
   DeleteOnlyFilesNotDirectory: boolean; DeletedCount: PInteger): boolean;
 var
-  f: TSearchRec;
-  n: integer;
-  dir: TFileName;
+  browse: TDirectoryDelete;
 begin
-  n := 0;
-  result := true;
-  if DirectoryExists(Directory) then
-  begin
-    dir := IncludeTrailingPathDelimiter(Directory);
-    if FindFirst(dir + Mask, faAnyFile - faDirectory, f) = 0 then
-    begin
-      repeat
-        if SearchRecValidFile(f) then
-          if DeleteFile(dir + f.Name) then
-            inc(n)
-          else
-            result := false;
-      until FindNext(f) <> 0;
-      FindClose(f);
-    end;
-    if not DeleteOnlyFilesNotDirectory and
-       not RemoveDir(dir) then
-      result := false;
+  browse := TDirectoryDelete.Create(Directory, [Mask], {recursive=}false);
+  try
+    browse.fDeleteFolders := not DeleteOnlyFilesNotDirectory;
+    browse.Run;
+    if DeletedCount <> nil then
+      DeletedCount^ := browse.fDeletedCount;
+    result := not browse.fDeleteError;
+  finally
+    browse.Free;
   end;
-  if DeletedCount <> nil then
-    DeletedCount^ := n;
+end;
+
+function DirectoryDeleteAll(const Directory: TFileName): boolean;
+begin
+  result := DirectoryDeleteOlderFiles(Directory, 0, FILES_ALL, true, nil, true);
 end;
 
 function DirectoryDeleteOlderFiles(const Directory: TFileName;
   TimePeriod: TDateTime; const Mask: TFileName; Recursive: boolean;
-  TotalSize: PInt64): boolean;
+  TotalSize: PInt64; DeleteFolders: boolean): boolean;
 var
-  f: TSearchRec;
-  dir: TFileName;
-  old: TDateTime;
+  browse: TDirectoryDelete;
 begin
-  if not Recursive and
-     (TotalSize <> nil) then
-    TotalSize^ := 0;
-  result := true;
-  if (Directory = '') or
-     not DirectoryExists(Directory) then
-    exit;
-  dir := IncludeTrailingPathDelimiter(Directory);
-  if FindFirst(dir + Mask, faAnyFile, f) = 0 then
-  begin
-    old := NowUtc - TimePeriod;
-    repeat
-      if SearchRecValidFolder(f) then
-      begin
-        if Recursive then
-          DirectoryDeleteOlderFiles(
-            dir + f.Name, TimePeriod, Mask, true, TotalSize);
-      end
-      else if SearchRecValidFile(f) and
-              (SearchRecToDateTimeUtc(f) < old) then
-        if not DeleteFile(dir + f.Name) then
-          result := false
-        else if TotalSize <> nil then
-          inc(TotalSize^, f.Size);
-    until FindNext(f) <> 0;
-    FindClose(f);
+  browse := TDirectoryDelete.Create(Directory, [Mask], Recursive);
+  try
+    if TimePeriod > 0 then
+      browse.fDeleteBefore := NowUtc - TimePeriod;
+    browse.fDeleteFolders := DeleteFolders;
+    browse.Run;
+    if TotalSize <> nil then
+      TotalSize^ := browse.fTotalSize;
+    result := not browse.fDeleteError;
+  finally
+    browse.Free;
   end;
 end;
 
@@ -7962,23 +8202,23 @@ end;
 
 procedure RetrieveSysInfoText(out text: ShortString);
 var
-  si: TSysInfo;  // Linuxism
+  si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Mac/BSD
 begin
   text[0] := #0;
   AppendShortCardinal(SystemInfo.dwNumberOfProcessors, text);
   if not RetrieveSysInfo(si) then // single syscall on Linux/Android
     exit;
-  AppendShortChar(' ', @text);
+  AppendShortChar(' ', @text); // si.loads[0/1] = user kern on Windows
   AppendShortCurr64((Int64(si.loads[0]) * CURR_RES + 5000) shr 16, text, 2);
   AppendShortChar(' ', @text);
   AppendShortCurr64((Int64(si.loads[1]) * CURR_RES + 5000) shr 16, text, 2);
   AppendShortChar(' ', @text);
-  {$ifdef OSPOSIX}
+  {$ifdef OSPOSIX} // si.loads[0/1/2] = avg1 avg5 avg15 on POSIX
   AppendShortCurr64((Int64(si.loads[2]) * CURR_RES + 5000) shr 16, text, 2);
   AppendShortChar(' ', @text);
   inc(si.freeram, si.bufferram);
   {$endif OSPOSIX}
-  if si.uptime > SecsPerDay then
+  if si.uptime > SecsPerDay then // optional [ndays]
   begin
     AppendShortCardinal(cardinal(si.uptime) div SecsPerDay, text);
     AppendShortChar(' ', @text);
@@ -7988,7 +8228,7 @@ begin
   if si.freeswap < si.totalswap shr 2 then // include swap if free below 25%
     AppendFreeTotalKB(QWord(si.totalswap - si.freeswap) * si.mem_unit,
                       QWord(si.totalswap) * si.mem_unit, text);
-  AppendShortIntHex(OSVersionInt32, text); // identify OS version
+  AppendShortIntHex(OSVersionInt32, text); // identify and OS version
 end;
 
 
@@ -8129,51 +8369,61 @@ end;
 function TSynLibrary.TryLoadLibrary(const aLibrary: array of TFileName;
   aRaiseExceptionOnFailure: ExceptionClass; aSilentError: PString): boolean;
 var
-  i, j: PtrInt;
-  {$ifdef OSWINDOWS}
-  cwd: TFileName;
-  {$endif OSWINDOWS}
-  lib, libs, nwd: TFileName;
+  i: PtrInt;
+  libs, nwd: TFileName;
   err: string;
-begin
-  for i := 0 to high(aLibrary) do
+
+  function LoadOne(lib: TFileName; current: PtrInt): boolean;
+  var
+    j: PtrInt;
+    {$ifdef OSWINDOWS}
+    cwd: TFileName;
+    {$endif OSWINDOWS}
   begin
     // check library name
-    lib := aLibrary[i];
+    result := false;
     if lib = '' then
-      continue;
-    result := true;
-    for j := 0 to i - 1 do
+      exit;
+    for j := 0 to current - 1 do
       if aLibrary[j] = lib then
-      begin
-        result := false;
-        break;
-      end;
-    if not result then
-      continue; // don't try twice the same library name
-    // open the library
+        exit; // don't try twice the same library name
+    // try to open this library
     nwd := ExtractFilePath(lib);
-    if fTryFromExecutableFolder  and
-       (nwd = '') and
-       FileExists(Executable.ProgramFilePath + lib) then
-    begin
-      lib := Executable.ProgramFilePath + lib;
-      nwd := Executable.ProgramFilePath;
-    end;
+    if nwd = '' then // has no specific path -> try exe folder or global path
+      if fTryFromExecutableFolder and
+         FileExists(Executable.ProgramFilePath + lib) then
+      begin
+        nwd := Executable.ProgramFilePath;
+        lib := nwd + lib;
+      end
+      else if (LibraryGlobalPath <> '') and
+              FileExists(LibraryGlobalPath + lib) then
+      begin
+        nwd := LibraryGlobalPath;
+        lib := nwd + lib;
+      end;
     if {%H-}libs = '' then
       libs := lib
     else
       libs := libs + ', ' + lib; // include path
+    // change the current folder at loading on Windows
     {$ifdef OSWINDOWS}
-    if nwd <> '' then
-    begin
-      cwd := GetCurrentDir;
-      SetCurrentDir(nwd); // change the current folder at loading on Windows
-      lib := ExtractFileName(lib); // seems more stable that way
+    try
+      if nwd <> '' then
+      begin
+        GlobalLock; // SetCurrentDir() is for the whole process not the thread
+        cwd := GetCurrentDir;
+        SetCurrentDir(nwd);
+        lib := ExtractFileName(lib); // seems more stable that way
+      end;
+      fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box
+    finally
+      if nwd <> '' then
+      begin
+        SetCurrentDir(cwd{%H-});
+        GlobalUnLock;
+      end;
     end;
-    fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box 
-    if nwd <> '' then
-      SetCurrentDir(cwd{%H-});
     {$else}
     fHandle := LibraryOpen(lib); // use regular .so loading behavior
     {$endif OSWINDOWS}
@@ -8184,6 +8434,7 @@ begin
       if length(fLibraryPath) < length(lib) then
       {$endif OSWINDOWS}
         fLibraryPath := lib;
+      result := true;
       exit;
     end;
     // handle any error
@@ -8191,6 +8442,12 @@ begin
     if err <> '' then
       libs := libs + ' [' + err + ']';
   end;
+
+begin
+  result := true;
+  for i := 0 to high(aLibrary) do
+    if LoadOne(aLibrary[i], i) then
+      exit;
   libs := Format('%s.TryLoadLibray failed - searched in %s',
     [ClassNameShort(self)^, libs]);
   if aRaiseExceptionOnFailure <> nil then
@@ -8368,7 +8625,7 @@ begin
   SetExecutableVersion(ver[0], ver[1], ver[2], ver[3]);
 end;
 
-procedure ComputeExecutableHash;
+procedure AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
 begin
   with Executable do
   begin
@@ -8394,20 +8651,39 @@ end;
 procedure GetExecutableVersion;
 begin
   if Executable.Version.RetrieveInformationFromFileName then
-    ComputeExecutableHash;
+    AfterExecutableInfoChanged;
 end;
 
-procedure InitializeExecutableInformation; // called once at startup
+procedure TrimDualSpaces(var s: RawUtf8);
+var
+  i: PtrInt;
+begin
+  i := 1;
+  repeat
+    i := PosEx('  ', s, i);
+    if i = 0 then
+      break;
+    delete(s, i, 1); // dual spaces -> single space
+  until false;
+  TrimSelf(s);
+end;
+
+procedure InitializeProcessInfo; // called once at startup
 var
   dt: TDateTime;
 begin
-  with Executable do
+  TrimDualSpaces(OSVersionText); // clean InitializeSpecificUnit info
+  TrimDualSpaces(OSVersionInfoEx);
+  {$ifndef OSLINUXANDROID} TrimDualSpaces(BiosInfoText); {$endif}
+  TrimDualSpaces(CpuInfoText);
+  OSVersionShort := ToTextOSU(OSVersionInt32);
+  with Executable do            // retrieve Executable + Host/User info
   begin
     {$ifdef OSWINDOWS}
     ProgramFileName := ParamStr(0); // RTL seems just fine here
     dt := FileAgeToDateTime(ProgramFileName);
     {$else}
-    ProgramFileName := GetExecutableName(@InitializeExecutableInformation);
+    ProgramFileName := GetExecutableName(@InitializeProcessInfo);
     if ProgramFileName <> '' then
     begin
       dt := FileAgeToDateTime(ProgramFileName);
@@ -8433,13 +8709,18 @@ begin
     Command.ExeDescription := ProgramName;
     Command.Parse;
   end;
-  ComputeExecutableHash;
+  AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
+  crc32c128(@StartupEntropy, @CpuCache, SizeOf(CpuCache)); // some more entropy
+  crc32c128(@StartupEntropy, @Executable.Hash, SizeOf(Executable.Hash));
+  {$ifdef CPUINTELARM}
+  crc32c128(@StartupEntropy, @CpuFeatures, SizeOf(CpuFeatures));
+  {$endif CPUINTELARM}
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
 begin
   if Executable.Version.SetVersion(aMajor, aMinor, aRelease, aBuild) then
-    ComputeExecutableHash; // re-compute if changed
+    AfterExecutableInfoChanged; // re-compute if changed
 end;
 
 
@@ -9306,6 +9587,8 @@ begin
            {$ifdef OSPOSIX}
            _AfterDecodeSmbios(RawSmbios); // persist in SMB_CACHE for non-root
            {$endif OSPOSIX}
+           DefaultHasher128(@StartupEntropy, pointer(RawSmbios.Data),
+             MinPtrInt(1024, length(RawSmbios.Data))); // won't hurt
            exit;
          end;
       // if not root on POSIX, SMBIOS is not available
@@ -10637,6 +10920,13 @@ begin
   FillAnsiStringFromRandom(@dest, 32);
 end;
 
+procedure TLecuyerThreadSafe.Seed(entropy: pointer; entropylen: PtrInt);
+begin
+  Safe.Lock;
+  Generator.Seed(entropy, entropylen);
+  Safe.UnLock;
+end;
+
 function Random32: cardinal;
 begin
   result := SharedRandom.Next;
@@ -10676,10 +10966,22 @@ begin
   result := SharedRandom.NextDouble;
 end;
 
-procedure RandomBytes(Dest: PByte; Count: integer);
+procedure RandomBytes(Dest: pointer; Count: integer);
 begin
   if Count > 0 then
-    SharedRandom.Fill(pointer(Dest), Count);
+    SharedRandom.Fill(Dest, Count);
+end;
+
+procedure RandomBytes(out Dest: THash128);
+begin
+  SharedRandom.Fill(@Dest, SizeOf(dest));
+end;
+
+function RandomByteString(Count: integer; var Dest; CodePage: cardinal): pointer;
+begin
+  FastSetStringCP(Dest, nil, Count, CodePage);
+  SharedRandom.Fill(pointer(Dest), Count);
+  result := pointer(Dest);
 end;
 
 procedure RandomShort31(var dest: TShort31);
@@ -10706,6 +11008,11 @@ begin
     SharedRandom.Fill(pointer(Dest), CardinalCount shl 2);
 end;
 {$endif PUREMORMOT2}
+
+procedure Random32Seed(entropy: pointer; entropylen: PtrInt);
+begin
+  SharedRandom.Seed(entropy, entropylen);
+end;
 
 
 procedure GlobalLock;
@@ -11162,20 +11469,6 @@ begin
   until false;
 end;
 
-procedure TrimDualSpaces(var s: RawUtf8);
-var
-  i: PtrInt;
-begin
-  i := 1;
-  repeat
-    i := PosEx('  ', s, i);
-    if i = 0 then
-      break;
-    delete(s, i, 1); // dual spaces -> single space
-  until false;
-  TrimSelf(s);
-end;
-
 
 procedure InitializeUnit;
 begin
@@ -11186,16 +11479,9 @@ begin
   {$endif ISFPC27}
   GlobalCriticalSection.Init;
   ConsoleCriticalSection.Init;
-  {$ifdef CPUINTELARM}
-  crc32c128(@StartupRandom, @CpuFeatures, SizeOf(CpuFeatures));
-  {$endif CPUINTELARM}
   InitializeSpecificUnit; // in mormot.core.os.posix/windows.inc files
-  TrimDualSpaces(OSVersionText);
-  TrimDualSpaces(OSVersionInfoEx);
-  {$ifndef OSLINUXANDROID} TrimDualSpaces(BiosInfoText); {$endif}
-  TrimDualSpaces(CpuInfoText);
-  OSVersionShort := ToTextOSU(OSVersionInt32);
-  InitializeExecutableInformation;
+  InitializeProcessInfo;  // cross-platform info - e.g. User/Host + Executable
+  // setup some constants
   JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
   JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
   NULL_STR_VAR := 'null';

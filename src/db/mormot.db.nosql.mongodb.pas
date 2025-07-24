@@ -2035,7 +2035,7 @@ end;
 function TMongoRequest.ToJson(Mode: TMongoJsonMode): RawUtf8;
 var
   W: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(tmp);
   try
@@ -2637,7 +2637,7 @@ begin
     inc(result);
   end;
   if result <> length(Dest) then
-    raise EMongoException.CreateU('Invalid opReply Documents');
+    EMongoException.RaiseU('Invalid opReply Documents');
 end;
 
 procedure TMongoReplyCursor.AppendAllToBson(Dest: TBsonWriter);
@@ -2672,7 +2672,7 @@ begin
   while Next(item) do
     Dest.AddItem(item{%H-});
   if Dest.Count <> result then
-    raise EMongoException.CreateU('Invalid opReply Documents');
+    EMongoException.RaiseU('Invalid opReply Documents');
 end;
 
 procedure TMongoReplyCursor.AppendAllAsDocVariant(var Dest: variant);
@@ -2742,7 +2742,7 @@ function TMongoReplyCursor.ToJson(Mode: TMongoJsonMode; WithHeader: boolean;
   MaxSize: PtrUInt): RawUtf8;
 var
   W: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if (fReply = '') or
      (fDocumentCount <= 0) then
@@ -2796,7 +2796,7 @@ end;
 procedure TMongoConnection.Open;
 begin
   if self = nil then
-    raise EMongoException.CreateU('TMongoConnection(nil).Open');
+    EMongoException.RaiseU('TMongoConnection(nil).Open');
   if fSocket <> nil then
     raise EMongoConnectionException.Create('Duplicate Open', self);
   try
@@ -2869,7 +2869,7 @@ end;
 function TMongoConnection.GetBsonAndFree(Query: TMongoRequest): TBsonDocument;
 var
   W: TBsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TBsonWriter.Create(tmp{%H-});
   try
@@ -2887,7 +2887,7 @@ function TMongoConnection.GetJsonAndFree(Query: TMongoRequest;
 var
   W: TJsonWriter;
   ReturnAsJsonArray: boolean;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   ReturnAsJsonArray := Query.NumberToReturn > 1; // set 1 to return an object
   W := TJsonWriter.CreateOwnedStream(tmp);
@@ -3373,7 +3373,7 @@ constructor EMongoRequestOSException.Create(const aMsg: RawUtf8;
   aConnection: TMongoConnection; aRequest: TMongoRequest);
 begin
   fSystemLastError := GetLastError;
-  CreateUtf8('%: % (%)', [aMsg, GetErrorText(fSystemLastError),
+  CreateUtf8('%: % (%)', [aMsg, GetErrorShort(fSystemLastError),
     fSystemLastError], aConnection, aRequest);
 end;
 
@@ -4091,7 +4091,7 @@ var
 begin
   // see http://docs.mongodb.org/manual/reference/command/aggregate
   if fDatabase.Client.ServerBuildInfoNumber < 2020000 then
-    raise EMongoException.CreateU('Aggregation needs MongoDB 2.2 or later');
+    EMongoException.RaiseU('Aggregation needs MongoDB 2.2 or later');
   if fDatabase.Client.ServerBuildInfoNumber >= 3060000 then
   begin
     // since 3.6, the cursor:{} parameter is mandatory, even if void

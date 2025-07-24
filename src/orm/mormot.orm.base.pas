@@ -2788,8 +2788,8 @@ type
   {$endif USERECORDWITHMETHODS}
   private
     fSafe: TRWLock; // thread-safe and not blocking concurrent IsLocked()
-    fID: TIDDynArray;       // array [0..Count-1] of locked TID
-    fTix: TIntegerDynArray; // GetTickCount64 shr 10 values at the Lock() time
+    fID: TIDDynArray;        // array [0..Count-1] of locked TID
+    fTix: TCardinalDynArray; // GetTickSec values at the Lock() time
     fCount: PtrInt;
     fLastPurge: integer;
   public
@@ -3445,7 +3445,7 @@ function EncodeAsSqlPrepared(const Decoder: TJsonObjectDecoder;
 var
   f: PtrInt;
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -3453,7 +3453,7 @@ begin
       ooUpdate:
         begin
           if Decoder.FieldCount = 0 then
-            raise EJsonObjectDecoder.Create('Invalid EncodeAsSqlPrepared(0)');
+            EJsonObjectDecoder.RaiseU('Invalid EncodeAsSqlPrepared(0)');
           W.AddShorter('update ');
           W.AddString(TableName);
           if Decoder.DecodedFieldTypesToUnnest <> nil then
@@ -6400,7 +6400,7 @@ procedure TOrmPropInfoRttiDynArray.Serialize(Instance: TObject;
   var data: RawByteString; ExtendedJson: boolean);
 var
   da: TDynArray;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   GetDynArray(Instance, da);
   if da.Count = 0 then
@@ -6410,7 +6410,7 @@ begin
     with TJsonWriter.CreateOwnedStream(temp) do
     try
       if ExtendedJson then // smaller content
-        CustomOptions := CustomOptions + [twoForceJsonExtended];
+        CustomOptions := [twoForceJsonExtended];
       AddDynArrayJson(da);
       SetText(RawUtf8(data));
     finally
@@ -7212,7 +7212,7 @@ procedure TOrmPropInfoCustomJson.GetValueVar(Instance: TObject; ToSql: boolean;
   var result: RawUtf8; wasSqlString: PBoolean);
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -7779,7 +7779,7 @@ procedure TOrmPropInfoList.ToCsvText(const Prefix: array of const;
 var
   f: PtrInt;
   W: TJsonWriter; // TJsonWriter.Add(Prefix) so TTextWriter is not enough
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -9072,7 +9072,7 @@ procedure TOrmTableAbstract.GetJsonValues(Json: TStream; Expand: boolean;
   RowFirst, RowLast: PtrInt; IDBinarySize: integer);
 var
   W: TResultsWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TResultsWriter.Create(Json, Expand, false, nil, 0, @tmp);
   try
@@ -9420,7 +9420,7 @@ end;
 function TOrmTableAbstract.GetHtmlTable(const Header: RawUtf8): RawUtf8;
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -10568,7 +10568,7 @@ begin
         n := fCount;
       end;
       fID[n] := aID;
-      fTix[n] := GetTickCount64 shr MilliSecsPerSecShl;
+      fTix[n] := GetTickSec;
       inc(fCount);
     finally
       fSafe.WriteUnLock;
@@ -10653,22 +10653,22 @@ begin
      (fCount = 0) or
      (MinutesFromNow = 0) then
     exit; // nothing to purge
-  old := GetTickCount64 shr MilliSecsPerSecShl; // as seconds
+  old := GetTickSec;
   if old - fLastPurge < 60 then
     exit; // no need to purge more than once per minute
   fLastPurge := old;
-  dec(old, MinutesFromNow * 60);
+  dec(old, cardinal(MinutesFromNow) * 60);
   if old <= 0 then
     exit; // this computer just started
   fSafe.WriteLock;
   try
     n := 0;
     for i := 0 to fCount - 1 do // brute force is fast enough every minute
-      if fTix[i] >= old then
+      if fTix[i] >= cardinal(old) then
       begin
         if n <> i then
         begin
-          fID[n] := fID[i];
+          fID[n]  := fID[i]; // in-place purge
           fTix[n] := fTix[i];
         end;
         inc(n);
@@ -11218,7 +11218,7 @@ var
   W: TTextWriter;
   Start: PUtf8Char;
   info: TGetJsonField;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   info.Json := P;
   if info.Json = nil then
@@ -11241,7 +11241,7 @@ begin
   W := TTextWriter.CreateOwnedStream(temp);
   try
     if sfoExtendedJson in Format then
-      W.CustomOptions := W.CustomOptions + [twoForceJsonExtended];
+      W.CustomOptions := [twoForceJsonExtended];
     W.AddDirect('{');
     if (decoded <> 0) and
        (sfoPutIDFirst in Format) then

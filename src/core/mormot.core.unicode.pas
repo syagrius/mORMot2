@@ -675,10 +675,10 @@ var
 
 type
   /// text file layout, as returned by BomFile() and StringFromBomFile()
-  // - bomNone means there was no BOM recognized
+  // - bomNone means there was no BOM recognized (most common case, e.g. on POSIX)
   // - bomUtf16LE stands for UTF-16 Little-Endian encoding (as in Windows)
-  // - bomUtf16BE stands for UTF-16 Big-Endian encoding
-  // - bomUtf8 stands for a UTF-8 BOM (as on Windows products)
+  // - bomUtf16BE stands for UTF-16 Big-Endian encoding (legacy/niche systems)
+  // - bomUtf8 stands for a UTF-8 BOM (as on some Windows products)
   TBomFile = (
     bomNone,
     bomUtf16LE,
@@ -686,11 +686,11 @@ type
     bomUtf8);
 
 const
-  /// UTF-8 BOM marker three bytes value (in little-endian)
+  /// UTF-8 BOM marker three bytes value, still common on Windows or CSV
   BOM_UTF8 = $bfbbef;
-  /// UTF-16LE BOM WideChar marker, as existing e.g. in some UTF-16 Windows files
+  /// UTF-16LE BOM WideChar marker, may appearing e.g. in some Windows files
   BOM_UTF16LE = #$feff;
-  /// UTF-16BE BOM WideChar marker, which is not supported
+  /// UTF-16BE BOM WideChar marker, seen only in legacy/niche systems
   BOM_UTF16BE = #$fffe;
 
 /// check the file BOM at the beginning of a file buffer
@@ -701,9 +701,9 @@ const
 function BomFile(var Buffer: pointer; var BufferSize: PtrInt): TBomFile;
 
 /// read a file into a temporary variable, check the BOM, and adjust the buffer
-// - for bomUtf16LE and bomUtf16BE, returns BufferSize as WideChar count (not bytes)
+// - bomUtf16LE and bomUtf16BE return BufferChars as WideChar count (not bytes)
 function StringFromBomFile(const FileName: TFileName; var FileContent: RawByteString;
-  out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
+  out Buffer: pointer; out BufferChars: PtrInt): TBomFile;
 
 /// read a File content into a RawUtf8, detecting any leading BOM
 // - will assume text file with no BOM is already UTF-8 encoded
@@ -1128,11 +1128,9 @@ function Utf8ToString(const Text: RawUtf8): string;
 
 /// convert any UTF-8 encoded String into a RTL string
 procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic RTL file name string
 procedure Utf8ToFileName(const Text: RawUtf8; var result: TFileName);
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded buffer into a RTL string
 // - it's prefered to use TLanguageFile.Utf8ToString() in mORMoti18n,
@@ -1160,6 +1158,7 @@ procedure Utf8ToWideString(Text: PUtf8Char; Len: PtrInt; var result: WideString)
 
 /// convert any UTF-8 encoded String into a generic SynUnicode Text
 function Utf8ToSynUnicode(const Text: RawUtf8): SynUnicode; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic SynUnicode Text
 procedure Utf8ToSynUnicode(const Text: RawUtf8; var result: SynUnicode); overload;
@@ -1198,7 +1197,6 @@ function StringToAnsi7(const Text: string): RawByteString;
 /// convert any RTL string into WinAnsi (Win-1252) 8-bit encoded String
 function StringToWinAnsi(const Text: string): WinAnsiString;
   {$ifdef UNICODE}inline;{$endif}
-
 
 
 { **************** Text Case-(in)sensitive Conversion and Comparison }
@@ -1736,6 +1734,9 @@ procedure CaseCopy(Text: PUtf8Char; Len: PtrInt; Table: PNormTable;
 /// low-level function called when inlining UpperCaseSelf and LowerCaseSelf
 procedure CaseSelf(var S: RawUtf8; Table: PNormTable);
 
+/// low-level function which could be called when S has RefCnt = 1
+procedure CaseNew(var S: RawUtf8; Table: PNormTable);
+
 /// fast conversion of the supplied text into uppercase
 // - this will only convert 'a'..'z' into 'A'..'Z' (no NormToUpper use), and
 // will therefore be correct with true UTF-8 content, but only for 7-bit
@@ -2179,6 +2180,10 @@ function FindShortStringListTrimLowerCaseExact(List: PShortString; MaxValue: int
 // - return an RawUtf8 string: enumeration names are pure 7-bit ANSI with Delphi
 // up to 2007, and UTF-8 encoded with Delphi 2009+
 function UnCamelCase(const S: RawUtf8): RawUtf8; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// convert in-place a CamelCase string into a space separated one
+procedure UnCamelCaseSelf(var S: RawUtf8);
 
 /// convert a CamelCase string into a space separated one
 // - 'OnLine' will return 'On line' e.g., and 'OnMyLINE' will return 'On my LINE'
@@ -2460,7 +2465,7 @@ type
     fSafe: TRWLightLock;
     fFiles: TRawUtf8DynArray;
     fFolder: TFileName;
-    fNextTix, fFlushSeconds: integer;
+    fNextTix, fFlushSeconds: cardinal;
     fSubFolders: boolean;
     procedure SetFolder(const aFolder: TFileName);
     procedure SetSubFolders(aSubFolders: boolean);
@@ -2490,7 +2495,7 @@ type
     /// after how many seconds OnIdle() should flush the internal cache
     // - default is 60, i.e. 1 minute
     // - you can set 0 to disable any auto-flush from OnIdle()
-    property FlushSeconds: integer
+    property FlushSeconds: cardinal
       read fFlushSeconds write fFlushSeconds;
   end;
 {$endif OSPOSIX}
@@ -3081,8 +3086,15 @@ begin
   begd := dest;
   endSource := source + sourceBytes;
   endSourceBy4 := endSource - 4;
-  if {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}(PtrUInt(source) and 3 = 0) and{$endif}
-     (source <= endSourceBy4) then
+  {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+  if (PtrUInt(source) and 3 = 0) and
+  {$else}
+  {$ifdef OSWINDOWS}
+  if (source <= endSourceBy4) and
+     (PCardinal(source)^ and $00ffffff = BOM_UTF8) then
+    inc(source, 3); // ignore any UTF-8 BOM (may appear on Windows)
+  {$endif OSWINDOWS}
+  if {$endif} (source <= endSourceBy4) then
     repeat // handle 7-bit ASCII chars, by quad
       c := PCardinal(source)^;
       if c and $80808080 <> 0 then
@@ -4448,8 +4460,15 @@ begin
   // first handle trailing 7-bit ASCII chars, by quad (Sha optimization)
   srcEnd := Source + SourceChars;
   srcEndBy4 := srcEnd - 4;
-  if {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}(PtrUInt(Source) and 3 = 0) and{$endif}
-     (Source <= srcEndBy4) then
+  {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
+  if (PtrUInt(Source) and 3 = 0) and
+  {$else}
+  {$ifdef OSWINDOWS}
+  if (Source <= srcEndBy4) and
+     (PCardinal(Source)^ and $00ffffff = BOM_UTF8) then
+    inc(Source, 3); // ignore any UTF-8 BOM (may appear on Windows)
+  {$endif OSWINDOWS}
+  if {$endif} (Source <= srcEndBy4) then
     repeat
       c := PCardinal(Source)^;
       if c and $80808080 <> 0 then
@@ -4712,16 +4731,16 @@ begin
 end;
 
 function StringFromBomFile(const FileName: TFileName; var FileContent: RawByteString;
-  out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
+  out Buffer: pointer; out BufferChars: PtrInt): TBomFile;
 begin
   FileContent := StringFromFile(FileName);
   Buffer := pointer(FileContent);
-  BufferSize := length(FileContent);
-  result := BomFile(Buffer, BufferSize); // recognize most BOMs
-  if BufferSize = 0 then
+  BufferChars := length(FileContent);
+  result := BomFile(Buffer, BufferChars); // recognize most BOMs and adjust
+  if BufferChars = 0 then
     result := bomNone
   else if result in [bomUtf16LE, bomUtf16BE] then
-    BufferSize := BufferSize shr 1; // UTF-16 BOMs return size in WideChar
+    BufferChars := BufferChars shr 1; // UTF-16 BOMs return size in WideChar
 end;
 
 function RawUtf8FromFile(const FileName: TFileName): RawUtf8;
@@ -4742,28 +4761,28 @@ function AnyTextFileToRawUtf8(const FileName: TFileName; AssumeUtf8IfNoBom: bool
 var
   tmp: RawByteString;
   buf: pointer;
-  len: PtrInt;
+  chars: PtrInt;
 begin
-  case StringFromBomFile(FileName, tmp, buf, len) of
-    bomNone:
-      if len = 0 then
+  case StringFromBomFile(FileName, tmp, buf, chars) of
+    bomNone: // most common case, especially on POSIX
+      if chars = 0 then
         FastAssignNew(result)
       else if AssumeUtf8IfNoBom or
-              IsValidUtf8Buffer(buf, len) then
-        FastAssignUtf8(result, tmp) // force CP_UTF8
+              IsValidUtf8Buffer(buf, chars) then // may use AVX2 on Haswell
+        FastAssignUtf8(result, tmp) // forced or detected CP_UTF8
       else
-        CurrentAnsiConvert.AnsiBufferToRawUtf8(buf, len, result);
-    bomUtf16LE:
-      RawUnicodeToUtf8(PWideChar(buf), len, result);
-    bomUtf16BE:
+        CurrentAnsiConvert.AnsiBufferToRawUtf8(buf, chars, result);
+    bomUtf16LE: // here chars = WideChar length
+      RawUnicodeToUtf8(PWideChar(buf), chars, result);
+    bomUtf16BE: // here chars = WideChar length
       begin
-        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
-        RawUnicodeToUtf8(PWideChar(buf), len, result);
+        RawUnicodeSwapEndian(buf, chars); // in-place conversion from Big-Endian
+        RawUnicodeToUtf8(PWideChar(buf), chars, result);
       end;
-    bomUtf8:
+    bomUtf8: // may appear on Windows
       begin
-        MoveFast(buf^, pointer(tmp)^, len); // fast in-place delete(bom)
-        FakeLength(tmp, len);
+        MoveFast(buf^, pointer(tmp)^, chars); // fast in-place delete(bom)
+        FakeLength(tmp, chars);
         FastAssignUtf8(result, tmp); // force CP_UTF8
       end;
   end;
@@ -4773,25 +4792,25 @@ function AnyTextFileToSynUnicode(const FileName: TFileName; ForceUtf8: boolean):
 var
   tmp: RawByteString;
   buf: pointer;
-  len: PtrInt;
+  chars: PtrInt;
 begin
-  case StringFromBomFile(FileName, tmp, buf, len) of
-    bomNone:
-      if (len = 0) or
+  case StringFromBomFile(FileName, tmp, buf, chars) of
+    bomNone: // most common case, especially on POSIX
+      if (chars = 0) or
          ForceUtf8 or
-         IsValidUtf8Buffer(buf, len) then
-        Utf8ToSynUnicode(buf, len, result)
+         IsValidUtf8Buffer(buf, chars) then  // may use AVX2 on Haswell
+        Utf8ToSynUnicode(buf, chars, result) // forced or detected CP_UTF8
       else
-        CurrentAnsiConvert.AnsiToUnicodeStringVar(buf, len, result);
-    bomUtf16LE:
-      FastSynUnicode(result, buf, len);
-    bomUtf16BE:
+        CurrentAnsiConvert.AnsiToUnicodeStringVar(buf, chars, result);
+    bomUtf16LE: // here chars = WideChar length
+      FastSynUnicode(result, buf, chars);
+    bomUtf16BE: // here chars = WideChar length
       begin
-        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
-        FastSynUnicode(result, buf, len);
+        RawUnicodeSwapEndian(buf, chars); // in-place conversion from Big-Endian
+        FastSynUnicode(result, buf, chars);
       end;
-    bomUtf8:
-      Utf8ToSynUnicode(buf, len, result);
+    bomUtf8: // may appear on Windows
+      Utf8ToSynUnicode(buf, chars, result);
   end;
 end;
 
@@ -4805,29 +4824,29 @@ function AnyTextFileToString(const FileName: TFileName; ForceUtf8: boolean): str
 var
   tmp: RawByteString;
   buf: pointer;
-  len: PtrInt;
+  chars: PtrInt;
 begin
-  case StringFromBomFile(FileName, tmp, buf, len) of
-    bomNone:
-      if len = 0 then
+  case StringFromBomFile(FileName, tmp, buf, chars) of
+    bomNone: // most common case, especially on POSIX
+      if chars = 0 then
         result := ''
-      else if IsAnsiCompatible(buf, len) or
-              not (ForceUtf8 or IsValidUtf8Buffer(buf, len)) then
+      else if IsAnsiCompatible(buf, chars) or
+              not (ForceUtf8 or IsValidUtf8Buffer(buf, chars)) then // AVX2
       begin
         FakeCodePage(tmp, Unicode_CodePage); // StringFromFile() forced CP_UTF8
         result := tmp; // no need to convert anything
       end
       else // need a full charset conversion
-        CurrentAnsiConvert.Utf8BufferToAnsi(buf, len, RawByteString(result));
-    bomUtf16LE:
-      CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, len, RawByteString(result));
-    bomUtf16BE:
+        CurrentAnsiConvert.Utf8BufferToAnsi(buf, chars, RawByteString(result));
+    bomUtf16LE: // here chars = WideChar length
+      CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, chars, RawByteString(result));
+    bomUtf16BE: // here chars = WideChar length
       begin
-        RawUnicodeSwapEndian(buf, len); // in-place conversion from Big-Endian
-        CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, len, RawByteString(result));
+        RawUnicodeSwapEndian(buf, chars); // in-place conversion from Big-Endian
+        CurrentAnsiConvert.UnicodeBufferToAnsiVar(buf, chars, RawByteString(result));
       end;
-    bomUtf8:
-      CurrentAnsiConvert.Utf8BufferToAnsi(buf, len, RawByteString(result));
+    bomUtf8: // may appear on Windows
+      CurrentAnsiConvert.Utf8BufferToAnsi(buf, chars, RawByteString(result));
   end;
 end;
 {$endif UNICODE}
@@ -7652,6 +7671,11 @@ begin
   CaseConvert(UniqueRawUtf8(S), length(S), Table);
 end;
 
+procedure CaseNew(var S: RawUtf8; Table: PNormTable);
+begin
+  CaseConvert(pointer(S), length(S), Table);
+end;
+
 function UpperCase(const S: RawUtf8): RawUtf8;
 begin
   CaseCopy(pointer(S), length(S), @NormToUpperAnsi7, result);
@@ -7826,7 +7850,7 @@ var
 begin
   l := length(textStart);
   result := (length(text) >= l) and
-            CompareMem(pointer(text), pointer(textStart), l);
+    mormot.core.base.CompareMem(pointer(text), pointer(textStart), l);
 end;
 
 function EndWithExact(const text, textEnd: RawUtf8): boolean;
@@ -7836,7 +7860,7 @@ begin
   l := length(textEnd);
   o := length(text) - l;
   result := (o >= 0) and
-            CompareMem(PUtf8Char(pointer(text)) + o, pointer(textEnd), l);
+    mormot.core.base.CompareMem(PUtf8Char(pointer(text)) + o, pointer(textEnd), l);
 end;
 
 function GetNextLine(source: PUtf8Char; out next: PUtf8Char; andtrim: boolean): RawUtf8;
@@ -9063,17 +9087,20 @@ begin
 end;
 
 function UnCamelCase(const S: RawUtf8): RawUtf8;
+begin
+  result := S;
+  UnCamelCaseSelf(result);
+end;
+
+procedure UnCamelCaseSelf(var S: RawUtf8);
 var
   tmp: TSynTempBuffer;
   destlen: PtrInt;
 begin
   if S = '' then
-    result := ''
-  else
-  begin
-    destlen := UnCamelCase(tmp.Init(length(S) * 2), pointer(S));
-    tmp.Done(PAnsiChar(tmp.buf) + destlen, result);
-  end;
+    exit;
+  destlen := UnCamelCase(tmp.Init(length(S) * 2), pointer(S));
+  tmp.Done(PAnsiChar(tmp.buf) + destlen, S);
 end;
 
 function UnCamelCase(D, P: PUtf8Char): integer;
@@ -9938,8 +9965,8 @@ var
   c, n: PtrInt;
 begin
   c := length(Values);
-  if c = 0 then
-    exit;
+  if c <= 1 then
+    exit; // nothing to search
   QuickSortRawUtf8(Values, c);
   n := DeduplicateRawUtf8Sorted(pointer(Values), c - 1) + 1;
   if n <> c then
@@ -10037,14 +10064,18 @@ begin
 end;
 
 procedure TPosixFileCaseInsensitive.OnIdle(tix64: Int64);
+var
+  tix32: cardinal;
 begin
   if (self = nil) or
      (fFiles = nil) or
      (fFlushSeconds = 0) then
     exit;
   if tix64 = 0 then
-    tix64 := GetTickCount64;
-  if tix64 shr MilliSecsPerSecShl < fNextTix then
+    tix32 := GetTickSec
+  else
+    tix32 := tix64 div MilliSecsPerSec;
+  if tix32 < fNextTix then
     exit;
   fSafe.WriteLock;
   try
@@ -10089,7 +10120,7 @@ begin
           aReadMs^ := stop - start;
         end;
         if fFlushSeconds <> 0 then
-          fNextTix := (GetTickCount64 shr MilliSecsPerSecShl) + fFlushSeconds;
+          fNextTix := GetTickSec + fFlushSeconds;
       end;
     finally
       fSafe.WriteUnLock;

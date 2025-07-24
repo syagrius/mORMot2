@@ -1093,8 +1093,9 @@ type
       read fGroupRights write fGroupRights;
     /// some custom data, associated to the User
     // - Server application may store here custom data
-    // - its content is not used by the framework but 'may' be used by your
-    // application
+    // - TAuthSession.Create will retrieved this field from the database,
+    // unless rsoGetUserRetrieveNoBlobData option is defined
+    // - its content is not used by the framework but 'may' be used by yours
     property Data: RawBlob
       read fData write fData;
   end;
@@ -1300,7 +1301,7 @@ type
     fMethod: TUriMethod;
     fClientKind: TRestClientKind;
     fCommand: TRestServerUriContextCommand;
-    fInputCookiesParsed: boolean;
+    fInputCookiesParsed: (icpNotParsed, icpNone, icpAvailable);
     fInputContentType: RawUtf8;
     fInHeaderLastName: RawUtf8;
     fInHeaderLastValue: RawUtf8;
@@ -1311,11 +1312,10 @@ type
     function GetUserAgent: RawUtf8;
       {$ifdef HASINLINE} inline; {$endif}
     function GetInHeader(const HeaderName: RawUtf8): RawUtf8;
+    function InputCookiesParse: PHttpCookies;
     function InputCookies: PHttpCookies;
       {$ifdef HASINLINE} inline; {$endif}
     function GetInCookie(const CookieName: RawUtf8): RawUtf8;
-      {$ifdef HASINLINE} inline; {$endif}
-    procedure SetInCookie(const CookieName, CookieValue: RawUtf8);
       {$ifdef HASINLINE} inline; {$endif}
     procedure SetOutSetCookie(const aOutSetCookie: RawUtf8); virtual;
     procedure SetOutCookie(const aName, aValue: RawUtf8);
@@ -1369,7 +1369,12 @@ type
     /// retrieve an incoming HTTP cookie value
     // - cookie name are case-sensitive
     property InCookie[const CookieName: RawUtf8]: RawUtf8
-      read GetInCookie write SetInCookie;
+      read GetInCookie;
+    /// retrieve a cookie name/value pair in the internal storage
+    function InCookieSearch(const CookieName: RawUtf8): PHttpCookie;
+    {$ifdef HASINLINE} inline; {$endif}
+    /// low-level method called by InCookie[] and InCookieExists()
+    // - will parse once for any coookie in the headers, if needed
     /// define a new 'name=value' cookie to be returned to the client
     // - if not void, TRestServer.Uri() will define a new 'set-cookie: ...'
     // header in Call^.OutHead
@@ -1486,7 +1491,8 @@ type
     procedure ReturnFileFromFolder(const FolderName: TFileName;
       Handle304NotModified: boolean = true;
       const DefaultFileName: TFileName = 'index.html';
-      const Error404Redirect: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0); virtual;
+      const Error404Redirect: RawUtf8 = '';
+      CacheControlMaxAgeSec: integer = 0); virtual; abstract;
     /// use this method notify the caller that the resource URI has changed
     // - returns a HTTP_TEMPORARYREDIRECT status with the specified location,
     // or HTTP_MOVEDPERMANENTLY if PermanentChange is TRUE
@@ -1550,11 +1556,11 @@ type
   // - inherited classes should override InternalExecute abstract method
   TRestThread = class(TThreadAbstract)
   protected
+    fSafe: TOSLock;
     fRest: TRest;
     fOwnRest: boolean;
     fExecuting: boolean;
     fLog: TSynLog;
-    fSafe: TSynLocker;
     fEvent: TSynEvent;
     /// allows customization in overriden Create (before Execute)
     fThreadName: RawUtf8;
@@ -1587,7 +1593,7 @@ type
       read fOwnRest;
     /// a critical section is associated to this thread
     // - could be used to protect shared resources within the internal process
-    property Safe: TSynLocker
+    property Safe: TOSLock
       read fSafe;
     /// read-only access to the REST TSynLog instance matching this thread
     // - can be used safely within InternalExecute code
@@ -3300,7 +3306,7 @@ end;
 function TRestBackgroundTimer.AsyncBatchStop(Table: TOrmClass): boolean;
 var
   b: PtrInt;
-  start, tix, timeout: Int64;
+  start, tix, timeout: Int64; // SleepStep() uses ms resolution
   {%H-}log: ISynLog;
 begin
   result := false;
@@ -3898,31 +3904,41 @@ begin
   end;
 end;
 
-function TRestUriContext.InputCookies: PHttpCookies;
+function TRestUriContext.InputCookiesParse: PHttpCookies;
 var
   p: PUtf8Char;
 begin
-  result := @fInputCookies;
-  if fInputCookiesParsed then
-    exit;
-  fInputCookiesParsed := true;
+  result := nil;
+  fInputCookiesParsed := icpNone;
   p := FindNameValue(pointer(fCall^.InHead), 'COOKIE: ');
-  if p <> nil then
-    result^.ParseServer(p - 8);
+  if p = nil then
+    exit;
+  fInputCookies.ParseServer(p - 8);
+  if fInputCookies.Cookies = nil then
+    exit;
+  fInputCookiesParsed := icpAvailable;
+  result := @fInputCookies;
+end;
+
+function TRestUriContext.InputCookies: PHttpCookies;
+begin
+  result := nil; // most common case
+  if (self <> nil) and
+     (fInputCookiesParsed <> icpNone) then
+    if fInputCookiesParsed = icpAvailable then
+      result := @fInputCookies
+    else
+      result := InputCookiesParse;
 end;
 
 function TRestUriContext.GetInCookie(const CookieName: RawUtf8): RawUtf8;
 begin
-  if self = nil then
-    result := ''
-  else
-    InputCookies^.RetrieveCookie(CookieName, result);
+  InputCookies^.RetrieveCookie(CookieName, result);
 end;
 
-procedure TRestUriContext.SetInCookie(const CookieName, CookieValue: RawUtf8);
+function TRestUriContext.InCookieSearch(const CookieName: RawUtf8): PHttpCookie;
 begin
-  if self <> nil then
-    InputCookies^.SetCookie(CookieName, CookieValue);
+  result := InputCookies^.FindCookie(CookieName);
 end;
 
 procedure TRestUriContext.SetOutSetCookie(const aOutSetCookie: RawUtf8);
@@ -3956,10 +3972,14 @@ begin
 end;
 
 function TRestUriContext.ContentTypeIsJson: boolean;
+var
+  p: PUtf8Char;
 begin
-  result := (fInputContentType = '') or
-            IsContentTypeJson(pointer(fInputContentType),
-              PStrLen(PAnsiChar(pointer(fInputContentType)) - _STRLEN)^);
+  p := pointer(fInputContentType);
+  if p = nil then
+    result := true
+  else
+    result := IsContentTypeJson(p, PStrLen(p - _STRLEN)^);
 end;
 
 function TRestUriContext.InputAsMultiPart(
@@ -4098,28 +4118,18 @@ begin
     // Content-Type: appears twice: 1st to notify static file, 2nd for mime type
     if not ExistsIniName(pointer(fCall^.OutHead), HEADER_CONTENT_TYPE_UPPER) then
       if ContentType <> '' then
-        AppendLine(fCall^.OutHead, [HEADER_CONTENT_TYPE, ContentType])
+        if IdemPChar(pointer(ContentType), HEADER_CONTENT_TYPE_UPPER) then
+          AppendLine(fCall^.OutHead, [ContentType]) // already in header: format
+        else
+          AppendLine(fCall^.OutHead, [HEADER_CONTENT_TYPE, ContentType])
       else
         AppendLine(fCall^.OutHead, [HEADER_CONTENT_TYPE, GetMimeContentType('', FileName)]);
     Prepend(fCall^.OutHead, [STATICFILE_CONTENT_TYPE_HEADER + #13#10]);
     StringToUtf8(FileName, fCall^.OutBody); // body=filename for STATICFILE_CONTENT
     if AttachmentFileName <> '' then
-      AppendLine(fCall^.OutHead, ['Content-Disposition: attachment; filename="',
-        AttachmentFileName, '"']);
+      AppendLine(fCall^.OutHead,
+        ['Content-Disposition: attachment; filename="', AttachmentFileName, '"']);
   end;
-end;
-
-procedure TRestUriContext.ReturnFileFromFolder(
-  const FolderName: TFileName; Handle304NotModified: boolean;
-  const DefaultFileName: TFileName; const Error404Redirect: RawUtf8;
-  CacheControlMaxAgeSec: integer);
-var
-  fileName: TFileName;
-begin
-  if DefaultFileName <> '' then
-    fileName := MakePath([FolderName, DefaultFileName]);
-  ReturnFile(fileName,
-    Handle304NotModified, '', '', Error404Redirect, CacheControlMaxAgeSec);
 end;
 
 procedure TRestUriContext.Redirect(const NewLocation: RawUtf8;
@@ -4145,7 +4155,7 @@ procedure TRestUriContext.Results(const Values: array of const;
 var
   i, h: PtrInt;
   json: RawUtf8;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   h := high(Values);
   if h < 0 then
@@ -4223,7 +4233,7 @@ procedure TRestUriContext.Error(const ErrorMessage: RawUtf8;
   Status, CacheControlMaxAgeSec: integer);
 var
   msg: PRawUtf8;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   fCall^.OutStatus := Status;
   if StatusCodeIsSuccess(Status) then
@@ -4273,9 +4283,9 @@ end;
 
 constructor TRestThread.Create(aRest: TRest; aOwnRest, aCreateSuspended: boolean);
 begin
+  fSafe.Init;
   if aRest = nil then
     EOrmException.RaiseUtf8('%.Create(aRest=nil)', [self]);
-  fSafe.InitFromClass;
   fRest := aRest;
   fOwnRest := aOwnRest;
   if fThreadName = '' then

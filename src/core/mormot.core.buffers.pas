@@ -2149,7 +2149,7 @@ type
     /// percentage of CurrentSize versus ExpectedSize
     // - equals 0 if ExpectedSize is 0
     Percent: integer;
-    /// number of milliseconds elasped since process beginning
+    /// number of milliseconds elapsed since process beginning
     Elapsed: Int64;
     /// number of milliseconds remaining for full process, as estimated
     // - equals 0 if ExpectedSize is 0
@@ -2293,7 +2293,7 @@ type
     // - equals 0 if ExpectedSize is 0
     property Percent: integer
       read fInfo.Percent;
-    /// number of milliseconds elasped since beginning, as set by Read/Write
+    /// number of milliseconds elapsed since beginning, as set by Read/Write
     property Elapsed: Int64
       read fInfo.Elapsed;
     /// number of milliseconds remaining for full process, as set by Read/Write
@@ -2610,12 +2610,11 @@ function EmojiFromDots(const text: RawUtf8): RawUtf8; overload;
 { ************ RawByteString Buffers Aggregation via TRawByteStringGroup }
 
 type
-  /// item as stored in a TRawByteStringGroup instance
+  /// one item as stored in a TRawByteStringGroup instance
   TRawByteStringGroupValue = record
     Position: integer;
     Value: RawByteString;
   end;
-
   PRawByteStringGroupValue = ^TRawByteStringGroupValue;
 
   /// items as stored in a TRawByteStringGroup instance
@@ -2637,7 +2636,7 @@ type
     /// naive but efficient cache for Find()
     LastFind: integer;
     /// add a new item to Values[]
-    procedure Add(const aItem: RawByteString); overload;
+    procedure Add(const aItem: RawByteString; aWeakAssign: boolean = false); overload;
     /// add a new item to Values[]
     procedure Add(aItem: pointer; aItemLen: integer); overload;
     /// add another TRawByteStringGroup to Values[]
@@ -2760,10 +2759,10 @@ type
     fBuffer: RawUtf8; // actual storage, with length(fBuffer) as Capacity
     fLen: PtrInt;
   public
-    /// set Len to 0, but doesn't clear/free the Buffer itself
+    /// set Len to 0, but doesn't clear/free the fBuffer working mem itself
     procedure Reset;
       {$ifdef HASINLINE}inline;{$endif}
-    /// release/free the internal Buffer storage
+    /// set Len to 0, and release/free the internal fBuffer storage
     // - returns the released memory bytes, i.e. former Capacity before clearing
     function Clear: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2813,11 +2812,9 @@ type
     function ExtractAt(var Dest: PAnsiChar; var Count: PtrInt;
       var Pos: PtrInt): PtrInt;
     /// retrieve the current Buffer/Len content as RawUtf8 text
-    // - with some optional overhead for faster reallocmem at concatenation
+    // - with some optional overhead bytes to avoid reallocmem at concatenation
     // - won't force Len to 0: caller should call Reset if done with it
-    // - UseMainBuffer=true will return a copy of fBuffer into Text
-    procedure AsText(out Text: RawUtf8; Overhead: PtrInt = 0;
-      UseMainBuffer: boolean = false);
+    procedure AsText(out Text: RawUtf8; Overhead: PtrInt = 0);
     /// how many bytes are currently used in the Buffer
     property Len: PtrInt
       read fLen write fLen;
@@ -3539,7 +3536,7 @@ begin
   if Assigned(OnErrorOverflow) then
     OnErrorOverflow
   else
-    raise EFastReader.Create('Reached End of Input');
+    EFastReader.RaiseU('Reached End of Input');
 end;
 
 procedure TFastReader.ErrorData(const fmt: RawUtf8; const args: array of const);
@@ -3547,7 +3544,7 @@ begin
   if Assigned(OnErrorData) then
     OnErrorData(fmt, args)
   else
-    raise EFastReader.CreateUtf8('Incorrect Data: ' + fmt, args);
+    EFastReader.RaiseUtf8('Incorrect Data: ' + fmt, args);
 end;
 
 procedure TFastReader.ErrorData(const msg: ShortString);
@@ -4617,12 +4614,7 @@ end;
 procedure TBufferWriter.WriteVar(var Item: TTempUtf8);
 begin
   WriteVar(Item.Text, Item.Len);
-  if Item.TempRawUtf8 <> nil then
-    {$ifdef FPC}
-    FastAssignNew(Item.TempRawUtf8);
-    {$else}
-    RawUtf8(Item.TempRawUtf8) := '';
-    {$endif FPC}
+  TempUtf8Done(Item);
 end;
 
 procedure TBufferWriter.Write(const Text: RawByteString);
@@ -6374,34 +6366,33 @@ end;
 
 { ************ Base64, Base64Uri, Base58 and Baudot Encoding / Decoding }
 
-type
-  TBase64Enc = array[0..63] of AnsiChar;
-  PBase64Enc = ^TBase64Enc;
-  TBase64Dec = array[AnsiChar] of shortint;
-  PBase64Dec = ^TBase64Dec;
-
 const
-  b64enc: TBase64Enc =
+  b64enc: TChar64 =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  b64Urienc: TBase64Enc =
+  b64Urienc: TChar64 =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+type
+  // generic lookup table type used for efficient Base64 Base58 Base32 decoding
+  TAnsiCharDec = array[AnsiChar] of shortint; // store -1 for incorrect chars
+  PAnsiCharDec = ^TAnsiCharDec;
 
 var
   /// a conversion table from Base64 text into binary data
   // - used by Base64ToBin/IsBase64 functions
   // - has -1 (255) for invalid char, -2 (254) for '=', 0..63 for valid char
-  ConvertBase64ToBin, ConvertBase64UriToBin: TBase64Dec;
+  ConvertBase64ToBin, ConvertBase64UriToBin: TAnsiCharDec;
 
 
 { --------- Base64 encoding/decoding }
 
-function Base64AnyDecode(const decode: TBase64Dec; sp, rp: PAnsiChar; len: PtrInt): boolean;
+function Base64AnyDecode(decode: PAnsiCharDec; sp, rp: PAnsiChar; len: PtrInt): boolean;
 var
   c, ch: PtrInt;
 begin // FPC emits suboptimal asm but Base64DecodeMainAvx2() will run on server
   result := false;
-  while len >= 4 do
-  begin
+  if len >= 4 then
+  repeat
     c := decode[sp[0]];
     if c < 0 then
       exit;
@@ -6426,7 +6417,7 @@ begin // FPC emits suboptimal asm but Base64DecodeMainAvx2() will run on server
     dec(len, 4);
     inc(rp, 3);
     inc(sp, 4);
-  end;
+  until len < 4;
   if len >= 2 then
   begin
     c := decode[sp[0]];
@@ -6454,13 +6445,13 @@ end;
 
 function Base64DecodeMainPas(sp, rp: PAnsiChar; len: PtrInt): boolean;
 begin
-  result := Base64AnyDecode(ConvertBase64ToBin, sp, rp, len);
+  result := Base64AnyDecode(@ConvertBase64ToBin, sp, rp, len);
 end;
 
 function Base64Decode(sp, rp: PAnsiChar; len: PtrInt): boolean;
   {$ifdef FPC} inline;{$endif}
 var
-  tab: PBase64Dec; // use local register
+  tab: PAnsiCharDec; // use local register
 begin
   tab := @ConvertBase64ToBin;
   len := len shl 2; // len was the number of 4 chars chunks in sp
@@ -6475,11 +6466,11 @@ begin
   {$ifdef ASMX64AVXNOCONST}
   result := Base64DecodeMain(sp, rp, len); // may be Base64DecodeMainAvx2
   {$else}
-  result := Base64AnyDecode(tab^, sp, rp, len);
+  result := Base64AnyDecode(tab, sp, rp, len);
   {$endif ASMX64AVXNOCONST}
 end;
 
-procedure Base64EncodeLoop(rp, sp: PAnsiChar; len: cardinal; enc: PBase64Enc);
+procedure Base64EncodeLoop(rp, sp: PAnsiChar; len: cardinal; enc: PAnsiChar);
   {$ifdef HASINLINE} inline; {$endif}
 var
   c: cardinal;
@@ -6513,13 +6504,13 @@ function Base64DecodeMainAvx2(sp, rp: PAnsiChar; len: PtrInt): boolean;
 begin
   Base64DecodeAvx2(sp, len, rp);
   // on error, AVX2 code let sp point to the faulty input so result=false
-  result := Base64AnyDecode(ConvertBase64ToBin, sp, rp, len);
+  result := Base64AnyDecode(@ConvertBase64ToBin, sp, rp, len);
 end;
 {$endif ASMX64AVXNOCONST}
 
 function Base64EncodeMainPas(rp, sp: PAnsiChar; len: cardinal): integer;
 var
-  enc: PBase64Enc; // use local register
+  enc: PAnsiChar; // use local register
 begin
   enc := @b64enc;
   result := len div 3;
@@ -6530,7 +6521,7 @@ end;
 procedure Base64EncodeTrailing(rp, sp: PAnsiChar; len: cardinal);
 var
   c: cardinal;
-  enc: PBase64Enc; // use local register
+  enc: PAnsiChar; // use local register
 begin
   enc := @b64enc;
   case len of
@@ -6696,7 +6687,7 @@ begin
   Base64Encode(PAnsiChar(pointer(Result)) + 3, Data, DataLen);
 end;
 
-function IsBase64Internal(sp: PAnsiChar; len: PtrInt; dec: PBase64Dec): boolean;
+function IsBase64Internal(sp: PAnsiChar; len: PtrInt; dec: PAnsiCharDec): boolean;
 var
   i: PtrInt;
 begin
@@ -6726,7 +6717,7 @@ begin
   result := IsBase64Internal(pointer(s), length(s), @ConvertBase64ToBin);
 end;
 
-function Base64Length(sp: PAnsiChar; len: PtrInt; dec: PBase64Dec): PtrInt;
+function Base64Length(sp: PAnsiChar; len: PtrInt; dec: PAnsiCharDec): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
 begin
   result := 0;
@@ -6745,7 +6736,7 @@ end;
 
 function Base64ToBinLengthSafe(sp: PAnsiChar; len: PtrInt): PtrInt;
 var
-  dec: PBase64Dec;
+  dec: PAnsiCharDec;
 begin
   dec := @ConvertBase64ToBin;
   if IsBase64Internal(sp, len, dec) then
@@ -6790,7 +6781,7 @@ end;
 function Base64LengthAdjust(sp: PAnsiChar; var len: PtrInt): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
 var
-  tab: PBase64Dec;
+  tab: PAnsiCharDec;
 begin
   result := len; // for better code generation
   if (result = 0) or
@@ -6871,7 +6862,7 @@ end;
 procedure Base64uriEncode(rp, sp: PAnsiChar; len: cardinal);
 var
   main, c: cardinal;
-  enc: PBase64Enc; // faster especially on x86_64 and PIC
+  enc: PAnsiChar; // faster especially on x86_64 and PIC
 begin
   enc := @b64Urienc;
   main := len div 3;
@@ -6968,7 +6959,7 @@ end;
 
 function Base64uriDecode(sp, rp: PAnsiChar; len: PtrInt): boolean;
 begin
-  result := Base64AnyDecode(ConvertBase64UriToBin, sp, rp, len);
+  result := Base64AnyDecode(@ConvertBase64UriToBin, sp, rp, len);
 end;
 
 function Base64uriToBin(sp: PAnsiChar; len: PtrInt): RawByteString;
@@ -6988,7 +6979,7 @@ begin
   result := false;
   resultLen := Base64uriToBinLength(len);
   if resultLen <> 0 then
-    result := Base64AnyDecode(ConvertBase64UriToBin, sp,
+    result := Base64AnyDecode(@ConvertBase64UriToBin, sp,
       FastNewRawByteString(bin, resultLen), len);
   if not result then
     bin := '';
@@ -6998,7 +6989,7 @@ function Base64uriToBin(sp: PAnsiChar; len: PtrInt; var temp: TSynTempBuffer): b
 begin
   temp.Init(Base64uriToBinLength(len));
   result := (temp.len > 0) and
-            Base64AnyDecode(ConvertBase64UriToBin, sp, temp.buf, len);
+            Base64AnyDecode(@ConvertBase64UriToBin, sp, temp.buf, len);
 end;
 
 function Base64uriToBin(const base64: RawByteString; bin: PAnsiChar; binlen: PtrInt): boolean;
@@ -7012,7 +7003,7 @@ var
 begin
   resultLen := Base64uriToBinLength(base64len);
   result := (resultLen = binlen) and
-            Base64AnyDecode(ConvertBase64UriToBin, base64, bin, base64len);
+            Base64AnyDecode(@ConvertBase64UriToBin, base64, bin, base64len);
 end;
 
 procedure Base64ToUri(var base64: RawUtf8);
@@ -7121,18 +7112,12 @@ end;
 
 { --------- Base58 encoding/decoding }
 
-type
-  TBase58Enc = array[0..57] of AnsiChar;
-  PBase58Enc = ^TBase58Enc;
-  TBase58Dec = array[AnsiChar] of shortint;
-  PBase58Dec = ^TBase58Dec;
-
 const
-  b58enc: TBase58Enc =
+  b58enc: array[0..57] of AnsiChar =
     '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 var
   /// a conversion table from Base58 text into binary data
-  ConvertBase58ToBin: TBase58Dec;
+  ConvertBase58ToBin: TAnsiCharDec;
 
 function BinToBase58(Bin: PAnsiChar; BinLen: integer; var Dest: TSynTempBuffer): integer;
 var
@@ -7362,7 +7347,7 @@ end;
 const
   b32enc: array[0..31] of AnsiChar = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 var
-  ConvertBase32ToBin: TBase64Dec;
+  ConvertBase32ToBin: TAnsiCharDec;
 
 function BinToBase32(Bin: PAnsiChar; BinLen: PtrInt): RawUtf8;
 begin
@@ -7376,7 +7361,7 @@ begin
   result := BinToBase32(pointer(Bin), length(Bin));
 end;
 
-function Base32Decode(decode: PBase64Dec; sp: PAnsiChar; rp: PByteArray;
+function Base32Decode(decode: PAnsiCharDec; sp: PAnsiChar; rp: PByteArray;
   len: PtrInt): pointer;
 var
   c, d, e: integer;
@@ -7756,7 +7741,7 @@ var
   boundaries: TRawUtf8DynArray;
   bound: RawUtf8;
   W: TTextWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   result := false;
   len := length(MultiPart);
@@ -7869,7 +7854,7 @@ end;
 
 const
   // see https://en.wikipedia.org/wiki/Baudot_code
-  Baudot2Char: array[0..63] of AnsiChar =
+  Baudot2Char: TChar64 =
    #0'e'#10'a siu'#13'drjnfcktzlwhypqobg'#254'mxv'#255+
    #0'3'#10'- ''87'#13#0'4'#0',!:(5+)2$6019?@'#254'./;'#255;
 var
@@ -9300,7 +9285,7 @@ begin
   P := pointer(fMap.Buffer);
   fMapEnd := P + fMap.Size;
   if PCardinal(P)^ and $00ffffff = BOM_UTF8 then
-    inc(P, 3); // ignore any UTF-8 BOM
+    inc(P, 3); // ignore any UTF-8 BOM (still appears on Windows)
   ParseLines(P, fMapEnd, self);
   if fLinesMax > fCount + 16384 then
     Reallocmem(fLines, fCount * SizeOf(pointer)); // size down only if worth it
@@ -9396,7 +9381,7 @@ function AppendUInt32ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
 var
   L: PtrInt;
   P: PAnsiChar;
-  tmp: array[0..23] of AnsiChar;
+  tmp: TTemp24;
 begin
   {$ifndef ASMINTEL} // our StrUInt32 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
@@ -9898,7 +9883,7 @@ begin
     if StartedMs <> 0 then
     begin
       tmp.fInfo.Elapsed := stop - StartedMs;
-      dec(tmp.fInfo.StartTix, tmp.fInfo.Elapsed shr MilliSecsPerSecShl); // fake time
+      dec(tmp.fInfo.StartTix, tmp.fInfo.Elapsed div MilliSecsPerSec); // fake time
     end;
     tmp.Ended;
   finally
@@ -10408,7 +10393,7 @@ begin
         break;
       end;
     until (r1 <> r2) or
-          not CompareMem(@b1, @b2, r1);
+          not mormot.core.base.CompareMem(@b1, @b2, r1);
   if ValidHandle(f2) then
     FileClose(f2);
   if ValidHandle(f1) then
@@ -10877,7 +10862,7 @@ end;
 
 function HtmlEscapeWiki(const wiki: RawUtf8; esc: TTextWriterHtmlEscape): RawUtf8;
 var
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
   W: TTextWriter;
 begin
   W := TTextWriter.CreateOwnedStream(temp);
@@ -11036,7 +11021,7 @@ end;
 
 { TRawByteStringGroup }
 
-procedure TRawByteStringGroup.Add(const aItem: RawByteString);
+procedure TRawByteStringGroup.Add(const aItem: RawByteString; aWeakAssign: boolean);
 begin
   if Values = nil then
     Clear; // ensure all fields are initialized, even if on stack
@@ -11045,7 +11030,10 @@ begin
   with Values[Count] do
   begin
     Position := self.Position;
-    Value := aItem;
+    if aWeakAssign then
+      pointer(Value) := pointer(aItem)
+    else
+      Value := aItem;
   end;
   LastFind := Count;
   inc(Count);
@@ -11054,10 +11042,13 @@ end;
 
 procedure TRawByteStringGroup.Add(aItem: pointer; aItemLen: integer);
 var
-  tmp: RawByteString;
+  tmp: pointer;
 begin
-  FastSetRawByteString(tmp, aItem, aItemLen);
-  Add(tmp);
+  if aItemLen <= 0 then
+    exit;
+  tmp := FastNewString(aItemLen, CP_UTF8); // CP_UTF8 for FPC RTL bug
+  MoveFast(aItem^, tmp^, aItemLen);
+  Add(RawByteString(tmp), {weakassign=}true);
 end;
 
 procedure TRawByteStringGroup.Add(const aAnother: TRawByteStringGroup);
@@ -11152,16 +11143,16 @@ procedure TRawByteStringGroup.Compact;
 var
   i: integer;
   v: PRawByteStringGroupValue;
-  tmp: RawUtf8;
+  tmp: PByteArray;
 begin
   if (Values <> nil) and
      (Count > 1) then
   begin
-    FastSetString(tmp, Position); // assume CP_UTF8 for FPC RTL bug
+    tmp := FastNewString(Position, CP_UTF8); // CP_UTF8 for FPC RTL bug
     v := pointer(Values);
     for i := 1 to Count do
     begin
-      MoveFast(pointer(v^.Value)^, PByteArray(tmp)[v^.Position], length(v^.Value));
+      MoveFast(pointer(v^.Value)^, tmp[v^.Position], length(v^.Value));
       {$ifdef FPC}
       FastAssignNew(v^.Value);
       {$else}
@@ -11169,9 +11160,9 @@ begin
       {$endif FPC}
       inc(v);
     end;
-    Values[0].Value := tmp; // use result for absolute compaction ;)
-    if Count > 128 then
-      SetLength(Values, 128);
+    pointer(Values[0].Value) := tmp; // absolute compaction ;)
+    if Count > 255 then
+      Values := nil; // not too many void pointers
     Count := 1;
     LastFind := 0;
   end;
@@ -11501,7 +11492,7 @@ end;
 
 procedure TRawByteStringBuffer.Append(Value: QWord);
 var
-  tmp: array[0..23] of AnsiChar;
+  tmp: TTemp24;
   P: PAnsiChar;
 begin
   {$ifndef ASMINTEL} // our StrUInt64 asm has less CPU cache pollution
@@ -11615,31 +11606,28 @@ begin
   dec(Count, result);
 end;
 
-procedure TRawByteStringBuffer.AsText(out Text: RawUtf8; Overhead: PtrInt;
-  UseMainBuffer: boolean);
+procedure TRawByteStringBuffer.AsText(out Text: RawUtf8; Overhead: PtrInt);
 begin
-  if (Len = 0) or
+  if (fLen = 0) or
      (fBuffer = '') or
      (OverHead < 0) then
     exit;
-  if UseMainBuffer and
-     (PStrCnt(PAnsiChar(pointer(fBuffer)) - _STRCNT)^ = 1) and
-     (Len + Overhead <= length(fBuffer)) then
-  begin
-    pointer(Text) := pointer(fBuffer); // fast pointer move for refcount=1
-    pointer(fBuffer) := nil;
-  end
-  else
-  begin
-    pointer(Text) := FastNewString(Len + Overhead, CP_UTF8);
-    MoveFast(pointer(fBuffer)^, pointer(Text)^, Len);
-    if OverHead = 0 then
-      exit;
-  end;
-  // keep OverHead allocated, but SetLength(Len) and put #0 at right position
-  FakeLength(Text, Len);
-end;
+  pointer(Text) := FastNewString(fLen + Overhead, CP_UTF8);
+  MoveFast(pointer(fBuffer)^, pointer(Text)^, fLen);
+  if OverHead <> 0 then
+    FakeLength(Text, fLen); // put Text[fLen] := #0 and set PStrRec^.length
+end; // keep fLen since may be not final - see e.g. TPostConnection.OnRead
 
+
+procedure SetBaseDecoder(s: PAnsiChar; var d: TAnsiCharDec; i: PtrUInt);
+begin
+  FillcharFast(d, SizeOf(d), 255); // fill with -1 = invalid by default
+  repeat
+    d[s[i]] := i; // pre-compute O(1) lookup table for the meaningful characters
+    dec(i);
+  until i = 0;
+  d[s[0]] := 0;
+end;
 
 procedure InitializeUnit;
 var
@@ -11647,35 +11635,36 @@ var
   e: TEmoji;
 begin
   // initialize Base64/Base64Uri/Base58/Base32/Baudot encoding/decoding tables
-  FillcharFast(ConvertBase64ToBin, SizeOf(ConvertBase64ToBin), 255); // -1 = invalid
-  FillcharFast(ConvertBase64uriToBin, SizeOf(ConvertBase64uriToBin), 255);
-  FillcharFast(ConvertBase58ToBin, SizeOf(ConvertBase58ToBin), 255);
-  FillcharFast(ConvertBase32ToBin, SizeOf(ConvertBase32ToBin), 255);
-  for i := 0 to high(b64enc) do
-    ConvertBase64ToBin[b64enc[i]] := i;
-  ConvertBase64ToBin['='] := -2; // special value for '='
-  for i := 0 to high(b64urienc) do
-    ConvertBase64uriToBin[b64urienc[i]] := i;
-  for i := 0 to high(b58enc) do
-    ConvertBase58ToBin[b58enc[i]] := i;
-  for i := 0 to high(b32enc) do
-    ConvertBase32ToBin[b32enc[i]] := i;
+  SetBaseDecoder(@b64enc,    ConvertBase64ToBin,    high(b64enc));
+  SetBaseDecoder(@b64urienc, ConvertBase64uriToBin, high(b64urienc));
+  SetBaseDecoder(@b58enc,    ConvertBase58ToBin,    high(b58enc));
+  SetBaseDecoder(@b32enc,    ConvertBase32ToBin,    high(b32enc));
+  ConvertBase64ToBin['='] := -2; // special value for ending '='
   for i := high(Baudot2Char) downto 0 do
-    if Baudot2Char[i]<#128 then
+    if Baudot2Char[i] < #128 then
       Char2Baudot[Baudot2Char[i]] := i;
   for i := ord('a') to ord('z') do
     Char2Baudot[AnsiChar(i - 32)] := Char2Baudot[AnsiChar(i)]; // A-Z -> a-z
+  Base64EncodeMain     := @Base64EncodeMainPas;
+  Base64DecodeMain     := @Base64DecodeMainPas;
+  Base64MagicRawDecode := @_Base64MagicRawDecode;
+  {$ifdef ASMX64AVXNOCONST} // focus on x86_64 server performance
+  if cfAVX2 in CpuFeatures then
+  begin // our AVX2 asm code is almost 10x faster than the pascal version
+    Base64EncodeMain := @Base64EncodeMainAvx2; // 11.5 GB/s vs 1.3 GB/s
+    Base64DecodeMain := @Base64DecodeMainAvx2; //  8.7 GB/s vs 0.9 GB/s
+  end;
+  {$endif ASMX64AVXNOCONST}
   // HTML/Emoji Efficient Parsing
   Assert(ord(high(TEmoji)) = $4f + 1);
   EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0
-  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT);
+  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, false, {lower=}true);
   EMOJI_TEXT[eNone] := '';
   for e := succ(low(e)) to high(e) do
   begin
-    LowerCaseSelf(EMOJI_TEXT[e]);
     Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
-    SetLength(EMOJI_UTF8[e], 4); // order matches U+1F600 to U+1F64F codepoints
-    Ucs4ToUtf8(ord(e) + $1f5ff, pointer(EMOJI_UTF8[e]));
+    // order matches U+1F600 to U+1F64F codepoints
+    Ucs4ToUtf8(ord(e) + $1f5ff, FastSetString(EMOJI_UTF8[e], 4));
   end;
   EMOJI_AFTERDOTS[')'] := eSmiley;
   EMOJI_AFTERDOTS['('] := eFrowning;
@@ -11688,20 +11677,10 @@ begin
   EMOJI_AFTERDOTS['P'] := eYum;
   EMOJI_AFTERDOTS['s'] := eScream;
   EMOJI_AFTERDOTS['S'] := eScream;
-  // setup internal lists and function wrappers
+  // setup internal compression algorithms
   AlgoSynLZ := TAlgoSynLZ.Create;
   AlgoRleLZ := TAlgoRleLZ.Create;
-  AlgoRle := TAlgoRle.Create;
-  Base64EncodeMain := @Base64EncodeMainPas;
-  Base64DecodeMain := @Base64DecodeMainPas;
-  Base64MagicRawDecode := @_Base64MagicRawDecode;
-  {$ifdef ASMX64AVXNOCONST} // focus on x86_64 server performance
-  if cfAVX2 in CpuFeatures then
-  begin // our AVX2 asm code is almost 10x faster than the pascal version
-    Base64EncodeMain := @Base64EncodeMainAvx2; // 11.5 GB/s vs 1.3 GB/s
-    Base64DecodeMain := @Base64DecodeMainAvx2; //  8.7 GB/s vs 0.9 GB/s
-  end;
-  {$endif ASMX64AVXNOCONST}
+  AlgoRle   := TAlgoRle.Create;
 end;
 
 

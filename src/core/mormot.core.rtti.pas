@@ -1657,7 +1657,8 @@ procedure GetEnumNames(aTypeInfo: PRttiInfo; aDest: PPShortString);
 // ! ...
 // !   GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT);
 procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
-  aUnCamelCase: boolean = false); overload;
+  aUnCamelCase: boolean = false; aLowerCase: boolean = false;
+  aLowerCaseFirst: boolean = false); overload;
 
 /// helper to retrieve all trimmed texts of an enumerate as UTF-8 strings
 function GetEnumTrimmedNames(aTypeInfo: PRttiInfo): TRawUtf8DynArray; overload;
@@ -1767,7 +1768,8 @@ type
   // - IN, IN/OUT, OUT directions can be applied to arguments, e.g. to be
   // available through our JSON-serialized remote access: rmdVar and rmdOut
   // kind of parameters will be returned within the "result": JSON array
-  // - rmdResult is used for a function method, to handle the returned value
+  // - rmdResult is used for the function method, to handle the returned value
+  // - FPC "constref" is not yet supported - use plain "const" instead
   TRttiMethodArgDirection = (
     rmdConst,
     rmdVar,
@@ -1785,6 +1787,8 @@ type
     /// the low-level RTTI information of this argument
     TypeInfo: PRttiInfo;
     /// how the parameter has been defined (const/var/out/result)
+    // - we don't support the FPC "constref" kind of argument by now, and
+    // follow the standard WIN64ABI / SYSVABI specs with "const"
     Direction: TRttiMethodArgDirection;
   end;
   PRttiMethodArg = ^TRttiMethodArg;
@@ -2731,7 +2735,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// allow low-level customization of the Cache.NewInstance pointer for rkClass/rkInterface
     procedure SetClassNewInstance(FactoryMethod: TRttiCustomNewInstance);
-    /// check if this type has ClassNewInstance information for rkClass
+    /// check if this type has ClassNewInstance information for rkClass/rkInterface
     function HasClassNewInstance: boolean;
     /// copy one rkClass instance into another - as used by CopyObject()
     // - return the destination object, optionally creating it if aTo = nil
@@ -2785,6 +2789,9 @@ type
     // - only set for rkClass and rkRecord/rkObject
     property Props: TRttiCustomProps
       read fProps;
+    /// return Props.Count or 0 if instance is nil or not rkClass/rkRecord
+    function PropsCount: integer;
+      {$ifdef HASINLINE}inline;{$endif}
     /// shortcut to the TRttiCustom of the item of a (dynamic) array
     // - only set for rkArray and rkDynArray
     // - may be set also for unmanaged types - use Cache.ItemInfo if you want
@@ -3682,7 +3689,7 @@ var
   i: integer;
   V: PShortString;
   uncamel: ShortString;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if @self <> nil then
     with TTextWriter.CreateOwnedStream(temp) do
@@ -6071,7 +6078,8 @@ end;
 
 function GetEnumNameUnCamelCase(aTypeInfo: PRttiInfo; aIndex: integer): RawUtf8;
 begin
-  result := UnCamelCase(GetEnumNameTrimed(aTypeInfo, aIndex));
+  result := GetEnumNameTrimed(aTypeInfo, aIndex);
+  UnCamelCaseSelf(result);
 end;
 
 procedure GetEnumNames(aTypeInfo: PRttiInfo; aDest: PPShortString);
@@ -6094,7 +6102,7 @@ begin
 end;
 
 procedure GetEnumTrimmedNames(aTypeInfo: PRttiInfo; aDest: PRawUtf8;
-  aUnCamelCase: boolean);
+  aUnCamelCase, aLowerCase, aLowerCaseFirst: boolean);
 var
   info: PRttiEnumType;
   p: PShortString;
@@ -6108,7 +6116,11 @@ begin
     begin
       TrimLeftLowerCaseShort(p, aDest^);
       if aUnCamelCase then
-        aDest^ := UnCamelCase(aDest^);
+        UnCamelCaseSelf(aDest^)
+      else if aLowerCase then
+        CaseNew(aDest^, @NormToLower)
+      else if aLowerCaseFirst then
+        PByte(aDest^)^ := NormToLowerByte[PByte(aDest^)^];
       p := @PByteArray(p)^[ord(p^[0]) + 1];
       inc(aDest);
     end;
@@ -6472,7 +6484,7 @@ begin
     begin
       if aFlags * [pfConst, pfVar, pfOut] = [] then
         RaiseError('%: % parameter should be declared as const, var or out',
-          [a^.ParamName^, aTypeName^]);
+          [a^.ParamName^, aTypeName^]); // e.g. FPC constref is not yet supported
     end
     else if aInfo^.Kind = rkInterface then
       if Rtti.FindType(aInfo).HasClassNewInstance then
@@ -6577,10 +6589,8 @@ type
   TObjectFromInterfaceStub = packed record
     Stub: cardinal;
     case integer of
-      0:
-        (ShortJmp: shortint);
-      1:
-        (LongJmp:  integer)
+      0: (ShortJmp: shortint);
+      1: (LongJmp:  integer)
   end;
   PObjectFromInterfaceStub = ^TObjectFromInterfaceStub;
 
@@ -7493,7 +7503,9 @@ begin
       if IdemPropNameUSameLenNotNull(Name, 'array', 5) then
         result := ptArray
       else if IdemPropNameUSameLenNotNull(Name, 'TDate', 5) then
-        result := ptDateTime;
+        result := ptDateTime
+      else if IdemPropNameUSameLenNotNull(Name, 'TGuid', 5) then
+        result := ptGuid; // Delphi defines uppercase TGUID in System.pas
     6:
       {$ifdef FPC}
       // TypeInfo(string)=TypeInfo(AnsiString) on FPC
@@ -8002,7 +8014,7 @@ end;
 procedure TRttiCustomProp.GetValueJson(Data: pointer; out Result: RawUtf8);
 var
   w: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   w := DefaultJsonWriter.CreateOwnedStream(tmp);
   try
@@ -8543,7 +8555,7 @@ end;
 procedure TRttiCustomProps.AsText(out Result: RawUtf8; IncludePropType: boolean;
   const Prefix, Suffix: RawUtf8);
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   i: PtrInt;
 begin
   if Count > 0 then
@@ -9041,7 +9053,12 @@ begin
   fParser := aParser;
   fParserComplex := aParserComplex;
   if fCache.Info <> nil then
-    ShortStringToAnsi7String(fCache.Info.Name^, fName);
+    case aParser of
+      ptGuid:
+        fName := PT_NAME[aParser]; // normalize for Delphi
+    else
+      ShortStringToAnsi7String(fCache.Info.Name^, fName);
+    end;
   fFlags := fFlags + fProps.AdjustAfterAdded;
   if (fArrayRtti <> nil) and
      (rcfIsManaged in fArrayRtti.Flags) then
@@ -9219,7 +9236,7 @@ end;
 
 procedure TRttiCustom.ValueGetText(Data: pointer; out Text: RawUtf8; HtmlEscape: boolean);
 var
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
   w: TTextWriter;
 begin
   if (self <> nil) and
@@ -9687,6 +9704,14 @@ begin
   r.fCache.ObjArrayClass := aItemClass; // overwrite
   r.fArrayRtti := Rtti.RegisterClass(aItemClass);
 end; // no need to set other fields like Name
+
+function TRttiCustom.PropsCount: integer;
+begin
+  if self = nil then
+    result := 0
+  else
+    result := fProps.Count;
+end;
 
 
 { TRttiCustomList }
@@ -10242,7 +10267,7 @@ begin
     for i := 0 to (n shr 1) - 1 do
       if (DynArrayItem[i * 2].VType <> vtPointer) or
          (DynArrayItem[i * 2 + 1].VType <> vtClass) then
-        raise ERttiException.Create('Rtti.RegisterObjArrays([?])')
+        ERttiException.RaiseU('Rtti.RegisterObjArrays([?])')
       else
         RegisterObjArray(DynArrayItem[i * 2].VPointer,
           DynArrayItem[i * 2 + 1].VClass);
@@ -10257,7 +10282,7 @@ var
 begin
   if (DynArrayOrRecord = nil) or
      not (DynArrayOrRecord^.Kind in rkRecordOrDynArrayTypes) then
-    raise ERttiException.Create('Rtti.RegisterFromText(DynArrayOrRecord?)');
+    ERttiException.RaiseU('Rtti.RegisterFromText(DynArrayOrRecord?)');
   RegisterSafe.Lock;
   try
     result := RegisterType(DynArrayOrRecord);
@@ -10342,9 +10367,9 @@ begin
     for i := 0 to (n shr 1) - 1 do
       if (TypeInfoTextDefinitionPairs[i * 2].VType <> vtPointer) or
          not VarRecToUtf8IsString(TypeInfoTextDefinitionPairs[i * 2 + 1], d) then
-        raise ERttiException.Create('Rtti.RegisterFromText[?]')
+        ERttiException.RaiseU('Rtti.RegisterFromText[?]')
       else
-         RegisterFromText(TypeInfoTextDefinitionPairs[i * 2].VPointer, d);
+        RegisterFromText(TypeInfoTextDefinitionPairs[i * 2].VPointer, d);
 end;
 
 

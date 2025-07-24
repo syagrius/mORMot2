@@ -191,11 +191,11 @@ type
   // - do not use this class, but plain TSynAuthentication
   TSynAuthenticationAbstract = class
   protected
+    fSafe: TOSLock;
     fSessions: TIntegerDynArray;
     fSessionsCount: integer;
     fSessionGenerator: integer;
     fTokenSeed: Int64;
-    fSafe: TSynLocker;
     function ComputeCredential(previous: boolean;
       const UserName, PassWord: RawUtf8): cardinal; virtual;
     function GetPassword(const UserName: RawUtf8;
@@ -1604,14 +1604,21 @@ type
     function Generate(out Cookie: RawUtf8; TimeOutMinutes: cardinal = 0;
       PRecordData: pointer = nil;
       PRecordTypeInfo: PRttiInfo = nil): TBinaryCookieGeneratorSessionID;
-    ///  decode a base64uri cookie and optionally fill an associated record
+    /// decode a base64uri cookie and optionally fill an associated record
     // - return the associated session/sequence number, 0 on error
     // - Invalidate=true would force this cookie to be rejected in the future,
     // adding it into an internal in-memory list, and avoid cookie replay attacks
     function Validate(const Cookie: RawUtf8; PRecordData: pointer = nil;
       PRecordTypeInfo: PRttiInfo = nil; PExpires: PUnixTime = nil;
       PIssued: PUnixTime = nil; Invalidate: boolean = false;
-      Now32: TUnixTimeMinimal = 0): TBinaryCookieGeneratorSessionID;
+      Now32: TUnixTimeMinimal = 0): TBinaryCookieGeneratorSessionID; overload;
+    /// decode a base64uri cookie buffer and optionally fill an associated record
+    // - input Cookie/CookieLen could be obtained via CookieFromHeaders() or
+    // via THttpCookies from mormot.core.text
+    function Validate(Cookie: PUtf8Char; CookieLen: PtrInt; PRecordData: pointer;
+      PRecordTypeInfo: PRttiInfo; PExpires: PUnixTime = nil;
+      PIssued: PUnixTime = nil; Invalidate: boolean = false;
+      Now32: TUnixTimeMinimal = 0): TBinaryCookieGeneratorSessionID; overload;
     /// allow currently available cookies to be recognized after server restart
     function Save: RawUtf8;
     /// unserialize the cookie generation context as serialized by Save
@@ -1719,7 +1726,7 @@ type
     function Get32: cardinal; overload; virtual;
     /// retrieve a random 32-bit value
     function Get32(max: cardinal): cardinal; overload;
-    /// retrieve a random floating point value in the [0..1) range
+    /// retrieve a random floating point value in the [0..1) range calling Get32
     function GetDouble: double;
   end;
 
@@ -3551,7 +3558,7 @@ function GetSignatureSecurityRaw(algo: TCryptAsymAlgo;
 /// encode a raw digital signature into ASN.1/DER
 // - incoming comes e.g. from base-64 decoded JSON Web Token/Signature (JWT/JWS)
 // - output is compatible e.g. with ICryptCert.Verify or ICryptPublicKey.Verify
-// - ECC are encoded from their raw xy coordinates concatenation into ASN1_SEQ
+// - ECC are encoded from their raw x/y coordinates concatenation into ASN1_SEQ
 function SetSignatureSecurityRaw(algo: TCryptAsymAlgo;
   const rawsignature: RawUtf8): RawByteString;
 
@@ -4700,7 +4707,7 @@ end;
 function HashDigestEqual(const a, b: THashDigest): boolean;
 begin
   result := (a.Algo <= high(THashAlgo)) and
-            CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
+            mormot.core.base.CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
 end;
 
 procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
@@ -5085,7 +5092,7 @@ begin
   if Tix64 = 0 then
     Tix64 := GetTickCount64;
   created := created and pred(QWord(1) shl 48);
-  if Tix64 - created > NonceExpSec shl MilliSecsPerSecShl then
+  if Tix64 - created > NonceExpSec * MilliSecsPerSec then
     exit;
   // fast challenge against the 64-bit Opaque value (typically a connection ID)
   DefaultHasher128(@nonce128, @Opaque, SizeOf(Opaque)); // see DigestServerInit
@@ -5269,7 +5276,7 @@ begin
   if result <> asrMatch then
     exit;
   if (DigestHA0(fAlgo, aUser, fRealm, aPassword, dig) = fAlgoSize) and
-     CompareMem(@dig, @stored, fAlgoSize) then
+     mormot.core.base.CompareMem(@dig, @stored, fAlgoSize) then
     if AfterAuth(self, aUser) then
       result := asrMatch
     else
@@ -5458,7 +5465,7 @@ procedure TDigestAuthServerFile.SaveToFile;
 var
   i: PtrInt;
   w: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   middle, txt1, txt2: RawUtf8;
   u: PRawUtf8;
   d: ^TDigestAuthHash;
@@ -5722,7 +5729,7 @@ end;
 
 constructor TSynAuthenticationAbstract.Create;
 begin
-  fSafe.InitFromClass;
+  fSafe.Init;
   fTokenSeed := Random32Not0;
   fSessionGenerator := abs(fTokenSeed * PPtrInt(self)^);
   fTokenSeed := fTokenSeed * Random31Not0;
@@ -5730,8 +5737,8 @@ end;
 
 destructor TSynAuthenticationAbstract.Destroy;
 begin
-  fSafe.Done;
   inherited;
+  fSafe.Done;
 end;
 
 class function TSynAuthenticationAbstract.ComputeHash(Token: Int64;
@@ -6448,7 +6455,7 @@ begin
         inc(tmp.len, 16 - pad);
       if tmp.len > SizeOf(cc.data) then
         // all cookies storage should be < 4K so a single 2K cookie seems huge
-        raise ECrypt.Create('TBinaryCookieGenerator: Too Big Too Fat');
+        ECrypt.RaiseU('TBinaryCookieGenerator: Too Big Too Fat');
       MoveFast(tmp.buf^, cc.data, tmp.len);
     end;
     cc.head.issued := UnixTimeMinimalUtc;
@@ -6481,18 +6488,25 @@ end;
 function TBinaryCookieGenerator.Validate(const Cookie: RawUtf8;
   PRecordData: pointer; PRecordTypeInfo: PRttiInfo; PExpires, PIssued: PUnixTime;
   Invalidate: boolean; Now32: TUnixTimeMinimal): TBinaryCookieGeneratorSessionID;
+begin
+  result := Validate(pointer(Cookie), length(Cookie), PRecordData,
+    PRecordTypeInfo, PExpires, PIssued, Invalidate, Now32)
+end;
+
+function TBinaryCookieGenerator.Validate(Cookie: PUtf8Char; CookieLen: PtrInt;
+  PRecordData: pointer; PRecordTypeInfo: PRttiInfo; PExpires, PIssued: PUnixTime;
+  Invalidate: boolean; Now32: TUnixTimeMinimal): TBinaryCookieGeneratorSessionID;
 var
-  clen, len: integer;
+  len: integer;
   ccend: PAnsiChar;
   cc: TCookieContent; // local working buffer on stack (no memory allocation)
 begin
   result := 0; // parsing/crc/timeout error
-  clen := length(Cookie);
-  len := Base64uriToBinLength(clen);
+  len := Base64uriToBinLength(CookieLen);
   if (self = nil) or
      (len < SizeOf(cc.head)) or
      (len > SizeOf(cc)) or
-     (not Base64uriDecode(pointer(Cookie), @cc, clen)) or
+     (not Base64uriDecode(pointer(Cookie), @cc, CookieLen)) or
      (cc.head.session < cardinal(fContext.SessionSequenceStart)) or
      (cc.head.session > cardinal(fContext.SessionSequence)) or
      (cc.head.issued = 0) or
@@ -6521,7 +6535,8 @@ begin
       if Now32 >= fNextUnixTimeMinimalInvalidateCheck then
       begin // cleanup of deprecated invalid sessions once per minute
         fNextUnixTimeMinimalInvalidateCheck := Now32 + SecsPerMin;
-        RemoveSortedInt64SmallerThan(fContext.Invalid, fInvalidCount, Int64(Now32) shl 32);
+        RemoveSortedInt64SmallerThan(fContext.Invalid, fInvalidCount,
+          Int64(Now32) shl 32);
       end;
       if FastFindInt64Sorted(pointer(fContext.Invalid), fInvalidCount - 1,
            PInt64(@cc.head.session)^) >= 0 then // branchless O(log(n)) search
@@ -6567,7 +6582,6 @@ begin
   if result then
     fAes.Init(fContext.CryptKey, 128, {avx=}false);
 end;
-
 
 
 { ************* Rnd/Hash/Sign/Cipher/Asym/Cert/Store High-Level Algorithms Factories }
@@ -6746,13 +6760,13 @@ begin
   result := Get32 * COEFF32; // 32-bit resolution is enough for our purpose
 end;
 
-
 { TCryptRandomAesPrng }
 
 type
   TCryptRandomAesPrng = class(TCryptRandom) // 'rnd-default,rnd-aes'
   public
     procedure Get(dst: pointer; dstlen: PtrInt); override;
+    function Get32: cardinal; override;
   end;
 
 procedure TCryptRandomAesPrng.Get(dst: pointer; dstlen: PtrInt);
@@ -6760,6 +6774,10 @@ begin
   TAesPrng.Main.FillRandom(dst, dstlen);
 end;
 
+function TCryptRandomAesPrng.Get32: cardinal;
+begin
+  result := TAesPrng.Main.Random32;
+end;
 
 { TCryptRandomEntropy }
 
@@ -6798,7 +6816,6 @@ begin
   FillZero(tmp);
 end;
 
-
 { TCryptRandomSysPrng }
 
 type
@@ -6809,9 +6826,8 @@ type
 
 procedure TCryptRandomSysPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  FillSystemRandom(dst, dstlen, length(fName) > 10); // may be blocking
+  FillSystemRandom(dst, dstlen, {allowblocking=}length(fName) > 10);
 end;
-
 
 { TCryptRandomLecuyerPrng }
 
@@ -6832,6 +6848,44 @@ begin
   result := SharedRandom.Next;
 end;
 
+{$ifdef CPUINTEL}
+
+{ TCryptRandomRdRand }
+
+type
+  TCryptRandomRdRand = class(TCryptRandom) // 'rnd-rdrand'
+  public
+    procedure Get(dst: pointer; dstlen: PtrInt); override;
+    function Get32: cardinal; override;
+  end;
+
+procedure TCryptRandomRdRand.Get(dst: pointer; dstlen: PtrInt);
+var
+  c: cardinal;
+begin
+  c := dstlen shr 2;
+  RdRand32(dst, c);
+  dstlen := dstlen and 3;
+  if dstlen = 0 then
+    exit;
+  inc(PCardinal(dst), c);
+  c := RdRand32; // last 1..3 bytes
+  repeat
+    PByte(dst)^ := PByte(dst)^ xor c;
+    dec(dstlen);
+    if dstlen = 0 then
+      exit;
+    c := c shr 8;
+    inc(PByte(dst));
+  until false;
+end;
+
+function TCryptRandomRdRand.Get32: cardinal;
+begin
+  result := RdRand32;
+end;
+
+{$endif CPUINTEL}
 
 { TCryptHash }
 
@@ -7703,7 +7757,7 @@ end;
 
 procedure TCryptCert.RaiseError(const Msg: ShortString);
 begin
-  ECryptCert.RaiseUtf8('%.%', [self, Msg]);
+  raise ECryptCert.CreateUtf8('%.%', [self, Msg]);
 end;
 
 procedure TCryptCert.RaiseError(const Fmt: RawUtf8;
@@ -8137,39 +8191,39 @@ begin
     result := nil;
 end;
 
+type
+  TDirectoryCryptStore = class(TDirectoryBrowser) // support MAX_PATH on Windows
+  protected
+    fStore: TCryptStore;
+    fSerials: TRawUtf8DynArray;
+    fCount: integer;
+    function OnFile(const FileInfo: TSearchRec;
+      const FullFileName: TFileName): boolean; override;
+  end;
+
+function TDirectoryCryptStore.OnFile(const FileInfo: TSearchRec;
+  const FullFileName: TFileName): boolean;
+begin
+  if FileInfo.Size < 65535 then // certificate files are expected to be < 64KB
+     AddRawUtf8(fSerials, fCount, fStore.AddFromFile(FullFileName));
+  result := true; // continue;
+end;
+
 function TCryptStore.AddFromFolder(const Folder, Mask: TFileName;
   Recursive: boolean): TRawUtf8DynArray;
 var
-  n: integer;
-
-  procedure SearchFolder(const DirName: TFileName);
-  var
-    F: TSearchRec;
-  begin
-    if FindFirst(MakePath([DirName, Mask]), faAnyfile - faDirectory, F) = 0 then
-    begin
-      repeat
-        if SearchRecValidFile(F, {includehidden=}true) and
-           (F.Size < 65535) then // certificate files are expected to be < 64KB
-          AddRawUtf8(result, n, AddFromFile(MakePath([DirName, F.Name])));
-      until FindNext(F) <> 0;
-      FindClose(F);
-    end;
-    if Recursive and
-       (FindFirstDirectory(DirName + '*', {includehidden=}true, F) = 0) then
-    begin
-      repeat
-        if SearchRecValidFolder(F, {includehidden=}true) then
-          SearchFolder(MakePath([DirName, F.Name]));
-      until FindNext(F) <> 0;
-      FindClose(F);
-    end;
-  end;
-
+  browser: TDirectoryCryptStore;
 begin
-  n := 0;
-  SearchFolder(Folder);
-  SetLength(result, n);
+  browser := TDirectoryCryptStore.Create(Folder, [Mask], Recursive);
+  try
+    browser.fStore := self;
+    browser.Run;
+    if browser.fCount <> 0 then
+      DynArrayFakeLength(browser.fSerials, browser.fCount);
+    result := browser.fSerials;
+  finally
+    browser.Free;
+  end;
 end;
 
 function TCryptStore.IsValidChain(const chain: ICryptCertChain;
@@ -8597,8 +8651,8 @@ begin
   if result = [] then
     exit;
   n := length(List);
-  if n = 255 then
-    raise ECryptCert.Create('TCryptCertPerUsage.Add overflow'); // paranoid
+  if n >= 255 then
+    ECryptCert.RaiseU('TCryptCertPerUsage.Add overflow'); // paranoid
   SetLength(List, n + 1);
   List[n] := cert;
   inc(n); // CertPerUsage[u] stores index + 1, i.e. in 1..255 range
@@ -8673,7 +8727,7 @@ end;
 function TCryptCertPerUsage.AsBinary: RawByteString;
 var
   i: PtrInt;
-  tmp: TTextWriterStackBuffer; // no allocation for a few certificates
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   s: TBufferWriter;
 begin
   s := TBufferWriter.Create(tmp{%H-});
@@ -8789,6 +8843,10 @@ begin
     // register mormot.crypt.core engines into our factories
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
     TCryptRandomLecuyerPrng.Implements('rnd-lecuyer');
+    {$ifdef CPUINTEL}
+    if cfRAND in CpuFeatures then
+      TCryptRandomRdRand.Implements('rnd-rdrand');
+    {$endif CPUINTEL}
     TCryptRandomEntropy.Implements(RndAlgosText);
     TCryptRandomSysPrng.Implements('rnd-system,rnd-systemblocking');
     TCryptHasherInternal.Implements(HashAlgosText);

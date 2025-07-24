@@ -1887,7 +1887,7 @@ type
     fState: TDynArrayHasherState;
     fCompare: TDynArraySortCompare;        // function
     fEventCompare: TOnDynArraySortCompare; // function of object
-    fHasher: THasher;
+    fHasher: THasher;                      // function
     function HashTableIndex(aHashCode: PtrUInt): PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
     function HashTableIndexToIndex(aHashTableIndex: PtrInt): PtrInt;
@@ -3599,9 +3599,9 @@ begin
   Safe.WriteLock;
   try
     if Locate(item, result) then // O(log(n)) binary search
-      result := -(result + 1)
+      result := -(result + 1)    // < 0 if already there
     else
-      Insert(item, result);
+      Insert(item, result);      // insert at the expected sorted position
   finally
     Safe.WriteUnLock;
   end;
@@ -4177,7 +4177,7 @@ begin
         inc(PBeg, UpperNameLength);
         i := (PBeg - pointer(Content)) + 1;
         if (i = length(NewValue)) and
-           CompareMem(PBeg, pointer(NewValue), i) then
+           mormot.core.base.CompareMem(PBeg, pointer(NewValue), i) then
           exit; // new Value is identical to the old one -> no change
         if P = nil then // avoid last line (P-PBeg) calculation error
           SetLength(Content, i - 1)
@@ -4402,7 +4402,7 @@ function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8;
   Options: TTextWriterWriteObjectOptions; Level: integer): RawUtf8;
 var
   W: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   nested: TRawUtf8DynArray;
   i, nestedcount: integer;
   r: TRttiCustom;
@@ -4415,7 +4415,7 @@ begin
   nestedcount := 0;
   W := DefaultJsonWriter.CreateOwnedStream(tmp);
   try
-    W.CustomOptions := W.CustomOptions + [twoTrimLeftEnumSets];
+    W.CustomOptions := [twoTrimLeftEnumSets];
     W.Add('[%]'#10, [SectionName]);
     r := Rtti.RegisterClass(Instance);
     p := pointer(r.Props.List);
@@ -6403,7 +6403,7 @@ begin
     Dest.WriteVar(Data^.vAny, length(UnicodeString(Data^.vAny)) * 2)
   {$endif HASVARUSTRING}
   else
-    _BS_VariantComplex(pointer(Data), Dest);
+    _BS_VariantComplex(pointer(Data), Dest); // redirect to _VariantSaveJson()
   result := SizeOf(Data^);
 end;
 
@@ -6674,7 +6674,7 @@ function BinarySave(Data: pointer; Info: PRttiInfo;
   Kinds: TRttiKinds; WithCrc: boolean): RawByteString;
 var
   W: TBufferWriter;
-  temp: TTextWriterStackBuffer; // 8KB
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
   save: TRttiBinarySave;
 begin
   save := RTTI_BINARYSAVE[Info^.Kind];
@@ -6702,7 +6702,7 @@ function BinarySaveBytes(Data: pointer; Info: PRttiInfo;
   Kinds: TRttiKinds): TBytes;
 var
   W: TBufferWriter;
-  temp: TTextWriterStackBuffer; // 8KB
+  temp: TTextWriterStackBuffer;
   save: TRttiBinarySave;
 begin
   save := RTTI_BINARYSAVE[Info^.Kind];
@@ -6758,7 +6758,7 @@ function BinarySaveBase64(Data: pointer; Info: PRttiInfo; UriCompatible: boolean
   Kinds: TRttiKinds; WithCrc: boolean): RawUtf8;
 var
   W: TBufferWriter;
-  temp: TTextWriterStackBuffer; // 8KB
+  temp: TTextWriterStackBuffer;
   tmp: RawByteString;
   P: PAnsiChar;
   len: integer;
@@ -7579,7 +7579,7 @@ end;
 procedure TDynArray.SaveToStream(Stream: TStream);
 var
   W: TBufferWriter;
-  tmp: TTextWriterStackBuffer; // 8KB buffer
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if (fValue = nil) or
      (Stream = nil) then
@@ -7670,7 +7670,7 @@ procedure TDynArray.SaveToJson(out result: RawUtf8; Options: TTextWriterOptions;
   ObjectOptions: TTextWriterWriteObjectOptions; reformat: TTextWriterJsonFormat);
 var
   W: TTextWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if GetCount = 0 then
     result := '[]'
@@ -7678,7 +7678,7 @@ begin
   begin
     W := DefaultJsonWriter.CreateOwnedStream(temp);
     try
-      W.CustomOptions := W.CustomOptions + Options;
+      W.CustomOptions := Options;
       SaveToJson(W, ObjectOptions);
       W.SetText(result, reformat);
     finally
@@ -7714,7 +7714,7 @@ procedure _GetDataFromJson(Data: pointer; var Json: PUtf8Char;
   CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
   Interning: TRawUtf8InterningAbstract);
 begin
-  raise ERttiException.Create('GetDataFromJson() not implemented - ' +
+  ERttiException.RaiseU('GetDataFromJson() not implemented - ' +
     'please include mormot.core.json in your uses clause');
 end;
 
@@ -9467,7 +9467,7 @@ end;
 procedure TDynArrayHasher.SetEventCompare(const Value: TOnDynArraySortCompare);
 begin
   if fDynArray^.GetCount <> 0 then
-    raise EDynArray.Create('TDynArrayHasher: late SetEventCompare');
+    EDynArray.RaiseU('TDynArrayHasher: late SetEventCompare');
   fEventCompare := Value;
   HashTableInit(fHasher);
 end;
@@ -9475,7 +9475,7 @@ end;
 procedure TDynArrayHasher.SetEventHash(const Value: TOnDynArrayHashOne);
 begin
   if fDynArray^.GetCount <> 0 then
-    raise EDynArray.Create('TDynArrayHasher: late SetEventHash');
+    EDynArray.RaiseU('TDynArrayHasher: late SetEventHash');
   fEventHash := Value;
   HashTableInit(fHasher);
 end;

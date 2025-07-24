@@ -24,9 +24,10 @@ uses
   mormot.core.perf,
   mormot.core.test,
   mormot.core.variants,
+  mormot.core.threads, // for TLoggedWorker inlining
   mormot.lib.pkcs11,
   mormot.lib.openssl11,
-  mormot.net.sock, // for NetBinToBase64()
+  mormot.net.sock,     // for NetBinToBase64()
   mormot.crypt.jwt,
   mormot.crypt.ecc,
   mormot.crypt.rsa,
@@ -46,13 +47,14 @@ type
     procedure CatalogRunCert(Context: TObject);
     procedure CatalogRunStore(Context: TObject);
     procedure RsaSlow(Context: TObject);
+    procedure CrcSlow(Context: TObject); // 32-bit, 64-bit and 128-bit hash
     procedure Rfc(a: TSignAlgo; const P, S: RawUtf8; c, l: integer;
       const exp, msg: RawUtf8);
     procedure Kdf(a: TSignAlgo; const key, exp, msg: RawUtf8;
       const lab: RawUtf8 = 'kerberos'; const ctx: RawUtf8 = '');
   published
-    /// MD5 (and MD4) hashing functions
-    procedure _MD5;
+    /// 32-bit to 128-bit hashing functions: crc32c, AesNiHash, MD5, MD4...
+    procedure Hashes;
     /// SHA-1 hashing functions
     procedure _SHA1;
     /// SHA-256 hashing functions
@@ -67,8 +69,6 @@ type
     procedure _AES_GCM;
     /// RC4 encryption function
     procedure _RC4;
-    /// 32-bit, 64-bit and 128-bit hashing functions including AesNiHash variants
-    procedure Hashes;
     /// pure pascal RSA tests
     procedure _RSA;
     /// X509 Certificates
@@ -383,6 +383,7 @@ begin
   rc4.Encrypt(OutDat, dat, SizeOf(InDat));
   Check(CompareMem(@dat, @InDat, SizeOf(OutDat)));
   key := RandomWinAnsi(100);
+  Check(length(key) = 100);
   for ks := 1 to 10 do
   begin
     ref.InitSha3(pointer(key)^, ks * 10);
@@ -669,6 +670,7 @@ procedure TTestCoreCrypto._SHA3;
       for i := 1 to 1000 do
       begin
         data := RandomWinAnsi(i);
+        Check(length(data) = i);
         {$ifdef FPC}
         SetCodePage(data, CP_RAWBYTESTRING, {convert=}false);
         {$endif FPC}
@@ -1011,8 +1013,14 @@ procedure TTestCoreCrypto._JWT;
     checkEqual(iss, 'joe');
     if one.Algorithm = 'none' then
       checkEqual(hp + '.', t);
+    check(ParseJwt(t, jwt) = jwtValid);
+    CheckEqual(jwt.reg[jrcIssuer], 'joe');
     check(TJwtAbstract.VerifyPayload(
       t, '', '', 'joe', '', nil, nil, nil, nil, nil, @v) = jwtValid);
+    Finalize(jwt);
+    CheckEqual(jwt.reg[jrcIssuer], '');
+    check(ParseJwt(t, jwt) = jwtValid);
+    CheckEqual(jwt.reg[jrcIssuer], 'joe');
     // {"http://example.com/is_root":true,"iss":"joe","exp":1658258457}
     check(_Safe(v)^.Count >= 3);
     with _Safe(v)^ do
@@ -1027,19 +1035,26 @@ procedure TTestCoreCrypto._JWT;
     end;
     check(one.VerifyPayload(
       t, one.Algorithm, '', 'joe', '', @exp, nil, @sub, @iss, nil) = jwtValid);
+    Finalize(jwt);
+    CheckEqual(jwt.reg[jrcIssuer], '');
+    check(ParseJwt(t, jwt) = jwtValid);
+    check(jwt.data.B['http://example.com/is_root']);
+    check((jwt.reg[jrcIssuedAt] <> '') = (jrcIssuedAt in one.Claims));
+    check(jwt.result = jwtValid);
+    CheckEqual(jwt.reg[jrcIssuer], 'joe');
     checkEqual(one.ExtractAlgo(t), one.Algorithm);
     checkEqual(one.ExtractAlgo(copy(t, 2, 1000)), '');
     checkEqual(one.CacheTimeoutSeconds, 0);
     one.Options := one.Options + [joHeaderParse];
     one.Verify(t, jwt);
-    CheckUtf8(jwt.result = jwtValid, 'verify1=%', [ToText(jwt.result)^]);
+    CheckUtf8(jwt.result = jwtValid, 'verify1=% %', [ToText(jwt.result)^, one]);
     checkEqual(jwt.reg[jrcIssuer], 'joe');
     one.Options := one.Options - [joHeaderParse];
     one.CacheTimeoutSeconds := 60;
     checkEqual(one.CacheTimeoutSeconds, 60);
     one.Verify(t, jwt);
     checkEqual(exp, GetCardinal(pointer(jwt.reg[jrcExpirationTime])));
-    CheckUtf8(jwt.result = jwtValid, 'verify2=%', [ToText(jwt.result)^]);
+    CheckUtf8(jwt.result = jwtValid, 'verify2=% %', [ToText(jwt.result)^, one]);
     check(jwt.reg[jrcExpirationTime] <> '');
     checkEqual(jwt.reg[jrcIssuer], 'joe');
     check(jwt.data.B['http://example.com/is_root']);
@@ -1063,6 +1078,14 @@ procedure TTestCoreCrypto._JWT;
       one.Verify(t, jwt);
       check(jwt.result <> jwtValid, 'invalid sig');
     end;
+    t := one.Compute([], 'john', '', '["one","two"]');
+    check(t <> '');
+    check(ParseJwt(t, jwt) = jwtValid);
+    CheckEqual(jwt.reg[jrcIssuer], 'john');
+    if jrcAudience in one.Claims then
+      CheckEqual(jwt.reg[jrcAudience], '["one","two"]')
+    else
+      CheckEqual(jwt.reg[jrcAudience], '');
     if not nofree then
       one.Free;
   end;
@@ -1313,9 +1336,7 @@ var
   AES: array[bAES128CFB..bAESLAST] of TAesAbstract;
   TXT: array[TBenchmark] of RawUtf8;
 begin
-  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT);
-  for b := low(b) to high(b) do
-    TXT[b] := LowerCase(TXT[b]);
+  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT, false, {lower=}true);
   for b := low(AES) to high(AES) do
     if AESCLASS[b].IsAvailable then
     begin
@@ -1339,6 +1360,7 @@ begin
   for s := 0 to high(SIZ) do
   begin
     data := RandomWinAnsi(SIZ[s]);
+    Check(length(data) = SIZ[s]);
     SetLength(encrypted, SIZ[s]);
     for b := low(b) to high(b) do
     if (b < low(AES)) or
@@ -1451,230 +1473,204 @@ begin
     AES[b].Free;
 end;
 
+{
+Some results for our 32-bit hashes (typical TSynDictionary use):
+
+On x86_64, for each value of L (0..256):
+4317d0 ../src/core/mormot.core.base.asmx64.inc crc32cfast (389)
+  0=0B/s 4=436.5MB/s 8=555.2MB/s 12=499.5MB/s 16=827.8MB/s 20=675.3MB/s
+  24=1GB/s 28=812.8MB/s 32=1.1GB/s 36=0.9GB/s 40=1.1GB/s 44=1GB/s 48=1.2GB/s
+  52=1.1GB/s 56=1GB/s 60=0.9GB/s 64=1.3GB/s 68=1GB/s 72=1.3GB/s 76=1.2GB/s
+  80=1.2GB/s 84=1.2GB/s 88=1.3GB/s 92=1.2GB/s 96=1.2GB/s 100=1.2GB/s
+  104=1.2GB/s 108=1.2GB/s 112=1.3GB/s 116=1.2GB/s 120=1.2GB/s 124=1.2GB/s
+  128=1.1GB/s 132=1.2GB/s 136=1.3GB/s 140=1.2GB/s 144=1.2GB/s 148=1.2GB/s
+  152=1.3GB/s 156=1.3GB/s 160=1.3GB/s 164=1.2GB/s 168=1.3GB/s 172=1.2GB/s
+  176=1.3GB/s 180=1.3GB/s 184=1.3GB/s 188=1.3GB/s 192=1.3GB/s 196=1.3GB/s
+  200=1.3GB/s 204=1.3GB/s 208=1.2GB/s 212=1.3GB/s 216=1.3GB/s 220=1.3GB/s
+  224=1.3GB/s 228=1.2GB/s 232=1.3GB/s 236=1.2GB/s 240=1.3GB/s 244=1.3GB/s
+  248=1.3GB/s 252=1.3GB/s 256=1.3GB/s
+4d5610 ../src/core/mormot.crypt.core.asmx64.inc crc32c_sse42_aesni (5279)
+  0=0B/s 4=381.9MB/s 8=763.4MB/s 12=1.1GB/s 16=1.4GB/s 20=1.7GB/s
+  24=2GB/s 28=2.2GB/s 32=2.5GB/s 36=2.7GB/s 40=3GB/s 44=3.2GB/s 48=3.4GB/s
+  52=3.6GB/s 56=3.7GB/s 60=3.9GB/s 64=4.2GB/s 68=3.1GB/s 72=3.3GB/s 76=3.7GB/s
+  80=4.8GB/s 84=4.1GB/s 88=4.7GB/s 92=5GB/s 96=5.2GB/s 100=5.3GB/s
+  104=5.6GB/s 108=5.5GB/s 112=5.8GB/s 116=5.4GB/s 120=6GB/s 124=5.7GB/s
+  128=5.8GB/s 132=5.7GB/s 136=6.2GB/s 140=6.2GB/s 144=6.5GB/s 148=5.9GB/s
+  152=6.6GB/s 156=6.2GB/s 160=6.7GB/s 164=6.6GB/s 168=6.5GB/s 172=6.7GB/s
+  176=6.9GB/s 180=6.7GB/s 184=6.1GB/s 188=6.3GB/s 192=7.1GB/s 196=6.9GB/s
+  200=9GB/s 204=8.3GB/s 208=8.8GB/s 212=8.6GB/s 216=7GB/s 220=8.4GB/s
+  224=9.7GB/s 228=9.4GB/s 232=9.5GB/s 236=9.4GB/s 240=10.2GB/s 244=7.8GB/s
+  248=5.8GB/s 252=1.9GB/s 256=10.1GB/s
+431ce0 ../src/core/mormot.core.base.asmx64.inc xxhash32 (860)
+  0=0B/s 4=235MB/s 8=436.2MB/s 12=624.4MB/s 16=842.1MB/s 20=0.9GB/s
+  24=1GB/s 28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.1GB/s
+  52=2.1GB/s 56=2GB/s 60=1.9GB/s 64=2.7GB/s 68=2.6GB/s 72=2.3GB/s 76=2.3GB/s
+  80=2.9GB/s 84=2.9GB/s 88=2.8GB/s 92=2.8GB/s 96=2.8GB/s 100=3.1GB/s
+  104=3.1GB/s 108=3GB/s 112=2.6GB/s 116=2.9GB/s 120=3.1GB/s 124=2.7GB/s
+  128=3.1GB/s 132=3GB/s 136=2.9GB/s 140=2.5GB/s 144=3GB/s 148=3GB/s
+  152=3.1GB/s 156=3.2GB/s 160=3.2GB/s 164=2.4GB/s 168=3.3GB/s 172=3.2GB/s
+  176=3.4GB/s 180=3.3GB/s 184=3.1GB/s 188=3.3GB/s 192=3.4GB/s 196=2.8GB/s
+  200=3.4GB/s 204=3.3GB/s 208=3.5GB/s 212=3.1GB/s 216=3.4GB/s 220=3.4GB/s
+  224=3.4GB/s 228=3.4GB/s 232=3.5GB/s 236=3.5GB/s 240=3.6GB/s 244=3GB/s
+  248=3.6GB/s 252=3.6GB/s 256=3.7GB/s
+4d4fe0 ../src/core/mormot.crypt.core.asmx64.inc _aesnihash32 (4930)
+  0=0B/s 4=235MB/s 8=488.5MB/s 12=723MB/s 16=0.9GB/s 20=1.1GB/s
+  24=1.3GB/s 28=1.6GB/s 32=1.8GB/ s 36=2GB/s 40=2.2GB/s 44=2.4GB/s 48=2.7GB/s
+  52=2.9GB/s 56=3.1GB/s 60=3.4GB/s 64=3.7GB/s 68=3.3GB/s 72=3.5GB/s 76=4GB/s
+  80=4.2GB/s 84=4.2GB/s 88=4.7GB/s 92=4.9GB/s 96=5.3GB/s 100=5.5GB/s
+  104=5.7GB/s 108=5.7GB/s 112=6GB/s 116=6.4GB/s 120=6.2GB/s 124=6.4GB/s
+  128=7GB/s 132=5.5GB/s 136=5.9GB/s 140=6.1GB/s 144=6.2GB/s 148=6.2GB/s
+  152=6.5GB/s 156=6.7GB/s 160=6.6GB/s 164=7GB/s 168=5.2GB/s 172=6.6GB/s
+  176=7.6GB/s 180=7.7GB/s 184=7.8GB/s 188=8GB/s 192=8GB/s 196=8.2GB/s
+  200=8.5GB/s 204=8.7GB/s 208=8.6GB/s 212=7.2GB/s 216=9.4GB/s 220=9.3GB/s
+  224=9.5GB/s 228=9.7GB/s 232=9.7GB/s 236=6.8GB/s 240=10.2GB/s 244=8.3GB/s
+  248=10.5GB/s 252=10.6GB/s 256=10.2GB/s
+
+On i386 (Linux/FPC):
+080792b0 ../src/core/mormot.core.base.asmx86.inc crc32cfast (252)
+  4=381.9MB/s 8=488.5MB/s 12=528.4MB/s 16=921.5MB/s 20=726.7MB/s 24=1.1GB/s
+  28=906.4MB/s 32=1.3GB/s 36=1GB/s 40=1.4GB/s 44=1.1GB/s 48=1.5GB/s
+  52=1.2GB/s 56=1.5GB/s 60=1.3GB/s 64=1.6GB/s 68=1.3GB/s 72=1.6GB/s
+  76=1.4GB/s 80=1.4GB/s 84=1.3GB/s 88=1.6GB/s 92=1.4GB/s 96=1.6GB/s
+  100=1.5GB/s 104=1.7GB/s 108=1.5GB/s 112=1.6GB/s 116=1.4GB/s 120=1.6GB/s
+  124=1.5GB/s 128=1.5GB/s 132=1.5GB/s 136=1.6GB/s 140=1.5GB/s 144=1.6GB/s
+  148=1.6GB/s 152=1.6GB/s 156=1.6GB/s 160=1.6GB/s 164=1.6GB/s 168=1.6GB/s
+  172=1.4GB/s 176=1.6GB/s 180=1.5GB/s 184=1.6GB/s 188=1.6GB/s 192=1.6GB/s
+  196=1.5GB/s 200=1.6GB/s 204=1.5GB/s 208=1.6GB/s 212=1.5GB/s 216=1.6GB/s
+  220=1.5GB/s 224=1.6GB/s 228=1.5GB/s 232=1.6GB/s 236=1.5GB/s 240=1.6GB/s
+  244=1.5GB/s 248=1.6GB/s 252=1.5GB/s 256=1.6GB/s
+08079d80 ../src/core/mormot.core.base.asmx86.inc crc32csse42 (1445)
+  4=436.5MB/s 8=642.8MB/s 12=0.9GB/s 16=1.2GB/s 20=1.3GB/s 24=1.6GB/s
+  28=1.9GB/s 32=2GB/s 36=2.3GB/s 40=2.3GB/s 44=2.5GB/s 48=2.5GB/s
+  52=2.8GB/s 56=2.7GB/s 60=3GB/s 64=2.9GB/s 68=3.2GB/s 72=3.1GB/s
+  76=3GB/s 80=3.2GB/s 84=3.4GB/s 88=3GB/s 92=3.4GB/s 96=3.4GB/s
+  100=3.6GB/s 104=3.4GB/s 108=3.4GB/s 112=3.5GB/s 116=3.6GB/s 120=3.6GB/s
+  124=3.7GB/s 128=3.6GB/s 132=3.7GB/s 136=3.7GB/s 140=3.8GB/s 144=3.8GB/s
+  148=3.8GB/s 152=3.7GB/s 156=3.9GB/s 160=3.8GB/s 164=3.8GB/s 168=3.9GB/s
+  172=4GB/s 176=3.8GB/s 180=3.9GB/s 184=3.8GB/s 188=3.9GB/s 192=3.8GB/s
+  196=3.9GB/s 200=3.8GB/s 204=3.9GB/s 208=3.8GB/s 212=3.8GB/s 216=3.7GB/s
+  220=3.9GB/s 224=3.8GB/s 228=1.9GB/s 232=3.8GB/s 236=3.9GB/s 240=3.8GB/s
+  244=3.8GB/s 248=3.9GB/s 252=3.7GB/s 256=3.7GB/s
+08079830 ../src/core/mormot.core.base.asmx86.inc xxhash32 (806)
+  4=235MB/s 8=436.2MB/s 12=610.6MB/s 16=842.1MB/s 20=0.9GB/s 24=1GB/s
+  28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.2GB/s
+  52=2.1GB/s 56=2GB/s 60=1.6GB/s 64=2.6GB/s 68=2.5GB/s 72=2.4GB/s
+  76=2.5GB/s 80=2.9GB/s 84=2.9GB/s 88=2.2GB/s 92=2.1GB/s 96=3.2GB/s
+  100=2.9GB/s 104=2.7GB/s 108=2.9GB/s 112=3.2GB/s 116=3.2GB/s 120=2.9GB/s
+  124=3GB/s 128=2.9GB/s 132=3.2GB/s 136=3GB/s 140=3.1GB/s 144=3.5GB/s
+  148=3.3GB/s 152=3.2GB/s 156=3GB/s 160=3.4GB/s 164=3.5GB/s 168=3.3GB/s
+  172=3.3GB/s 176=2.4GB/s 180=2.9GB/s 184=3.2GB/s 188=3.4GB/s 192=3.6GB/s
+  196=3.5GB/s 200=3.4GB/s 204=3.5GB/s 208=3.6GB/s 212=3.6GB/s 216=3.4GB/s
+  220=3.5GB/s 224=3.6GB/s 228=3.5GB/s 232=3.5GB/s 236=3.6GB/s 240=3.6GB/s
+  244=3.4GB/s 248=3.1GB/s 252=3.6GB/s 256=3.7GB/s
+0810edd0 ../src/core/mormot.crypt.core.asmx86.inc _aesnihash32 (2638)
+  4=235MB/s 8=508.9MB/s 12=785MB/s 16=1GB/s 20=1.2GB/s 24=1.4GB/s
+  28=1.7GB/s 32=1.9GB/s 36=2GB/s 40=2.3GB/s 44=2.4GB/s 48=2.8GB/s
+  52=3.1GB/s 56=3.3GB/s 60=3.6GB/s 64=3.8GB/s 68=3.3GB/s 72=3.5GB/s
+  76=3.7GB/s 80=3.9GB/s 84=4.1GB/s 88=4.3GB/s 92=4.6GB/s 96=4.3GB/s
+  100=5.1GB/s 104=5.3GB/s 108=5.4GB/s 112=5.7GB/s 116=5.8GB/s 120=6.1GB/s
+  124=6.3GB/s 128=5.6GB/s 132=4.7GB/s 136=5.8GB/s 140=6.1GB/s 144=6.3GB/s
+  148=6.1GB/s 152=6.5GB/s 156=7GB/s 160=7.2GB/s 164=7.2GB/s 168=7.6GB/s
+  172=7.6GB/s 176=7.6GB/s 180=7.6GB/s 184=8.3GB/s 188=8.6GB/s 192=8.8GB/s
+  196=7.7GB/s 200=7.9GB/s 204=7.5GB/s 208=8.3GB/s 212=8.4GB/s 216=8.7GB/s
+  220=7.4GB/s 224=8GB/s 228=9.4GB/s 232=9.5GB/s 236=9.7GB/s 240=9.8GB/s
+  244=10.1GB/s 248=8.2GB/s 252=10.3GB/s 256=10.5GB/s
+
+-> aesnihash32 is faster or as fast as very optimized Intel's crc32c+SSE4.2
+   on x86_64, blow away everything on i386, and with much better output quality
+   - see smhasher report about crc32c: insecure, 100% bias, collisions, distrib,
+   BIC, and xxHash32: LongNeighbors, 4bit collisions, MomentChi2 220 - whereas
+   https://github.com/tkaitchuck/aHash (same algorithm) passes all tests
+}
+
+procedure TTestCoreCrypto.CrcSlow(Context: TObject);
+
 const
   HASHESMAX = 512;
-
-function Hash32Test(buf: PAnsiChar; hash: THasher; var expected: cardinal): boolean;
-var
-  L, modif: PtrInt;
-  c, c2 {, s}: cardinal;
-begin
-  result := false;
-  if expected = 0 then
-    expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
-  else if hash(0, buf, HASHESMAX) <> expected then
-  begin
-    //writeln('alignement problem');
-    exit;
-  end;
-  for L := 0 to HASHESMAX do
-  begin
-    c := hash(0, buf, L);
-    //s := 0;
-    for modif := 0 to L - 1 do
-    begin
-      inc(buf[modif]);
-      c2 := hash(0, buf, L);
-      if c2 = c then
-      begin
-        //writeln('L=',L,' modif=',modif);
-        exit; // should detect one modified bit at any position
-      end;
-      dec(buf[modif]);
-      //inc(s, L);
-    end;
-    if hash(0, buf, L) <> c then
-      exit; // should return the same value for the same data
-    //inc(s, L);
-    // timer.Stop; write(L, '=', GetExecutableLocation(@hash), ' ',
-    // KBNoSpace(timer.PerSec(s)), '/s ');
-  end; // at the end: s = 45133056 (45MB) for HASHESMAX=512
-  {
-  Some results for our 32-bit hashes (typical TSynDictionary use):
-
-  On x86_64, for each value of L (0..256):
-  4317d0 ../src/core/mormot.core.base.asmx64.inc crc32cfast (389)
-    0=0B/s 4=436.5MB/s 8=555.2MB/s 12=499.5MB/s 16=827.8MB/s 20=675.3MB/s
-    24=1GB/s 28=812.8MB/s 32=1.1GB/s 36=0.9GB/s 40=1.1GB/s 44=1GB/s 48=1.2GB/s
-    52=1.1GB/s 56=1GB/s 60=0.9GB/s 64=1.3GB/s 68=1GB/s 72=1.3GB/s 76=1.2GB/s
-    80=1.2GB/s 84=1.2GB/s 88=1.3GB/s 92=1.2GB/s 96=1.2GB/s 100=1.2GB/s
-    104=1.2GB/s 108=1.2GB/s 112=1.3GB/s 116=1.2GB/s 120=1.2GB/s 124=1.2GB/s
-    128=1.1GB/s 132=1.2GB/s 136=1.3GB/s 140=1.2GB/s 144=1.2GB/s 148=1.2GB/s
-    152=1.3GB/s 156=1.3GB/s 160=1.3GB/s 164=1.2GB/s 168=1.3GB/s 172=1.2GB/s
-    176=1.3GB/s 180=1.3GB/s 184=1.3GB/s 188=1.3GB/s 192=1.3GB/s 196=1.3GB/s
-    200=1.3GB/s 204=1.3GB/s 208=1.2GB/s 212=1.3GB/s 216=1.3GB/s 220=1.3GB/s
-    224=1.3GB/s 228=1.2GB/s 232=1.3GB/s 236=1.2GB/s 240=1.3GB/s 244=1.3GB/s
-    248=1.3GB/s 252=1.3GB/s 256=1.3GB/s
-  4d5610 ../src/core/mormot.crypt.core.asmx64.inc crc32c_sse42_aesni (5279)
-    0=0B/s 4=381.9MB/s 8=763.4MB/s 12=1.1GB/s 16=1.4GB/s 20=1.7GB/s
-    24=2GB/s 28=2.2GB/s 32=2.5GB/s 36=2.7GB/s 40=3GB/s 44=3.2GB/s 48=3.4GB/s
-    52=3.6GB/s 56=3.7GB/s 60=3.9GB/s 64=4.2GB/s 68=3.1GB/s 72=3.3GB/s 76=3.7GB/s
-    80=4.8GB/s 84=4.1GB/s 88=4.7GB/s 92=5GB/s 96=5.2GB/s 100=5.3GB/s
-    104=5.6GB/s 108=5.5GB/s 112=5.8GB/s 116=5.4GB/s 120=6GB/s 124=5.7GB/s
-    128=5.8GB/s 132=5.7GB/s 136=6.2GB/s 140=6.2GB/s 144=6.5GB/s 148=5.9GB/s
-    152=6.6GB/s 156=6.2GB/s 160=6.7GB/s 164=6.6GB/s 168=6.5GB/s 172=6.7GB/s
-    176=6.9GB/s 180=6.7GB/s 184=6.1GB/s 188=6.3GB/s 192=7.1GB/s 196=6.9GB/s
-    200=9GB/s 204=8.3GB/s 208=8.8GB/s 212=8.6GB/s 216=7GB/s 220=8.4GB/s
-    224=9.7GB/s 228=9.4GB/s 232=9.5GB/s 236=9.4GB/s 240=10.2GB/s 244=7.8GB/s
-    248=5.8GB/s 252=1.9GB/s 256=10.1GB/s
-  431ce0 ../src/core/mormot.core.base.asmx64.inc xxhash32 (860)
-    0=0B/s 4=235MB/s 8=436.2MB/s 12=624.4MB/s 16=842.1MB/s 20=0.9GB/s
-    24=1GB/s 28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.1GB/s
-    52=2.1GB/s 56=2GB/s 60=1.9GB/s 64=2.7GB/s 68=2.6GB/s 72=2.3GB/s 76=2.3GB/s
-    80=2.9GB/s 84=2.9GB/s 88=2.8GB/s 92=2.8GB/s 96=2.8GB/s 100=3.1GB/s
-    104=3.1GB/s 108=3GB/s 112=2.6GB/s 116=2.9GB/s 120=3.1GB/s 124=2.7GB/s
-    128=3.1GB/s 132=3GB/s 136=2.9GB/s 140=2.5GB/s 144=3GB/s 148=3GB/s
-    152=3.1GB/s 156=3.2GB/s 160=3.2GB/s 164=2.4GB/s 168=3.3GB/s 172=3.2GB/s
-    176=3.4GB/s 180=3.3GB/s 184=3.1GB/s 188=3.3GB/s 192=3.4GB/s 196=2.8GB/s
-    200=3.4GB/s 204=3.3GB/s 208=3.5GB/s 212=3.1GB/s 216=3.4GB/s 220=3.4GB/s
-    224=3.4GB/s 228=3.4GB/s 232=3.5GB/s 236=3.5GB/s 240=3.6GB/s 244=3GB/s
-    248=3.6GB/s 252=3.6GB/s 256=3.7GB/s
-  4d4fe0 ../src/core/mormot.crypt.core.asmx64.inc _aesnihash32 (4930)
-    0=0B/s 4=235MB/s 8=488.5MB/s 12=723MB/s 16=0.9GB/s 20=1.1GB/s
-    24=1.3GB/s 28=1.6GB/s 32=1.8GB/ s 36=2GB/s 40=2.2GB/s 44=2.4GB/s 48=2.7GB/s
-    52=2.9GB/s 56=3.1GB/s 60=3.4GB/s 64=3.7GB/s 68=3.3GB/s 72=3.5GB/s 76=4GB/s
-    80=4.2GB/s 84=4.2GB/s 88=4.7GB/s 92=4.9GB/s 96=5.3GB/s 100=5.5GB/s
-    104=5.7GB/s 108=5.7GB/s 112=6GB/s 116=6.4GB/s 120=6.2GB/s 124=6.4GB/s
-    128=7GB/s 132=5.5GB/s 136=5.9GB/s 140=6.1GB/s 144=6.2GB/s 148=6.2GB/s
-    152=6.5GB/s 156=6.7GB/s 160=6.6GB/s 164=7GB/s 168=5.2GB/s 172=6.6GB/s
-    176=7.6GB/s 180=7.7GB/s 184=7.8GB/s 188=8GB/s 192=8GB/s 196=8.2GB/s
-    200=8.5GB/s 204=8.7GB/s 208=8.6GB/s 212=7.2GB/s 216=9.4GB/s 220=9.3GB/s
-    224=9.5GB/s 228=9.7GB/s 232=9.7GB/s 236=6.8GB/s 240=10.2GB/s 244=8.3GB/s
-    248=10.5GB/s 252=10.6GB/s 256=10.2GB/s
-
-  On i386 (Linux/FPC):
-  080792b0 ../src/core/mormot.core.base.asmx86.inc crc32cfast (252)
-    4=381.9MB/s 8=488.5MB/s 12=528.4MB/s 16=921.5MB/s 20=726.7MB/s 24=1.1GB/s
-    28=906.4MB/s 32=1.3GB/s 36=1GB/s 40=1.4GB/s 44=1.1GB/s 48=1.5GB/s
-    52=1.2GB/s 56=1.5GB/s 60=1.3GB/s 64=1.6GB/s 68=1.3GB/s 72=1.6GB/s
-    76=1.4GB/s 80=1.4GB/s 84=1.3GB/s 88=1.6GB/s 92=1.4GB/s 96=1.6GB/s
-    100=1.5GB/s 104=1.7GB/s 108=1.5GB/s 112=1.6GB/s 116=1.4GB/s 120=1.6GB/s
-    124=1.5GB/s 128=1.5GB/s 132=1.5GB/s 136=1.6GB/s 140=1.5GB/s 144=1.6GB/s
-    148=1.6GB/s 152=1.6GB/s 156=1.6GB/s 160=1.6GB/s 164=1.6GB/s 168=1.6GB/s
-    172=1.4GB/s 176=1.6GB/s 180=1.5GB/s 184=1.6GB/s 188=1.6GB/s 192=1.6GB/s
-    196=1.5GB/s 200=1.6GB/s 204=1.5GB/s 208=1.6GB/s 212=1.5GB/s 216=1.6GB/s
-    220=1.5GB/s 224=1.6GB/s 228=1.5GB/s 232=1.6GB/s 236=1.5GB/s 240=1.6GB/s
-    244=1.5GB/s 248=1.6GB/s 252=1.5GB/s 256=1.6GB/s
-  08079d80 ../src/core/mormot.core.base.asmx86.inc crc32csse42 (1445)
-    4=436.5MB/s 8=642.8MB/s 12=0.9GB/s 16=1.2GB/s 20=1.3GB/s 24=1.6GB/s
-    28=1.9GB/s 32=2GB/s 36=2.3GB/s 40=2.3GB/s 44=2.5GB/s 48=2.5GB/s
-    52=2.8GB/s 56=2.7GB/s 60=3GB/s 64=2.9GB/s 68=3.2GB/s 72=3.1GB/s
-    76=3GB/s 80=3.2GB/s 84=3.4GB/s 88=3GB/s 92=3.4GB/s 96=3.4GB/s
-    100=3.6GB/s 104=3.4GB/s 108=3.4GB/s 112=3.5GB/s 116=3.6GB/s 120=3.6GB/s
-    124=3.7GB/s 128=3.6GB/s 132=3.7GB/s 136=3.7GB/s 140=3.8GB/s 144=3.8GB/s
-    148=3.8GB/s 152=3.7GB/s 156=3.9GB/s 160=3.8GB/s 164=3.8GB/s 168=3.9GB/s
-    172=4GB/s 176=3.8GB/s 180=3.9GB/s 184=3.8GB/s 188=3.9GB/s 192=3.8GB/s
-    196=3.9GB/s 200=3.8GB/s 204=3.9GB/s 208=3.8GB/s 212=3.8GB/s 216=3.7GB/s
-    220=3.9GB/s 224=3.8GB/s 228=1.9GB/s 232=3.8GB/s 236=3.9GB/s 240=3.8GB/s
-    244=3.8GB/s 248=3.9GB/s 252=3.7GB/s 256=3.7GB/s
-  08079830 ../src/core/mormot.core.base.asmx86.inc xxhash32 (806)
-    4=235MB/s 8=436.2MB/s 12=610.6MB/s 16=842.1MB/s 20=0.9GB/s 24=1GB/s
-    28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.2GB/s
-    52=2.1GB/s 56=2GB/s 60=1.6GB/s 64=2.6GB/s 68=2.5GB/s 72=2.4GB/s
-    76=2.5GB/s 80=2.9GB/s 84=2.9GB/s 88=2.2GB/s 92=2.1GB/s 96=3.2GB/s
-    100=2.9GB/s 104=2.7GB/s 108=2.9GB/s 112=3.2GB/s 116=3.2GB/s 120=2.9GB/s
-    124=3GB/s 128=2.9GB/s 132=3.2GB/s 136=3GB/s 140=3.1GB/s 144=3.5GB/s
-    148=3.3GB/s 152=3.2GB/s 156=3GB/s 160=3.4GB/s 164=3.5GB/s 168=3.3GB/s
-    172=3.3GB/s 176=2.4GB/s 180=2.9GB/s 184=3.2GB/s 188=3.4GB/s 192=3.6GB/s
-    196=3.5GB/s 200=3.4GB/s 204=3.5GB/s 208=3.6GB/s 212=3.6GB/s 216=3.4GB/s
-    220=3.5GB/s 224=3.6GB/s 228=3.5GB/s 232=3.5GB/s 236=3.6GB/s 240=3.6GB/s
-    244=3.4GB/s 248=3.1GB/s 252=3.6GB/s 256=3.7GB/s
-  0810edd0 ../src/core/mormot.crypt.core.asmx86.inc _aesnihash32 (2638)
-    4=235MB/s 8=508.9MB/s 12=785MB/s 16=1GB/s 20=1.2GB/s 24=1.4GB/s
-    28=1.7GB/s 32=1.9GB/s 36=2GB/s 40=2.3GB/s 44=2.4GB/s 48=2.8GB/s
-    52=3.1GB/s 56=3.3GB/s 60=3.6GB/s 64=3.8GB/s 68=3.3GB/s 72=3.5GB/s
-    76=3.7GB/s 80=3.9GB/s 84=4.1GB/s 88=4.3GB/s 92=4.6GB/s 96=4.3GB/s
-    100=5.1GB/s 104=5.3GB/s 108=5.4GB/s 112=5.7GB/s 116=5.8GB/s 120=6.1GB/s
-    124=6.3GB/s 128=5.6GB/s 132=4.7GB/s 136=5.8GB/s 140=6.1GB/s 144=6.3GB/s
-    148=6.1GB/s 152=6.5GB/s 156=7GB/s 160=7.2GB/s 164=7.2GB/s 168=7.6GB/s
-    172=7.6GB/s 176=7.6GB/s 180=7.6GB/s 184=8.3GB/s 188=8.6GB/s 192=8.8GB/s
-    196=7.7GB/s 200=7.9GB/s 204=7.5GB/s 208=8.3GB/s 212=8.4GB/s 216=8.7GB/s
-    220=7.4GB/s 224=8GB/s 228=9.4GB/s 232=9.5GB/s 236=9.7GB/s 240=9.8GB/s
-    244=10.1GB/s 248=8.2GB/s 252=10.3GB/s 256=10.5GB/s
-
-  -> aesnihash32 is faster or as fast as very optimized Intel's crc32c+SSE4.2
-     on x86_64, blow away everything on i386, and with much better output quality
-     - see smhasher report about crc32c: insecure, 100% bias, collisions, distrib,
-     BIC, and xxHash32: LongNeighbors, 4bit collisions, MomentChi2 220 - whereas
-     https://github.com/tkaitchuck/aHash (same algorithm) passes all tests
-  }
-  result := true;
-end;
-
-function Hash64Test(buf: PAnsiChar; hash: THasher64; var expected: QWord): boolean;
-var
-  L, modif: PtrInt;
-  c, c2: QWord;
-begin
-  result := false;
-  if expected = 0 then
-    expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
-  else if hash(0, buf, HASHESMAX) <> expected then
-  begin
-    //writeln('alignement problem');
-    exit;
-  end;
-  for L := 0 to HASHESMAX do
-  begin
-    c := hash(0, buf, L);
-    for modif := 0 to L - 1 do
-    begin
-      inc(buf[modif]);
-      c2 := hash(0, buf, L);
-      dec(buf[modif]);
-      if c2 = c then
-      begin
-        //writeln('L=',L,' modif=',modif);
-        exit; // should detect one modified bit at any position
-      end;
-    end;
-    if hash(0, buf, L) <> c then
-      exit; // should return the same value for the same data
-  end;
-  result := true;
-end;
-
-function Hash128Test(buf: PAnsiChar; hash: THasher128; out msg: string): boolean;
-var
-  L, modif: PtrInt;
-  c, c2: THash128;
-begin
-  result := false;
-  for L := 0 to HASHESMAX do
-  begin
-    FillZero(c);
-    hash(@c, buf, L);
-    for modif := 0 to L - 1 do
-    begin
-      FillZero(c2);
-      inc(buf[modif]);
-      hash(@c2, buf, L);
-      dec(buf[modif]);
-      if IsEqual(c, c2) then
-      begin
-        FormatString('L=% modif=%', [L, modif], msg);
-        exit; // should detect one modified bit at any position
-      end;
-    end;
-    FillZero(c2);
-    hash(@c2, buf, L);
-    if not IsEqual(c, c2) then
-    begin
-      msg := 'after reset';
-      exit; // should return the same value for the same data
-    end;
-  end;
-  result := true;
-end;
-
-procedure TTestCoreCrypto.Hashes;
-const
   HASHALIGN = 4; // you may try with paranoid 32 here
+
+  procedure Hash32Test(buf: PAnsiChar; hash: THasher; var expected: cardinal);
+  var
+    L, modif: PtrInt;
+    c, c2: cardinal;
+  begin
+    if expected = 0 then
+      expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
+    else
+      CheckEqual(hash(0, buf, HASHESMAX), expected, 'alignement problem');
+    for L := 0 to HASHESMAX do
+    begin
+      c := hash(0, buf, L);
+      for modif := 0 to L - 1 do
+      begin
+        inc(buf[modif]); // should detect one modified bit at any position
+        c2 := hash(0, buf, L);
+        dec(buf[modif]); // reset
+        CheckUtf8(c <> c2, 'L=% modif=%', [L, modif]);
+      end;
+      CheckEqual(hash(0, buf, L), c, 'after reset');
+    end;
+  end;
+
+  procedure Hash64Test(buf: PAnsiChar; hash: THasher64; var expected: QWord);
+  var
+    L, modif: PtrInt;
+    c, c2: QWord;
+  begin
+    if expected = 0 then
+      expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
+    else
+      CheckEqual(hash(0, buf, HASHESMAX), expected, 'alignement problem');
+    for L := 0 to HASHESMAX do
+    begin
+      c := hash(0, buf, L);
+      for modif := 0 to L - 1 do
+      begin
+        inc(buf[modif]); // should detect one modified bit at any position
+        c2 := hash(0, buf, L);
+        dec(buf[modif]);
+        CheckUtf8(c <> c2, 'L=% modif=%', [L, modif]);
+      end;
+      CheckEqual(hash(0, buf, L), c, 'after reset');
+    end;
+  end;
+
+  procedure Hash128Test(buf: PAnsiChar; hash: THasher128);
+  var
+    L, modif: PtrInt;
+    c, c2: THash128Rec;
+  begin
+    for L := 0 to HASHESMAX do
+    begin
+      FillZero(c.b);
+      hash(@c, buf, L);
+      if L > 16 then
+      begin
+        Check(c.c0 <> c.c1, 'c0c1'); // no 32-bit overlap is expected
+        Check(c.c0 <> c.c2, 'c0c2');
+        Check(c.c0 <> c.c3, 'c0c3');
+        Check(c.c1 <> c.c2, 'c1c2');
+        Check(c.c1 <> c.c3, 'c1c3');
+        Check(c.c2 <> c.c3, 'c2c3');
+      end;
+      for modif := 0 to L - 1 do
+      begin
+        FillZero(c2.b);
+        inc(buf[modif]); // should detect one modified bit at any position
+        hash(@c2, buf, L);
+        dec(buf[modif]);
+        CheckUtf8(not IsEqual(c.b, c2.b), 'L=% modif=%', [L, modif]);
+      end;
+      FillZero(c2.b);
+      hash(@c2, buf, L); // should return the same value for the same data
+      CheckUtf8(IsEqual(c.b, c2.b), 'after reset');
+    end;
+  end;
+
 var
   buf: RawByteString;
   u: RawUtf8;
   P: PAnsiChar;
-  msg: string;
   unalign: PtrInt;
   exp321, exp322, exp323, exp324, exp325: cardinal;
   exp641, exp642: QWord;
@@ -1682,6 +1678,7 @@ var
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
 begin
+  // validate THashAlgo and TSignAlgo recognition
   for h := low(h) to high(h) do
   begin
     u := ToUtf8(h);
@@ -1734,6 +1731,7 @@ begin
   Check(s2 = saSha3S256);
   Check(not TextToSignAlgo('SHA5122', s));
   Check(not TextToSignAlgo('SHA512256', s));
+  // validate our 32-bit, 64-bit and 128-bit hash functions
   Check(Adler32SelfTest);
   SetLength(buf, HASHESMAX + HASHALIGN);
   exp321 := 0;
@@ -1743,23 +1741,23 @@ begin
   exp325 := 0;
   exp641 := 0;
   exp642 := 0;
-  for unalign := 0 to HASHALIGN - 1 do
+  for unalign := 0 to HASHALIGN - 1 do // ensure alignment doesn't change result
   begin
     P := pointer(buf);
     inc(P, unalign);
     FillIncreasing(pointer(P), $12345670, HASHESMAX shr 2);
-    Check(Hash32Test(P, @crc32cfast,    exp321));
-    Check(Hash32Test(P, @crc32c,        exp322));
-    Check(Hash32Test(P, @xxHash32,      exp323));
+    Hash32Test(P, @crc32cfast,    exp321);
+    Hash32Test(P, @crc32c,        exp322);
+    Hash32Test(P, @xxHash32,      exp323);
     if Assigned(AesNiHash32) then
-      Check(Hash32Test(P, @AesNiHash32, exp324));
-    Check(Hash32Test(P, @crc32fast,     exp325));
-    Check(Hash64Test(P, @crc32cTwice,   exp641));
+      Hash32Test(P, @AesNiHash32, exp324);
+    Hash32Test(P, @crc32fast,     exp325);
+    Hash64Test(P, @crc32cTwice, exp641);
     if Assigned(AesNiHash64) then
-      Check(Hash64Test(P, @AesNiHash64, exp642));
-    Check(Hash128Test(P, @crc32c128, msg), msg{%H-});
+      Hash64Test(P, @AesNiHash64, exp642);
+    Hash128Test(P, @crc32c128);
     if Assigned(AesNiHash128) then
-      Check(Hash128Test(P, @AesNiHash128, msg), msg);
+      Hash128Test(P, @AesNiHash128);
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
@@ -2013,6 +2011,7 @@ begin
   enc.Init;
   dec.Init;
   tmp := RandomWinAnsi(1 shl 20);
+  Check(length(tmp) = 1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
@@ -2177,6 +2176,7 @@ var
   s, b, p: TAesBlock;
   iv: THash128Rec;
   i, j, k, ks, m, len: integer;
+  c: cardinal;
   tag1, tag2: TAesBlock;
   mac: TAesMac256;
   mac1, mac2: THash256;
@@ -2215,6 +2215,7 @@ begin
   SetLength(crypted, MAX + 256);
   st := '1234essai';
   orig := RandomWinAnsi(8000);
+  Check(length(orig) = 8000);
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
@@ -2437,11 +2438,11 @@ begin
           try
             gcm := one.InheritsFrom(TAesGcmAbstract);
             aead := one.InheritsFrom(TAesAbstractAead);
+            Check(k in [0..2]);
             if m <= 9 then
               SetLength(h32[k, m], 257);
             if aead then
             begin
-              Check(k in [0..2]);
               Check(m in [7..9]);
               SetLength(Tags[k, m], 257);
             end;
@@ -2462,9 +2463,13 @@ begin
               s3 := one.EncryptPkcs7(s2);
               if m <= 9 then
                 if noaesni then
-                  CheckEqual(h32[k, m, i], cardinal(DefaultHasher(0, pointer(s3), length(s3))))
+                begin
+                  c := DefaultHasher(0, pointer(s3), length(s3));
+                  CheckUtf8(h32[k, m, i] = c, '%=% len=%',
+                    [h32[k, m, i], c, length(s3)]);
+                end
                 else
-                  h32[k, m, i] := cardinal(DefaultHasher(0, pointer(s3), length(s3)));
+                  h32[k, m, i] := DefaultHasher(0, pointer(s3), length(s3));
               if aead then
                 if not noaesni then
                   Check(one.MacEncryptGetTag(Tags[k, m, i]))
@@ -2816,14 +2821,99 @@ begin
 end;
 {$endif PUREMORMOT2}
 
-procedure TTestCoreCrypto._MD5;
+const
+  // AesNiHash128() responses with fixed byte-increasing AesNiHashAntiFuzzTable
+  // - to validate one identical algorithm on both i386 and x64 platforms
+  AESNIHASH_REF128: PAnsiChar = '00000000000000000000000000000000' +
+    'ebcaa5d9d3111481ca62776f7cc716d5078f6490103c58d95b5e16001d40cf6b' +
+    '9b0e47ebccb12f80270b0d17caafa8e1e64ef4b87ee4dd8743650db1ac9d59b0' +
+    '345407a79f54f73c6a8120cd19ec289750bc08c882e7f30a72295534c6d5ad1c' +
+    '2a4d337351355ef19da8ac689bc9abf5f4eea591f6845c428e70a22f16704d7c' +
+    '7b6d2e6ba7fc17afe99577fdd4396a5400f82e31242f8f4837b128170def4d81' +
+    '5ce88e10dd957cd5256cf17305668d7187e3a5f8364c2f11bf22cfab5c97e57c' +
+    '9d62a4ea395e1a66c6da14059a5b046594887b40c2fd6beb93cb2c0ea3a6d826' +
+    'e448eb7ff07caa6e91d9a2a8cdbf8ffb17e3839f9fd9b5db11fcc27ec73d90b6' +
+    'ea5aa1a2c33f8507d4a4548ee3e951619e19c45be7fc245f2062b8a67200e933' +
+    'e2bc6aee7eb66c9c626a5e24c294d64f9577d432b98b33e09b31b129956c9453' +
+    '982c1746186eeeb2e725be97e486dc3343ab8f9474c99e6e38bd2d13a580f299' +
+    'bba44ec2bfd7c869f719965d6b2232f0b7716a42122245c86fde9b2fcf8687cd' +
+    'a9a2236e62424e427b7262ebc57694e5e3cf2be5086c55492ae1df51e642b16b' +
+    'fa28fa2aa2b2b6470d03d915a77173d0222a5fdb927c149a2ed29ec6f39611b1' +
+    'dfc2957b933caeac4206e5cd6b54505cf734b02d838621386f011a488a0aaa21' +
+    'ca21a1cc16a0de4c7c1706a3d63a54196685816076f0bf423f62cc39c6e65cbe' +
+    'eb71ecb63a7b6bff1f2501040a9cdd4d29d986eec0ba0eeb3cc81f107493fa26' +
+    '8d16ede5b6c2311331043f392d75775205ea71c47441f88fb921091f36429447' +
+    '5440c3a28156fcf83362c7de4563b9e5c74f2ae31c0892ba2416d9433fbec5e8' +
+    'aa066e0839a2ff380eef8a50fdb8abf1a8e264d80d52547c19e8fc8c4cb0b6a9' +
+    '228873ffd35acbd862051ba5972d1ea5c77da42d0932de9862d213d9c2a8e1be' +
+    'ada5d458399c4aaa1047ae56ed803da266fc0be094eb5e1091e2f23842380209' +
+    '75d184ec6b0f6cad9474dc5b335f7894aff4754b5ea5502a27ca73ff14328196' +
+    '5539828fe6b11948b5be01053fbe212da322fa592d28db34898f824faddb1ebb' +
+    '0f2071856be7a84df01aa15cc78b0e77959885fad4117d0d2f428db9a04557a3' +
+    '097c7ffed3b8ad6e1a341610a40e852f70b117853a6de37263f5e726d67c3466';
+  // AesNiHash32() responses with fixed byte-increasing AesNiHashAntiFuzzTable
+  // - to validate one identical algorithm on both i386 and x64 platforms
+  AESNIHASH_REF32: array[0 .. 52] of cardinal = (
+    $00000000, $7ebbb034, $031c3f98, $84720a5e, $a838babc, $fbb8855b,
+    $1c301a13, $611fff36, $9826aa67, $6e1939cf, $1a54fda0, $9dbffd04,
+    $86308d64, $3593ea6e, $59276b61, $4341c163, $b88e7728, $11eca1e0,
+    $1e1c27e1, $de24287e, $1af49bbc, $c0d1bf44, $e2606908, $bc8bc0f3,
+    $932baa5c, $1211661d, $43fbca34, $67e4e4a0, $bb68c8c0, $1c17c3b0,
+    $7dce27fa, $95a911c6, $04a499b3, $cda40a55, $d062c08f, $7f3a8f3f,
+    $d4b99c7b, $1f110334, $ba207aaa, $f395c480, $19dbc289, $e50746b3,
+    $bbc251fc, $ee5b2935, $70d8e8cf, $02a7706c, $f0ad90cf, $020670e0,
+    $1322057e, $d9b7a878, $671232c8, $bbc2d9f4, $85676d1f);
+
+procedure TTestCoreCrypto.Hashes;
 var
-  i, n: integer;
+  i, n: PtrInt;
+  exp: cardinal;
   md: TMd5;
   dig, dig2: TMd5Digest;
-  tmp: TByteDynArray;
+  bytes: TByteToByte;
   ismd4: boolean;
+  ref: PAnsiChar;
+  ref32: PCardinal;
+  h128, ref128: THash128;
+  bak: THash512;
 begin
+  for i := 0 to high(bytes) do
+    bytes[i] := i;
+  // validate AesNiHash128() against reference vectors
+  // - should be done FIRST with no process in the background
+  if Assigned(AesNiHash128) and
+     not CheckFailed(not fBackgroundRun.Waiting, 'no background run') and
+     not CheckFailed(Assigned(AesNiHashAntiFuzzTable)) then
+  begin
+    bak := AesNiHashAntiFuzzTable^;
+    AesNiHashAntiFuzzTable^ := PHash512(@bytes)^; // replace to get AESNIHASH_REF
+    ref := AESNIHASH_REF128;
+    ref32 := @AESNIHASH_REF32;
+    n := 0;
+    writeln;
+    repeat
+      exp := AesNiHash32(n, @bytes, n);
+      CheckUtf8((n = 0) = (exp = 0), 'aesni32n1(%)', [n]);
+      CheckUtf8(exp = ref32^, 'aesni32ref(%)', [n]);
+      FillZero(h128);
+      AesNiHash128(@h128, @bytes, n);
+      Check(mormot.core.text.HexToBin(ref, @ref128, SizeOf(ref128)));
+      inc(ref, SizeOf(ref128) * 2);
+      CheckUtf8(IsEqual(h128, ref128), 'aesni128ref(%)', [n]);
+      exp := PCardinal(@ref128)^;
+      CheckUtf8(AesNiHash32(0, @bytes, n) = exp, 'aesni32trunc(%)', [n]);
+      CheckUtf8(AesNiHash32(n, @bytes, n) = ref32^, 'aesni32n2(%)', [n]);
+      inc(ref32);
+      if n < 20 then
+        inc(n) // specific verification of pshufb process for 1..16 bytes
+      else
+        inc(n, 7);
+    until n > 250;
+    CheckEqual(n, 251);
+    AesNiHashAntiFuzzTable^ := bak; // needed to preserve existing hash tables
+  end;
+  // validate 32-bit, 64-bit and 128-bit crc functions in the background
+  Run(CrcSlow, nil, 'crc', {threaded=}true, {notify=}false);
   // MD5 validation
   CheckEqual(htdigest('agent007', 'download area', 'secret'),
     'agent007:download area:8364d0044ef57b3defcfa141e8f77b65', 'htdigest');
@@ -2844,7 +2934,6 @@ begin
     '3b69f5d2a3bb3719dc69891e9f95e809fd7e8b23ba6318edc45e51fe39708bf9427e9c3e8b9')),
     '4d7e6a1defa93d2dde05b45d864c429b', 'colllisionB');
   // MD Context Hashing validation
-  SetLength(tmp, 256);
   for ismd4 := false to true do
     for n := 256 - 80 to 256 do
     begin
@@ -2852,10 +2941,10 @@ begin
         md.InitMD4
       else
         md.Init;
-      for i := 1 to n do
-        md.Update(tmp[0], 1);
+      for i := 0 to n - 1 do
+        md.Update(bytes[i], 1);
       md.Final(dig);
-      md.Full(pointer(tmp), n, dig2, ismd4);
+      md.Full(@bytes, n, dig2, ismd4);
       check(IsEqual(dig, dig2), 'MDrefA');
       check(CompareMem(@dig, @dig2, SizeOf(dig)), 'MDrefB');
     end;
@@ -3280,7 +3369,7 @@ begin
     Check(pub <> '');
     Check(priv <> '');
     asy.GeneratePem(pub2, priv2, '');
-    NotifyTestSpeed('%.Generate', [asy], 2, 0, @timer, {onlylog=}true);
+    NotifyTestSpeed('%.Generate %', [asy, asy.AlgoName], 2, 0, @timer, {onlylog=}true);
     Check(pub2 <> '');
     Check(priv2 <> '');
     Check(pub <> pub2);
@@ -3743,11 +3832,12 @@ procedure TTestCoreCrypto.Catalog;
 var
   m: TAesMode;
   k, k2: integer;
-  a, i: PtrInt;
+  a, i, rounds, bytes: PtrInt;
   c32, cprev: cardinal;
   d, dprev: double;
   n, h, nprev, aead: RawUtf8;
   r, s: RawByteString;
+  timer: TPrecisionTimer;
   aes: TAesAbstract;
   key: THash256;
   rnd: TCryptRandom;
@@ -3782,15 +3872,21 @@ begin
       CheckUtf8(AesAlgoNameDecode(n, k2) = nil, n);
     end;
   // validate Rnd() High-Level Algorithms Factory
+  TAesPrng.Main.Random32; // warmup and entropy gathering outside timer
   alg := TCryptRandom.Instances;
   for a := 0 to high(alg) do
   begin
     rnd := alg[a] as TCryptRandom;
     NotifyProgress([rnd.AlgoName]);
     Check(mormot.crypt.secure.Rnd(rnd.AlgoName) = rnd);
+    timer.Start;
     cprev := 0;
     dprev := 0;
-    for i := 1 to 10 do // some system random generators may be slow/blocking
+    bytes := 0;
+    rounds := 100;
+    if PosEx('blocking', rnd.AlgoName) > 0 then
+      rounds := 10; // some system random generators may be slow/blocking
+    for i := 1 to rounds do
     begin
       c32 := rnd.Get32;
       CheckUtf8(c32 <> cprev, rnd.AlgoName);
@@ -3802,7 +3898,9 @@ begin
       dprev := d;
       n := rnd.Get(i); // up to 10 bytes is fine on slow/blocking OS random API
       CheckEqual(length(n), i);
+      inc(bytes, 12 + i);
     end;
+    NotifyTestSpeed('%', [rnd.AlgoName], 0, bytes, @timer, {onlylog=}true);
   end;
   // validate Hash() High-Level Algorithms Factory
   alg := TCryptHasher.Instances;

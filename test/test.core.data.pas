@@ -352,6 +352,8 @@ const
   __TTestCustomJsonGitHub =
       'name RawUtf8 id cardinal description RawUtf8 ' +
      'fork boolean owner{login RawUtf8 id currency}';
+  __TTestCustomJsonMixed =
+     'status: RawUtf8; results: variant; price: double;';
   __TTestCustomJson2Title =
       'TITYPE,TIID,TICID,TIDSC30,TIORDER,TIDEL RawUtf8';
   __TTestCustomJson2 =
@@ -1280,8 +1282,13 @@ type
       id: currency;
     end;
   end;
-
   TTestCustomJsonGitHubs = array of TTestCustomJsonGitHub;
+
+  TTestCustomJsonMixed = packed record
+    status: RawUtf8;
+    results: variant;
+    price: double;
+  end;
 
   TTestCustomJson2Title = packed record
     TITYPE, TIID, TICID, TIDSC30, TIORDER, TIDEL: RawUtf8;
@@ -1835,6 +1842,7 @@ var
     X: RawUtf8;
     AA, AB: TRawUtf8DynArrayDynArray;
     i, a, v: PtrInt;
+    mix1: TTestCustomJsonMixed;
     {$ifdef HASEXTRECORDRTTI}
     nav, nav2: TConsultaNav;
     nrtti, nrtti2: TNewRtti;
@@ -2267,6 +2275,34 @@ var
     Check(Cache.Json = 'test3');
     Check(Cache.Tag = 12);
 
+    mix1.price := 10;
+    CheckEqual(mix1.status, '');
+    Check(VarIsEmpty(mix1.results));
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"","results":null,"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"toto",results:1}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'toto');
+    Check(mix1.results = 1);
+    CheckSame(mix1.price, 10);
+    Finalize(mix1);
+    CheckEqual(mix1.status, '');
+    Check(VarIsEmpty(mix1.results));
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"","results":null,"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"toto",results:{a:10,b:[{c:"cee"}]}}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'toto');
+    CheckSame(mix1.price, 10);
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"toto","results":{"a":10,"b":[{"c":"cee"}]},"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"titi",price:3,results:[1]}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'titi');
+    CheckSame(mix1.price, 3);
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"titi","results":[1],"price":3}');
+
     {$ifdef HASEXTRECORDRTTI}
     FillCharFast(nav, SizeOf(nav), 0);
     FillCharFast(nav2, SizeOf(nav2), 1);
@@ -2583,6 +2619,7 @@ begin
     a := Random32(maxInt);
     r := RandomDouble;
     U := RandomUtf8(i);
+    Check(length(U) >= i);
     J := JsonEncode(['a', a, 'r', r, 'u', U]);
     check(IsValidJson(J));
     P := nil;
@@ -3215,16 +3252,16 @@ begin
   TestJSONSerialization;
   {$endif HASEXTRECORDRTTI}
   // test TJsonRecordTextDefinition JSON serialization
-  Rtti.RegisterFromText(TypeInfo(TSubAB), __TSubAB);
-  Rtti.RegisterFromText(TypeInfo(TSubCD), __TSubCD);
-  Rtti.RegisterFromText(TypeInfo(TAggregate), __TAggregate);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArray), __TTestCustomJsonArray);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArraySimple),
-    __TTestCustomJsonArraySimple);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant),
-    __TTestCustomJsonArrayVariant);
-  Rtti.RegisterFromText(TypeInfo(TEntry), __TEntry);
+  Rtti.RegisterFromText([
+    TypeInfo(TSubAB),                      __TSubAB,
+    TypeInfo(TSubCD),                      __TSubCD,
+    TypeInfo(TAggregate),                  __TAggregate,
+    TypeInfo(TTestCustomJsonRecord),       __TTestCustomJsonRecord,
+    TypeInfo(TTestCustomJsonMixed),        __TTestCustomJsonMixed,
+    TypeInfo(TTestCustomJsonArray),        __TTestCustomJsonArray,
+    TypeInfo(TTestCustomJsonArraySimple),  __TTestCustomJsonArraySimple,
+    TypeInfo(TTestCustomJsonArrayVariant), __TTestCustomJsonArrayVariant,
+    TypeInfo(TEntry),                      __TEntry]);
   TestJSONSerialization;
   TestJSONSerialization; // test twice for safety
   Rtti.RegisterFromText(TypeInfo(TEntry), '');
@@ -3232,6 +3269,7 @@ begin
   Rtti.RegisterFromText(TypeInfo(TSubCD), '');
   Rtti.RegisterFromText(TypeInfo(TAggregate), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord), '');
+  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonMixed), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArray), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArraySimple), '');
@@ -3240,6 +3278,7 @@ begin
   // test JSON serialization defined by Enhanced RTTI
   TestJSONSerialization;
   {$endif HASEXTRECORDRTTI}
+
   // tests parsing options
   Parser := Rtti.RegisterFromText(
     TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
@@ -5634,6 +5673,9 @@ var
     n: integer;
   begin
     vd.InitArray([1, 2, 3, 4]);
+    Check(vd.IsArray);
+    Check(not vd.IsObject);
+    CheckEqual(vd.Count, 4);
     for f in vd do
     begin
       Check(f.Name = nil);
@@ -5646,7 +5688,28 @@ var
       Check(f.Name = pointer(1)); // should not iterate
     for v in vd.Items do
       Check(v = nil); // should not iterate
-    vd.InitJson('[{a:1,b:1}, 1, "no object", {a:2,b:2}]');
+    Check(vd.InitJson('{a:[{a:1,b:1}, 1, "no object", {a:2,b:2}]}'));
+    Check(not vd.IsArray);
+    Check(vd.IsObject);
+    CheckEqual(vd.Count, 1);
+    for f in vd do
+      CheckEqual(f.Name^, 'a');
+    for v in vd.Items('a') do
+      Check(not VarIsEmptyOrNull(v^));
+    n := 0;
+    for d in vd.Objects('a') do
+    begin
+      Check(not VarDataIsEmptyOrNull(d));
+      Check(DocVariantType.IsOfType(variant(d^)));
+      Check(d^.Exists('a'), 'a');
+      Check(d^.Exists('b'), 'a');
+      inc(n);
+      CheckEqual(d^.I['a'], n);
+      CheckEqual(d^.I['b'], n);
+    end;
+    CheckEqual(n, 2);
+    vd.Clear;
+    Check(vd.InitJson('[{a:1,b:1}, 1, "no object", {a:2,b:2}]'));
     v2.InitFast;
     for f in vd do
     begin
@@ -5750,6 +5813,26 @@ var
   lRefreshed: boolean;
   uu: TRawUtf8DynArray;
 begin
+  Check(GetBoolean('true'));
+  Check(GetBoolean('TRue'));
+  Check(GetBoolean('yes'));
+  Check(GetBoolean('YeS'));
+  Check(not GetBoolean(nil));
+  Check(not GetBoolean('false'));
+  Check(GetBooleanW('true'));
+  Check(GetBooleanW('TRue'));
+  Check(not GetBooleanW('yes'));
+  Check(not GetBooleanW('tru'));
+  Check(not GetBooleanW('trues'));
+  Check(not GetBooleanW(nil));
+  Check(not GetBooleanW('false'));
+  Check(GetTrue('true') = 1);
+  Check(GetTrue('TRue') = 1);
+  Check(GetTrue('yes') = 1);
+  Check(GetTrue('Yes') = 1);
+  Check(GetTrue('tru') = 0);
+  Check(GetTrue('trues') = 1);
+  Check(GetTrue('false') = 0);
   Check(pointer(uu) = nil);
   a.InitArrayFrom(uu, JSON_FAST); // ensure no GPF
   CheckEqual(a.Count, 0);
@@ -6148,7 +6231,7 @@ begin
   check(Doc.A['test'].ToJson = 'null');
   Doc.A_['test']^.AddItems([1, 2]);
   j := Doc.ToJson;
-  check(j = '{"test":[1,2]}');
+  checkEqual(j, '{"test":[1,2]}');
   check(Doc.A['test'].ToJson = '[1,2]');
   Doc.A_['test']^.AddItems([3, 4]);
   CheckEqual(Doc.ToJson, '{"test":[1,2,3,4]}');
@@ -6836,12 +6919,17 @@ const
 
   procedure DoOne(const value, expected: RawUtf8);
   var
-    res: RawUtf8;
+    p: PUtf8Char;
   begin
     w.CancelAll;
     w.AddUrlNameNormalize(pointer(value), length(value));
-    w.SetText(res);
-    CheckEqual(res, expected);
+    CheckEqual(w.TextLength, length(expected), 'before');
+    p := w.GetTextAsBuffer; // validate this method insteas of SetText()
+    Check(p <> nil);
+    Check(p[length(expected)] = #0, 'end with #0');
+    if expected <> '' then
+      Check(CompareMem(p, pointer(expected), length(expected)));
+    CheckEqual(w.TextLength, length(expected), 'after');
   end;
 
   procedure Test(decoded, encoded: RawUtf8);
@@ -6923,6 +7011,7 @@ begin
   begin
     j := i * 5; // circumvent weird FPC code generation bug in -O2 mode
     s := RandomUtf8(j);
+    Check(length(s) >= j);
     CheckEqual(UrlDecode(UrlEncode(s)), s, s);
   end;
   utf := BinToBase64Uri(@Guid, SizeOf(Guid));
@@ -6993,6 +7082,7 @@ begin
     CheckEqual(UrlDecodeName(t), s);
     CheckEqual(t, s, 'plainname');
     s := RandomUtf8(i);
+    Check(length(s) >= i);
     Check(not NeedsHtmlEscape(pointer(s), hfNone));
     t := UrlEncode(s);
     Check(t <> '');

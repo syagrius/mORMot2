@@ -48,14 +48,10 @@ type
   // BSON Decimal128 format, and processed by the TDecimal128 object
   TDecimal128Bits = record
     case integer of
-      0:
-        (lo, hi: QWord);
-      1:
-        (l, h: Int64);
-      2:
-        (b: THash128);
-      3:
-        (c: array[0..3] of cardinal);
+      0: (lo, hi: QWord);
+      1: (l, h: Int64);
+      2: (b: THash128);
+      3: (c: array[0..3] of cardinal);
   end;
 
   /// points to a 128-bit decimal binary
@@ -2223,7 +2219,7 @@ begin
   else
   begin
     if (b^.VType = DocVariantVType) and
-       PDocVariantData(b)^.IsObject then
+       not PDocVariantData(b)^.IsArray then
     begin
       // use the existing TDocVariant object content
       PDocVariantData(b)^.AddNameValuesToObject(NameValuePairs);
@@ -3115,10 +3111,10 @@ begin
               PBoolean(Element)^ := false;
           betInt32:
             if not VariantToInteger(aValue, PInteger(Element)^) then
-              raise EBsonException.Create('TBsonElement.FromVariant(betInt32)');
+              EBsonException.RaiseU('TBsonElement.FromVariant(betInt32)');
           betInt64:
             if not VariantToInt64(aValue, PInt64(Element)^) then
-              raise EBsonException.Create('TBsonElement.FromVariant(betInt64)')
+              EBsonException.RaiseU('TBsonElement.FromVariant(betInt64)')
             else if PInt64Rec(Element)^.Hi = 0 then
               Kind := betInt32; // 32-bit is enough
         end;
@@ -3366,7 +3362,7 @@ procedure TBsonWriter.WriteCollectionName(Flags: integer; const CollectionName: 
 begin
   Write4(Flags);
   if CollectionName = '' then
-    raise EBsonException.Create('Missing collection name');
+    EBsonException.RaiseU('Missing collection name');
   Write(pointer(CollectionName), length(CollectionName) + 1); // +1 for #0
 end;
 
@@ -3541,7 +3537,7 @@ begin
   else if doc.IsArray then
     BsonWrite(name, betArray)
   else
-    raise EBsonException.Create('Undefined nested document');
+    EBsonException.RaiseU('Undefined nested document');
   BsonWriteDoc(doc);
 end;
 
@@ -3565,7 +3561,7 @@ end;
 procedure TBsonWriter.BsonDocumentBegin(const name: RawUtf8; kind: TBsonElementType);
 begin
   if not (kind in [betDoc, betArray]) then
-    raise EBsonException.Create('BsonDocumentBegin(?)');
+    EBsonException.RaiseU('BsonDocumentBegin(?)');
   BsonWrite(name, kind);
   BsonDocumentBegin;
 end;
@@ -3653,8 +3649,7 @@ begin
       begin
         VarRecToTempUtf8(@value, tmp);
         BsonWriteText(name, tmp.Text, tmp.Len);
-        if tmp.TempRawUtf8 <> nil then
-          RawUtf8(tmp.TempRawUtf8) := '';
+        TempUtf8Done(tmp);
       end;
   else
     EBsonException.RaiseUtf8(
@@ -4101,7 +4096,7 @@ begin
   if (BSON = nil) or
      ((ExpectedBSONLen <> 0) and
       (PInteger(BSON)^ <> ExpectedBSONLen)) then
-    raise EBsonException.Create('Incorrect supplied BSON document content');
+    EBsonException.RaiseU('Incorrect supplied BSON document content');
   result := PInteger(BSON)^;
   inc(PInteger(BSON));
 end;
@@ -4110,7 +4105,7 @@ function BsonParseLength(var BSON: PByte): integer;
 begin
   if (BSON = nil) or
      (PInteger(BSON)^ < SizeOf(integer)) then
-    raise EBsonException.Create('Incorrect supplied BSON document content');
+    EBsonException.RaiseU('Incorrect supplied BSON document content');
   result := PInteger(BSON)^;
   inc(PInteger(BSON));
 end;
@@ -4160,7 +4155,7 @@ var
   name: RawUtf8;
   a, len, vallen: PtrInt;
   P: PAnsiChar;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if (high(NameValuePairs) = 1) and
      (NameValuePairs[1].VType = vtAnsiString) then
@@ -4207,7 +4202,7 @@ procedure BsonToDoc(BSON: PByte; var Result: Variant; ExpectedBSONLen: integer;
   Option: TBsonDocArrayConversion);
 begin
   if Option = asBsonVariant then
-    raise EBsonException.Create('BsonToDoc: Option not allowed');
+    EBsonException.RaiseU('BsonToDoc: Option not allowed');
   VarClear(Result);
   BsonParseLength(BSON, ExpectedBSONLen);
   BsonItemsToDocVariant(betDoc, BSON, TDocVariantData(Result), Option);
@@ -4278,7 +4273,7 @@ function BsonToJson(BSON: PByte; Kind: TBsonElementType;
   ExpectedBSONLen: integer; Mode: TMongoJsonMode): RawUtf8;
 var
   W: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   BsonParseLength(BSON, ExpectedBSONLen);
   W := TJsonWriter.CreateOwnedStream(tmp);
@@ -4313,7 +4308,7 @@ end;
 function VariantSaveMongoJson(const Value: variant; Mode: TMongoJsonMode): RawUtf8;
 var
   W: TJsonWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(tmp);
   try
@@ -4358,7 +4353,7 @@ end;
 function BsonObjectID(const aObjectID: variant): TBsonObjectID;
 begin
   if not result.FromVariant(aObjectID) then
-    raise EBsonException.Create('BsonObjectID() over not ObjectID variant');
+    EBsonException.RaiseU('BsonObjectID() over not ObjectID variant');
 end;
 
 function JavaScript(const JS: RawUtf8): variant;
@@ -4587,7 +4582,7 @@ var
   EndOfObject: AnsiChar;
   Kind: TBsonElementType;
   n: integer;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   result := false;
   if Json = nil then

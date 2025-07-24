@@ -3912,6 +3912,7 @@ begin
     begin
       j := i shr 3 + 1; // circumvent weird FPC code generation bug in -O2 mode
       S := RandomWinAnsi(j);
+      Check(length(S) = j);
       crc := crc32creference(0, pointer(S), length(S));
       inc(totallen, length(S));
       c2 := HmacCrc32c(@c1, pointer(S), 4, length(S));
@@ -4516,19 +4517,19 @@ begin
   Check(UInt4DigitsToUtf8(12) = '0012');
   Check(UInt4DigitsToUtf8(123) = '0123');
   Check(UInt4DigitsToUtf8(1234) = '1234');
-  Check(MicroSecToString(0) = '0us');
-  Check(MicroSecToString(QWord(-10)) = '0us');
-  Check(MicroSecToString(10) = '10us');
-  Check(MicroSecToString(999) = '999us');
-  Check(MicroSecToString(1000) = '1ms');
-  Check(MicroSecToString(1001) = '1ms');
-  Check(MicroSecToString(1010) = '1.01ms');
-  Check(MicroSecToString(1100) = '1.10ms');
-  Check(MicroSecToString(999999) = '999.99ms');
-  Check(MicroSecToString(1000000) = '1s');
-  Check(MicroSecToString(1000001) = '1s');
-  Check(MicroSecToString(2030001) = '2.03s');
-  Check(MicroSecToString(200000070001) = '2d');
+  CheckEqualShort(MicroSecToString(0) , '0us');
+  CheckEqualShort(MicroSecToString(QWord(-10)) , '0us');
+  CheckEqualShort(MicroSecToString(10) , '10us');
+  CheckEqualShort(MicroSecToString(999) , '999us');
+  CheckEqualShort(MicroSecToString(1000) , '1ms');
+  CheckEqualShort(MicroSecToString(1001) , '1ms');
+  CheckEqualShort(MicroSecToString(1010) , '1.01ms');
+  CheckEqualShort(MicroSecToString(1100) , '1.10ms');
+  CheckEqualShort(MicroSecToString(999999) , '999.99ms');
+  CheckEqualShort(MicroSecToString(1000000) , '1s');
+  CheckEqualShort(MicroSecToString(1000001) , '1s');
+  CheckEqualShort(MicroSecToString(2030001) , '2.03s');
+  CheckEqualShort(MicroSecToString(200000070001) , '2d');
   Check(KbNoSpace(0)            = '0B' , 'kb0');
   Check(KbNoSpace(99)           = '99B', 'kb99');
   Check(KbNoSpace(1 shl 10 - 1) = '1KB', 'kb1');
@@ -5722,14 +5723,14 @@ begin
   CsvToRawUtf8DynArray('item1   item2    item3', arr, {sep=}' ',
     {TrimItems=}true , {AddVoidItems=}false);
   CheckEqual(length(arr), 3);
-  Check(arr[0] = 'item1');
-  Check(arr[1] = 'item2');
-  Check(arr[2] = 'item3');
-  Check(AddPrefixToCsv('One,Two,Three', 'Pre') = 'PreOne,PreTwo,PreThree');
-  Check(CsvOfValue('?', 3) = '?,?,?');
-  Check(GetUnQuoteCsvItem('"""one,""","two "', 1, ',', '"') = 'two ');
-  Check(GetUnQuoteCsvItem('''''''one,''''''', 0) = '''one,''');
-  Check(GetUnQuoteCsvItem('"""one,', 0, ',', '"') = '');
+  CheckEqual(arr[0], 'item1');
+  CheckEqual(arr[1], 'item2');
+  CheckEqual(arr[2], 'item3');
+  CheckEqual(AddPrefixToCsv('One,Two,Three', 'Pre'), 'PreOne,PreTwo,PreThree');
+  CheckEqual(CsvOfValue('?', 3), '?,?,?');
+  CheckEqual(GetUnQuoteCsvItem('"""one,""","two "', 1, ',', '"'), 'two ');
+  CheckEqual(GetUnQuoteCsvItem('''''''one,''''''', 0), '''one,''');
+  CheckEqual(GetUnQuoteCsvItem('"""one,', 0, ',', '"'), '');
   Check(not CsvContains('', 'b'));
   Check(not CsvContains('a', ''));
   Check(CsvContains('a', 'a'));
@@ -5860,6 +5861,7 @@ begin
   AppendLine(U, ['bcdef']);
   CheckEqual(U, 'a1'#13#10'2345'#13#10'bcdef');
   Append(U, #13#10);
+  CheckEqual(U, 'a1'#13#10'2345'#13#10'bcdef'#13#10);
   AppendLine(U, ['ghij']);
   CheckEqual(U, 'a1'#13#10'2345'#13#10'bcdef'#13#10'ghij');
   U := QuotedStr('', '"');
@@ -5893,7 +5895,7 @@ begin
   for i := 0 to 1000 do
   begin
     len := i * 5;
-    W := RandomAnsi7(len);
+    W := RandomAnsi7(len, CP_WINANSI);
     CheckEqual(length(W), len);
     lenup100 := len;
     if lenup100 > 100 then
@@ -5935,7 +5937,9 @@ begin
     if L and 1 <> 0 then
       SetLength(W, L - 1); // force exact UTF-16 buffer length
     W := RandomWinAnsi(len);
+    Check(length(W) = len);
     U := WinAnsiToUtf8(W);
+    Check(length(U) >= len);
     check(IsValidUtf8(U), 'IsValidUtf8U');
     P := UniqueRawUtf8(U);
     check(IsValidUtf8(P), 'IsValidUtf8');
@@ -7629,6 +7633,8 @@ begin
   Check(WinErrorShort(1722) = '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
   Check(WinErrorShort(12152) = '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
   Check(WinErrorShort($c00000fd) = 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
+  Check(WinErrorShort($80090330) = '80090330 SEC_E_DECRYPT_FAILURE', 'w7');
+  Check(WinErrorShort($00090321) = '590625 SEC_I_RENEGOTIATE', 'w8');
   Check(WinErrorShort(244, {noint=}false) = '244', '244w');
   Check(WinErrorShort(245, {noint=}true) = '', '245w');
   BsdErrorShort(1, @ss);
@@ -7675,12 +7681,12 @@ begin
     else
       CheckUtf8(not CurrentUserHasGroup(s), s);
   end;
-  Check(OSErrorShort(5) = '5 ERROR_ACCESS_DENIED', '5ead');
-  Check(OSErrorShort(5, true) = 'ERROR_ACCESS_DENIED', '5ead2');
+  CheckEqualShort(OSErrorShort(5), '5 ERROR_ACCESS_DENIED', '5ead');
+  CheckEqualShort(OSErrorShort(5, true), 'ERROR_ACCESS_DENIED', '5ead2');
   {$else}
-  Check(OSErrorShort(1) = '1 EPERM', '1eperm');
-  Check(OSErrorShort(5) = '5 EIO', '5eio');
-  Check(OSErrorShort(5, true) = 'EIO', '5eio2');
+  CheckEqualShort(OSErrorShort(1), '1 EPERM', '1eperm');
+  CheckEqualShort(OSErrorShort(5), '5 EIO', '5eio');
+  CheckEqualShort(OSErrorShort(5, true), 'EIO', '5eio2');
   {$endif OSWINDOWS}
 end;
 
@@ -10262,8 +10268,10 @@ var
   nfo: TWinProcessInfo;
 begin
   // validate Windows API error code recognition
-  CheckEqual(WinErrorText(1246), 'ERROR__CONTINUE');
-  CheckEqual(WinErrorText(ERROR_INSUFFICIENT_BUFFER), 'ERROR_INSUFFICIENT_BUFFER');
+  CheckEqualShort(WinApiErrorShort(122), 'ERROR_INSUFFICIENT_BUFFER');
+  CheckEqualShort(WinApiErrorShort(1246), 'ERROR__CONTINUE');
+  Check(WinApiErrorString(122) = 'ERROR_INSUFFICIENT_BUFFER');
+  Check(WinApiErrorString(1246) = 'ERROR__CONTINUE');
   // validate DotNet exceptions error code recognition
   Win32DotNetException(0, '');
   Win32DotNetException(9234, '');

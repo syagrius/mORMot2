@@ -1492,7 +1492,7 @@ end;
 
 procedure TXName.ComputeText;
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   a: TXAttr;
   first: boolean;
   p: PUtf8Char;
@@ -2286,7 +2286,7 @@ procedure TX509.ComputeCachedDer;
 begin
   if (SignatureAlgorithm = xsaNone) or
      (SignatureValue = '') then
-    raise EX509.Create('TX509.ToDer with no previous Sign() call');
+    EX509.RaiseU('TX509.ToDer with no previous Sign() call');
   fSafe.Lock;
   try
     if fCachedDer = '' then
@@ -4201,7 +4201,7 @@ end;
 
 function TCryptStoreX509.Save: RawByteString;
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   w: TTextWriter;
 begin
   w := TTextWriter.CreateOwnedStream(tmp);

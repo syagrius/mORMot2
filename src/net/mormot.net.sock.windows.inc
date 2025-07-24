@@ -1543,7 +1543,7 @@ begin
         fOnLog(sllDebug, 'Destroy waiting=%', [fWaiting], self);
       IocpPostQueuedStatus(fIocp, 0, nil, nil); // notify again (paranoid)
       SleepHiRes(10);
-      tix := mormot.core.os.GetTickCount64 shr MilliSecsPerSecShl;
+      tix := GetTickSec;
       if endtix = 0 then
         endtix := tix + 5
       else if tix > endtix then
@@ -2029,8 +2029,8 @@ var
   msg: string;
 begin
   sys := GetLastError;
-  msg := format('<%s>: %s returned %x [%s], System Error %d [%s]',
-    [fServerAddressW, ctx, res, SspiResToText(res), sys, GetErrorText(sys)]);
+  msg := format('<%s>: %s returned %s, System Error %d [%s]',
+    [fServerAddressW, ctx, OsErrorShort(res), sys, GetErrorShort(sys)]);
   //writeln(fSocket.Socket,' ',msg);
   raise ESChannel.Create(msg);
 end;

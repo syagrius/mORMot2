@@ -530,7 +530,7 @@ type
     // ACE body
     Mask: TSecAccessMask;
     case integer of
-      0: (CommonSid: cardinal);
+      0: (CommonSid:   cardinal);
       1: (ObjectFlags: cardinal;
           ObjectStart: cardinal);
   end;
@@ -1418,10 +1418,10 @@ function SddlToKnownSid(const sddl: RawUtf8; out wks: TWellKnownSid): boolean;
 function SddlToKnownRid(const sddl: RawUtf8; out wkr: TWellKnownRid): boolean;
 
 const
-  { SDDL standard identifiers using string[3] for efficient 32-bit alignment }
+  { SDDL standard identifiers using TShort3 for efficient 32-bit alignment }
 
   /// define how ACE kinds in TSecAce.AceType are stored as SDDL
-  SAT_SDDL: array[TSecAceType] of string[3] = (
+  SAT_SDDL: array[TSecAceType] of TShort3 = (
     '',    // satUnknown
     'A',   // satAccessAllowed
     'D',   // satAccessDenied
@@ -1447,7 +1447,7 @@ const
     'FL'); // satAccessFilter
 
   /// define how ACE flags in TSecAce.Flags are stored as SDDL
-  SAF_SDDL: array[TSecAceFlag] of string[3] = (
+  SAF_SDDL: array[TSecAceFlag] of TShort3 = (
     'OI',  // safObjectInherit
     'CI',  // safContainerInherit
     'NP',  // safNoPropagateInherit
@@ -1458,7 +1458,7 @@ const
     'FA'); // safFailedAccess
 
   /// define how ACE access rights bits in TSecAce.Mask are stored as SDDL
-  SAM_SDDL: array[TSecAccess] of string[3] = (
+  SAM_SDDL: array[TSecAccess] of TShort3 = (
     'CC',  // samCreateChild
     'DC',  // samDeleteChild
     'LC',  // samListChildren
@@ -1493,7 +1493,7 @@ const
     'GR'); // samGenericRead
 
   /// define how full 32-bit ACE access rights in TSecAce.Mask are stored as SDDL
-  SAR_SDDL: array[TSecAccessRight] of string[3] = (
+  SAR_SDDL: array[TSecAccessRight] of TShort3 = (
     'FA',  //  sarFileAll
     'FR',  //  sarFileRead
     'FW',  //  sarFileWrite
@@ -2334,8 +2334,8 @@ type
     dwGroupId: DWORD;
     Union: record
       case integer of
-        0: (dwValue: DWORD);
-        1: (Algid: DWORD);
+        0: (dwValue:  DWORD);
+        1: (Algid:    DWORD);
         2: (dwLength: DWORD);
     end;
     ExtraInfo: CRYPTOAPI_BLOB;
@@ -3100,7 +3100,7 @@ begin
     {$ifdef CPUX64}
     if MemCmp(pointer(OldSid[i]), @Sid, SidLen) = 0 then // use SSE2 asm
     {$else}
-    if CompareMem(pointer(OldSid[i]), @Sid, SidLen) then
+    if mormot.core.base.CompareMem(pointer(OldSid[i]), @Sid, SidLen) then
     {$endif CPUX64}
     begin
       MoveFast(pointer(NewSid[i])^, Sid, SidLen); // in-place overwrite
@@ -3855,7 +3855,7 @@ begin
   p := s;
 end;
 
-function SddlNextTwo(var p: PUtf8Char; out u: ShortString): boolean;
+function SddlNextTwo(var p: PUtf8Char; u: PAnsiChar): boolean;
 var
   s: PUtf8Char;
 begin
@@ -3902,7 +3902,7 @@ var
   a: TSecAccess;
   m: integer absolute mask;
   one: integer;
-  u: string[2];
+  u: TShort3;
 begin
   result := false;
   m := 0;
@@ -3917,7 +3917,7 @@ begin
         break // we got the mask as a 32-bit hexadecimal value
       else
         exit;
-    if not SddlNextTwo(p, u) then
+    if not SddlNextTwo(p, @u) then
       exit;
     one := 0;
     for r := low(r) to high(r) do
@@ -4583,7 +4583,7 @@ begin
   result := atpInvalidFlags;
   while p^ <> ';' do
   begin
-    if not SddlNextTwo(p, u) then
+    if not SddlNextTwo(p, @u) then
       exit;
     for f := low(f) to high(f) do
       if SAF_SDDL[f] = u then
@@ -5492,7 +5492,7 @@ begin
 end;
 
 const
-  SCOPE_SDDL: array[TSecAceScope] of string[3] = (
+  SCOPE_SDDL: array[TSecAceScope] of TShort3 = (
     'D:', 'S:');
   SCOPE_P: array[TSecAceScope] of TSecControl = (
     scDaclProtected, scSaclProtected);
@@ -6662,7 +6662,7 @@ function AsnNext(var Pos: integer; const Buffer: TAsnObject;
   Value: PRawByteString; CtrEndPos: PInteger): integer;
 var
   asnsize: integer;
-  tmp: array[0..23] of AnsiChar;
+  tmp: TTemp24;
   p: PAnsiChar;
 begin
   if Value <> nil then

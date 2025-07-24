@@ -511,7 +511,7 @@ type
     /// get a known TOrm instance JSON representation
     // - a slightly faster alternative to Value.GetJsonValues
     procedure GetJsonValue(Value: TOrm; withID: boolean;
-      const Fields: TFieldBits; out Json: RawUtf8); overload;
+      const Fields: TFieldBits; var Json: RawUtf8); overload;
     /// get a known TOrm instance JSON representation
     // - a slightly faster alternative to Value.GetJsonValues
     procedure GetJsonValue(Value: TOrm; withID: boolean;
@@ -4675,9 +4675,9 @@ type
   /// thread-safe class to store a BATCH sequence of writing operations
   TRestBatchLocked = class(TRestBatch)
   protected
+    fSafe: TOSLock;
     fResetTix: Int64;
     fThreshold: integer;
-    fSafe: TSynLocker;
   public
     /// initialize the BATCH instance
     constructor CreateNoRest(aModel: TOrmModel; aTable: TOrmClass;
@@ -4691,7 +4691,7 @@ type
       Options: TRestBatchOptions = [boExtendedJson]); override;
     /// access to the locking methods of this instance
     // - use Safe.Lock/TryLock with a try ... finally Safe.Unlock block
-    property Safe: TSynLocker
+    property Safe: TOSLock
       read fSafe;
     /// property set to the current GetTickCount64 value when Reset was called
     property ResetTix: Int64
@@ -5144,7 +5144,7 @@ procedure EncodeMultiInsertSQLite3(Props: TOrmProperties;
 var
   f: PtrInt;
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -5613,7 +5613,7 @@ var
   EnumValues: set of 0..63;
   Soundex: TSynSoundEx;
   M: TOrmModel;
-  tmp: array[0..23] of AnsiChar;
+  tmp: TTemp24;
 begin
   result := 0;
   if (self = nil) or
@@ -7099,7 +7099,7 @@ end;
 function TOrm.GetBinary(WithID, SimpleFields: boolean): RawByteString;
 var
   W: TBufferWriter;
-  temp: TTextWriterStackBuffer; // 8KB
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TBufferWriter.Create(temp{%H-});
   try
@@ -7307,7 +7307,7 @@ procedure TOrm.GetJsonValues(Json: TStream; Expand, withID: boolean;
   Occasion: TOrmOccasion; OrmOptions: TOrmWriterOptions);
 var
   serializer: TOrmWriter;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if self = nil then
     exit;
@@ -7856,12 +7856,12 @@ procedure TOrm.EnginePrepareMany(const aClient: IRestOrm;
   out ObjectsClass: TOrmClassDynArray; out SQL, Json: RawUtf8);
 var
   aSqlFields, aSqlFrom, aSqlWhere, aSqlJoin: RawUtf8;
-  aField: string[3];
+  aField: TShort3;
   aMany: RawUtf8;
   f, n, i, SqlFieldsCount: integer;
   Props: TOrmProperties;
   SqlFields: array of record
-    SQL: string[3];
+    SQL: TShort3;
     prop: TOrmPropInfo;
     Instance: TOrm;
   end;
@@ -7877,7 +7877,7 @@ var
     else
       with SqlFields[SqlFieldsCount] do
       begin
-        SQL := aField;
+        PCardinal(@SQL)^ := PCardinal(@aField)^;
         prop := aProp;
         Instance := Objects[f];
         inc(SqlFieldsCount);
@@ -9281,7 +9281,7 @@ label
 begin
   inherited Create;
   if aTable = nil then
-    raise EModelException.CreateU('TOrmProperties.Create(nil)');
+    EModelException.RaiseU('TOrmProperties.Create(nil)');
   // register for JsonToObject() and for TOrmPropInfoRttiTID.Create()
   // (should have been done before in TOrmModel.Create/AddTable)
   fTableRtti := Rtti.RegisterClass(aTable) as TRttiJson;
@@ -9599,7 +9599,7 @@ var
 begin
   if (cardinal(aIndex) > cardinal(fTablesMax)) or
      (fTableProps[aIndex] <> nil) then
-    raise EModelException.CreateU('TOrmModel.SetTableProps');
+    EModelException.RaiseU('TOrmModel.SetTableProps');
   Table := fTables[aIndex];
   if Table.InheritsFrom(TOrmFts5) then
     Kind := ovkFts5
@@ -9984,7 +9984,7 @@ end;
 function TOrmModel.GetTableIndexExisting(aTable: TOrmClass): PtrInt;
 begin
   if self = nil then
-    raise EModelException.CreateU('nil.GetTableIndexExisting');
+    EModelException.RaiseU('nil.GetTableIndexExisting');
   result := GetTableIndex(aTable);
   if result < 0 then
     EModelException.RaiseUtf8('% is not part of % root=%',
@@ -10725,7 +10725,7 @@ type
 
 var
   W: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try // Sql.TableSimpleFields[withID: boolean; withTableName: boolean]
@@ -11264,7 +11264,7 @@ begin
   fPreviousTable := nil;
   fTable := aTable;
   if boExtendedJson in Options then
-    fBatch.CustomOptions := fBatch.CustomOptions + [twoForceJsonExtended];
+    fBatch.CustomOptions := [twoForceJsonExtended];
   if (aTable <> nil) and
      (fModel <> nil) and
      not (boOnlyObjects in fOptions) then
@@ -11702,15 +11702,15 @@ constructor TRestBatchLocked.CreateNoRest(aModel: TOrmModel; aTable: TOrmClass;
   AutomaticTransactionPerRow: cardinal; Options: TRestBatchOptions;
   InternalBufferSize: cardinal);
 begin
-  fSafe.InitFromClass;
+  fSafe.Init;
   inherited CreateNoRest(
     aModel, aTable, AutomaticTransactionPerRow, Options, InternalBufferSize);
 end;
 
 destructor TRestBatchLocked.Destroy;
 begin
-  fSafe.Done;
   inherited Destroy;
+  fSafe.Done;
 end;
 
 procedure TRestBatchLocked.Reset(aTable: TOrmClass;

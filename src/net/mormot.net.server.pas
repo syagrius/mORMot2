@@ -3378,15 +3378,18 @@ function THttpServerRequest.TempJsonWriter(
   var temp: TTextWriterStackBuffer): TJsonWriter;
 begin
   if fTempWriter = nil then
-    fTempWriter := TJsonWriter.CreateOwnedStream(temp, {noshared=}true)
+  begin
+    fTempWriter := TJsonWriter.CreateOwnedStream(temp, {noshared=}true);
+    fTempWriter.FlushToStreamNoAutoResize := true;
+  end
   else
-    fTempWriter.CancelAllWith(temp);
+    fTempWriter.CancelAllWith(temp); // reuse during THttpServerRequest lifetime
   result := fTempWriter;
 end;
 
 function THttpServerRequest.SetOutJson(Value: pointer; TypeInfo: PRttiInfo): cardinal;
 var
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   TempJsonWriter(temp).AddTypedJson(Value, TypeInfo, []);
   fTempWriter.SetText(RawUtf8(fOutContent));
@@ -4200,9 +4203,9 @@ end;
 procedure THttpServerSocketGeneric.WaitStarted(
   Seconds: integer; TLS: PNetTlsContext);
 var
-  endtix: Int64;
+  tix32: cardinal;
 begin
-  endtix := mormot.core.os.GetTickCount64 + Seconds shl MilliSecsPerSecShl;
+  tix32 := GetTickSec + cardinal(Seconds);
   repeat
     if Terminated then
       exit;
@@ -4214,7 +4217,7 @@ begin
           [self, fExecuteMessage]);
     end;
     SleepHiRes(1); // warning: waits typically 1-15 ms on Windows
-    if mormot.core.os.GetTickCount64 > endtix then
+    if GetTickSec > tix32 then
       EHttpServer.RaiseUtf8('%.WaitStarted timeout % after % seconds [%]',
         [self, ToText(GetExecuteState)^, Seconds, fExecuteMessage]);
   until false;
@@ -4469,7 +4472,7 @@ begin
   if list = '' then
   begin
     log.Log(sllTrace, 'RefreshBlackListUriExecute will retry soon enough', self);
-    tix32 := mormot.core.os.GetTickCount64 div 1000 + SecsPerMin * 30;
+    tix32 := GetTickSec + SecsPerMin * 30;
     if tix32 < fBlackListUriNextTix then
       fBlackListUriNextTix := tix32; // retry at least twice an hour
     exit;
@@ -4877,7 +4880,7 @@ begin // is called at most every second, but maybe up to 5 seconds delay
     RefreshBlackListUri(sec32);
   {$ifdef OSPOSIX}
   if Assigned(fSspiKeyTab) and
-     fSspiKeyTab.TryRefresh(tix64) then
+     fSspiKeyTab.TryRefresh(sec32) then
     fLogClass.Add.Log(sllDebug, 'DoCallbacks: refreshed %', [fSspiKeyTab], self);
   {$endif OSPOSIX}
 end;
@@ -5781,7 +5784,7 @@ begin
   server := THttpServerEphemeral.Create(
     aPort, aResponse, @aParams, aLogClass, aMethods, aOptions);
   try
-    result := server.fReceived.WaitForSafe(aTimeOutSecs shl MilliSecsPerSecShl);
+    result := server.fReceived.WaitForSafe(aTimeOutSecs * MilliSecsPerSec);
     if aLogClass <> nil then
       aLogClass.Add.Log(sllDebug, 'EphemeralHttpServer(%)=% %',
         [aPort, BOOL_STR[result], variant(aParams)], server);
@@ -6096,7 +6099,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  tix := GetTickCount64 shr MilliSecsPerSecShl; // call OS API every second
+  tix := GetTickSec;
   if tix = fLastNetworkTix then
     exit;
   fLastNetworkTix := tix;
@@ -6741,7 +6744,7 @@ begin
     // similar to git - aFileName[1..2] is the algorithm, so hash starts at [3]
     result := MakePath([fPermFilesPath, aFileName[3]]);
     if lfnEnsureDirectoryExists in aFlags then
-      result := EnsureDirectoryExists(result);
+      result := EnsureDirectoryExistsNoExpand(result);
     result := result + aFileName;
   end
   else
@@ -7017,7 +7020,7 @@ begin
   if (pcoBroadcastNotAlone in fSettings.Options) or
      (waoBroadcastNotAlone in Params.AlternateOptions) then
   begin
-    tix := (GetTickCount64 shr MilliSecsPerSecShl) + 1; // 1024 ms resolution
+    tix := GetTickSec + 1;
     if fBroadcastTix = tix then  // disable broadcasting within up to 1s delay
       exit;
   end;
@@ -8190,7 +8193,7 @@ var
   incontlen: Qword;
   incontlenchunk, incontlenread: cardinal;
   incontenc, inaccept, host, range, referer: RawUtf8;
-  outstat: RawUtf8;
+  outstat, outmsg: RawUtf8;
   outstatcode, afterstatcode: cardinal;
   respsent: boolean;
   urirouter: TUriRouter;
@@ -8205,7 +8208,6 @@ var
   datachunkfile: HTTP_DATA_CHUNK_FILEHANDLE;
   logdata: PHTTP_LOG_FIELDS_DATA;
   started, elapsed: Int64;
-  contrange: ShortString;
 
   procedure SendError(StatusCode: cardinal; const ErrorMsg: RawUtf8;
     E: Exception = nil);
@@ -8288,7 +8290,7 @@ var
       filehandle := FileOpen(Utf8ToString(ctxt.OutContent), fmOpenReadShared);
       if not ValidHandle(filehandle)  then
       begin
-        SendError(HTTP_NOTFOUND, WinErrorText(GetLastError));
+        SendError(HTTP_NOTFOUND, GetErrorText);
         result := false; // notify fatal error
       end;
       try // http.sys will serve then close the file from kernel
@@ -8323,10 +8325,10 @@ var
                   // "bytes=0-499" -> start=0, len=500
                   datachunkfile.ByteRange.Length.QuadPart := rangelen;
               end; // "bytes=1000-" -> start=1000, to eof
-              FormatShort('Content-range: bytes %-%/%'#0, [rangestart,
+              FormatUtf8('Content-range: bytes %-%/%', [rangestart,
                 rangestart + datachunkfile.ByteRange.Length.QuadPart - 1,
-                outcontlen.QuadPart], contrange);
-              resp^.AddCustomHeader(@contrange[1], heads, false);
+                outcontlen.QuadPart], outmsg);
+              resp^.AddCustomHeader(pointer(outmsg), heads, false);
               resp^.SetStatus(HTTP_PARTIALCONTENT, outstat);
             end;
           end;
@@ -8530,7 +8532,8 @@ begin
                 until incontlenread = incontlen;
                 if err <> NO_ERROR then
                 begin
-                  SendError(HTTP_NOTACCEPTABLE, WinErrorText(err, HTTPAPI_DLL));
+                  StringToUtf8(WinApiErrorString(err, HTTPAPI_DLL), outmsg);
+                  SendError(HTTP_NOTACCEPTABLE, outmsg);
                   continue;
                 end;
                 // optionally uncompress input body
@@ -9908,7 +9911,7 @@ begin
         proto.fSafe.UnLock;
       end;
     end;
-    inc(tix, fServer.PingTimeout shl MilliSecsPerSecShl);
+    inc(tix, fServer.PingTimeout * MilliSecsPerSec);
     while not Terminated and
           (mormot.core.os.GetTickCount64 < tix) do
       SleepHiRes(100);

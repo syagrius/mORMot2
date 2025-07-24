@@ -1636,7 +1636,7 @@ type
     /// if the Proxy settings were auto-detected by Internet Explorer
     AutoDetected: Boolean;
     /// detailed error message, if GetProxyInfo() returned a non 0 error code
-    ErrorMessage: RawUtf8;
+    ErrorMessage: string;
   end;
 
 /// use WinHttp to retrieve the proxy information needed to access a given URI
@@ -2105,7 +2105,7 @@ begin
   fLastApiError := Error;
   fLastApi := api;
   inherited CreateUtf8('% failed: % (%)',
-    [HttpNames[api], WinErrorText(Error, HTTPAPI_DLL), Error])
+    [HttpNames[api], WinApiErrorShort(Error, HTTPAPI_DLL), Error])
 end;
 
 
@@ -2263,20 +2263,22 @@ end;
 
 function SysErrorMessageWinInet(error: integer): RawUtf8;
 var
-  dwError, tmpLen: DWORD;
+  dwError, extendedLen: DWORD;
   tmp: array[0..511] of WideChar;
 begin
-  result := WinErrorText(error, 'wininet.dll');
-  if error <> ERROR_INTERNET_EXTENDED_ERROR then
-    exit;
-  InternetGetLastResponseInfoW(dwError, nil, tmpLen);
-  if (tmpLen = 0) or
-     (tmplen > SizeOf(tmp)) then
-    exit;
-  InternetGetLastResponseInfoW(dwError, @tmp, tmpLen);
-  result := FormatUtf8('% [%]', [result, PWideChar(@tmp)]);
+  extendedLen := 0;
+  if error = ERROR_INTERNET_EXTENDED_ERROR then
+  begin
+    InternetGetLastResponseInfoW(dwError, nil, extendedLen);
+    if extendedLen > SizeOf(tmp) then
+      extendedLen := 0
+    else
+      InternetGetLastResponseInfoW(dwError, @tmp, extendedLen);
+  end;
+  ShortStringToAnsi7String(WinApiErrorShort(error, 'wininet.dll'), result);
+  if extendedLen <> 0 then
+    Append(result, [' [', PWideChar(@tmp), ']']);
 end;
-
 
 
 { ******************** winhttp.dll Windows API Definitions }
@@ -2406,7 +2408,7 @@ begin
       result := GetLastError;
   end;
   if result <> 0 then
-    ProxyInfo.ErrorMessage := WinErrorText(result, winhttpdll);
+    ProxyInfo.ErrorMessage := WinApiErrorString(result, winhttpdll);
 end;
 
 procedure WinHttpApiInitialize(RaiseOnError: boolean);
@@ -2580,7 +2582,7 @@ begin
   fLastError := Error;
   fLastApi := api;
   inherited CreateUtf8('% failed: % (%)', [WebSocketNames[api],
-    WinErrorText(Error, WEBSOCKET_DLL), Error])
+    WinApiErrorShort(Error, WEBSOCKET_DLL), Error])
 end;
 
 const

@@ -845,34 +845,29 @@ type
 
 { ************ TAuthSession for In-Memory User Sessions }
 
-  /// used for efficient TAuthSession.IDCardinal comparison
-  TAuthSessionParent = class(TSynPersistent)
-  protected
-    fID: cardinal;
-  end;
-
   /// class used to maintain in-memory sessions
   // - this is not a TOrm table so won't be remotely accessible, for
   // performance and security reasons
   // - the User field is a true instance, copy of the corresponding database
   // content (for better speed)
   // - you can inherit from this class, to add custom session process
-  TAuthSession = class(TAuthSessionParent)
+  TAuthSession = class(TSynPersistent)
   protected
-    fUser: TAuthUser;
+    fID: cardinal; // should be the first field for LockedSessionFind()
     fTimeOutTix: cardinal;
     fTimeOutShr10: cardinal;
+    fLastTimestamp: cardinal;   // client-side generated timestamp
+    fPrivateSaltHash: cardinal; // pre-computed 32-bit seed for signature
+    fRemoteOsVersion: TOperatingSystemVersion; // stored as 32-bit
+    fUser: TAuthUser;
     fPrivateKey: RawUtf8;
     fPrivateSalt: RawUtf8; // 'SessionID+PrivateKey'
     fSentHeaders: RawUtf8;
     fRemoteIP: RawUtf8;
     fConnectionID: TRestConnectionID;
-    fPrivateSaltHash: cardinal;
-    fLastTimestamp: cardinal; // client-side generated timestamp
     fAccessRights: TOrmAccessRights;
     fMethods: TSynMonitorInputOutputObjArray;
     fInterfaces: TSynMonitorInputOutputObjArray;
-    fRemoteOsVersion: TOperatingSystemVersion;
     fConnectionOpaque: PRestServerConnectionOpaque;
     function GetUserName: RawUtf8;
     function GetUserID: TID;
@@ -909,13 +904,13 @@ type
     // - extracted from User.TAuthGroup.OrmAccessRights
     property AccessRights: TOrmAccessRights
       read fAccessRights;
-    /// the hexadecimal private key
+    /// the 128-bit hexadecimal private key
     // - once connected, returned to connected client as 'SessionID+PrivateKey'
     // for digital signature of the URIs
     // - pre-computed in fPrivateSalt / fPrivateSaltHash protected fields
     property PrivateKey: RawUtf8
       read fPrivateKey;
-    /// the transmitted HTTP headers, if any
+    /// the transmitted HTTP headers, if any, when the session was created
     // - can contain e.g. 'RemoteIp: 127.0.0.1' or 'User-Agent: Mozilla/4.0'
     property SentHeaders: RawUtf8
       read fSentHeaders;
@@ -1150,7 +1145,7 @@ type
     /// will try to handle the Auth RESTful method with mORMot authentication
     // - to be called in a two pass "challenging" algorithm:
     // $ GET ModelRoot/auth?UserName=...
-    // $  -> returns an hexadecimal nonce contents (valid for 5 minutes)
+    // $  -> returns an hexadecimal nonce contents (valid for 4.3 minutes)
     // $ GET ModelRoot/auth?UserName=...&PassWord=...&ClientNonce=...
     // $ -> if password is OK, will open the corresponding session
     // $    and return 'SessionID+HexaSessionPrivateKey'
@@ -2561,7 +2556,7 @@ function ServiceRunningRequest: TRestServerUriContext;
 function CurrentServiceContext: TServiceRunningContext;
 {$endif PUREMORMOT2}
 
-/// returns a safe 256-bit hexadecimal nonce, changing every 5 minutes
+/// returns a safe HMAC-SHA-256 hexadecimal nonce, changing every 4.3 minutes
 // - as used e.g. by TRestServerAuthenticationDefault.Auth
 // - this function is very fast, caching a cryptographically-level SHA-256 hash
 // - Ctxt may be nil (only used for faster GetTickCount64)
@@ -2569,20 +2564,20 @@ function CurrentNonce(Ctxt: TRestServerUriContext;
   Previous: boolean = false): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// returns a safe 256-bit nonce, changing every 5 minutes
+/// returns a safe HMAC-SHA-256 nonce, changing every 4.3 minutes
 // - can return the (may be cached) value as hexadecimal text or THash256 binary
 procedure CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean;
   Nonce: PRawUtf8; Nonce256: PHash256; Tix64: Int64 = 0); overload;
 
-/// returns a safe 256-bit nonce as binary, changing every 5 minutes
+/// returns a safe HMAC-SHA-256 nonce as binary, changing every 4.3 minutes
 function CurrentNonce256(Previous: boolean): THash256;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// validate a 256-bit binary nonce against current or previous nonce
+/// validate a HMAC-SHA-256 binary nonce against current or previous nonce
 function IsCurrentNonce(Ctxt: TRestServerUriContext;
   const Nonce256: THash256): boolean; overload;
 
-/// validate a 256-bit hexadecimal nonce against current or previous nonce
+/// validate a HMAC-SHA-256 hexadecimal nonce against current or previous nonce
 function IsCurrentNonce(Ctxt: TRestServerUriContext;
   const Nonce: RawUtf8): boolean; overload;
 
@@ -2905,7 +2900,7 @@ end;
 procedure TRestServerUriContext.SessionAssign(AuthSession: TAuthSession);
 begin
   // touch the TAuthSession deprecation timestamp
-  AuthSession.fTimeOutTix := (TickCount64 shr 10) + AuthSession.TimeoutShr10;
+  AuthSession.fTimeOutTix := (TickCount64 shr 10) + AuthSession.fTimeoutShr10;
   // make local copy of TAuthSession information
   fSession := AuthSession.ID;
   fSessionOS := AuthSession.fRemoteOsVersion;
@@ -3309,7 +3304,7 @@ end;
 procedure TRestServerUriContext.ServiceResult(const Name, JsonValue: RawUtf8);
 var
   wr: TJsonWriter;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   wr := TJsonWriter.CreateOwnedStream(temp);
   try
@@ -3511,7 +3506,7 @@ var
   W: TOrmWriter;
   bits: TFieldBits;
   withid: boolean;
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   // force plain standard JSON output for AJAX clients
   if (FieldsCsv = '') or
@@ -3526,7 +3521,7 @@ begin
     W := TableModelProps.Props.CreateJsonWriter(TRawByteStringStream.Create,
       true, FieldsCsv, {knownrows=}0, 0, @tmp);
     try
-      W.CustomOptions := W.CustomOptions + [twoForceJsonStandard]; // regular JSON
+      W.CustomOptions := [twoForceJsonStandard]; // regular JSON
       W.OrmOptions := Options; // SetOrmOptions() may refine ColNames[]
       rec.AppendFillAsJsonValues(W);
       W.SetText(fCall^.OutBody);
@@ -4410,7 +4405,7 @@ end;
 function TRestServerUriContext.GetInputAsTDocVariant(
   const Options: TDocVariantOptions; InterfaceMethod: PInterfaceMethod): variant;
 var
-  ndx, a: PtrInt;
+  n, ndx, a: PtrInt;
   forcestring: boolean;
   v: variant;
   multipart: TMultiPartDynArray;
@@ -4419,10 +4414,12 @@ var
 begin
   VarClear(result{%H-});
   FillInput;
-  if fInput <> nil then
+  n := length(fInput) shr 1; // fInput[] = name/value pairs
+  if n <> 0 then
   begin
     res.Init(Options, dvObject);
-    for ndx := 0 to (length(fInput) shr 1) - 1 do
+    res.Capacity := n;
+    for ndx := 0 to n - 1 do
     begin
       name := fInput[ndx * 2];
       if InterfaceMethod <> nil then
@@ -4536,19 +4533,14 @@ procedure TRestServerUriContext.ReturnFileFromFolder(
   const DefaultFileName: TFileName; const Error404Redirect: RawUtf8;
   CacheControlMaxAgeSec: integer);
 var
-  fn: RawUtf8;
   fileName: TFileName;
 begin
   if fUriMethodPath = '' then
-    fileName := DefaultFileName
+    fileName := MakePath([FolderName, DefaultFileName])
   else
-  begin
-    fn := StringReplaceChars(fUriMethodPath, '/', PathDelim);
-    if SafeFileNameU(fn) then
-      Utf8ToFileName(fn, filename);
-  end;
-  inherited ReturnFileFromFolder(FolderName, Handle304NotModified,
-    fileName, Error404Redirect, CacheControlMaxAgeSec);
+    NormalizeUriToFileName(fUriMethodPath, filename, FolderName);
+  ReturnFile(fileName,
+    Handle304NotModified, '', '', Error404Redirect, CacheControlMaxAgeSec);
 end;
 
 procedure TRestServerUriContext.Error(const ErrorMessage: RawUtf8;
@@ -4650,7 +4642,7 @@ var
   argdone: boolean;
   m: PInterfaceMethod;
   a: PInterfaceMethodArgument;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   WR := TJsonWriter.CreateOwnedStream(temp);
   try // convert URI parameters into the expected ordered json array
@@ -4808,6 +4800,9 @@ end;
 
 { ************ TAuthSession for In-Memory User Sessions }
 
+var
+  ServerProcessKdf: THmacSha256; // thread-safe HMAC-SHA-256 transient secret
+
 { TAuthSession }
 
 /// TSynObjectListSorted-TOnObjectCompare compatible callback method
@@ -4824,65 +4819,67 @@ begin
   fAccessRights := User.GroupRights.OrmAccessRights;
   Make([fID, '+', fPrivateKey], fPrivateSalt);
   fPrivateSaltHash := crc32(crc32(0, pointer(fPrivateSalt), length(fPrivateSalt)),
-    pointer(User.PasswordHashHexa), length(User.PasswordHashHexa));
+    pointer(fUser.PasswordHashHexa), length(fUser.PasswordHashHexa));
 end;
 
 constructor TAuthSession.Create(aCtxt: TRestServerUriContext; aUser: TAuthUser);
 var
-  GID: TAuthGroup;
-  rnd: THash256;
-  blob: RawBlob;
+  gid: TID;
+  rnd: THash256Rec;
 begin
   // inherited Create; // not mandatory - should not be overriden
-  fUser := aUser;
-  if (aCtxt <> nil) and
-     (User <> nil) and
-     (User.IDValue <> 0) then
+  if (aCtxt = nil) or
+     (aUser = nil) or
+     (aUser.IDValue = 0) then
+     ESecurityException.RaiseUtf8('Invalid %.Create(%,%)', [self, aCtxt, aUser]);
+  // allocate and retrieve the associated User.GroupRights instance
+  gid := TID(aUser.GroupRights); // retrieve pseudo TAuthGroup = ID
+  aUser.GroupRights := aCtxt.Server.fAuthGroupClass.Create(aCtxt.Server.ORM, gid);
+  if aUser.GroupRights.IDValue = 0 then
   begin
-    GID := User.GroupRights; // save pseudo TAuthGroup = ID
-    User.GroupRights :=
-      aCtxt.Server.fAuthGroupClass.Create(aCtxt.Server.ORM, GID);
-    if User.GroupRights.IDValue <> 0 then
-    begin
-      // compute the next Session ID
-      fID := InterlockedIncrement(aCtxt.Server.fSessionCounter);
-      // set session parameters
-      TAesPrng.Main.Fill(@rnd, SizeOf(rnd));
-      fPrivateKey := BinToHex(@rnd, SizeOf(rnd));
-      if not (rsoGetUserRetrieveNoBlobData in aCtxt.Server.Options) then
-      begin
-        aCtxt.Server.OrmInstance.RetrieveBlob(aCtxt.Server.fAuthUserClass,
-          User.IDValue, 'Data', blob);
-        User.Data := blob;
-      end;
-      if (aCtxt.fCall <> nil) and
-         (aCtxt.fCall^.InHead <> '') then
-        fSentHeaders := aCtxt.fCall^.InHead;
-      ComputeProtectedValues(aCtxt.TickCount64);
-      fConnectionID := aCtxt.Call^.LowLevelConnectionID;
-      aCtxt.SetRemoteIP(fRemoteIP);
-      fRemoteOsVersion := aCtxt.SessionOS;
-      if Assigned(aCtxt.fLog) and
-         (sllUserAuth in aCtxt.Server.fLogLevel) then
-        aCtxt.fLog.Log(sllUserAuth,
-          'New [%] session %/% created at %/% running % {%}',
-          [User.GroupRights.Ident, User.LogonName, fID, fRemoteIP,
-           aCtxt.Call^.LowLevelConnectionID, aCtxt.GetUserAgent,
-           ToTextOS(integer(fRemoteOsVersion))], self);
-      exit; // create successful
-    end;
-    // on error: set GroupRights back to a pseudo TAuthGroup = ID
-    User.GroupRights.Free;
-    User.GroupRights := GID;
+    // on error: set GroupRights back to the pseudo TAuthGroup = ID
+    aUser.GroupRights.Free;
+    aUser.GroupRights := pointer(gid);
+    ESecurityException.RaiseUtf8('Invalid %.Create(%,%): no %.ID=%',
+      [self, aCtxt, aUser, aCtxt.Server.fAuthGroupClass, gid]);
   end;
-  ESecurityException.RaiseUtf8('Invalid %.Create(%,%)', [self, aCtxt, aUser]);
+  fUser := aUser;
+  // store the REST/HTTP execution context
+  fConnectionID := aCtxt.Call^.LowLevelConnectionID;
+  if (aCtxt.fCall <> nil) and
+     (aCtxt.fCall^.InHead <> '') then
+    fSentHeaders := aCtxt.fCall^.InHead;
+  aCtxt.SetRemoteIP(fRemoteIP);
+  fRemoteOsVersion := aCtxt.SessionOS;
+  if not (rsoGetUserRetrieveNoBlobData in aCtxt.Server.Options) then
+    if not aCtxt.Server.Orm.RetrieveBlobFields(fUser) then
+      aCtxt.fLog.Log(sllError, 'Create: RetrieveBlobFields(%.ID=%) failed',
+        [fUser, fUser.IDValue], self);
+  // compute the next Session ID and its associated private key
+  fID := InterlockedIncrement(aCtxt.Server.fSessionCounter); // 20-bit number
+  if PInteger(@ServerProcessKdf)^ <> 0 then  // use our thread-safe CSPRNG
+    ServerProcessKdf.Compute(@fID, 8, rnd.b) // 8 bytes to be <> nonce
+  else
+    RandomBytes(rnd.Lo); // Lecuyer as fallback (paranoid)
+  XorMemory(rnd.l, StartupEntropy); // always obfuscate
+  XorMemory(rnd.l, rnd.h);          // don't leak state
+  BinToHexLower(@rnd, SizeOf(rnd.l), fPrivateKey); // 128-bit is enough
+  ComputeProtectedValues(aCtxt.TickCount64);
+  // this session has been successfully created
+  if Assigned(aCtxt.fLog) and
+     (sllUserAuth in aCtxt.Server.fLogLevel) then
+    aCtxt.fLog.Log(sllUserAuth,
+      'New [%] session %/% created at %/% running % {%}',
+      [fUser.GroupRights.Ident, fUser.LogonName, fID, fRemoteIP,
+       aCtxt.Call^.LowLevelConnectionID, aCtxt.Call^.LowLevelUserAgent,
+       ToTextOS(integer(fRemoteOsVersion))], self);
 end;
 
 destructor TAuthSession.Destroy;
 begin
-  if User <> nil then
+  if fUser <> nil then
   begin
-    User.GroupRights.Free;
+    fUser.GroupRights.Free;
     fUser.Free;
   end;
   ObjArrayClear(fMethods);
@@ -5238,8 +5235,7 @@ begin
   result := nil; // indicates invalid signature
 end;
 
-var
-  ServerNonceHasher: TSha256;
+var // the HMAC-SHA-256 ServerProcessKdf() of the last two 4.3 minutes ticks
   ServerNonceCache: array[{previous=}boolean] of record
     safe: TLightLock;
     tix: cardinal;
@@ -5251,26 +5247,24 @@ procedure CurrentServerNonceCompute(ticks: cardinal; previous: boolean;
   nonce: PRawUtf8; nonce256: PHash256);
 var
   hex: RawUtf8;
-  sha: TSha256;
-  tmp: TSha256Digest;
+  tmp: THash256;
 begin
-  if PInteger(@ServerNonceHasher)^ = 0 then
+  if PInteger(@ServerProcessKdf)^ = 0 then
   begin
-    // first time used: initialize the private secret
-    repeat
-      sha.Init;
-      TAesPrng.Fill(tmp); // random seed for this process lifetime
-      sha.Update(@tmp, SizeOf(tmp));
-    until PInteger(@sha)^ <> 0; // paranoid
+    // first time used: initialize the HMAC-SHA-256 secret for this process
+    TAesPrng.Main.Fill(tmp); // use strong CSPRNG seed
     ServerNonceCache[false].safe.Lock;
-    if PInteger(@ServerNonceHasher)^ = 0 then // atomic set
-      ServerNonceHasher := sha;
+    if PInteger(@ServerProcessKdf)^ = 0 then // ensure thread-safe
+    begin
+      ServerProcessKdf.Init(@StartupEntropy, SizeOf(StartupEntropy)); // salt
+      ServerProcessKdf.Update(tmp);
+    end;
     ServerNonceCache[false].safe.UnLock;
+    if PInteger(@ServerProcessKdf)^ = 0 then // paranoid
+      ESecurityException.RaiseU('CurrentServerNonceCompute: hmac?');
   end;
-  // compute and cache the new nonce for this timestamp
-  sha := ServerNonceHasher; // thread-safe SHA-256 state reuse
-  sha.Update(@ticks, SizeOf(ticks));
-  sha.Final(tmp, {noinit=}true); // single RawSha256Compress() call
+  // cache the new nonce for this timestamp (called at most every 4.3 minutes)
+  ServerProcessKdf.Compute(@ticks, 4, tmp); // thread-safe
   BinToHexLower(@tmp, SizeOf(tmp), hex);
   if nonce <> nil then
     nonce^ := hex;
@@ -5302,7 +5296,7 @@ begin
     if (tix32 = tix) and
        (res <> '') then  // check for res='' since tix32 may be 0 at startup
     begin
-      // fast retrieval from cache as binary or hexadecimal
+      // fast retrieval from cache as binary and/or hexadecimal
       if Nonce256 <> nil then
         Nonce256^ := hash;
       if Nonce <> nil then
@@ -5408,7 +5402,7 @@ begin
     // GET ModelRoot/auth?UserName=...&PassWord=...&ClientNonce=... -> handshaking
     DoAuthWithNonce
   else if aUserName <> '' then
-    // only UserName=... -> return hexadecimal nonce content valid for 5 minutes
+    // only UserName=... -> return hexadecimal nonce valid for 4.3 minutes
     DoAuthReturnNonce
   else
     // parameters does not match any expected layout -> try next authentication
@@ -5425,7 +5419,7 @@ begin
   result := IsHex(aPassWord, SizeOf(THash256)) and
     (PropNameEquals(aPassWord,
       Sha256U([fServer.Model.Root, CurrentNonce(Ctxt, {prev=}false), salt])) or
-     // if current nonce failed, tries with previous 5 minutes' nonce
+     // if current nonce failed, tries with previous nonce
      PropNameEquals(aPassWord,
        Sha256U([fServer.Model.Root, CurrentNonce(Ctxt, {prev=}true), salt])));
 end;
@@ -5459,7 +5453,7 @@ var
   rnd: THash128;
 begin
   inherited Create(aServer);
-  RandomBytes(@rnd, SizeOf(rnd)); // transient secret which cannot be persisted
+  RandomBytes(rnd); // transient secret which cannot be persisted
   fAes.EncryptInit(rnd, 128); // AES-128-CTR for safe 96-bit digital signature
   fAesMask := Random32;
   FillZero(rnd);
@@ -7133,14 +7127,14 @@ end;
 function TRestServer.LockedSessionFind(
   aSessionID: cardinal; aIndex: PPtrInt): TAuthSession;
 var
-  tmp: array[0..3] of PtrInt; // store a fake TAuthSessionParent instance
+  tmp: array[0..3] of PtrInt; // store a fake TAuthSession instance
   i: PtrInt;
 begin
   result := nil;
   if (aSessionID <= fSessionCounterMin) or
      (aSessionID > cardinal(fSessionCounter)) then
     exit;
-  TAuthSessionParent(@tmp).fID := aSessionID;
+  TAuthSession(@tmp).fID := aSessionID;
   i := fSessions.IndexOf(@tmp); // use fast O(log(n)) binary search
   if aIndex <> nil then
     aIndex^ := i;
@@ -7854,7 +7848,7 @@ procedure TRestServer.Stat(Ctxt: TRestServerUriContext);
 var
   W: TJsonWriter;
   json, xml, name: RawUtf8;
-  temp: TTextWriterStackBuffer;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try

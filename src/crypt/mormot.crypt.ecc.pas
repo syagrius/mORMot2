@@ -2819,13 +2819,13 @@ begin
         ValidityStart := EccDate(StartDate);
       ValidityEnd := ValidityStart + ExpirationDays;
     end;
-    TAesPrng.Fill(TAesBlock(Serial));
+    TAesPrng.Main.Fill(TAesBlock(Serial));
     fContent.SetUsage(word(Usage), MaxVers);
     if IssuerText = '' then
       if Subjects <> '' then
         fContent.SetSubject(Subjects, MaxVers)
       else
-        TAesPrng.Fill(TAesBlock(Issuer))
+        TAesPrng.Main.Fill(TAesBlock(Issuer))
     else
       EccIssuer(IssuerText, Issuer);
     if not ecc_make_key_pas(PublicKey, fPrivateKey) then
@@ -2948,7 +2948,7 @@ begin
     plain := SaveToBinary;
     if plain <> '' then
       try
-        salt := TAesPrng.Fill(PRIVKEY_SALTSIZE);
+        RandomByteString(PRIVKEY_SALTSIZE, salt); // public: Lecuyer is enough
         Pbkdf2HmacSha256(PassWord, salt, Pbkdf2Round, aeskey);
         a := Aes.Create(aeskey);
         try
@@ -3257,7 +3257,7 @@ begin
     pub := @dst.PublicKey;
   end
   else
-    raise EEccException.CreateUtf8(
+    raise EEccException.CreateUtf8( // no RaiseUtf8() for Delphi
       '%.SignCertificate: self-sign with no secret', [self]);
   // compute the digital signature of Dest.fContent
   Dest.fContent.ComputeHash(hash);
@@ -4377,7 +4377,8 @@ begin
       // store first the certificates
       n := length(fItems);
       if n > 65535 then
-        raise EEccException.Create('Too many items in Chain');
+        EEccException.RaiseUtf8(
+          '%.SaveToBinary: Too many certificates (%) in Chain', [self, n]);
       st.WriteBuffer(n, 2);
       for i := 0 to n - 1 do
       begin
@@ -4389,7 +4390,8 @@ begin
       // then the revocation serials
       n := length(fCrl);
       if n > 65535 then
-        raise EEccException.Create('Too many CRLs in Chain');
+        EEccException.RaiseUtf8(
+          '%.SaveToBinary: Too many CRLs (%) in Chain', [self, n]);
       st.WriteBuffer(n, 2);
       for i := 0 to n - 1 do
         fCrl[i].SaveToStream(st);

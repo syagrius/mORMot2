@@ -1212,7 +1212,7 @@ var
   priv: THash256Rec;
   pub: TEccPoint;
   tries: integer;
-  sha: TSha256;
+  kdf: THmacSha256;
 begin
   result := false;
   tries := MAX_TRIES;
@@ -1220,14 +1220,15 @@ begin
     dec(tries);
     if tries = 0 then
       exit;
-    // generate a 256-bit secret key using TAesPrng + OS and SHA-256 diffusion
-    sha.Init;
-    sha.Update(@tries, SizeOf(tries));
-    TAesPrng.Fill(@pub, SizeOf(pub));  // 512-bit from our AES-PRNG
-    sha.Update(@pub, SizeOf(pub));
-    XorOSEntropy(THash512Rec(pub));    // 512-bit from OS entropy sources
-    sha.Update(@pub, SizeOf(pub));
-    sha.Final(priv.b);                 // diffused with three SHA-256 rounds
+    // generate a 256-bit secret key with HMAC-SHA-256 over random sources
+    // - keys may be ephemeral so entropy sources should better be fast
+    kdf.Init(@StartupEntropy, SizeOf(StartupEntropy));
+    kdf.Update(@tries, SizeOf(tries)); // salt
+    TAesPrng.Main.Fill(priv.b); // 256-bit from our AES-PRNG (max key size)
+    kdf.Update(@priv, SizeOf(priv));
+    _Fill256FromOs(priv);       // 256-bit padding from fast OS entropy sources
+    kdf.Update(@priv, SizeOf(priv));
+    kdf.Done(priv.b);           // apply the HMAC key derivation function
     if _isZero(priv) or
        _equals(priv, _1) or
        _equals(priv, _11) then
@@ -1335,7 +1336,7 @@ var
   product: TEccPoint;
   rnd: THash256Rec;
 begin
-  TAesPrng.Fill(rnd.b); // no SHA-256 diffusion needed if ephemeral
+  TAesPrng.Main.Fill(rnd.b); // no SHA-256 diffusion needed if ephemeral
   _bswap256(@priv, @PrivateKey);
   EccPointMult(product, TEccPoint(PublicPoint), priv, @rnd);
   _bswap256(@Secret, @product.x);
@@ -1427,7 +1428,7 @@ begin
   tries := 0;
   repeat
     inc(tries);
-    TAesPrng.Fill(k.b);
+    TAesPrng.Main.Fill(k.b);
     if tries >= MAX_TRIES then
       exit; // the random generator seems broken
     if _isZero(k) or
