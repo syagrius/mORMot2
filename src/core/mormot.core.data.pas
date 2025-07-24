@@ -535,9 +535,6 @@ type
   TSynObjectListSorted = class(TSynObjectListLocked)
   protected
     fCompare: TOnObjectCompare;
-    // returns TRUE and the index of existing Item, or FALSE and the index
-    // where the Item is to be inserted so that the array remains sorted
-    function Locate(item: pointer; out index: PtrInt): boolean;
   public
     /// initialize the object list to be sorted with the supplied function
     constructor Create(const aCompare: TOnObjectCompare;
@@ -550,6 +547,9 @@ type
     // - this overriden version won't search for the item pointer itself,
     // but will use the Compare() function until it is 0
     function IndexOf(item: pointer): PtrInt; override;
+    /// returns TRUE and the index of existing Item, or FALSE and the index
+    // where the Item is to be inserted so that the array remains sorted
+    function Locate(item: pointer; out index: PtrInt): boolean;
     /// fast retrieve one item in the list using O(log(n)) binary search
     // - supplied item should have enough information for fCompare to work
     function Find(item: TObject): TObject;
@@ -1098,42 +1098,42 @@ type
   /// internal enumeration used to specify some standard arrays
   // - mORMot 1.18 did have two serialization engines - we unified it
   // - defined only for backward compatible code; use TRttiParserType instead
-  TDynArrayKind = TRttiParserType;
+  TDynArrayKind  = TRttiParserType;
   TDynArrayKinds = TRttiParserTypes;
 
 const
   /// deprecated TDynArrayKind enumerate mapping
   // - defined only for backward compatible code; use TRttiParserType instead
-  djNone = ptNone;
-  djboolean = ptboolean;
-  djByte = ptByte;
-  djWord = ptWord;
-  djInteger = ptInteger;
-  djCardinal = ptCardinal;
-  djSingle = ptSingle;
-  djInt64 = ptInt64;
-  djQWord = ptQWord;
-  djDouble = ptDouble;
-  djCurrency = ptCurrency;
-  djTimeLog = ptTimeLog;
-  djDateTime = ptDateTime;
-  djDateTimeMS = ptDateTimeMS;
-  djRawUtf8 = ptRawUtf8;
-  djRawJson = ptRawJson;
-  djWinAnsi = ptWinAnsi;
-  djString = ptString;
-  djRawByteString = ptRawByteString;
-  djWideString = ptWideString;
-  djSynUnicode = ptSynUnicode;
-  djHash128 = ptHash128;
-  djHash256 = ptHash256;
-  djHash512 = ptHash512;
-  djVariant = ptVariant;
-  djCustom = ptCustom;
-  djPointer = ptPtrInt;
-  djObject = ptPtrInt;
+  djNone           = ptNone;
+  djboolean        = ptboolean;
+  djByte           = ptByte;
+  djWord           = ptWord;
+  djInteger        = ptInteger;
+  djCardinal       = ptCardinal;
+  djSingle         = ptSingle;
+  djInt64          = ptInt64;
+  djQWord          = ptQWord;
+  djDouble         = ptDouble;
+  djCurrency       = ptCurrency;
+  djTimeLog        = ptTimeLog;
+  djDateTime       = ptDateTime;
+  djDateTimeMS     = ptDateTimeMS;
+  djRawUtf8        = ptRawUtf8;
+  djRawJson        = ptRawJson;
+  djWinAnsi        = ptWinAnsi;
+  djString         = ptString;
+  djRawByteString  = ptRawByteString;
+  djWideString     = ptWideString;
+  djSynUnicode     = ptSynUnicode;
+  djHash128        = ptHash128;
+  djHash256        = ptHash256;
+  djHash512        = ptHash512;
+  djVariant        = ptVariant;
+  djCustom         = ptCustom;
+  djPointer        = ptPtrInt;
+  djObject         = ptPtrInt;
   djUnmanagedTypes = ptUnmanagedTypes;
-  djStringTypes = ptStringTypes;
+  djStringTypes    = ptStringTypes;
 
 {$endif PUREMORMOT2}
 
