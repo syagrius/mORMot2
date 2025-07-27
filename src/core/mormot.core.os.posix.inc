@@ -3575,11 +3575,14 @@ begin
   {$ifdef OSDARWIN} // OSX has no clock_gettime() API
   e.d0 := mach_absolute_time;
   e.d1 := mach_continuous_time;
+  crcblock(@e.l, @StartupEntropy);
+  inc(StartupEntropy.Lo, e.d1); // StartupEntropy is a bit weak at startup
+  dec(StartupEntropy.Hi, e.d0);
   {$else}
   if SizeOf(timespec) <= SizeOf(e) then // paranoid (max 128-bit) -> no-op
     clock_gettime(CLOCK_MONOTONIC_FAST, @e); // fast VDSO call
-  {$endif OSDARWIN}
   crcblock(@e.l, @StartupEntropy); // 128-bit entropy over nanosecond timestamp
+  {$endif OSDARWIN}
   {$ifdef OSLINUX}
   if LinuxGetRandom(@e.h, SizeOf(e.h)) then // 128-bit crypto-PRNG in 1 syscall
     exit;
@@ -3606,15 +3609,13 @@ begin
   if Len <= 0 then
     exit;
   // retrieve up to MAXFROMOS bytes max from OS
-  rd := MAXFROMOS;
-  if Len < MAXFROMOS then
-    rd := Len;
+  rd := MinPtrInt(Len, MAXFROMOS);
   {$ifdef OSLINUX} // a single syscall to rule them all on Linux
   result := LinuxGetRandom(Buffer, rd);
   if not result then
   {$endif OSLINUX}
   begin
-    dev := -1;
+    dev := 0;
     if not __NoURandom then
       // /dev/urandom non blocking on Linux, but may block at boot time on BSD
       dev := FileOpenSequentialRead('/dev/urandom');
@@ -4806,6 +4807,7 @@ var
   release: RawUtf8;
   procid, phyid, phyndx: integer;
   phy: TIntegerDynArray;
+  auxv: PPtrUInt;
   {$ifdef OSLINUX}
   dist: RawUtf8;
   SR: TSearchRec;
@@ -5079,7 +5081,7 @@ begin
                          (mach_timeinfo.Denom = 1);
   PInt64Array(@uts)[0] := mach_absolute_time;
   PInt64Array(@uts)[1] := PInt64(@mach_timecoeff)^;
-  crc32c128(@StartupEntropy, @uts, 16); // nanoseconds timestamp + coeff
+  crcblock(@StartupEntropy, @uts); // nanoseconds timestamp + coeff
   {$else}
   // try Linux kernel 2.6.32+ or FreeBSD 8.1+ fastest clocks
   tpfail := 0;
@@ -5137,6 +5139,21 @@ begin
   {$endif OSLINUX}
   {$endif CPUX64}
   {$endif OSDARWIN}
+  {$ifdef OSLINUXANDROID}
+  // add entropy from auxiliary vectors - https://lwn.net/Articles/519085/
+  auxv := pointer(system.envp);
+  while auxv^ <> 0 do
+    inc(auxv);
+  inc(auxv); // set by kernel's ELF binary loader after all env PPAnsiChar
+  P := pointer(auxv);
+  while auxv[0] <> 0 do
+  begin
+    if auxv[0] = 25 then // AT_RANDOM: 16 random bytes (used for stacks canary)
+      XorMemory(StartupEntropy, PHash128Rec(auxv[1])^);
+    auxv := @auxv[2];
+  end;
+  crc32c128(@StartupEntropy, P, PAnsiChar(auxv) - P); // include all auxv info
+  {$endif OSLINUXANDROID}
 end;
 
 procedure FinalizeSpecificUnit;

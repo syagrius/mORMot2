@@ -11032,12 +11032,13 @@ var
   b, c: byte;
   tab: PAnsiCharToByte; // higher number of registers x86_64 and arm/aarch64
 begin
-  if (Hex <> nil) and
-     (Bin <> nil) and
-     (BinBytes > 0) then
-  repeat
-    tab := @ConvertHexToBin;
-    inc(Bin, BinBytes - 1); // display = reverse order
+  result := false;
+  if (Hex = nil) or
+     (Bin = nil) then
+    exit;
+  tab := @ConvertHexToBin;
+  inc(Bin, BinBytes - 1); // display = reverse order
+  if BinBytes > 0 then
     repeat
       c := tab[Hex[0]];
       if c = 255 then
@@ -11052,17 +11053,14 @@ begin
       inc(Hex, 2);
       dec(BinBytes);
     until BinBytes = 0;
-    result := true;
-    exit;
-  until false;
-  result := false; // return false if any invalid char
+  result := true;
 end;
 
 function HexDisplayToCardinal(Hex: PAnsiChar; out aValue: cardinal): boolean;
 var
   v, b, err: cardinal;
   tab: PAnsiCharToByte;
-begin // unrolled version for x86_64 and arm/aarch64
+begin // unrolled version for x86_64 and arm/aarch64 - used mainly in REST auth
   tab := @ConvertHexToBin;
   err := 255;
   repeat

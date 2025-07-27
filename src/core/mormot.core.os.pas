@@ -8683,6 +8683,7 @@ begin
     ProgramFileName := ParamStr(0); // RTL seems just fine here
     dt := FileAgeToDateTime(ProgramFileName);
     {$else}
+    dt := 0;
     ProgramFileName := GetExecutableName(@InitializeProcessInfo);
     if ProgramFileName <> '' then
     begin
@@ -8711,10 +8712,7 @@ begin
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
   crc32c128(@StartupEntropy, @CpuCache, SizeOf(CpuCache)); // some more entropy
-  crc32c128(@StartupEntropy, @Executable.Hash, SizeOf(Executable.Hash));
-  {$ifdef CPUINTELARM}
-  crc32c128(@StartupEntropy, @CpuFeatures, SizeOf(CpuFeatures));
-  {$endif CPUINTELARM}
+  crcblock(@StartupEntropy, @Executable.Hash);
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);

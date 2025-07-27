@@ -855,7 +855,7 @@ type
     fID: cardinal; // should be the first field for LockedSessionFind()
     fTimeOutTix: cardinal;
     fTimeOutShr10: cardinal;
-    fLastTimestamp: cardinal;   // client-side generated timestamp
+    fLastClientTimestamp: cardinal;   // client-side generated timestamp
     fPrivateSaltHash: cardinal; // pre-computed 32-bit seed for signature
     fRemoteOsVersion: TOperatingSystemVersion; // stored as 32-bit
     fUser: TAuthUser;
@@ -1837,7 +1837,8 @@ type
     // - returns nil if not found, or fill aContext.User/Group values if matchs
     // - this method will also check for outdated sessions, and delete them
     // - this method is not thread-safe: caller should use Sessions.Safe.ReadOnlyLock
-    function LockedSessionAccess(Ctxt: TRestServerUriContext): TAuthSession;
+    function LockedSessionAccess(Ctxt: TRestServerUriContext;
+      FullyAuthenticated: boolean = true): TAuthSession;
     /// delete a session from its index in Sessions[]
     // - will perform any needed clean-up, and log the event
     // - this method is not thread-safe: caller should use Sessions.Safe.WriteLock
@@ -4708,9 +4709,10 @@ begin
       while par^ = '+' do
         inc(par); // ignore trailing spaces
       if (par^ = '[') or
-         IdemPChar(par, '%5B') then
+         ((PCardinal(par)^ and $00dfffff) =
+           ord('%') + ord('5') shl 8 + ord('B') shl 16) then
         // as json array (input is e.g. '+%5B...' for ' [...')
-        UrlDecodeVar(par, StrLen(par), RawUtf8(fCall^.InBody), {name=}false)
+        UrlDecodeVar(par, StrLen(par), RawUtf8(fCall^.InBody), {space=}' ')
       else
       begin
         // or as a list of parameters (input is 'Param1=Value1&Param2=Value2...')
@@ -4721,7 +4723,7 @@ begin
       end;
     end;
   end;
-  fServiceParameters := pointer(fCall^.InBody);
+  fServiceParameters    := pointer(fCall^.InBody);
   fServiceParametersLen := length(fCall^.InBody);
   // now Service, ServiceParameters, ServiceMethod(Index) are set
   InternalExecuteSoaByInterface;
@@ -5180,11 +5182,11 @@ begin
      (reslen + (19 + 8 + 8 + 8) > PStrLen(P - _STRLEN)^) or
      not HexDisplayToCardinal(P + reslen + 19, Ctxt.fSession) then
     exit;
-  result := fServer.LockedSessionAccess(Ctxt); // retrieve Ctxt.Session ID
+  result := fServer.LockedSessionAccess(Ctxt, {done=}false); // retrieve Ctxt.Session ID
   if result = nil then
     exit; // unknown Session
   P := @P[reslen + (19 + 8)]; // points to Hexa8(Timestamp)
-  minticks := result.fLastTimestamp - fTimestampCoherencyTicks;
+  minticks := result.fLastClientTimestamp - fTimestampCoherencyTicks;
   if HexDisplayToCardinal(P, ts) and
      (fNoTimestampCoherencyCheck or
       (integer(minticks) < 0) or // <0 just after computer startup
@@ -5196,8 +5198,9 @@ begin
        ({%H-}sign = expectedsign) then
     begin
       if not fNoTimestampCoherencyCheck then
-        if ts > result.fLastTimestamp then
-          result.fLastTimestamp := ts;
+        if ts > result.fLastClientTimestamp then
+          result.fLastClientTimestamp := ts;
+      Ctxt.SessionAssign(result); // set TimeOutTix and fill Ctxt.Session*
       exit; // success
     end
     else if Assigned(Ctxt.fLog) and
@@ -5326,31 +5329,49 @@ end;
 
 { TRestServerAuthenticationDefault }
 
+const
+  _NIL: pointer = nil; // so that PRawUtf8^ = ''
+
 function TRestServerAuthenticationDefault.Auth(Ctxt: TRestServerUriContext;
   const aUserName: RawUtf8): boolean;
 var
-  nonce: PRawUtf8;
+  nonce, pwd: PRawUtf8;
+  os: TOperatingSystemVersion;
+  usr: TAuthUser;
 
-  procedure DoAuthWithNonce;
-  var
-    pwd: RawUtf8;
-    usr: TAuthUser;
-    os: TOperatingSystemVersion;
+  procedure DoAuthReturnNonce;
   begin
+    Ctxt.Results([CurrentNonce(Ctxt)]);
+  end;
+
+begin
+  result := aUserName <> '';
+  if not result then // let's try another TRestServerAuthentication class
+    exit;
+  result := true;
+  if AuthSessionRelease(Ctxt, aUserName) then
+    exit;
+  nonce := Ctxt.GetInputValue('ClientNonce');
+  if (nonce <> nil) and
+     (length(nonce^) > 32) then
+  begin
+    // GET ModelRoot/auth?UserName=...&PassWord=...&ClientNonce=... -> handshaking
     usr := GetUser(Ctxt, aUserName);
     if usr <> nil then
     try
-      // decode TRestClientAuthenticationDefault.ClientComputeSessionKey nonce
-      if (length(nonce^) = (SizeOf(os) + SizeOf(TAesBlock)) * 2 + 1) and
-         (nonce^[9] = '_') and
-         HexDisplayToCardinal(pointer(nonce^), PCardinal(@os)^) and
-         (os.os <= high(os.os)) then
-        Ctxt.fSessionOS := os;
       // check if match TRestClientUri.SetUser() algorithm
-      Ctxt.RetrieveInputUtf8OrVoid('Password', pwd);
-      if CheckPassword(Ctxt, usr, nonce^, pwd) then
+      pwd := Ctxt.GetInputValue('Password');
+      if pwd = nil then
+        pwd := @_NIL;
+      if CheckPassword(Ctxt, usr, nonce^, pwd^) then
       begin
         Ctxt.InputRemoveFromUri('PASSWORD='); // anti-forensic
+        // decode TRestClientAuthenticationDefault.ClientComputeSessionKey nonce
+        if (length(nonce^) = (SizeOf(os) + SizeOf(TAesBlock)) * 2 + 1) and
+           (nonce^[9] = '_') and
+           HexDisplayToCardinal(pointer(nonce^), PCardinal(@os)^) and
+           (os.os <= high(os.os)) then
+          Ctxt.fSessionOS := os; // the nonce included some hidden client info
         // setup a new TAuthSession
         // SessionCreate would call Ctxt.AuthenticationFailed on error
         SessionCreate(Ctxt, usr);
@@ -5362,29 +5383,10 @@ var
     end
     else
       Ctxt.AuthenticationFailed(afUnknownUser);
-  end;
-
-  procedure DoAuthReturnNonce;
-  begin
-    Ctxt.Results([CurrentNonce(Ctxt)]);
-  end;
-
-begin
-  result := true;
-  if AuthSessionRelease(Ctxt, aUserName) then
-    exit;
-  nonce := Ctxt.GetInputValue('ClientNonce');
-  if (aUserName <> '') and
-     (nonce <> nil) and
-     (length(nonce^) > 32) then
-    // GET ModelRoot/auth?UserName=...&PassWord=...&ClientNonce=... -> handshaking
-    DoAuthWithNonce
-  else if aUserName <> '' then
-    // only UserName=... -> return hexadecimal nonce valid for 4.3 minutes
-    DoAuthReturnNonce
+  end
   else
-    // parameters does not match any expected layout -> try next authentication
-    result := false;
+    // only UserName=... -> return hexadecimal nonce valid for 4.3 minutes
+    DoAuthReturnNonce;
 end;
 
 function TRestServerAuthenticationDefault.CheckPassword(
@@ -7203,7 +7205,7 @@ begin
     for i := fSessions.Count - 1 downto 0 do // backward for deletion
     begin
       dec(a);
-      if tix > a^.TimeOutTix then
+      if tix > a^.fTimeOutTix then
       begin
         if result = 0 then
         begin
@@ -7225,7 +7227,8 @@ begin
   end;
 end;
 
-function TRestServer.LockedSessionAccess(Ctxt: TRestServerUriContext): TAuthSession;
+function TRestServer.LockedSessionAccess(Ctxt: TRestServerUriContext;
+  FullyAuthenticated: boolean): TAuthSession;
 var
   ndx: PtrInt;
 begin
@@ -7252,7 +7255,8 @@ begin
         exit;
       end;
     // found the session: assign it to the request Ctxt
-    Ctxt.SessionAssign(result);
+    if FullyAuthenticated then
+      Ctxt.SessionAssign(result);
   end
   else
     result := nil;
@@ -7273,7 +7277,7 @@ begin
        (s.User = nil) then
       exit;
     result := s.User.CreateCopy as fAuthUserClass;
-    result.GroupRights := pointer(s.User.GroupRights.IDValue); // as TID
+    result.GroupRights := pointer(PtrUInt(s.User.GroupRights.IDValue)); // as TID
   finally
     fSessions.Safe.ReadOnlyUnLock;
   end;
@@ -7873,9 +7877,6 @@ begin
   end;
 end;
 
-const
-  _NIL: pointer = nil; // so that PRawUtf8^ = ''
-
 procedure TRestServer.Auth(Ctxt: TRestServerUriContext);
 var
   n: integer;
@@ -7905,24 +7906,31 @@ end;
 
 procedure TRestServer.Timestamp(Ctxt: TRestServerUriContext);
 var
-  info: TDocVariantData;
-  tix: cardinal;
+  tix: Int64;
+
+  procedure ComputeInfo;
+  var
+    info: TDocVariantData;
+  begin
+    fTimestampInfoCacheTix := tix shr 12;
+    {%H-}info.InitFast;
+    InternalInfo(Ctxt, info);
+    fSessions.Safe.WriteLock;
+    fTimestampInfoCache := info.ToHumanJson;
+    fSessions.Safe.WriteUnlock;
+  end;
+
 begin
+  tix := Ctxt.TickCount64;
   if PropNameEquals(Ctxt.fUriMethodPath, 'info') and
      not (rsoTimestampInfoUriDisable in fOptions) then
   begin
-    tix := Ctxt.TickCount64 shr 12; // cache refreshed every 4.096 seconds
-    if tix <> fTimestampInfoCacheTix then
-    begin
-      fTimestampInfoCacheTix := tix;
-      {%H-}info.InitFast;
-      InternalInfo(Ctxt, info);
-      fTimestampInfoCache := info.ToHumanJson;
-    end;
+    if tix shr 12 <> fTimestampInfoCacheTix then
+      ComputeInfo; // cache refreshed every 4.096 seconds
     Ctxt.Returns(fTimestampInfoCache);
   end
   else
-    Ctxt.Returns(Int64ToUtf8(GetServerTimestamp(Ctxt.TickCount64)),
+    Ctxt.Returns(Int64ToUtf8(GetServerTimestamp(tix)),
       HTTP_SUCCESS, TEXT_CONTENT_TYPE_HEADER);
 end;
 
