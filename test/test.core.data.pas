@@ -462,130 +462,130 @@ begin
   Check(boolean(v));
   Check(VariantTypeName(v)^ = 'Boolean');
   GetVariantFromJsonField('0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 0);
   GetVariantFromJsonField('123', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(v = 123);
   GetVariantFromJsonField('0123', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   GetVariantFromJsonField('-', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '-');
   GetVariantFromJsonField('-e', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '-e');
   GetVariantFromJsonField('-0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(@vd)^ = 'Integer');
   Check(v = 0);
   GetVariantFromJsonField('-123', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(v = -123);
   GetVariantFromJsonField('-0123', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   GetVariantFromJsonField('123456789', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 123456789);
   GetVariantFromJsonField('9876543210', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(VariantTypeName(v)^ = 'Int64');
   Check(v = 9876543210);
   GetVariantFromJsonField('12345678901', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 12345678901);
   GetVariantFromJsonField('12345678901234567', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   GetVariantFromJsonField('123456789012345678', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 123456789012345678);
   GetVariantFromJsonField('1234567890123456789', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 1234567890123456789);
   GetVariantFromJsonField('12345678901234567890', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(vd.VDouble, 12345678901234567890.0, 0);
   GetVariantFromJsonField('12345678901234567890', False, v, nil, false);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('0.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(VariantTypeName(v)^ = 'Currency');
   Check(v = 0.123);
   GetVariantFromJsonField('-0.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -0.123);
   GetVariantFromJsonField('-123.1', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.1);
   GetVariantFromJsonField('-123.12', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.12);
   GetVariantFromJsonField('-123.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.123);
   GetVariantFromJsonField('123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = 123.1234);
   GetVariantFromJsonField('-123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.1234);
   GetVariantFromJsonField('0123.1234', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('-0123.1234', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('-123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   GetVariantFromJsonField('123.12345', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('123.12345', False, v, nil, {double=}true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, 123.12345);
   GetVariantFromJsonField('-123.12345', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -123.12345);
   GetVariantFromJsonField('-1.123e12', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1.123e12);
   GetVariantFromJsonField('-123.123e-2', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(v, -123.123e-2);
   GetVariantFromJsonField('-123.123ee2', False, v, nil, true);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   Check(v = '-123.123ee2');
   GetVariantFromJsonField('1e', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '1e');
   GetVariantFromJsonField('1e0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 1);
   GetVariantFromJsonField('1-123.12', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '1-123.12');
   GetVariantFromJsonField('123.', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.');
   GetVariantFromJsonField('123.abc', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.abc');
   GetVariantFromJsonField('123.1abc', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.1abc');
   GetVariantFromJsonField('123.12a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.12a');
   GetVariantFromJsonField('123.123a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.123a');
   GetVariantFromJsonField('123.1234a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.1234a');
   Check(VariantToDateTime('2016', dt));
   CheckSame(dt, 42370);
@@ -610,12 +610,12 @@ begin
   {$endif FPC}
   info.Json := nil;
   JsonToAnyVariant(v, info, nil, false);
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson('');
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   v := VariantLoadJson('null');
-  Check(vd.VType = varNull);
+  CheckEqual(vd.VType, varNull);
   Check(VariantTypeName(v)^ = 'Null');
   v := VariantLoadJson('false');
   Check(not boolean(v));
@@ -624,36 +624,36 @@ begin
   Check(VariantTypeName(v)^ = 'Boolean');
   Check(boolean(v));
   v := VariantLoadJson('invalid');
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   Check(VariantLoadJson(v, 'true'));
   Check(boolean(v));
   Check(not VariantLoadJson(v, 'invalid'));
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson('0');
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   v := VariantLoadJson('123456789012345678');
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(VariantTypeName(v)^ = 'Int64');
   Check(v = 123456789012345678);
   v := VariantLoadJson('123.1234');
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(VariantTypeName(v)^ = 'Currency');
   CheckSame(v, 123.1234);
   v := VariantLoadJson('1E300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(v, 1e300);
   v := VariantLoadJson('-1E300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1e300);
   v := VariantLoadJson('-1E-300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1e-300);
   v := VariantLoadJson('1E-300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, 1e-300);
   v := VariantLoadJson('[]', @JSON_[mFast]);
   Check(VariantTypeName(v)^ = 'DocVariant');
@@ -674,10 +674,10 @@ begin
   Check(v._count = 2);
   Check(VariantTypeName(v)^ = 'DocVariant');
   v := VariantLoadJson('{"invalid":', @JSON_[mFast]);
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson(' "toto\r\ntoto"');
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   Check(v = 'toto'#$D#$A'toto');
 end;
@@ -1029,7 +1029,7 @@ begin
       Minor := GetNextItemCardinal(P);
       Release := GetNextItemCardinal(P);
       Build := GetNextItemCardinal(P);
-      Context.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := P;
+      Context.Json := P;
       Main := Context.ParseString;
       Detailed := Context.ParseString;
       Context.ParseEndOfObject;
@@ -4023,8 +4023,60 @@ begin
   {$endif JSONBENCHMARK_FPJSON}
 end;
 
+const
+  HTML_UNESCAPE: array[1 .. 104] of string[6] = (
+    'amp', 'lt', 'gt', 'quot', 'rsquo', {6=}'ndash', {7=}'trade', {8=}'hellip',
+    'nbsp', 'iexcl', 'cent', 'pound', 'curren', 'yen', 'brvbar', 'sect', 'uml',
+    'copy', 'ordf', 'laquo', 'not', 'shy', 'reg', 'macr', 'deg', 'plusmn',
+    'sup2', 'sup3', 'acute', 'micro', 'para', 'middot', 'cedil', 'sup1', 'ordm',
+    'raquo', 'frac14', 'frac12', 'frac34', 'iquest', 'Agrave', 'Aacute', 'Acirc',
+    'Atilde', 'Auml', 'Aring', 'AElig', 'Ccedil', 'Egrave', 'Eacute', 'Ecirc',
+    'Euml', 'Igrave', 'Iacute', 'Icirc', 'Iuml', 'ETH', 'Ntilde', 'Ograve',
+    'Oacute', 'Ocirc', 'Otilde', 'Ouml', 'times', 'Oslash', 'Ugrave', 'Uacute',
+    'Ucirc', 'Uuml', 'Yacute', 'THORN', 'szlig', 'agrave', 'aacute', 'acirc',
+    'atilde', 'auml', 'aring', 'aelig', 'ccedil', 'egrave', 'eacute', 'ecirc',
+    'euml', 'igrave', 'iacute', 'icirc', 'iuml', 'eth', 'ntilde', 'ograve',
+    'oacute', 'ocirc', 'otilde', 'ouml', 'divide', 'oslash', 'ugrave',
+    'uacute', 'ucirc', 'uuml', 'yacute', 'thorn', 'yuml');
+  HTML_UNESCAPED: array[1 .. 6] of RawUtf8 = (
+    '&', '<', '>', '"', '''', '-');
+
 procedure TTestCoreProcess.WikiMarkdownToHtml;
+var
+  i: PtrInt;
+  c: cardinal;
+  s, exp: RawUtf8;
 begin
+  // html escape and parsing
+  CheckEqual(HtmlUnescape(''), '');
+  CheckEqual(HtmlUnescape('test'), 'test');
+  CheckEqual(HtmlUnescape('test&'), 'test&');
+  CheckEqual(HtmlUnescape('&test'), '&test');
+  CheckEqual(HtmlUnescape('te&st'), 'te&st');
+  for i := 1 to high(HTML_UNESCAPE) do
+  begin
+    if i <= 6 then
+      exp := HTML_UNESCAPED[i]
+    else if i = 8 then
+      exp := '...'
+    else
+    begin
+      if i = 7 then
+        c := 153
+      else if i = 9 then
+        c := 32
+      else
+        c := i + ($00a0 - 9);
+      RawUcs4ToUtf8(@c, 1, exp);
+    end;
+    Make(['&', HTML_UNESCAPE[i], ';'], s);
+    CheckEqual(HtmlUnescape(s), exp);
+    CheckEqual(HtmlUnescape(Join(['abc', s])),       Join(['abc', exp]));
+    CheckEqual(HtmlUnescape(Join([s, 'abc'])),       Join([exp, 'abc']));
+    CheckEqual(HtmlUnescape(Join(['a&bc', s])),      Join(['a&bc', exp]));
+    CheckEqual(HtmlUnescape(Join(['ab&amp;c', s])),  Join(['ab&c', exp]));
+    CheckEqual(HtmlUnescape(Join(['ab&none;c', s])), Join(['ab&none;c', exp]));
+  end;
   // wiki
   CheckEqual(HtmlEscapeWiki('test'), '<p>test</p>');
   CheckEqual(HtmlEscapeWiki('te<b>st'), '<p>te&lt;b&gt;st</p>');
@@ -5125,6 +5177,17 @@ var
   end;
 
 begin
+  CheckEqual(SizeOf(TDecimal128), 16);
+  CheckEqual(ord(betEof), $00);
+  CheckEqual(ord(betInt64), $12);
+  CheckEqual(ord(betDecimal128), $13);
+  CheckEqual(ord(bbtGeneric), $00);
+  CheckEqual(ord(bbtMD5), $05);
+  CheckEqual(ord(bbtEncryptedBsonValue), $06);
+  CheckEqual(ord(bbtCompressedBsonColumn), $07);
+  CheckEqual(ord(bbtUser), $80);
+  CheckEqual(SizeOf(TBsonObjectID), 12);
+  CheckEqual(SizeOf(TBsonVariantData), SizeOf(variant));
   Check(@PBsonVariantData(nil)^.VBlob = @PVarData(nil)^.VAny);
   Check(@PBsonVariantData(nil)^.VText = @PVarData(nil)^.VAny);
   // see http://docs.mongodb.org/manual/reference/object-id
@@ -5133,7 +5196,8 @@ begin
   u := oid.ToText;
   CheckEqual(u, BSONID);
   o := ObjectID('507f191e810c19729de860ea');
-  Check(TVarData(o).VType = BsonVariantType.VarType);
+  CheckEqual(TVarData(o).VType, BsonVariantVType);
+  CheckEqual(BsonVariantVType, BsonVariantType.VarType);
   u := ToUtf8(string(o));
   Check(u = BSONID, 'variant bsonid to string');
   d2 := Iso8601ToDateTime('2012-10-17T20:46:22');
@@ -5270,7 +5334,8 @@ begin
   CheckElemIsBsonArray;
   Check(not BsonParseNextElement(b, name, value));
   o := BsonDocumentToDoc(bsonDat);
-  Check(TVarData(o).VType = DocVariantType.VarType);
+  CheckEqual(TVarData(o).VType, DocVariantVType);
+  CheckEqual(DocVariantVType, DocVariantType.VarType);
   Check(DocVariantType.IsOfType(o));
   Check(o.Name(0) = 'BSON');
   Check(o._(0)._Kind = ord(dvArray));
@@ -6817,7 +6882,7 @@ end;
 
 type
   TOne = record
-    head: TLockedListOne;
+    head: TLockedListOne; // first field - as required by TLockedList
     data1, data2: integer;
   end;
   POne = ^TOne;
@@ -7726,11 +7791,6 @@ begin
   end;
 end;
 
-const
-  // a void .zip file is just a void last header (22 bytes)
-  MINIM_ZIP: TLastHeader = (
-    signature: $06054b50{%H-});
-
 procedure TTestCoreCompression.ZipFormat;
 var
   FN, FN2: TFileName;
@@ -7827,9 +7887,12 @@ var
   i, m: integer;
   mem: QWord;
   json, deleted: TStringDynArray;
+  minim: TLastHeader; // a void .zip file is just a void last header (22 bytes)
 begin
   FN := WorkDir + 'void.zip';
-  Check(FileFromBuffer(@MINIM_ZIP, SizeOf(MINIM_ZIP), fn));
+  FillCharFast(minim, SizeOf(minim), 0);
+  minim.signature := $06054b50; // = PK#5#6 .zip file header - all other = 0
+  Check(FileFromBuffer(@minim, SizeOf(minim), fn));
   try
     with TZipRead.Create(FN) do
       try
@@ -7843,7 +7906,7 @@ begin
   end;
   Check(DeleteFile(FN));
   TZipWrite.Create(FN).Free;
-  CheckEqual(FileSize(FN), SizeOf(MINIM_ZIP), 'TZipWrite void .zip');
+  CheckEqual(FileSize(FN), SizeOf(minim), 'TZipWrite void .zip');
   Check(DeleteFile(FN));
   // onprog := TStreamRedirect.ProgressInfoToConsole;
   onprog := TSynLog.ProgressInfo;

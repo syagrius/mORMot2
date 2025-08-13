@@ -150,6 +150,7 @@ type
     fPartials: TSynMustachePartials;
     fTempProcessHelper: TVariantDynArray;
     fOnStringTranslate: TOnStringTranslate;
+    fOnUtf8Translate: TOnUtf8Translate;
     fOwner: TSynMustache;
     // some variant support is needed for the helpers
     function ProcessHelper(const ValueName: RawUtf8; space, helper: PtrInt;
@@ -184,9 +185,12 @@ type
     /// access to the custom Partials associated with this execution context
     property Partials: TSynMustachePartials
       read fPartials write fPartials;
-    /// access to the {{"English text}} translation callback
+    /// access to the {{"English text}} translation string callback
     property OnStringTranslate: TOnStringTranslate
       read fOnStringTranslate write fOnStringTranslate;
+    /// access to the {{"English text}} translation RawUtf8 callback
+    property OnUtf8Translate: TOnUtf8Translate
+      read fOnUtf8Translate write fOnUtf8Translate;
     /// read-only access to the associated text writer instance
     property Writer: TJsonWriter
       read fWriter;
@@ -604,7 +608,7 @@ type
 
 const
   /// Mustache-friendly JSON Serialization Options
-  // - as used e.g. from mormot.rest.mvc Data Context from Cookies
+  // - as used e.g. from mormot.core.mvc Data Context from Cookies
   TEXTWRITEROPTIONS_MUSTACHE =
      [twoForceJsonExtended,
       twoEnumSetsAsBooleanInRecord,
@@ -651,15 +655,25 @@ end;
 procedure TSynMustacheContext.TranslateBlock(Text: PUtf8Char; TextLen: integer);
 var
   s: string;
+  u: RawUtf8;
 begin
-  if Assigned(OnStringTranslate) then
+  if Assigned(OnUtf8Translate) then
+  begin
+    OnUtf8Translate(Text, TextLen, u);
+    if u <> '' then
+    begin
+      fWriter.AddString(u);
+      exit;
+    end;
+  end
+  else if Assigned(OnStringTranslate) then
   begin
     Utf8DecodeToString(Text, TextLen, s);
     OnStringTranslate(s);
     fWriter.AddNoJsonEscapeString(s);
-  end
-  else
-    fWriter.AddNoJsonEscape(Text, TextLen);
+    exit;
+  end;
+  fWriter.AddNoJsonEscape(Text, TextLen);
 end;
 
 function TSynMustacheContext.GetVariantFromContext(
@@ -675,7 +689,7 @@ begin
     VariantLoadJson(result, ValueName, @JSON_[mFast])
   else if fGetVarDataFromContextNeedsFree then
   begin
-    if TVarData(result).VType <> varEmpty then
+    if TSynVarData(result).VType <> varEmpty then
       VarClearProc(TVarData(result));
     GetVarDataFromContext(-1, ValueName, TVarData(result)); // set directly
   end
@@ -945,9 +959,12 @@ end;
 
 function IsFalseySimpleVariant(VType: cardinal; const Value: TVarData): boolean;
   {$ifdef HASINLINE} inline; {$endif}
+var
+  vt: cardinal;
 begin
-  result := (VType <= varNull) or
-            ((VType = varBoolean) and
+  vt := VType;
+  result := (vt <= varNull) or
+            ((vt = varBoolean) and
              (not Value.VBoolean)); // empty/null or false are falsey values
   // note: '' or 0 are NOT falsey - https://github.com/mustache/spec/issues/28
   // TL&WR: "official" solution is to use an explicit boolean value in the data
@@ -1398,12 +1415,12 @@ begin
             // tag starts on a new line -> check if ends on the same line
             if (fPos > fPosMax) or
                (fPos^ = #$0A) or
-               (PWord(fPos)^ = CRLFW) then
+               (PWord(fPos)^ = EOLW) then
             begin
               if fPos <= fPosMax then
                 if fPos^ = #$0A then
                   inc(fPos)
-                else if PWord(fPos)^ = CRLFW then
+                else if PWord(fPos)^ = EOLW then
                   inc(fPos, 2);
               if fTagCount > 0 then
                 // remove any indentation chars from previous text
@@ -2348,10 +2365,10 @@ var
 begin
   // {{#Equals .,12}}
   if _SafeArray(Value, 2, dv) and
-       (FastVarDataComp(@dv^.Values[0], @dv^.Values[1], false) = 0) then
-      Result := VarTrue
-    else
-      SetVariantNull(Result{%H-});
+     (FastVarDataComp(@dv^.Values[0], @dv^.Values[1], false) = 0) then
+    Result := VarTrue
+  else
+    SetVariantNull(Result{%H-});
 end;
 
 class procedure TSynMustache.If_(const Value: variant; out Result: variant);

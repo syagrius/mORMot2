@@ -4542,7 +4542,7 @@ type
     // - by default, won't write more than 512MB of JSON, to avoid OutOfMemory
     // - returns the number of data rows added to JSON (excluding the headers)
     function Execute(aDB: TSqlite3DB; const aSql: RawUtf8; Json: TStream;
-      Expand: boolean = false; MaxMemory: PtrUInt = 512 shl 20;
+      Expand: boolean = false; MaxMemory: PtrInt = 512 shl 20;
       Options: TTextWriterOptions = []): PtrInt; overload;
     /// Execute one SQL statement which return the results in JSON format
     // - use internally Execute() above with a TRawByteStringStream, and return
@@ -4555,7 +4555,7 @@ type
     // - if any error occurs, ESqlite3Exception is catched and '' is returned
     function ExecuteJson(aDB: TSqlite3DB; const aSql: RawUtf8;
       Expand: boolean = false; aResultCount: PPtrInt = nil;
-      MaxMemory: PtrUInt = 512 shl 20; Options: TTextWriterOptions = []): RawUtf8;
+      MaxMemory: PtrInt = 512 shl 20; Options: TTextWriterOptions = []): RawUtf8;
     /// Execute one SQL statement step into a JSON object
     // - has less overhead than ExecuteJson() for a single row of data
     function ExecuteStepJson(aDB: TSqlite3DB; W: TJsonWriter): boolean;
@@ -4907,7 +4907,7 @@ type
   // TSqlite3Library.AfterInitialization did set SQLITE_CONFIG_MULTITHREAD flag
   // - can cache last results for SELECT statements, if property UseCache is true:
   //  this can speed up most read queries, for web server or client UI e.g.
-  TSqlDataBase = class(TSynLocked)
+  TSqlDataBase = class(TObjectOSLock)
   protected
     fDB: TSqlite3DB;
     fFileName: TFileName;
@@ -7884,13 +7884,13 @@ begin
           c := PInteger(p^.VAnsiString)^ and $00ffffff;
           if c = JSON_BASE64_MAGIC_C then
           begin
-            Base64ToBin(p^.VPChar + 3, length(RawUtf8(p^.VAnsiString)) - 3,
+            Base64ToBin(p^.VPChar + 3, PStrLen(p^.VPChar - _STRLEN)^ - 3,
               RawByteString(tmp));
             BindBlob(arg, tmp);
           end
           else if c = JSON_SQLDATE_MAGIC_C then // store as ISO-8601 text
             BindU(arg, PUtf8Char(p^.VAnsiString) + 3,
-                     length(RawUtf8(p^.VAnsiString)) - 3)
+                       PStrLen(p^.VPChar - _STRLEN)^ - 3)
           else
             Bind(arg, RawUtf8(p^.VAnsiString)); // assume CP_UTF8
         end;
@@ -7955,22 +7955,23 @@ end;
 
 procedure TSqlRequest.BindS(Param: integer; const Value: string);
 var
-  P: PUtf8Char;
+  V, P: PUtf8Char;
   len: integer;
 begin
-  if pointer(Value) = nil then
+  V := pointer(Value);
+  if V = nil then
   begin
     // avoid to bind '' as null
     sqlite3_check(RequestDB,
       sqlite3.bind_text(Request, Param, @NULCHAR, 0, SQLITE_STATIC));
     exit;
   end;
-  len := length(Value);
+  len := PStrLen(V - _STRLEN)^;
   GetMem(P, len * 3 + 1);
   {$ifdef UNICODE}
-  len := RawUnicodeToUtf8(P, len * 3, pointer(Value), len, []);
+  len := RawUnicodeToUtf8(P, len * 3, pointer(V), len, []);
   {$else}
-  len := CurrentAnsiConvert.AnsiBufferToUtf8(P, pointer(Value), len) - P;
+  len := CurrentAnsiConvert.AnsiBufferToUtf8(P, pointer(V), len) - P;
   {$endif UNICODE}
   sqlite3_check(RequestDB,
     sqlite3.bind_text(Request, Param, P, len, @sqlite3InternalFree), 'BindS');
@@ -8196,7 +8197,7 @@ begin
 end;
 
 function TSqlRequest.Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
-  Json: TStream; Expand: boolean; MaxMemory: PtrUInt;
+  Json: TStream; Expand: boolean; MaxMemory: PtrInt;
   Options: TTextWriterOptions): PtrInt;
 // expand=true: [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
 // expand=false: { "FieldCount":2,"Values":["col1","col2",val11,"val12",val21,..] }
@@ -8294,7 +8295,7 @@ end;
 {$I+}
 
 function TSqlRequest.ExecuteJson(aDB: TSqlite3DB; const aSql: RawUtf8;
-  Expand: boolean; aResultCount: PPtrInt; MaxMemory: PtrUInt;
+  Expand: boolean; aResultCount: PPtrInt; MaxMemory: PtrInt;
   Options: TTextWriterOptions): RawUtf8;
 var
   Stream: TRawByteStringStream;
@@ -9023,8 +9024,7 @@ end;
 
 procedure TSqlStatementCached.SortCacheByTotalTime(var aIndex: TIntegerDynArray);
 begin
-  Caches.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}
-    CreateOrderedIndex(aIndex, StatementCacheTotalTimeCompare);
+  PDynArray(@Caches)^.CreateOrderedIndex(aIndex, StatementCacheTotalTimeCompare);
 end;
 
 

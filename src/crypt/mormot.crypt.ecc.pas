@@ -862,7 +862,6 @@ type
     fMaxVersion: byte;
     fIsValidCached: boolean;
     fIsValidCacheCount: integer;
-    fIsValidCacheSalt: RawByteString; // avoid flooding on forged input
     fIsValidCache: THash128DynArray;  // low TEccCertificateContent.ComputeHash
     function GetCount: integer;
       {$ifdef HASINLINE} inline; {$endif}
@@ -3708,7 +3707,6 @@ end;
 constructor TEccCertificateChain.Create;
 begin
   CreateVersion(2);
-  fIsValidCacheSalt := ToUtf8(RandomGuid); // avoid flooding on forged input
 end;
 
 constructor TEccCertificateChain.CreateFromJson(
@@ -3749,7 +3747,6 @@ function TEccCertificateChain.IsValidRaw(const content: TEccCertificateContent;
 var
   authoritypublickey: TEccPublicKey;
   hash: THash256Rec;
-  cached: THash128;
 begin
   // check certificate coherency and date before checking the cache
   result := ecvCorrupted;
@@ -3771,11 +3768,9 @@ begin
   if fIsValidCached then
   begin
     // try to recognize a previous valid certificate in the hash cache
-    cached := hash.Lo; // apply fIsValidCacheSalt and maybe AesNiHash128
-    DefaultHasher128(@cached, pointer(fIsValidCacheSalt), length(fIsValidCacheSalt));
     fSafe.ReadLock;
     try
-      if Hash128Index(pointer(fIsValidCache), fIsValidCacheCount, @cached) >= 0 then
+      if Hash128Index(pointer(fIsValidCache), fIsValidCacheCount, @hash) >= 0 then
         exit; // 128-bit lower part of sha-256 is very unlikely to collide
     finally
       fSafe.ReadUnlock;
@@ -3803,7 +3798,7 @@ begin
       try
         if fIsValidCacheCount > 1024 then
           fIsValidCacheCount := 0; // time to flush the cache once reached 16KB
-        AddHash128(fIsValidCache, cached, fIsValidCacheCount);
+        AddHash128(fIsValidCache, hash.Lo, fIsValidCacheCount);
       finally
         fSafe.WriteUnlock;
       end;
@@ -5260,7 +5255,7 @@ begin
   FillCharFast(aClient, SizeOf(aClient), 0);
   aClient.algo := fAlgo;
   // client-side randomness for ephemeral keys and signatures
-  SharedRandom.Fill(@fRndA, SizeOf(fRndA)); // enough for public randomness
+  SharedRandom.Fill(@fRndA, SizeOf(fRndA)); // public and unique: use Lecuyer
   aClient.RndA := fRndA;
   // generate the client ephemeral key
   if fAlgo.auth <> authClient then
@@ -5382,7 +5377,7 @@ begin
   FillCharFast(aServer, SizeOf(aServer), 0);
   aServer.algo := fAlgo;
   aServer.RndA := fRndA;
-  SharedRandom.Fill(@fRndB, SizeOf(fRndB)); // enough for public randomness
+  SharedRandom.Fill(@fRndB, SizeOf(fRndB)); // public and unique: use Lecuyer
   aServer.RndB := fRndB;
   if fAlgo.auth <> authServer then
     if not Ecc256r1MakeKey(aServer.QF, dF) then

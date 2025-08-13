@@ -274,7 +274,7 @@ type
 { ************ TRestRunThreads Multi-Threading Process of a REST instance }
 
   /// access to the Multi-Threading process of a TRest instance
-  TRestRunThreads = class(TSynLocked)
+  TRestRunThreads = class(TObjectOSLock)
   protected
     fOwner: TRest;
     fBackgroundTimer: TRestBackgroundTimer;
@@ -1298,10 +1298,10 @@ type
   TRestUriContext = class
   protected
     fCall: PRestUriParams;
-    fMethod: TUriMethod;
-    fClientKind: TRestClientKind;
-    fCommand: TRestServerUriContextCommand;
-    fInputCookiesParsed: (icpNotParsed, icpNone, icpAvailable);
+    fMethod: TUriMethod;                                          // 8-bit
+    fClientKind: TRestClientKind;                                 // 8-bit
+    fCommand: TRestServerUriContextCommand;                       // 8-bit
+    fInputCookiesParsed: (icpNotParsed, icpNone, icpAvailable);   // 8-bit
     fInputContentType: RawUtf8;
     fInHeaderLastName: RawUtf8;
     fInHeaderLastValue: RawUtf8;
@@ -1368,19 +1368,18 @@ type
       read GetInHeader;
     /// retrieve an incoming HTTP cookie value
     // - cookie name are case-sensitive
+    // - consider faster InCookieSearch() if a transient RawUtf8 is not required
     property InCookie[const CookieName: RawUtf8]: RawUtf8
       read GetInCookie;
     /// retrieve a cookie name/value pair in the internal storage
+    // - cookie name are case-sensitive
     function InCookieSearch(const CookieName: RawUtf8): PHttpCookie;
-    {$ifdef HASINLINE} inline; {$endif}
-    /// low-level method called by InCookie[] and InCookieExists()
-    // - will parse once for any coookie in the headers, if needed
-    /// define a new 'name=value' cookie to be returned to the client
+      {$ifdef HASINLINE} inline; {$endif}
+    /// low-level raw cookie value as set by OutCookie[] to be sent as response
     // - if not void, TRestServer.Uri() will define a new 'set-cookie: ...'
-    // header in Call^.OutHead
-    // - you can use COOKIE_EXPIRED as value to delete a cookie in the browser
-    // - if no Path=/.. is included, it will append
-    // $ '; Path=/'+Server.Model.Root+'; HttpOnly'
+    // header in Call^.OutHead to be stored on the HTTP client
+    // - overriden TRestServerUriContext will append "Path=/" or "Secure" members
+    // according to rsoCookieHttpOnlyFlagDisable and rsoCookieSecure options
     property OutSetCookie: RawUtf8
       read fOutSetCookie write SetOutSetCookie;
     /// define a new 'name=value' cookie to be returned to the client
@@ -4153,32 +4152,32 @@ end;
 procedure TRestUriContext.Results(const Values: array of const;
   Status: integer; Handle304NotModified: boolean; CacheControlMaxAgeSec: integer);
 var
-  i, h: PtrInt;
+  n: PtrInt;
   json: RawUtf8;
+  v: PVarRec;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
-  h := high(Values);
-  if h < 0 then
+  n := length(Values);
+  if n = 0 then
     json := '{"result":null}'
   else
     with TJsonWriter.CreateOwnedStream(temp) do
     try
       AddShort('{"result":');
-      if h = 0 then
+      v := @Values[0];
+      if n = 1 then
         // result is one value
-        AddJsonEscapeVarRec(@Values[0])
+        AddJsonEscapeVarRec(v)
       else
       begin
         // result is one array of values
         AddDirect('[');
-        i := 0;
         repeat
-          AddJsonEscapeVarRec(@Values[i]);
-          if i = h then
-            break;
+          AddJsonEscapeVarRec(v);
           AddComma;
-          inc(i);
-        until false;
+          inc(v);
+          dec(n);
+        until n = 0;
         AddDirect(']');
       end;
       AddDirect('}');

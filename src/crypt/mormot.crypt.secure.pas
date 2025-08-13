@@ -1243,7 +1243,7 @@ type
     // - properly implemented in TDigestAuthServer: THttpAuthServer raise EDigest
     function DigestInit(Opaque, Tix64: Int64;
       const Prefix: RawUtf8 = 'WWW-Authenticate: Digest ';
-      const Suffix: RawUtf8 = #13#10): RawUtf8;
+      const Suffix: RawUtf8 = EOL): RawUtf8;
     /// validate a Digest client authentication response
     // - used for the DIGEST authentication scheme in THttpServerSocketGeneric
     // - FromClient typically follow 'Authorization: Digest ' header text
@@ -1728,6 +1728,13 @@ type
     function Get32(max: cardinal): cardinal; overload;
     /// retrieve a random floating point value in the [0..1) range calling Get32
     function GetDouble: double;
+  end;
+
+  /// an abstract TCryptRandom class which will call Get32 as its random source
+  TCryptRandom32 = class(TCryptRandom)
+  public
+    /// will call the Get32 virtual method to fill
+    procedure Get(dst: pointer; dstlen: PtrInt); override;
   end;
 
   /// hashing/signing parent class, as returned by Hash/Sign() factories
@@ -3147,12 +3154,15 @@ function IsDer(const Rdn: RawUtf8): boolean;
 
 /// main resolver of the randomness generators
 // - a shared TCryptRandom instance is returned: caller should NOT free it
-// - e.g. Rnd.GetBytes(100) to get 100 random bytes from 'rnd-default' engine
+// - e.g. Rnd.GetBytes(100) to get 100 random bytes from 'rnd-default' engine,
+// which redirects in fact to our secure TAesPrng.Main generator
+// - alternative generators are 'rnd-aes' (same as 'rnd-default'), 'rnd-lecuyer'
+// (fast on small content), 'rnd-system'/'rnd-systemblocking' (mapping
+// FillSystemRandom, which may be slow and even blocking), 'rnd-delphi' which
+// follows the weak but known Delphi RTL Random(), and 'rnd-rdrand' which calls
+// the homonymous CPU HW opcode (if cfRAND in CpuFeatures)
 // - call Rnd('rnd-entropy').Get() to gather OS entropy (which may be slow),
 // optionally as 'rnd-entropysys', 'rnd-entropysysblocking', 'rnd-entropyuser'
-// - alternative generators are 'rnd-aes' (same as 'rnd-default'), 'rnd-lecuyer'
-// (fast on small content) and 'rnd-system'/'rnd-systemblocking' (mapping
-// FillSystemRandom, which may be slow and even blocking)
 function Rnd(const name: RawUtf8 = 'rnd-default'): TCryptRandom;
 
 /// main resolver of the registered hashers
@@ -5330,7 +5340,7 @@ begin
     exit;
   fUsers.Safe.ReadLock;
   try
-    fUsers.Keys.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}CopyTo(result);
+    PDynArray(@fUsers.Keys)^.CopyTo(result);
   finally
     fUsers.Safe.ReadUnLock;
   end;
@@ -6811,7 +6821,7 @@ procedure TCryptRandomEntropy.Get(dst: pointer; dstlen: PtrInt);
 var
   tmp: RawByteString;
 begin
-  tmp := TAesPrng.GetEntropy(dstlen, fSource); // may be slow
+  tmp := TAesPrng.GetEntropy(dstlen, fSource); // may be slow for a few bytes
   MoveFast(pointer(tmp)^, dst^, dstlen);
   FillZero(tmp);
 end;
@@ -6840,7 +6850,7 @@ type
 
 procedure TCryptRandomLecuyerPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  SharedRandom.Fill(dst, dstlen); // use Lecuyer's gsl_rng_taus2 generator
+  SharedRandom.Fill(dst, dstlen); // global Lecuyer's gsl_rng_taus2 generator
 end;
 
 function TCryptRandomLecuyerPrng.Get32: cardinal;
@@ -6848,41 +6858,69 @@ begin
   result := SharedRandom.Next;
 end;
 
+{ TCryptRandom32 }
+
+procedure TCryptRandom32.Get(dst: pointer; dstlen: PtrInt);
+var
+  c: cardinal;
+begin
+  repeat
+    if dstlen < 4 then
+      break;
+    PCardinal(dst)^ := PCardinal(dst)^ xor Get32; // e.g. Get32 = RdRand32
+    inc(PCardinal(dst));
+    dec(dstlen, 4);
+  until false;
+  if dstlen <= 0 then
+    exit;
+  c := Get32;
+  repeat
+    PByte(dst)^ := PByte(dst)^ xor c;
+    inc(PByte(dst));
+    c := c shr 8;
+    dec(dstlen);
+  until dstlen = 0;
+end;
+
+{ TCryptRandomDelphi }
+
+type
+  TCryptRandomDelphi = class(TCryptRandom32) // 'rnd-delphi'
+  protected
+    fSafe: TLightLock;
+    fSeed: cardinal;
+  public
+    function Get32: cardinal; override;
+  end;
+
+function TCryptRandomDelphi.Get32: cardinal;
+begin
+  fSafe.Lock; // we make this generator thread-safe - whereas Delphi's is not
+  if fSeed = 0 then
+    fSeed := Random32; // good enough - better than Delphi/FPC Randomize anyway
+  // the Delphi RTL uses such a weak deterministic linear congruential generator
+  result := fSeed * 134775813 + 1;
+  fSeed := result;
+  fSafe.UnLock;
+end;
+
+// note: the FPC RTL has a better Mersenne Twister algorithm, but its 32-bit
+// core is not published outside of the system unit, it consumes 2KB from a weak
+// 32-bit seed from GetTickCount/fptime, and is not thread-safe either
+
 {$ifdef CPUINTEL}
 
 { TCryptRandomRdRand }
 
 type
-  TCryptRandomRdRand = class(TCryptRandom) // 'rnd-rdrand'
+  TCryptRandomRdRand = class(TCryptRandom32) // 'rnd-rdrand'
   public
-    procedure Get(dst: pointer; dstlen: PtrInt); override;
     function Get32: cardinal; override;
   end;
 
-procedure TCryptRandomRdRand.Get(dst: pointer; dstlen: PtrInt);
-var
-  c: cardinal;
-begin
-  c := dstlen shr 2;
-  RdRand32(dst, c);
-  dstlen := dstlen and 3;
-  if dstlen = 0 then
-    exit;
-  inc(PCardinal(dst), c);
-  c := RdRand32; // last 1..3 bytes
-  repeat
-    PByte(dst)^ := PByte(dst)^ xor c;
-    dec(dstlen);
-    if dstlen = 0 then
-      exit;
-    c := c shr 8;
-    inc(PByte(dst));
-  until false;
-end;
-
 function TCryptRandomRdRand.Get32: cardinal;
 begin
-  result := RdRand32;
+  result := RdRand32; // class is only registered if cfRAND in CpuFeatures
 end;
 
 {$endif CPUINTEL}
@@ -8005,11 +8043,11 @@ begin
   // cut-down version of TJwtAbstract.PayloadToJson
   payload.InitObject(DataNameValue, JSON_FAST);
   if Issuer <> '' then
-    payload.AddValueFromText('iss', Issuer);
+    payload.AddValueText('iss', Issuer);
   if Subject <> '' then
-    payload.AddValueFromText('sub', Subject);
+    payload.AddValueText('sub', Subject);
   if Audience <> '' then
-    payload.AddValueFromText('aud', Audience);
+    payload.AddValueText('aud', Audience);
   if NotBefore > 0 then
     payload.AddValue('nbf', DateTimeToUnixTime(NotBefore));
   if ExpirationMinutes > 0 then
@@ -8843,6 +8881,7 @@ begin
     // register mormot.crypt.core engines into our factories
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
     TCryptRandomLecuyerPrng.Implements('rnd-lecuyer');
+    TCryptRandomDelphi.Implements('rnd-delphi');
     {$ifdef CPUINTEL}
     if cfRAND in CpuFeatures then
       TCryptRandomRdRand.Implements('rnd-rdrand');
@@ -10161,7 +10200,7 @@ begin
     if Ctxt.Value = nil then // null
       Data^ := ''
     else if not Ctxt.WasString or
-       not TextToSid(Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Value, tmp) then
+            not TextToSid(Ctxt.Get.Value, tmp) then
       Ctxt.Valid := false
     else
       ToRawSid(@tmp, Data^);
@@ -10190,8 +10229,7 @@ begin
     if Ctxt.Value = nil then // null
       Data^ := ''
     else if not Ctxt.WasString or
-            (tmp.FromText(Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}
-               Value) <> atpSuccess) then
+            (tmp.FromText(Ctxt.Get.Value) <> atpSuccess) then
       Ctxt.Valid := false
     else
       Data^ := tmp.ToBinary;
@@ -10215,7 +10253,7 @@ begin
       Data^ := []
     else
       Ctxt.Valid := Ctxt.WasString and
-        SddlNextMask(Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Value, Data^);
+                    SddlNextMask(Ctxt.Get.Value, Data^);
 end;
 
 procedure _JS_Mask(Data: PSecAccessMask; const Ctxt: TJsonSaveContext);

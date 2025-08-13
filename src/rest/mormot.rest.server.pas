@@ -224,7 +224,7 @@ type
     fStaticOrm: TRestOrm;
     fSessionUserName: RawUtf8;
     fCustomErrorMsg: RawUtf8;
-    fTemp: RawUtf8; // used e.g. for XML or Cookie process
+    fTemp: RawUtf8; // used e.g. for XML process
     fMicroSecondsStart: Int64;
     fMicroSecondsElapsed: QWord;
     fLog: TSynLog;
@@ -624,7 +624,7 @@ type
     // or set a particular XML name space, depending on the application
     property ForceServiceResultAsXMLObjectNameSpace: RawUtf8
       read fForceServiceResultAsXMLObjectNameSpace;
-    /// the corresponding session TAuthSession.IDCardinal value
+    /// the corresponding session TAuthSession.ID cardinal value
     // - equals 0 (CONST_AUTHENTICATION_SESSION_NOT_STARTED) if the session
     // is not started yet - i.e. if still in handshaking phase
     // - equals 1 (CONST_AUTHENTICATION_NOT_USED) if authentication mode
@@ -1194,15 +1194,12 @@ type
   // - do not use this abstract class, but e.g. TRestServerAuthenticationHttpBasic
   // - this class will transmit the session_signature as HTTP cookie, not at
   // URI level, so is expected to be used only from browsers or old clients
-  // - cookie is encrypted using AES-CTR-128, but real security level is as safe
+  // - cookie is encrypted using AES-128, but real security level is as safe
   // as the cookie secrecy on the client side - even if any replay is avoided
   // - note that such sessions can not be persisted on disk
   TRestServerAuthenticationHttpAbstract = class(TRestServerAuthentication)
   protected
-    fSafe: TLightLock; // RetrieveSession() could append within multi-write lock
-    fAes: TAes;
-    fAesMask: cardinal;
-    procedure DoAes(var iv: THash128Rec; c0: cardinal);
+    fSignature: TAesSignature;
   public
     /// additional salt/realm parameter used for ComputeHashedPassword()
     HashSalt: RawUtf8;
@@ -1586,8 +1583,9 @@ type
   // ?authenticationbearer=... URI parameter value alternatively to the HTTP
   // header unless rsoAuthenticationUriDisable is set (for security reasons)
   // - you can switch off root/timestamp/info URI via rsoTimestampInfoUriDisable
-  // - Uri() header output will be sanitized for any EOL injection, unless
-  // rsoHttpHeaderCheckDisable is defined (to gain a few cycles)
+  // - Uri() header output will be sanitized for any EOL injection at REST level,
+  // unless rsoHttpHeaderCheckDisable is defined - to gain a few cycles since
+  // the cleaning process is done eventually in THttpServerRequest.SetupResponse
   // - by default, TAuthUser.Data blob is retrieved from the database,
   // unless rsoGetUserRetrieveNoBlobData is defined
   // - rsoNoInternalState could be state to avoid transmitting the
@@ -1766,9 +1764,9 @@ type
     fHandleAuthentication: boolean;
     fAfterCreation: boolean;
     fShutdownRequested: boolean;
-    fStatLevels: TRestServerMonitorLevels;
-    fOptions: TRestServerOptions;
-    fBypassOrmAuthentication: TUriMethods;
+    fStatLevels: TRestServerMonitorLevels; // 8-bit
+    fOptions: TRestServerOptions;          // 32-bit
+    fBypassOrmAuthentication: TUriMethods; // 16-bit
     /// the TAuthUser and TAuthGroup classes, as defined in model
     fAuthUserClass: TAuthUserClass;
     fAuthGroupClass: TAuthGroupClass;
@@ -1835,22 +1833,21 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// search for Ctxt.Session ID and fill Ctxt.Session* members if found
     // - returns nil if not found, or fill aContext.User/Group values if matchs
-    // - this method will also check for outdated sessions, and delete them
     // - this method is not thread-safe: caller should use Sessions.Safe.ReadOnlyLock
     function LockedSessionAccess(Ctxt: TRestServerUriContext;
       FullyAuthenticated: boolean = true): TAuthSession;
     /// delete a session from its index in Sessions[]
     // - will perform any needed clean-up, and log the event
     // - this method is not thread-safe: caller should use Sessions.Safe.WriteLock
-    procedure LockedSessionDelete(aSessionIndex: integer; aSession: TAuthSession;
-      Ctxt: TRestServerUriContext);
+    procedure WriteLockedSessionDelete(aSessionIndex: integer;
+      aSession: TAuthSession; Ctxt: TRestServerUriContext);
     /// SessionAccess will detect and delete outdated sessions, but you can call
     // this method to force checking for deprecated session now
     // - may be used e.g. from OnSessionCreate to limit the number of active sessions
     // - this method is thread-safe via Sessions.Safe.ReadWriteLock/WriteLock
     // - it will be called to search for outdated sessions only once per second
     // - returns how many deprecated sessions have been purge
-    function SessionDeleteDeprecated(tix: cardinal): integer;
+    function SessionDeleteDeprecated(tix32: cardinal): integer;
   public
     /// a method can be specified to be notified when a session is created
     // - for OnSessionCreate, returning TRUE will abort the session creation -
@@ -1898,7 +1895,7 @@ type
     // - should return TRUE if the method can be executed
     // - should return FALSE if the method should not be executed, and the
     // callback should set the corresponding error to the supplied context e.g.
-    // ! Ctxt.Error('Unauthorized method',HTTP_NOTALLOWED);
+    // ! Ctxt.Error('Unauthorized method', HTTP_NOTALLOWED);
     // - since this event will be executed by every TRestServer.Uri call,
     // it should better not make any slow process (like accessing a remote DB)
     OnBeforeUri: TOnBeforeUri;
@@ -2083,12 +2080,13 @@ type
     /// returns a copy of the user associated to a session ID
     // - returns nil if the session does not exist (e.g. if authentication disabled)
     // - caller MUST release the TAuthUser instance returned (if not nil)
+    // - default aSessionID = 0 will search for GetCurrentSessionUserID
     // - this method IS thread-safe, calling internally Sessions.Safe.ReadOnlyLock
     // (the returned TAuthUser is a private copy from Sessions[].User instance,
     // in order to be really thread-safe)
     // - the returned TAuthUser instance will have ID, LogonName, DisplayName,
     // PasswordHashHexa and Data fields available and GroupRights as TID
-    function SessionGetUser(aSessionID: cardinal): TAuthUser;
+    function SessionGetUser(aSessionID: cardinal = 0): TAuthUser;
     /// persist all in-memory sessions into a compressed binary file
     // - you should not call this method it directly, but rather use Shutdown()
     // with a StateFileName parameter - to be used e.g. for a short maintenance
@@ -2462,9 +2460,9 @@ type
     // of the specified record
     // - POST ModelRoot/CacheFlush/_callback_ URI will be called by the client
     // to notify the server that an interface callback instance has been released
-    // - POST ModelRoot/CacheFlush/_ping_ URI will be called by the client after
-    // every half session timeout (or at least every hour) to notify the server
-    // that the connection is still alive
+    // - POST ModelRoot/CacheFlush/_ping_ URI could be called e.g. by the client
+    // after every half session timeout (or at least every hour) to notify the
+    // server that this connection is still alive
     procedure CacheFlush(Ctxt: TRestServerUriContext);
     /// REST service accessible from ModelRoot/Stat URI to gather detailed information
     // - returns the current execution statistics of this server, as a JSON object
@@ -2924,6 +2922,7 @@ function TRestServerUriContext.Authenticate: boolean;
 var
   s: TAuthSession;
   a: ^TRestServerAuthentication;
+  tix32: cardinal;
   n: integer;
 begin
   result := true;
@@ -2939,18 +2938,22 @@ begin
        // you can allow a service to be called directly
        ((Service <> nil) and
         TServiceFactoryServerAbstract(Service).ByPassAuthentication) or
-       // allow by-pass for a set of HTTP verbs (e.g. mGET)
+       // allow by-pass for a set of HTTP verbs (e.g. mGET from AJAX clients)
        ((Table <> nil) and
         (Method in Server.BypassOrmAuthentication)) then
       // no need to check the sessions
       exit;
+    // first check for deprecated sessions (every second is enough)
+    tix32 := TickCount64 shr 10;
+    if Server.fSessionsDeprecatedTix <> tix32 then
+      Server.SessionDeleteDeprecated(tix32);
     // TAuthSession instance may have been stored at connection level
     if (rsoSessionInConnectionOpaque in Server.Options) and
        (Call^.LowLevelConnectionOpaque <> nil) then
     begin
       s := pointer(Call^.LowLevelConnectionOpaque^.ValueInternal);
       if s <> nil then
-        if s.InheritsFrom(Server.fSessionClass) then
+        if PClass(s)^ = Server.fSessionClass then
         begin
           // safely avoid signature parsing and session lookup
           SessionAssign(s);
@@ -2959,7 +2962,7 @@ begin
         else
           Call^.LowLevelConnectionOpaque^.ValueInternal := 0; // paranoid
     end;
-    // parse signature to retrieve the associated session
+    // parse URI signature (or cookie) to retrieve the associated session
     Server.fSessions.Safe.ReadOnlyLock; // allow concurrent authentication
     try
       a := pointer(Server.fSessionAuthentication);
@@ -2967,7 +2970,7 @@ begin
       begin
         n := PDALen(PAnsiChar(a) - _DALEN)^ + _DAOFF;
         repeat
-          s := a^.RetrieveSession(self); // retrieve from URI or cookie
+          s := a^.RetrieveSession(self); // from URI or cookie
           if s <> nil then
           begin
             if Assigned(fLog) and
@@ -3184,7 +3187,7 @@ begin
   // Par is the callback ID transmitted from the client side
   fakeid := Ctxt.ParseInteger;
   if Ctxt.Json = nil then // allow e.g. '[12345]' (single interface parameter)
-    Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := @NULCHAR;
+    Ctxt.Json := @NULCHAR;
   if (fakeid = 0) or
      (ParamInterfaceInfo.Info = TypeInfo(IInvokable)) then
   begin
@@ -3193,7 +3196,7 @@ begin
   end;
   // let TServiceContainerServer resolve this
   (Server.Services as TServiceContainerServer).GetFakeCallback(
-    self, ParamInterfaceInfo.Info, fakeid, Obj);
+    self, ParamInterfaceInfo, fakeid, Obj);
 end;
 
 procedure TRestServerUriContext.ComputeStatsAfterCommand;
@@ -4855,8 +4858,7 @@ begin
     ServerProcessKdf.Compute(@fID, 8, rnd.b) // 8 > 4 bytes nonce ticks
   else
     RandomBytes(rnd.Lo); // Lecuyer as fallback (paranoid)
-  XorMemory(rnd.l, StartupEntropy); // always obfuscate
-  XorMemory(rnd.l, rnd.h);          // don't leak state
+  XorMemory(rnd.l, rnd.h); // don't leak full state, but use full result
   BinToHexLower(@rnd, SizeOf(rnd.l), fPrivateKey); // 128-bit is enough
   ComputeProtectedValues(aCtxt.TickCount64);
   // this session has been successfully created
@@ -5016,7 +5018,7 @@ begin
     Ctxt.fAuthSession := nil; // avoid GPF
     if fServer.LockedSessionFind(sessid, ndx) = s then
     begin
-      fServer.LockedSessionDelete(ndx, s, Ctxt);
+      fServer.WriteLockedSessionDelete(ndx, s, Ctxt);
       Ctxt.Success;
     end;
   end;
@@ -5182,7 +5184,7 @@ begin
      (reslen + (19 + 8 + 8 + 8) > PStrLen(P - _STRLEN)^) or
      not HexDisplayToCardinal(P + reslen + 19, Ctxt.fSession) then
     exit;
-  result := fServer.LockedSessionAccess(Ctxt, {done=}false); // retrieve Ctxt.Session ID
+  result := fServer.LockedSessionAccess(Ctxt, {done=}false); // get Ctxt.Session
   if result = nil then
     exit; // unknown Session
   P := @P[reslen + (19 + 8)]; // points to Hexa8(Timestamp)
@@ -5449,60 +5451,31 @@ end;
 { TRestServerAuthenticationHttpAbstract }
 
 constructor TRestServerAuthenticationHttpAbstract.Create(aServer: TRestServer);
-var
-  rnd: THash128;
 begin
   inherited Create(aServer);
-  RandomBytes(rnd); // transient secret which cannot be persisted
-  fAes.EncryptInit(rnd, 128); // AES-128-CTR for safe 96-bit digital signature
-  fAesMask := Random32;
-  FillZero(rnd);
-end;
-
-procedure TRestServerAuthenticationHttpAbstract.DoAes(
-  var iv: THash128Rec; c0: cardinal);
-begin
-  iv.c0 := c0; // 32-bit session sequence is used as genuine IV for AES-CTR
-  iv.c1 := fAesMask; // with 96-bit of fixed but random padding
-  iv.H := fServer.fSessionCounterMin;
-  fSafe.Lock; // Auth() is locked, but RetrieveSession() is multi-read
-  fAes.Encrypt(iv.b, iv.b); // very fast on all platforms
-  fSafe.UnLock;
+  fSignature.Init; // for safe 96-bit digital signature
 end;
 
 function TRestServerAuthenticationHttpAbstract.RetrieveSession(
   Ctxt: TRestServerUriContext): TAuthSession;
 var
-  iv, v: THash128Rec; // 32-bit lower = session, 96-bit upper = digital signature
+  c: PHttpCookie;
 begin
-  Ctxt.InputCookies^.RetrieveCookie(fServer.Model.Root, Ctxt.fTemp);
   result := nil;
-  if Ctxt.fTemp = '' then
+  c := Ctxt.InputCookies^.FindCookie(fServer.Model.Root);
+  if c = nil then
     exit; // no cookie
-  if (length(Ctxt.fTemp) = SizeOf(v) * 2) and
-     HexDisplayToBin(pointer(Ctxt.fTemp), @v, SizeOf(v)) then
-  begin
-    DoAes(iv, v.c0);
-    if (v.c1 = iv.c1) and
-       (v.H  = iv.H) then
-    begin // valid digital signature
-      Ctxt.fSession := v.c0 xor fAesMask;
-      result := fServer.LockedSessionAccess(Ctxt)
-    end;
-  end;
+  Ctxt.fSession := fSignature.ValidateCookie(c^.ValueStart, c^.ValueLen);
+  if Ctxt.fSession <> 0 then
+    result := fServer.LockedSessionAccess(Ctxt);
   if result = nil then // invalid cookie should be deleted on client side
     Ctxt.OutCookie[fServer.Model.Root] := COOKIE_EXPIRED;
 end;
 
 function TRestServerAuthenticationHttpAbstract.ComputeCookieValue(
   aSession: cardinal): RawUtf8;
-var
-  iv: THash128Rec; // 32-bit lower = session, 96-bit upper = digital signature
 begin
-  aSession := aSession xor fAesMask;
-  DoAes(iv, aSession);
-  iv.c0 := aSession;
-  result := BinToHexDisplayLower(@iv, SizeOf(iv));
+  result := fSignature.GenerateCookie(aSession);
 end;
 
 
@@ -5583,7 +5556,7 @@ begin
   begin
     Join(['WWW-Authenticate: Basic realm="', fServer.Model.Root, '"'],
       Ctxt.fCall^.OutHead);
-    Ctxt.Error('', HTTP_UNAUTHORIZED); // 401 will popup for credentials in browser
+    Ctxt.Error('', HTTP_UNAUTHORIZED); // 401 = popup for credentials in browser
   end;
 end;
 
@@ -6256,7 +6229,7 @@ begin
   // setup Sessions - as needed by AuthenticationRegister() below
   fSessions := TSynObjectListSorted.Create(AuthSessionCompare);
   fSessionClass := TAuthSession;
-  // (+ 10 to avoid CONST_AUTHENTICATION_* i.e. IDCardinal=0 or 1)
+  // (+ 10 to avoid CONST_AUTHENTICATION_* i.e. ID = 0 or 1)
   fSessionCounterMin := Random32(1 shl 20) + 10; // positive 20-bit integer
   fSessionCounter := fSessionCounterMin;
   // setup method-based services list - needed for /auth
@@ -6544,13 +6517,15 @@ begin
 end;
 
 function TRestServer.GetCurrentSessionUserID: TID;
+var
+  ctxt: TRestServerUriContext;
 begin
-  with PServiceRunningContext(PerThreadRunningContextAddress)^ do
-    if (Request <> nil) and
-       (Request.Session > CONST_AUTHENTICATION_NOT_USED) then
-      result := Request.SessionUser
-    else
-      result := 0;
+  ctxt := ServiceRunningRequest;
+  if (ctxt <> nil) and
+     (ctxt.Session > CONST_AUTHENTICATION_NOT_USED) then
+    result := ctxt.SessionUser
+  else
+    result := 0;
 end;
 
 function TRestServer.ServicesPublishedInterfaces: RawUtf8;
@@ -7137,10 +7112,8 @@ begin
     result := fSessions.List[aIndex];
 end;
 
-procedure TRestServer.LockedSessionDelete(aSessionIndex: integer;
+procedure TRestServer.WriteLockedSessionDelete(aSessionIndex: integer;
   aSession: TAuthSession; Ctxt: TRestServerUriContext);
-var
-  soa: integer;
 
   procedure ClearConnectionOpaque(o: PRestServerConnectionOpaque);
   begin
@@ -7159,41 +7132,47 @@ var
       end;
   end;
 
+var
+  gc: integer;
 begin
-  soa := 0;
-  if (self <> nil) and
-     (cardinal(aSessionIndex) < cardinal(fSessions.Count)) then
-  begin
-    if fServices <> nil then
-      soa := (fServices as TServiceContainerServer).OnCloseSession(aSession.ID);
-    if rsoSessionInConnectionOpaque in fOptions then
-      if Ctxt = nil then
-        ClearConnectionOpaque(aSession.fConnectionOpaque)
-      else
-        ClearConnectionOpaque(Ctxt.Call^.LowLevelConnectionOpaque);
-    if sllUserAuth in fLogLevel then
-      if Ctxt = nil then
-        InternalLog('Deleted deprecated session %:%/% soaGC=%',
-          [aSession.User.LogonName, aSession.ID, fSessions.Count, soa], sllUserAuth)
-      else
-        InternalLog('Deleted session %:%/% from %/% soaGC=%',
-          [aSession.User.LogonName, aSession.ID, fSessions.Count,
-           aSession.RemoteIP, Ctxt.Call^.LowLevelConnectionID, soa], sllUserAuth);
-    if Assigned(OnSessionClosed) then
-      OnSessionClosed(self, aSession, Ctxt);
-    fSessions.Delete(aSessionIndex);
-    fStats.ClientDisconnect;
-  end;
+  if (self = nil) or
+     (cardinal(aSessionIndex) >= cardinal(fSessions.Count)) then
+    exit;
+  // cleanup any service context related with this session
+  gc := 0;
+  if fServices <> nil then
+    gc := (fServices as TServiceContainerServer).OnCloseSession(aSession.ID);
+  // cleanup any associated TRestServerConnectionOpaque
+  if rsoSessionInConnectionOpaque in fOptions then
+    if Ctxt = nil then
+      ClearConnectionOpaque(aSession.fConnectionOpaque)
+    else
+      ClearConnectionOpaque(Ctxt.Call^.LowLevelConnectionOpaque);
+  // optional logging
+  if sllUserAuth in fLogLevel then
+    if Ctxt = nil then
+      InternalLog('Deleted deprecated session %:%/% soaGC=%',
+        [aSession.User.LogonName, aSession.ID, fSessions.Count, gc], sllUserAuth)
+    else
+      InternalLog('Deleted session %:%/% from %/% soaGC=%',
+        [aSession.User.LogonName, aSession.ID, fSessions.Count,
+         aSession.RemoteIP, Ctxt.Call^.LowLevelConnectionID, gc], sllUserAuth);
+  // optional callback
+  if Assigned(OnSessionClosed) then
+    OnSessionClosed(self, aSession, Ctxt);
+  // actually remove this sesion from the internal list
+  fSessions.Delete(aSessionIndex);
+  fStats.ClientDisconnect;
 end;
 
-function TRestServer.SessionDeleteDeprecated(tix: cardinal): integer;
+function TRestServer.SessionDeleteDeprecated(tix32: cardinal): integer;
 var
   i: PtrInt;
   log: ISynLog;
   a: ^TAuthSession;
 begin
-  // TRestServer.Uri() runs this method every second
-  fSessionsDeprecatedTix := tix;
+  // TRestServer.Uri() runs this method at most every second
+  fSessionsDeprecatedTix := tix32;
   result := 0;
   if (self = nil) or
      (fSessions = nil) or
@@ -7205,14 +7184,14 @@ begin
     for i := fSessions.Count - 1 downto 0 do // backward for deletion
     begin
       dec(a);
-      if tix > a^.fTimeOutTix then
+      if tix32 > a^.fTimeOutTix then // remove this session
       begin
-        if result = 0 then
+        if result = 0 then // first deprecated session identified
         begin
           fLogClass.EnterLocal(log, self, 'SessionDeleteDeprecated');
-          fSessions.Safe.WriteLock; // upgrade the lock (hardly)
+          fSessions.Safe.WriteLock; // upgrade the lock (only if needed)
         end;
-        LockedSessionDelete(i, a^, nil);
+        WriteLockedSessionDelete(i, a^, nil);
         inc(result);
       end;
     end;
@@ -7270,6 +7249,8 @@ begin
   result := nil;
   if self = nil then
     exit;
+  if aSessionID = 0 then
+    aSessionID := GetCurrentSessionUserID;
   fSessions.Safe.ReadOnlyLock;
   try
     s := LockedSessionFind(aSessionID, ndx);
@@ -7404,7 +7385,7 @@ begin
     ByPassAuthentication := aByPassAuthentication;
     Methods := m;
   end;
-  ResetRoutes;
+  ResetRoutes;  // fRouter will be re-generated when needed
 end;
 
 function TRestServer.ServiceMethodByPassAuthentication(
@@ -7600,6 +7581,7 @@ procedure TRestServer.OnBeginCurrentThread(Sender: TThread);
 var
   tc: integer;
   id: TThreadID;
+  thrd: PServiceRunningContext;
 begin
   tc := fStats.NotifyThreadCount(1);
   id := GetCurrentThreadId;
@@ -7611,14 +7593,14 @@ begin
     ERestException.RaiseUtf8(
       '%.BeginCurrentThread(Thread.ID=%) and CurrentThreadID=% should match',
       [self, {%H-}pointer(Sender.ThreadID), {%H-}pointer(id)]);
-  with PServiceRunningContext(PerThreadRunningContextAddress)^ do
-    if RunningThread <> Sender then
-      // e.g. if length(TRestHttpServer.fRestServers)>1
-      if RunningThread <> nil then
-        ERestException.RaiseUtf8('%.BeginCurrentThread() twice', [self])
-      else
-        // set the current TThread info
-        RunningThread := Sender;
+  thrd := PerThreadRunningContextAddress;
+  if thrd^.RunningThread <> Sender then
+    // e.g. if length(TRestHttpServer.fRestServers)>1
+    if thrd^.RunningThread <> nil then
+      ERestException.RaiseUtf8('%.BeginCurrentThread() twice', [self])
+    else
+      // set the current TThread info
+      thrd^.RunningThread := Sender;
   // call TRestOrmServer.BeginCurrentThread
   inherited OnBeginCurrentThread(Sender);
 end;
@@ -7628,6 +7610,7 @@ var
   tc: integer;
   i: PtrInt;
   id: TThreadID;
+  thrd: PServiceRunningContext;
   inst: TServiceFactoryServerInstance;
 begin
   tc := fStats.NotifyThreadCount(-1);
@@ -7651,15 +7634,15 @@ begin
         if InstanceCreation = sicPerThread then
           RetrieveInstance(nil, inst, ord(imFree), 0);
   end;
-  with PServiceRunningContext(PerThreadRunningContextAddress)^ do
-    if RunningThread <> nil then
-      // e.g. if length(TRestHttpServer.fRestServers)>1
-      if RunningThread <> Sender then
-        ERestException.RaiseUtf8(
-          '%.EndCurrentThread(%) should match RunningThread=%',
-          [self, Sender, RunningThread])
-      else        // reset the TThread info
-        RunningThread := nil;
+  thrd := PerThreadRunningContextAddress;
+  if thrd^.RunningThread <> nil then
+    // e.g. if length(TRestHttpServer.fRestServers)>1
+    if thrd^.RunningThread <> Sender then
+      ERestException.RaiseUtf8(
+        '%.EndCurrentThread(%) should match RunningThread=%',
+        [self, Sender, thrd^.RunningThread])
+    else // reset the TThread info
+      thrd^.RunningThread := nil;
   // call TRestOrmServer.EndCurrentThread (and TSynLogFamily.OnThreadEnded)
   inherited OnEndCurrentThread(Sender);
 end;
@@ -7669,8 +7652,7 @@ procedure TRestServer.Uri(var Call: TRestUriParams);
 var
   ctxt: TRestServerUriContext;
   node: TRestTreeNode;
-  tix: Int64;
-  tix32: cardinal;
+  idletix32: cardinal;
   outcomingfile: boolean;
 begin
   // 1. reject ASAP if not worth processing
@@ -7702,6 +7684,7 @@ begin
   if fRouter = nil then
     ComputeRoutes; // thread-safe (re)initialize once if needed
   Call.OutStatus := HTTP_BADREQUEST; // default error code is 400 BAD REQUEST
+  idletix32 := 0; // make compiler happy
   ctxt := fServicesRouting.Create;
   try
     ctxt.Prepare(self, Call);
@@ -7718,7 +7701,7 @@ begin
     fRouterSafe.ReadUnLock;
     if (node = nil) or
        (ctxt.fNode = rnNone) then
-      ctxt.Error('Invalid URI', HTTP_BADREQUEST) // root ok: error 400, not 404
+      ctxt.Error('Invalid URI', HTTP_BADREQUEST) // root ok: 400 not 404
     else if (RootRedirectGet <> '') and
             (ctxt.Method = mGet) and
             (ctxt.fNode = rnTable) and // Url = Model.Root
@@ -7728,7 +7711,7 @@ begin
             (rsoValidateUtf8Input in fOptions) and
             ctxt.ContentTypeIsJson and
             not IsValidUtf8NotVoid(Call.InBody) then // may use AVX2
-      ctxt.Error('Expects valid UTF-8 input')
+      ctxt.Error('Expects valid UTF-8 input', HTTP_BADREQUEST)
     else
     // 6. handle security
     if (rsoSecureConnectionRequired in fOptions) and
@@ -7806,10 +7789,10 @@ begin
     // set any outgoing cookie
     if ctxt.OutSetCookie <> '' then
       ctxt.OutHeadFromCookie;
-    // paranoid check of the supplied output headers
+    // paranoid check of the supplied output headers (done anyway at HTTP level)
     if (Call.OutHead <> '') and
        not (rsoHttpHeaderCheckDisable in fOptions) and
-       IsInvalidHttpHeader(pointer(Call.OutHead), length(Call.OutHead)) then
+       IsInvalidHttpHeader(Call.OutHead) then
       ctxt.Error('Unsafe HTTP header rejected [%]',
         [EscapeToShort(Call.OutHead)], HTTP_SERVERERROR);
   finally
@@ -7825,23 +7808,16 @@ begin
         OnAfterUri(ctxt);
       except
       end;
-    tix := ctxt.TickCount64; // retrieve the (cached) value before Free
+    if Assigned(OnIdle) then
+      idletix32 := ctxt.TickCount64 shr 7; // trigger OnIdle() every 128 ms
     ctxt.Free;
   end;
   // 12. trigger post-request periodic process
-  tix32 := tix shr 10;
-  if tix32 <> fSessionsDeprecatedTix then
-    // check deprecated sessions every second
-    SessionDeleteDeprecated(tix32);
-  if Assigned(OnIdle) then
+  if (idletix32 <> 0) and
+     (fOnIdleLastTix <> idletix32) then
   begin
-    tix32 := tix shr 7;
-    if tix32 <> fOnIdleLastTix then
-    begin
-      // trigger OnIdle() every 128 ms
-      fOnIdleLastTix := tix32;
-      OnIdle(self);
-    end;
+    fOnIdleLastTix := idletix32;
+    OnIdle(self);
   end;
 end;
 
@@ -7888,7 +7864,7 @@ begin
   usr := Ctxt.GetInputValue('UserName');
   if usr = nil then
     usr := @_NIL;
-  fSessions.Safe.WriteLock;
+  fSessions.Safe.WriteLock; // AuthSessionRelease() requires WriteLock
   try
     a := pointer(fSessionAuthentication);
     n := PDALen(PAnsiChar(a) - _DALEN)^ + _DAOFF;
@@ -7936,14 +7912,15 @@ end;
 
 procedure TRestServer.CacheFlush(Ctxt: TRestServerUriContext);
 var
-  i, count: PtrInt;
+  n: integer;
   old: TRestConnectionID;
   cache: TOrmCache;
+  soa: TServiceContainerServer;
 begin
   case Ctxt.Method of
     mGET:
       begin
-        // POST root/cacheflush[/table[/id]]
+        // GET root/cacheflush[/table[/id]]
         cache := TRestOrmServer(fOrmInstance).CacheOrNil;
         if cache <> nil then
           if Ctxt.Table = nil then
@@ -7955,38 +7932,40 @@ begin
         Ctxt.Success;
       end;
     mPOST:
-      if Ctxt.fUriMethodPath = '_ping_' then
       begin
-        // POST root/cacheflush/_ping_
-        count := 0;
-        if Ctxt.Session > CONST_AUTHENTICATION_NOT_USED then
-          for i := 0 to Services.Count - 1 do
-            inc(count, TServiceFactoryServer(Services.InterfaceList[i].Service).
-              RenewSession(Ctxt));
-        if sllUserAuth in fLogLevel then
-          InternalLog('Renew % authenticated session % from %: count=%',
-            [Model.Root, Ctxt.Session, Ctxt.RemoteIPNotLocal, count], sllUserAuth);
-        Ctxt.Returns(['count', count]);
-      end
-      else if (fServices <> nil) and
-              (llfWebsockets in Ctxt.Call^.LowLevelConnectionFlags) then
-        if Ctxt.fUriMethodPath = '_callback_' then
-          // POST root/cacheflush/_callback_ with {"ICallbackName":1234} body
-          // as called from TRestHttpClientWebsockets.FakeCallbackUnregister
-          (fServices as TServiceContainerServer).ReleaseFakeCallback(Ctxt)
-        else if Ctxt.fUriMethodPath = '_replaceconn_' then
+        // POST root/cacheflush/* for services
+        soa := pointer(fServices);
+        if soa = nil then
+          exit;
+        if Ctxt.fUriMethodPath = '_ping_' then
         begin
-          // POST root/cacheflush/_replaceconn_ (over a secured connection)
-          old := GetInt64(pointer(Ctxt.Call^.InBody));
-          count := (fServices as TServiceContainerServer).
-            FakeCallbackReplaceConnectionID(old, Ctxt.Call^.LowLevelConnectionID);
-          if sllHTTP in fLogLevel then
-            InternalLog('%: Connection % replaced by % from % on %',
-              [Model.Root, old, Ctxt.Call^.LowLevelConnectionID,
-               Ctxt.RemoteIPNotLocal, Plural('interface', count)], sllHTTP);
-          Ctxt.Returns(['count', count]);
-        end;
-    mPUT:
+          // POST root/cacheflush/_ping_
+          n := 0;
+          if Ctxt.Session > CONST_AUTHENTICATION_NOT_USED then
+            n := soa.ClientSessionRenew(Ctxt);
+          if sllUserAuth in fLogLevel then
+            InternalLog('Renew % authenticated session % from %: n=%',
+              [Model.Root, Ctxt.Session, Ctxt.RemoteIPNotLocal, n], sllUserAuth);
+          Ctxt.Returns(['n', n]);
+        end
+        else if llfWebsockets in Ctxt.Call^.LowLevelConnectionFlags then
+          if Ctxt.fUriMethodPath = '_callback_' then
+            // POST root/cacheflush/_callback_ with {"ICallbackName":1234} body
+            // as called from TRestHttpClientWebsockets.FakeCallbackUnregister
+            soa.ClientFakeCallbackRelease(Ctxt)
+          else if Ctxt.fUriMethodPath = '_replaceconn_' then
+          begin
+            // POST root/cacheflush/_replaceconn_ (over a secured connection)
+            old := GetInt64(pointer(Ctxt.Call^.InBody));
+            n := soa.ClientFakeCallbackReplaceConnectionID(
+                   old, Ctxt.Call^.LowLevelConnectionID);
+            if sllHTTP in fLogLevel then
+              InternalLog('%: Connection % replaced by % from % on %',
+                [Model.Root, old, Ctxt.Call^.LowLevelConnectionID,
+                 Ctxt.RemoteIPNotLocal, Plural('interface', n)], sllHTTP);
+            Ctxt.Returns(['n', n]);
+          end;
+      end;
   end;
 end;
 
@@ -7997,7 +7976,7 @@ var
 begin
   if not (Ctxt.Method in [mPUT, mPOST]) then
   begin
-    Ctxt.Error('PUT/POST only');
+    Ctxt.Error('PUT/POST only', HTTP_NOTALLOWED);
     exit;
   end;
   try

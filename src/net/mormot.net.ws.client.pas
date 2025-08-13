@@ -702,7 +702,7 @@ begin
       aProtocol.OnBeforeIncomingFrame := fOnBeforeIncomingFrame;
       // send initial upgrade request
       RequestSendHeader(aWebSocketsURI, 'GET');
-      SharedRandom.Fill(@key, SizeOf(key)); // Lecuyer is enough for public random
+      SharedRandom.Fill(@key, SizeOf(key)); // public and unique: use Lecuyer
       bin1 := BinToBase64(@key, SizeOf(key));
       SockSendLine(['Content-Length: 0'#13#10 +
                     'Connection: Upgrade'#13#10 +
@@ -717,7 +717,7 @@ begin
          (extout <> '') then // e.g. for TEcdheProtocol
         SockSendLine(['Sec-WebSocket-Extensions: ', extout]);
       if aCustomHeaders <> '' then
-        SockSendHeaders(pointer(aCustomHeaders)); // normalizing CRLF
+        SockSendHeaders(aCustomHeaders); // normalizing CRLF
       SockSendCRLF;
       SockSendFlush('');
       // validate the response as WebSockets upgrade

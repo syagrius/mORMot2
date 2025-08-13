@@ -560,6 +560,7 @@ type
     var Context: THttpClientRequest): boolean of object;
 
   /// callback used e.g. by THttpClientSocket.Request to process any custom protocol
+  // - http.CommandResp contains the full URI, e.g. 'file:///C:/folder/file.txt'
   TOnHttpClientRequest = function(
     var http: THttpRequestContext): integer of object;
 
@@ -613,9 +614,8 @@ type
     /// constructor to create a client connection to a given URI
     // - returns TUri.Address as parsed from aUri
     // - overriden to support custom RegisterNetClientProtocol()
-    constructor OpenUri(const aUri: RawUtf8; out aAddress: RawUtf8;
-      const aTunnel: RawUtf8 = ''; aTimeOut: cardinal = 10000;
-      aTLSContext: PNetTlsContext = nil); override;
+    constructor OpenUri(const aUri: TUri; const aUriFull, aTunnel: RawUtf8;
+      aTimeOut: cardinal; aTLSContext: PNetTlsContext); override;
     /// constructor to create a client connection to a given TUri and options
     // - will use specified options, including TLS and Auth members, just like
     // the overloaded THttpRequest.Create(TUri,PHttpRequestExtendedOptions)
@@ -1659,6 +1659,10 @@ type
     /// set Http.Options^.Auth.Token/Scheme with a given wraBearer token
     // - will disable authentication if Token = ''
     procedure SetBearer(const Token: SpiUtf8);
+    /// can specify an additional default header to the HTTP request
+    // - could be used e.g. as
+    // ! Client.AddDefaultHeader('Authorization', 'Wawi '+ GetApiKey);
+    procedure AddDefaultHeader(const Name, Value: RawUtf8);
     /// Request execution, with no JSON parsing using RTTI
     procedure Request(const Method, Action: RawUtf8;
       const CustomError: TOnJsonClientError = nil); overload;
@@ -1696,6 +1700,7 @@ type
       var Response: TJsonResponse);
     /// can specify a cookie value to the HTTP request
     // - is void by default
+    // - specify a fully constructed 'cookiename: cookievalue; path=...' content
     property Cookies: RawUtf8
       read GetCookies write SetCookies;
     /// can specify a default header to the HTTP request
@@ -1755,6 +1760,7 @@ type
     procedure SetDefaultHeaders(const Value: RawUtf8); virtual; abstract;
     function Http: IHttpClient; virtual; abstract;
     procedure SetBearer(const Token: SpiUtf8); virtual;
+    procedure AddDefaultHeader(const Name, Value: RawUtf8); virtual; abstract;
     function Connected: string; virtual; abstract;
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
       var Response: TJsonResponse); virtual; abstract;
@@ -1825,6 +1831,7 @@ type
     procedure SetCookies(const Value: RawUtf8); override;
     function GetDefaultHeaders: RawUtf8; override;
     procedure SetDefaultHeaders(const Value: RawUtf8); override;
+    procedure AddDefaultHeader(const Name, Value: RawUtf8); override;
     function Http: IHttpClient; override;
     function Connected: string; override;
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
@@ -1907,6 +1914,7 @@ type
 // - this method will use a low-level THttpClientSock socket for plain http URI,
 // or TWinHttp/TCurlHttp for any https URI, or if forceNotSocket is set to true
 // - see also OpenHttpGet() for direct THttpClientSock call
+// - try INetClientProtocol if aUri does not start with http:// or https://
 function HttpGet(const aUri: RawUtf8; outHeaders: PRawUtf8 = nil;
   forceNotSocket: boolean = false; outStatus: PInteger = nil;
   timeout: integer = 0; forceSocket: boolean = false;
@@ -1915,6 +1923,7 @@ function HttpGet(const aUri: RawUtf8; outHeaders: PRawUtf8 = nil;
 /// retrieve the content of a web page, using the HTTP/1.1 protocol and GET method
 // - this method will use a low-level THttpClientSock socket for plain http URI,
 // or TWinHttp/TCurlHttp for any https URI
+// - try INetClientProtocol if aUri does not start with http:// or https://
 function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
   outHeaders: PRawUtf8 = nil; forceNotSocket: boolean = false;
   outStatus: PInteger = nil; timeout: integer = 0; forceSocket: boolean = false;
@@ -1923,6 +1932,7 @@ function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
 /// retrieve the content of a web page, with ignoreTlsCertError=true for https
 // - typically used to retrieve reference material online for testing
 // - can optionally use a local file as convenient offline cache
+// - try INetClientProtocol if aUri does not start with http:// or https://
 function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName = '';
   outStatus: PInteger = nil): RawByteString;
 
@@ -2129,7 +2139,7 @@ procedure RegisterNetClientProtocol(
 var
   m: TMethod;
 begin
-  if NetClientProtocols.FindAndExtract(Name, m) then
+  if NetClientProtocols.FindAndExtract(Name, m) then // remove any existing
     TObject(m.Data).Free; // was owned by this unit
   if Assigned(OnRequest) then
     NetClientProtocols.Add(Name, OnRequest);
@@ -2648,11 +2658,10 @@ begin
   if IsNone(proxy) or
      (not temp.From(uri)) or
      (temp.Address = '') or
+     (not (temp.UriScheme in [usHttp, usHttps])) or
      IsLocalHost(pointer(temp.Address)) or // no proxy for "127.x.x.x"
      (DefaultHttpClientSocketProxyNotForIp4 and
-      NetIsIP4(pointer(temp.Address))) or // plain "1.2.3.4" IP has no proxy
-     ((temp.Scheme <> '') and
-      not IdemPChar(pointer(temp.Scheme), 'HTTP')) then
+      NetIsIP4(pointer(temp.Address))) then  // plain "1.2.3.4" IP has no proxy
     result := nil
   else if (proxy <> '') and
           temp.From(proxy) then
@@ -2706,23 +2715,17 @@ begin
   inherited Destroy;
 end;
 
-constructor THttpClientSocket.OpenUri(const aUri: RawUtf8;
-  out aAddress: RawUtf8; const aTunnel: RawUtf8; aTimeOut: cardinal;
-  aTLSContext: PNetTlsContext);
-var
-  u: TUri;
+constructor THttpClientSocket.OpenUri(const aUri: TUri; const aUriFull,
+  aTunnel: RawUtf8; aTimeOut: cardinal; aTLSContext: PNetTlsContext);
 begin
-  if (u.From(aUri) or // e.g. 'file:///path/to' returns false but is valid
-      (u.Address <> '')) and
-     not IdemPChar(pointer(u.Scheme), 'HTTP') and
-     NetClientProtocols.FindAndCopy(u.Scheme, fOnProtocolRequest) then
-    begin
-      Create(aTimeOut); // no socket involved
-      fOpenUriFull := aUri; // e.g. to call PatchCreateFromUrl() Windows API
-      aAddress := u.Address;
-    end
+  if not (aUri.UriScheme in [usHttp .. usUdp]) and
+     NetClientProtocols.FindAndCopy(aUri.Scheme, fOnProtocolRequest) then
+  begin
+    Create(aTimeOut); // no socket involved - but keep Request() logic
+    fOpenUriFull := aUriFull;  // e.g. to call PatchCreateFromUrl() WinAPI
+  end
   else
-    inherited OpenUri(aUri, aAddress, aTunnel, aTimeOut, aTLSContext);
+    inherited OpenUri(aUri, aUriFull, aTunnel, aTimeOut, aTLSContext);
 end;
 
 constructor THttpClientSocket.OpenOptions(const aUri: TUri;
@@ -2801,7 +2804,7 @@ function THttpClientSocket.SameOpenOptions(const aUri: TUri;
 var
   tun: TUri;
 begin
-  result := IdemPChar(pointer(aUri.Scheme), 'HTTP') and
+  result := (aUri.UriScheme in HTTP_SCHEME) and
             aUri.Same(Server, Port, ServerTls) and
             SameNetTlsContext(TLS, aOptions.TLS) and
             fExtendedOptions.SameAuth(@aOptions.Auth);
@@ -2899,9 +2902,9 @@ begin
           not IsHead(ctxt.Method)) then
         CompressDataAndWriteHeaders(ctxt.DataMimeType, dat, ctxt.InStream);
       if ctxt.Header <> '' then
-        SockSendHeaders(pointer(ctxt.Header)); // normalizing CRLF
+        SockSendHeaders(ctxt.Header); // normalizing CRLF
       if Http.CompressList <> nil then
-        SockSendHeaders(pointer(Http.CompressList^.AcceptEncoding));
+        SockSendHeaders(Http.CompressList^.AcceptEncoding);
       SockSendCRLF;
       // flush headers and Data/InStream body
       SockSendFlush(dat);
@@ -3136,9 +3139,9 @@ begin
     begin
       // emulate a custom protocol (e.g. 'file://') into a HTTP request
       if Http.ParseAll(ctxt.InStream, ctxt.Data,
-          FormatUtf8('% % HTTP/1.0', [method, ctxt.Url]), ctxt.Header) then
+        Join([method, ' ', ctxt.Url, ' HTTP/1.0']), ctxt.Header) then
       begin
-        Http.CommandResp := fOpenUriFull;
+        Http.CommandResp := fOpenUriFull; // e.g. 'file:///C:/folder/file.txt'
         ctxt.Status := fOnProtocolRequest(Http);
         if StatusCodeIsSuccess(ctxt.Status) then
           ctxt.Status := Http.ContentToOutput(ctxt.Status, ctxt.OutStream);
@@ -3211,8 +3214,8 @@ begin
       if Assigned(fOnRedirect) then
         if not fOnRedirect(self, ctxt) then
           break;
-      if IdemPChar(pointer(ctxt.Url), 'HTTP') and
-         newuri.From(ctxt.Url) then
+      if IsHttp(ctxt.Url) and
+         newuri.From(ctxt.Url) then // relocated to another server
       begin
         fRedirected := newuri.Address;
         if (hfConnectionClose in Http.HeaderFlags) or
@@ -3778,18 +3781,11 @@ begin
   end;
 end;
 
-function OpenHttpGet(const server, port, url, inHeaders: RawUtf8;
-  outHeaders: PRawUtf8; aLayer: TNetLayer; aTLS: boolean;
-  outStatus: PInteger; aTimeout: integer; ignoreTlsCertError: boolean): RawByteString;
+function DoHttpGet(http: THttpClientSocket; const url, inHeaders: RawUtf8;
+  outHeaders: PRawUtf8; outStatus: PInteger): RawByteString;
 var
-  Http: THttpClientSocket;
   status: integer;
-  tls: TNetTlsContext;
 begin
-  result := '';
-  InitNetTlsContext(tls);
-  tls.IgnoreCertificateErrors := ignoreTlsCertError;
-  Http := OpenHttp(server, port, aTLS, aLayer, '', aTimeout, @tls);
   if Http <> nil then
   try
     Http.RedirectMax := 5; // fair enough
@@ -3805,6 +3801,17 @@ begin
   finally
     Http.Free;
   end;
+end;
+
+function OpenHttpGet(const server, port, url, inHeaders: RawUtf8;
+  outHeaders: PRawUtf8; aLayer: TNetLayer; aTLS: boolean;
+  outStatus: PInteger; aTimeout: integer; ignoreTlsCertError: boolean): RawByteString;
+var
+  tmp: TNetTlsContext;
+begin
+  result := DoHttpGet(OpenHttp(server, port, aTLS, aLayer, '', aTimeout,
+                        GetTlsContext(aTLS, ignoreTlsCertError, tmp)),
+              url, inHeaders, outHeaders, outStatus);
 end;
 
 
@@ -3957,7 +3964,7 @@ begin
     'pf', TLS.PrivateKeyFile], JSON_FAST, {dontAddDefault=}true);
   if (TLS.PrivateKeyFile <> '') and
      (TLS.PrivatePassword <> '') then
-    TDocVariantData(result).AddValueFromText('pp',
+    TDocVariantData(result).AddValueText('pp',
       BinToBase64uri(CryptDataWithSecret(TLS.PrivatePassword,
         [TLS.PrivateKeyFile, TLS.CertificateFile, Secret], TLS_ROUNDS, TLS_SALT)));
 end;
@@ -4227,7 +4234,7 @@ begin
   if Assigned(fOnProgress) then
     fOnProgress(self, 0, ContentLength); // initial notification
   if Assigned(fOnDownload) then
-    // download per-chunk using calback event
+    // download per-chunk using callback event
     repeat
       Bytes := InternalQueryDataAvailable;
       if Bytes = 0 then
@@ -4584,7 +4591,8 @@ var
 begin
   err := GetLastError;
   EWinHttp.RaiseUtf8('%: % error [%] (%) on %:%',
-    [self, ctxt, WinApiErrorShort(err, winhttpdll), err, fServer, fPort]);
+    [self, ctxt, WinApiErrorShort(err, WinHttpApi.LibraryHandle),
+     err, fServer, fPort]);
 end;
 
 
@@ -5549,6 +5557,12 @@ begin
   result := fDefaultHeaders;
 end;
 
+procedure TJsonClient.AddDefaultHeader(const Name, Value: RawUtf8);
+begin
+  AppendLine(fDefaultHeaders, [Name, ': ', Value]);
+  SetInHeaders;
+end;
+
 function TJsonClient.HttpOptions: PHttpRequestExtendedOptions;
 begin
   result := fHttp.Options;
@@ -5712,7 +5726,8 @@ function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
 var
   uri: TUri;
 begin
-  if uri.From(aUri) then
+  if uri.From(aUri) and // has a valid uri.Server field
+     (uri.UriScheme in HTTP_SCHEME) then
     if (uri.Https or
         forceNotSocket) and
        not forceSocket then
@@ -5735,8 +5750,11 @@ begin
       result := OpenHttpGet(uri.Server, uri.Port, uri.Address,
         inHeaders, outHeaders, uri.Layer, uri.Https, outStatus,
         timeout, ignoreTlsCertError)
-    else
-      result := '';
+  else if uri.Scheme = '' then
+    result := '' // a clearly invalid URI
+  else // try custom RegisterNetClientProtocol()
+    result := DoHttpGet(THttpClientSocket.OpenUri(uri, aUri, '', timeout, nil),
+      uri.Address, inHeaders, outHeaders, outStatus);
   {$ifdef LINUX_RAWDEBUGVOIDHTTPGET}
   if result = '' then
     writeln('HttpGet returned VOID for ',uri.server,':',uri.Port,' ',uri.Address);
@@ -5890,8 +5908,8 @@ begin
         'Content-Type: text/plain;charset=', TextCharSet, #13#10 +
         'Content-Transfer-Encoding: 8bit']);
     if head <> '' then
-      sock.SockSendHeaders(pointer(head)); // normalizing CRLF
-    sock.SockSendCRLF;                     // end of headers
+      sock.SockSendHeaders(head); // normalizing CRLF
+    sock.SockSendCRLF;            // end of headers
     sock.SockSend(Text);
     Exec('.', '25');
     Exec('QUIT', '22');

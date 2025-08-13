@@ -52,7 +52,7 @@ type
 
 const
   {$ifdef OSWINDOWS}
-  /// operating-system dependent Line Feed characters (#13#10 or #10)
+  /// operating-system dependent Line Feed characters (#13#10 on Windows)
   CRLF = #13#10;
   /// operating-system dependent wildchar to match all files in a folder
   FILES_ALL = '*.*';
@@ -61,7 +61,7 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = true;
   {$else}
-  /// operating-system dependent Line Feed characters
+  /// operating-system dependent Line Feed characters (#10 on POSIX)
   CRLF = #10;
   /// operating-system dependent wildchar to match all files in a folder
   FILES_ALL = '*';
@@ -70,8 +70,10 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = false;
   {$endif OSWINDOWS}
+  /// system-independent CR+LF two chars, as used on Windows or HTTP headers
+  EOL = #13#10;
   /// system-independent CR+LF two chars, as 16-bit constant
-  CRLFW = $0a0d;
+  EOLW = $0a0d;
   /// convert a TLineFeed value into its UTF-8 text representation
   LINE_FEED: array[TLineFeed] of TShort3 = (CRLF, #10, #13#10);
 
@@ -1045,17 +1047,17 @@ const
 type
   /// low-level API structure, not defined in old Delphi versions
   TOSVersionInfoEx = record
-    dwOSVersionInfoSize: DWORD;
-    dwMajorVersion: DWORD;
-    dwMinorVersion: DWORD;
-    dwBuildNumber: DWORD;
-    dwPlatformId: DWORD;
+    dwOSVersionInfoSize: DWord;
+    dwMajorVersion: DWord;
+    dwMinorVersion: DWord;
+    dwBuildNumber: DWord;
+    dwPlatformId: DWord;
     szCSDVersion: array[0..127] of char;
-    wServicePackMajor: WORD;
-    wServicePackMinor: WORD;
-    wSuiteMask: WORD;
-    wProductType: BYTE;
-    wReserved: BYTE;
+    wServicePackMajor: Word;
+    wServicePackMinor: Word;
+    wSuiteMask: Word;
+    wProductType: Byte;
+    wReserved: Byte;
   end;
 
 {$endif UNICODE}
@@ -1648,7 +1650,7 @@ type
     /// typically 0 for SMBIOS 2.1, 1 for SMBIOS 3.0
     DmiRevision: byte;
     /// the length of encoded binary in data
-    Length: DWORD;
+    Length: DWord;
     /// low-level binary of the SMBIOS Structure Table
     Data: RawByteString;
   end;
@@ -1785,7 +1787,7 @@ type
 
   /// Windows handle for a Thread - for cross-platform/cross-compiler clarity
   // - note that on POSIX TThreadID is a pointer and not a 32-bit file handle
-  TThreadID = DWORD;
+  TThreadID = DWord;
   /// a TThreadID-sized unsigned integer, to ease TThreadID alignment
   TThreadIDInt = cardinal;
 
@@ -1830,10 +1832,10 @@ type
     function ReadQword(const entry: SynUnicode): QWord;
     /// read a Windows Registry content as binary buffer after ReadOpen()
     // - just a wrapper around RegQueryValueExW() API call
-    function ReadBuffer(const entry: SynUnicode; data: pointer; datalen: DWORD): boolean;
+    function ReadBuffer(const entry: SynUnicode; data: pointer; datalen: DWord): boolean;
     /// read a Windows Registry content as length-specified buffer after ReadOpen()
     // - returns the number of bytes written to Data
-    function ReadMax(const entry: SynUnicode; data: pointer; maxdatalen: DWORD): DWORD;
+    function ReadMax(const entry: SynUnicode; data: pointer; maxdatalen: DWord): DWord;
     /// retrieve a Windows Registry content size as binary bytes after ReadOpen()
     // - returns -1 if the entry is not found
     function ReadSize(const entry: SynUnicode): integer;
@@ -1878,8 +1880,8 @@ const
 
 type
   /// 4KB stack buffer for no heap allocation during UTF-16 path encoding or
-  // switch to extended-length on > MAX_PATH
-  TW32Temp = array[0..W32_MAX] of WideChar;
+  // switch to extended-length on > MAX_PATH up to 2047 widechars
+  TW32Temp = array[0 .. W32_MAX] of WideChar;
 
 /// efficiently return a PWideChar from a TFileName on all compilers
 // - without any memory allocation, and with proper Unicode support
@@ -1934,7 +1936,7 @@ procedure CoInit;
 // - only made public for user convenience, e.g. when using custom COM objects
 procedure CoUninit;
 
-/// retrieves the current executable module handle, i.e.  its memory load address
+/// retrieves the current executable library handle, i.e. its memory load address
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetModuleHandle(lpModuleName: PChar): HMODULE;
 
@@ -1950,18 +1952,18 @@ function RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture: cardinal;
 
 /// retrieves the current thread ID
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
-function GetCurrentThreadId: DWORD; stdcall;
+function GetCurrentThreadId: DWord; stdcall;
 
 /// retrieves the current process ID
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
-function GetCurrentProcessId: DWORD; stdcall;
+function GetCurrentProcessId: DWord; stdcall;
 
 /// retrieves the current process ID
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentProcess: THandle; stdcall;
 
 /// redefined in mormot.core.os to avoid dependency to the Windows unit
-function WaitForSingleObject(hHandle: THandle; dwMilliseconds: DWORD): DWORD; stdcall;
+function WaitForSingleObject(hHandle: THandle; dwMilliseconds: DWord): DWord; stdcall;
 
 /// redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetEnvironmentStringsW: PWideChar; stdcall;
@@ -1991,18 +1993,18 @@ procedure LeaveCriticalSection(var cs: TRTLCriticalSection); stdcall;
 /// initialize Windows IOCP instance
 // - renamed in mormot.core.os to avoid dependency to the Windows unit
 function IocpCreate(FileHandle, ExistingCompletionPort: THandle;
-  CompletionKey: pointer; NumberOfConcurrentThreads: DWORD): THandle; stdcall;
+  CompletionKey: pointer; NumberOfConcurrentThreads: DWord): THandle; stdcall;
 
 /// retrieve Windows IOCP instance status
 // - renamed in mormot.core.os to avoid dependency to the Windows unit
 function IocpGetQueuedStatus(CompletionPort: THandle;
-  var lpNumberOfBytesTransferred: DWORD; var lpCompletionKey: pointer;
-  var lpOverlapped: pointer; dwMilliseconds: DWORD): BOOL; stdcall;
+  var lpNumberOfBytesTransferred: DWord; var lpCompletionKey: pointer;
+  var lpOverlapped: pointer; dwMilliseconds: DWord): BOOL; stdcall;
 
 /// trigger a Windows IOCP instance
 // - renamed in mormot.core.os to avoid dependency to the Windows unit
 function IocpPostQueuedStatus(CompletionPort: THandle;
-  NumberOfBytesTransferred: DWORD; dwCompletionKey: pointer;
+  NumberOfBytesTransferred: DWord; dwCompletionKey: pointer;
   lpOverlapped: POverlapped): BOOL; stdcall;
 
 /// finalize a Windows resource (e.g. IOCP instance)
@@ -2255,6 +2257,10 @@ function LinuxEventFDWait(fd: integer; ms: integer): boolean; inline;
 // - used e.g. by function FillSystemRandom() if available, since it makes a
 // single syscall, and /dev/urandom may be not available from some chroot
 function LinuxGetRandom(buf: pointer; len: PtrInt): boolean;
+
+/// a wrapper to the Linux prctl(PR_SET_NAME) syscall
+// - returns false if the kernel is unsupported (before 2.6.9) or on failure
+function LinuxSetProcessName(const NewName: RawUtf8): boolean;
 
 {$endif OSLINUX}
 
@@ -2536,17 +2542,20 @@ procedure GetErrorShortVar(error: integer; var dest: ShortString);
 
 {$ifdef OSWINDOWS}
 
-/// return the error message - maybe of a given Module - as generic string
+/// return the error message - maybe of a given library - as generic string
 // - may be used e.g. in conjunction with Exception.CreateFmt()
-// - if ModuleName does not support this Code, will also try it as system error
+// - if optional HMODULE does not support this Code, will try as System error
 // - first try WinErrorConstant() for system error constants, then call
 // FormatMessage() ensuring the ENGLISH_LANGID flag is used first
 // - replace SysErrorMessagePerModule() and SysErrorMessage() from mORMot 1
-function WinApiErrorString(Code: cardinal; ModuleName: PChar = nil): string;
+function WinApiErrorString(Code: cardinal; Lib: HMODULE = 0): string;
 
-/// return the error message of a given Module as UTF-8 ShortString
+/// return the error message - maybe of a given library - as UTF-8 ShortString
 // - may be used e.g. in conjunction with Exception.CreateUtf8()
-function WinApiErrorShort(Code: cardinal; ModuleName: PChar = nil): shortstring;
+function WinApiErrorShort(Code: cardinal; Lib: HMODULE = 0): shortstring;
+
+/// return the error message - maybe of a given library - as UTF-8 string
+function WinApiErrorUtf8(Code: cardinal; Lib: HMODULE = 0): RawUtf8;
 
 /// raise an EOSException from the last system error using WinApiErrorString()
 // - if Code is kept to its default 0, GetLastError is called
@@ -2562,8 +2571,9 @@ procedure WinCheck(const Context: ShortString; Code: integer;
   RaisedException: ExceptClass = nil);
   {$ifdef HASINLINE} inline; {$endif}
 
-/// raise an Exception from the last module error using WinApiErrorString()
-procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
+/// raise an Exception from the last library error using WinApiErrorString()
+procedure RaiseLastModuleError(const Context: ShortString; Lib: HMODULE;
+  ModuleException: ExceptClass);
 
 {$else}
 /// set the current system time as UTC timestamp
@@ -2670,8 +2680,8 @@ function GetTickCount64: Int64;
 {$endif OSWINDOWS}
 
 /// returns a system-wide current monotonic timestamp as 32-bit seconds
-// - simply wrap GetTickCount64 div 1000 on Windows, or call clock_gettime()
-// and return directly its timespec.tv_sec part on POSIX
+// - simply wrap GetTickCount64 div 1000 on Windows/Mac, or call clock_gettime()
+// and return directly its timespec.tv_sec part on Linux/BSD
 function GetTickSec: cardinal;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
@@ -3339,24 +3349,27 @@ type
     function DoMap(aCustomOffset: Int64): boolean;
     procedure DoUnMap;
   public
-    /// map the corresponding file handle
+    /// map the corresponding file handle into memory
     // - if aCustomSize and aCustomOffset are specified, the corresponding
-    // map view if created (by default, will map whole file)
+    // map view is created (by default, will map whole file, but it could
+    // be handy to only map a portion of it, e.g. its start for TSynPELoader,
+    // or to keep the pointers in a workable range on CPU32 systems)
     function Map(aFile: THandle; aCustomSize: PtrUInt = 0;
       aCustomOffset: Int64 = 0; aFileOwned: boolean = false;
-      aFileSize: Int64 = -1): boolean; overload;
-    /// map the file specified by its name
-    // - file will be closed when UnMap will be called
-    function Map(const aFileName: TFileName): boolean; overload;
+      aFileSize: Int64 = -1; aForceMap: boolean = false): boolean; overload;
+    /// map the file specified by its name into memory for reading
+    // - file will be closed when UnMap is called
+    function Map(const aFileName: TFileName; aForceMap: boolean = false;
+      aCustomSize: Int64 = 0; aCustomOffset: Int64 = 0): boolean; overload;
     /// set a fixed buffer for the content
     // - emulates memory-mapping over an existing buffer
     procedure Map(aBuffer: pointer; aBufferSize: PtrUInt); overload;
-    /// unmap the file
+    /// unmap the file - to be called eventually after any successfull Map()
     procedure UnMap;
     /// retrieve the memory buffer mapped to the file content
     property Buffer: PAnsiChar
       read fBuf;
-    /// retrieve the buffer size
+    /// retrieve the memory mapped buffer size (may be < FileSize)
     property Size: PtrUInt
       read fBufSize;
     /// retrieve the mapped file size
@@ -3701,9 +3714,8 @@ function ConsoleReadBody: RawByteString;
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
 var
-  /// internal wrapper using the RTL by default
-  // - overriden by mormot.core.unicode on Delphi 7/2007 to handle surrogates
-  // - called if IsAnsiCompatibleW(P, Len) returned false
+  /// used by Win32PWideCharToUtf8() when IsAnsiCompatibleW(P, Len) = false
+  // - overriden by mormot.core.unicode for performance and Delphi 7/2007 fix
   DoWin32PWideCharToUtf8: procedure(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
@@ -3763,6 +3775,14 @@ function PosixFileNames(const Folder: TFileName; Recursive: boolean;
   ExcludesDir: boolean = false; IncludeHiddenFiles: boolean = false;
   IncludeFolders: boolean = false): TRawUtf8DynArray;
 
+/// POSIX-only function to change the public name of the current process
+// - supplied Name should be pure ASCII-7 identifier - or fails returning false
+// - on Linux, will use prctl(PR_SET_NAME) syscall - truncating Name to 15 bytes
+// - on other POSIX (e.g. Darwin), will try to override the argv[0] value
+// directly in the process memory - which is somehow supported by some tools
+// - Windows does not allow to change the process name at all
+function PosixSetProcessName(const Name: RawUtf8): boolean;
+
 {$ifdef OSLINUXANDROID}
 /// read a File content into a string, without using FileSize()
 // - result will be filled using a buffer as required e.g. for POSIX char files
@@ -3777,8 +3797,8 @@ procedure LoadProcFileTrimed(fn: PAnsiChar; var result: RawUtf8); overload;
 /// low-level function returning some random binary from the Operating System
 // - Windows version calling the CryptGenRandom API is in mormot.core.os.security
 // - on POSIX, only up to 256 bytes (2048-bits) are retrieved from /dev/urandom
-// or /dev/random as stated by "man urandom" Usage - then padded with our
-// L'Ecuyer gsl_rng_taus2 random generator
+// or /dev/random as stated by "man urandom" Usage - then padded with our shared
+// gsl_rng_taus2 "L'Ecuyer" random generator
 // - so you may consider that the output Buffer is always filled with random
 // - you should not have to call this low-level procedure, but faster and safer
 // TAesPrng from mormot.crypt.core - also consider the TSystemPrng class
@@ -3994,7 +4014,7 @@ type
   {$endif USERECORDWITHMETHODS}
   private
     Flags: PtrUInt;      // is also the reentrant > 0 counter
-    ThreadID: TThreadID; // pointer on POSIX, DWORD on Windows
+    ThreadID: TThreadID; // pointer on POSIX, DWord on Windows
     procedure LockSpin;  // called by the Lock method when inlined
   public
     /// to be called if the instance has not been filled with 0
@@ -4080,6 +4100,9 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// leave a non-reentrant non-upgradable exclusive write lock
     procedure WriteUnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// check if the non-reentrant lock has been acquired as read or write
+    function IsLocked: boolean;
       {$ifdef HASINLINE} inline; {$endif}
   end;
   PRWLightLock = ^TRWLightLock;
@@ -4179,6 +4202,9 @@ type
     /// a high-level wrapper over ReadOnlyUnLock/ReadWriteUnLock/WriteUnLock methods
     procedure UnLock(context: TRWLockContext {$ifndef PUREMORMOT2} = cWrite {$endif});
       {$ifdef HASINLINE} inline; {$endif}
+    /// check if the reentrant lock has been acquired as read or write
+    function IsLocked: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
   PRWLock = ^TRWLock;
 
@@ -4276,17 +4302,19 @@ type
   {$else}
   TLockedList = object
   {$endif USERECORDWITHMETHODS}
-  private
-    fHead, fBin: pointer;
-    fSize: integer;
-    fSequence: PtrUInt;
-    fOnFree: TOnLockedListOne;
   public
     /// thread-safe access to the list
     Safe: TLightLock;
     /// how many TLockedListOne instances are currently stored in this list
     // - excluding the instances in the recycle bin
     Count: integer;
+    /// the size of one stored instance, including its TLockedListOne header
+    Size: integer;
+  private
+    fHead, fBin: pointer;
+    fSequence: PtrUInt;
+    fOnFree: TOnLockedListOne;
+  public
     /// initialize the storage for an inherited TLockedListOne size
     procedure Init(onesize: PtrUInt; const onefree: TOnLockedListOne = nil);
     /// release all stored memory
@@ -4305,9 +4333,6 @@ type
     /// raw access to the stored items as PLockedListOne dual-linked list
     property Head: pointer
       read fHead;
-    /// the size of one stored instance, including its TLockedListOne header
-    property Size: integer
-      read fSize;
   end;
   PLockedList = ^TLockedList;
 
@@ -4562,8 +4587,7 @@ type
   // - see also NewSynLocker and TSynLocker.DoneAndFreemem functions
   PSynLocker = ^TSynLocker;
 
-  /// raw class used by TAutoLocker.ProtectMethod and TSynLocker.ProtectMethod
-  // - defined here for use by TAutoLocker in mormot.core.data.pas
+  /// raw class used by TSynLocker.ProtectMethod and TAutoLocker.ProtectMethod
   TAutoLock = class(TInterfacedObject)
   protected
     fLock: PSynLocker;
@@ -4614,9 +4638,10 @@ type
   end;
 
   /// a thread-safe class with a virtual constructor and properties persistence
-  // - publishes a TSynLocker instance, and its managed critical section
+  // - publishes a TSynLocker instance, and its OS lock and padding fields
   // - consider a TLightLock field as lighter options, or a R/W lock with
   // TObjectRWLock and TObjectRWLightLock classes, or even a TObjectOSLightLock
+  // or a TObjectOSLock if you don't need additional TSynLocker fields/features
   // - TSynLockedWithRttiMethods would add paranoid JSON persistence lock
   TSynLocked = class(TSynPersistent)
   protected
@@ -4638,10 +4663,33 @@ type
   end;
 
   /// a thread-safe class with a virtual constructor and properties persistence
+  // - publishes one Operating System standard lock without the TSynLocker overhead
+  // - on high contention, for proper padding over the 64-bytes CPU cache line,
+  // you should add at least 36 bytes on CPU32 (i.e. 9 integer/pointer fields)
+  TObjectOSLock = class(TSynPersistent)
+  protected
+    fSafe: TOSLock; // TRTLCriticalSection with no padding (24 bytes on CPU32)
+  public
+    /// initialize the instance, and its associated OS lock
+    constructor Create; override;
+    /// finalize the instance, and its associated OS lock
+    destructor Destroy; override;
+    /// access to the associated non-reentrant Operating System lock instance
+    property Safe: TOSLock
+      read fSafe;
+    /// could be used as a short-cut to Safe^.Lock
+    procedure Lock;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// could be used as a short-cut to Safe^.UnLock
+    procedure Unlock;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
+
+  /// a thread-safe class with a virtual constructor and properties persistence
   // - publishes the fastest available non-reentrant Operating System lock
   TObjectOSLightLock = class(TSynPersistent)
   protected
-    fSafe: TOSLightLock;
+    fSafe: TOSLightLock; // = TOSLightMutex = SRW lock or direct pthread mutex
   public
     /// initialize the instance, and its associated OS lock
     constructor Create; override;
@@ -4711,7 +4759,7 @@ type
     procedure Fill(dest: pointer; count: integer);
     /// fill some string[31] with 7-bit ASCII random text
     procedure FillShort31(var dest: TShort31);
-    /// seed this gsl_rng_taus2 Random32 generator
+    /// seed this gsl_rng_taus2 generator
     procedure Seed(entropy: pointer; entropylen: PtrInt);
   end;
 
@@ -4719,16 +4767,16 @@ type
 
 var
   /// a global thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
-  // - could be used if a threadvar is overkill, e.g. for short-living threads
   // - called e.g. by Random32/Random31/Random64/RandomDouble/RandomBytes functions
+  // - you can always seed and use your own TLecuyer (threadvar) instance, if needed
   SharedRandom: TLecuyerThreadSafe;
 
 /// fast compute of some 32-bit random value, using the gsl_rng_taus2 generator
 // - this function will use well documented and proven Pierre L'Ecuyer software
 // generator - which happens to be faster (and safer) than RDRAND opcode (which
 // is used for seeding anyway)
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
+// - note that TAesPrng.Main.Random32() cryptographic-level seems pointless for
+// only 32-bit of output - and it is twice slower (even with AES-NI)
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
 function Random32: cardinal; overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -4753,8 +4801,6 @@ function Random64: QWord;
 
 /// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
 // - returns 0 <= Random32(max) < max, calling the overloaded Random32 function
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
 function Random32(max: cardinal): cardinal; overload;
 
@@ -5150,10 +5196,10 @@ function OpenServiceInstance(hSCManager: SC_HANDLE; const ServiceName: RawUtf8;
 
 function GetNamedSecurityInfoW(pObjectName: PWideChar; ObjectType,
   SecurityInfo: cardinal; ppsidOwner, ppsidGroup, ppDacl, ppSacl: pointer;
-  var ppSecurityDescriptor: PSECURITY_DESCRIPTOR): DWORD; stdcall; external advapi32;
+  var ppSecurityDescriptor: PSECURITY_DESCRIPTOR): DWord; stdcall; external advapi32;
 function SetNamedSecurityInfoW(pObjectName: PWideChar; ObjectType,
   SecurityInfo: cardinal; psidOwner, psidGroup: pointer;
-  pDacl, pSacl: pointer): DWORD; stdcall; external advapi32;
+  pDacl, pSacl: pointer): DWord; stdcall; external advapi32;
 
 
 { *** high level classes to define and manage Windows Services }
@@ -6191,7 +6237,7 @@ type
     FLT_OVERFLOW, FLT_STACK_CHECK, FLT_UNDERFLOW, INT_DIVIDE_BY_ZERO,
     INT_OVERFLOW, PRIV_INSTRUCTION, STACK_OVERFLOW_,
     // sparse system errors
-    ALREADY_EXISTS, MORE_DATA, ACCOUNT_EXPIRED, NO_SYSTEM_RESOURCES,
+    ALREADY_EXISTS, MORE_DATA, ACCOUNT_EXPIRED, OLD_WIN_VERSION, NO_SYSTEM_RESOURCES,
     RPC_S_SERVER_UNAVAILABLE, PASSWORD_MUST_CHANGE, ACCOUNT_LOCKED_OUT,
     // main Windows Socket API (WSA*) errors
     EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, ENETDOWN,
@@ -6219,7 +6265,7 @@ const
     $c000008c, $c000008d, $c000008e, $c000008f, $c0000090, $c0000091,
     $c0000092, $c0000093, $c0000094, $c0000095, $c0000096, $c00000fd,
     // sparse system errors
-    183, 234, 701, 1450, 1722, 1907, 1909,
+    183, 234, 701, 1150, 1450, 1722, 1907, 1909,
     // main Windows Socket API (WSA) errors
     10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
     10060, 10061, 11002,
@@ -6629,8 +6675,8 @@ end;
 function Unicode_CompareString(PW1, PW2: PWideChar; L1, L2: PtrInt;
   IgnoreCase: boolean): integer;
 const
-  _CASEFLAG: array[boolean] of DWORD = (0, NORM_IGNORECASE);
-begin
+  _CASEFLAG: array[boolean] of DWord = (0, NORM_IGNORECASE);
+begin // mormot.core.os.posix.inc CompareStringW() may be using ICU or the RTL
   result := CompareStringW(LOCALE_USER_DEFAULT, _CASEFLAG[IgnoreCase], PW1, L1, PW2, L2);
 end;
 
@@ -7804,7 +7850,7 @@ procedure SynRaiseProc(Obj: TObject; Addr: CodePointer;
   FrameCount: integer; Frame: PCodePointer);
 var
   ctxt: TSynLogExceptionContext;
-  backuplasterror: DWORD;
+  backuplasterror: DWord;
   backuphandler: TOnRawLogException;
 begin
   if (Obj <> nil) and
@@ -7878,8 +7924,8 @@ end;
 
 { TMemoryMap }
 
-function TMemoryMap.Map(aFile: THandle; aCustomSize: PtrUInt;
-  aCustomOffset: Int64; aFileOwned: boolean; aFileSize: Int64): boolean;
+function TMemoryMap.Map(aFile: THandle; aCustomSize: PtrUInt; aCustomOffset: Int64;
+  aFileOwned: boolean; aFileSize: Int64; aForceMap: boolean): boolean;
 var
   available: Int64;
 begin
@@ -7895,14 +7941,10 @@ begin
   fFileSize := aFileSize;
   if aFileSize = 0 then
   begin
-    result := true; // handle 0 byte file without error (but no memory map)
+    result := true; // no error on inexistant / void file (but no memory map)
     exit;
   end;
   result := false;
-  if (fFileSize <= 0)
-     {$ifdef CPU32} or (fFileSize > maxInt){$endif} then
-    // maxInt = $7FFFFFFF = 1.999 GB (2GB would induce PtrInt errors on CPU32)
-    exit;
   if aCustomSize = 0 then
     fBufSize := fFileSize
   else
@@ -7910,11 +7952,16 @@ begin
     available := fFileSize - aCustomOffset;
     if available < 0 then
       exit;
-    if aCustomSize > available then
-      fBufSize := available;
-    fBufSize := aCustomSize;
+    if aCustomSize < available then
+      available := aCustomSize; // truncate to what is needed
+    fBufSize := available;
   end;
-  fLoadedNotMapped := fBufSize < 1 shl 20;
+  {$ifdef CPU32}
+  if fBufSize > Int64(MaxInt) then
+    // maxInt = $7FFFFFFF = 1.999 GB (2GB would induce PtrInt errors on CPU32)
+    exit; // use aCustomSize instead
+  {$endif CPU32}
+  fLoadedNotMapped := (fBufSize < 1 shl 20) and not aForceMap;
   if fLoadedNotMapped then
   begin
     // mapping is not worth it for size < 1MB which can be just read at once
@@ -7946,17 +7993,22 @@ begin
   fFileLocal := false;
 end;
 
-function TMemoryMap.Map(const aFileName: TFileName): boolean;
+function TMemoryMap.Map(const aFileName: TFileName; aForceMap: boolean;
+  aCustomSize, aCustomOffset: Int64): boolean;
 var
   h: THandle;
 begin
   result := false;
+  {$ifdef OSWINDOWS}
   // Memory-mapped file access does not go through the cache manager so
-  // using FileOpenSequentialRead() is pointless here
+  // using FileOpenSequentialRead() is pointless on Windows
   h := FileOpen(aFileName, fmOpenReadShared);
+  {$else}
+  h := FileOpenSequentialRead(aFileName); // but no lock is a good idea on POSIX
+  {$endif OSWINDOWS}
   if not ValidHandle(h) then
     exit;
-  result := Map(h);
+  result := Map(h, aCustomSize, aCustomOffset, {owned=}false, -1, aForceMap);
   if not result then
     FileClose(h);
   fFileLocal := result;
@@ -10085,6 +10137,11 @@ begin
   until TryWriteLock;
 end;
 
+function TRWLightLock.IsLocked: boolean;
+begin
+  result := (Flags <> 0);
+end;
+
 
 { TRWLock }
 
@@ -10260,6 +10317,11 @@ begin
     WriteUnLock;
 end;
 
+function TRWLock.IsLocked: boolean;
+begin
+  result := (Flags <> 0);
+end;
+
 
 { TOSLock }
 
@@ -10294,7 +10356,7 @@ end;
 procedure TLockedList.Init(onesize: PtrUInt; const onefree: TOnLockedListOne);
 begin
   FillCharFast(self, SizeOf(self), 0);
-  fSize := onesize;
+  Size := onesize;
   fOnFree := onefree;
   fSequence := (Random32 shr 2) + 65536; // 65535 < sequence < MaxInt
 end;
@@ -10353,7 +10415,7 @@ begin
     if result <> nil then
       fBin := PLockedListOne(result).next
     else
-      result := AllocMem(fSize);
+      result := AllocMem(Size);
     PLockedListOne(result).sequence := fSequence;
     inc(fSequence); // protected by Safe.Lock
     // insert at beginning of the main double-linked list
@@ -10387,7 +10449,7 @@ begin
     // release internals and add to the recycle bin
     if Assigned(fOnFree) then
       fOnFree(o);
-    FillCharFast(o^, fSize, 0); // garbage collect as void
+    FillCharFast(o^, Size, 0); // garbage collect as void
     o.next := fBin;
     fBin := o;
     dec(Count);
@@ -10671,7 +10733,7 @@ begin
   {$endif HASFASTTRYFINALLY}
     RWLock(cReadOnly);
     with Padding[Index].Data do
-      if VType = varAny then
+      if cardinal(VType) = varAny then
         result := VAny;
   {$ifdef HASFASTTRYFINALLY}
   finally
@@ -10776,7 +10838,7 @@ begin
       with Padding[Index] do
       begin
         if Index < fPaddingUsedCount then
-          if VType = varAny then
+          if cardinal(VType) = varAny then
             result := VAny
           else
             VarClearProc(Data)
@@ -10813,6 +10875,31 @@ procedure TSynLocked.Unlock;
 begin
   if self <> nil then
     fSafe^.UnLock;
+end;
+
+
+{ TObjectOSLock }
+
+constructor TObjectOSLock.Create;
+begin
+  fSafe.Init;
+end;
+
+destructor TObjectOSLock.Destroy;
+begin
+  fSafe.Done;
+end;
+
+procedure TObjectOSLock.Lock;
+begin
+  if self <> nil then
+    fSafe.Lock;
+end;
+
+procedure TObjectOSLock.Unlock;
+begin
+  if self <> nil then
+    fSafe.UnLock;
 end;
 
 
@@ -10915,7 +11002,7 @@ end;
 procedure TLecuyerThreadSafe.FillShort31(var dest: TShort31);
 begin
   Fill(@dest, 32);
-  FillAnsiStringFromRandom(@dest, 32);
+  AdjustShortStringFromRandom(@dest, 32);
 end;
 
 procedure TLecuyerThreadSafe.Seed(entropy: pointer; entropylen: PtrInt);
@@ -11359,7 +11446,7 @@ begin
       '^':
         if not posix and
            (state * [sInSQ, sInDQ, sBslash] = []) then
-          if PWord(p)^ = CRLFW then
+          if PWord(p)^ = EOLW then
           begin
             inc(p, 2);
             continue;

@@ -1902,7 +1902,7 @@ type
   // - will default setup a TLS connection on the OS-designed LDAP server
   // - Authentication will use Username/Password properties
   // - is not thread-safe, but you can call Lock/UnLock to share the connection
-  TLdapClient = class(TSynLocked)
+  TLdapClient = class(TObjectOSLock)
   protected
     fSettings: TLdapClientSettings;
     fSock: TCrtSocket;
@@ -5372,7 +5372,7 @@ begin
       inc(attr);
     end;
     if ObjectAttributeField = '*' then
-      v^.AddOrUpdateFrom(variant(a), {onlymissing=}true)
+      v^.AddOrUpdateFrom(a, {onlymissing=}true)
     else
       v^.AddValue(ObjectAttributeField, variant(a), {owned=}true);
     a.Clear; // mandatory to prepare the next a.Init in this loop

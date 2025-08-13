@@ -276,15 +276,16 @@ function SearchFieldIndex(var Indexes: TFieldIndexDynArray; Field: integer): Ptr
 function FieldIndexToBits(const Index: TFieldIndexDynArray): TFieldBits; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-const { published for testing - do not use! }
+const { published only for regression tests - do not use! }
   // "as at by do if in is no of on or to" char pairs
   SQL_KEYWORDS_BY2: array[0 .. 12 * 2 - 1] of AnsiChar =
     'ASATBYDOIFINISNOOFONORTO';
 
-  // minimal list - see https://sqlite.org/lang_createtable.html
-  SQL_KEYWORDS: array[0 .. 11] of PUtf8Char = (
-    'CHECK', 'COLLATE', 'CONSTRAINT', 'DEFAULT', 'FOREIGN', 'FROM', 'GROUP',
-    'NOT', 'ORDER', 'PRIMARY', 'UNIQUE', 'WHERE');
+  // minimal list - https://sqlite.org/lang_createtable.html + SQL_KEYWORDS_BY2
+  SQL_KEYWORDS: array[0 .. 16] of PUtf8Char = (
+    'AND', 'CHECK', 'COLLATE', 'CONSTRAINT', 'DEFAULT', 'FOREIGN', 'FROM',
+    'GROUP', 'JOIN', 'LIKE', 'LIMIT', 'NOT', 'NULL', 'ORDER', 'PRIMARY',
+    'UNIQUE', 'WHERE');
 
   // see https://sqlite.org/lang_keywords.html + SQL_KEYWORDS_BY2
   SQLITE_KEYWORDS: array[0 ..  135] of PUtf8Char = (
@@ -1797,7 +1798,7 @@ end;
 function IsRowID(FieldName: PUtf8Char; FieldLen: integer): boolean;
 begin
   if FieldLen = 2 then
-    result := PWord(FieldName)^ and $dfdf = ord('I') + ord('D') shl 8
+    result := PInteger(FieldName)^ and $dfdf = ord('I') + ord('D') shl 8
   else if FieldLen = 5 then
     result := (PInteger(FieldName)^ and $dfdfdfdf =
                ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
@@ -1850,75 +1851,74 @@ procedure VariantToSqlVar(const Input: variant; var temp: RawByteString;
   var Output: TSqlVar);
 var
   wasString: boolean;
+  inp: TVarData absolute Input;
 begin
   Output.Options := [];
-  with TVarData(Input) do
-    if VType = varVariantByRef then
-      VariantToSqlVar(PVariant(VPointer)^, temp, Output)
-    else
-      case VType of
-        varEmpty,
-        varNull:
-          Output.VType := ftNull;
-        varByte:
-          begin
-            Output.VType := ftInt64;
-            Output.VInt64 := VByte;
-          end;
-        varInteger:
-          begin
-            Output.VType := ftInt64;
-            Output.VInt64 := VInteger;
-          end;
-        varLongWord:
-          begin
-            Output.VType := ftInt64;
-            Output.VInt64 := VLongWord;
-          end;
-        varWord64,
-        varInt64:
-          begin
-            Output.VType := ftInt64;
-            Output.VInt64 := VInt64;
-          end;
-        varSingle:
-          begin
-            Output.VType := ftDouble;
-            Output.VDouble := VSingle;
-          end;
-        varDouble:
-          begin
-            // varDate would be converted into ISO-8601 by VariantToUtf8()
-            Output.VType := ftDouble;
-            Output.VDouble := VDouble;
-          end;
-        varCurrency:
-          begin
-            Output.VType := ftCurrency;
-            Output.VInt64 := VInt64;
-          end;
-        varString:
-          begin
-            // assume RawUtf8
-            Output.VType := ftUtf8;
-            Output.VText := VPointer;
-          end;
-      else
-        // handle less current cases
-        if VariantToInt64(Input, Output.VInt64) then
-          Output.VType := ftInt64
-        else
-        begin
-          VariantToUtf8(Input, RawUtf8(temp), wasString);
-          if wasString then
-          begin
-            Output.VType := ftUtf8;
-            Output.VText := pointer(temp);
-          end
-          else
-            Output.VType := ftNull;
-        end;
+  case cardinal(inp.VType) of
+    varEmpty,
+    varNull:
+      Output.VType := ftNull;
+    varByte:
+      begin
+        Output.VType := ftInt64;
+        Output.VInt64 := inp.VByte;
       end;
+    varInteger:
+      begin
+        Output.VType := ftInt64;
+        Output.VInt64 := inp.VInteger;
+      end;
+    varLongWord:
+      begin
+        Output.VType := ftInt64;
+        Output.VInt64 := inp.VLongWord;
+      end;
+    varWord64,
+    varInt64:
+      begin
+        Output.VType := ftInt64;
+        Output.VInt64 := inp.VInt64;
+      end;
+    varSingle:
+      begin
+        Output.VType := ftDouble;
+        Output.VDouble := inp.VSingle;
+      end;
+    varDouble:
+      begin
+        // varDate would be converted into ISO-8601 by VariantToUtf8()
+        Output.VType := ftDouble;
+        Output.VDouble := inp.VDouble;
+      end;
+    varCurrency:
+      begin
+        Output.VType := ftCurrency;
+        Output.VInt64 := inp.VInt64;
+      end;
+    varString:
+      begin
+        // assume RawUtf8
+        Output.VType := ftUtf8;
+        Output.VText := inp.VPointer;
+      end;
+  else
+    // handle less current cases
+    if cardinal(inp.VType) = varVariantByRef then
+      VariantToSqlVar(PVariant(inp.VPointer)^, temp, Output)
+    else if VariantToInt64(Input, Output.VInt64) then
+      Output.VType := ftInt64
+    else
+    begin
+      VariantToUtf8(Input, RawUtf8(temp), wasString);
+      if wasString then
+      begin
+        Output.VType := ftUtf8;
+        Output.VText := pointer(temp);
+      end
+      else
+        Output.VType := ftNull;
+    end;
+  end;
 end;
 
 procedure VariantToInlineValue(const V: Variant; var result: RawUtf8);
@@ -1935,7 +1935,7 @@ end;
 
 function VariantVTypeToSqlDBFieldType(VType: cardinal): TSqlDBFieldType;
 begin
-  case VType of
+  case cardinal(VType) of
     varNull:
       result := ftNull;
     varShortInt,
@@ -1970,7 +1970,7 @@ begin
   result := VariantVTypeToSqlDBFieldType(VD.VType);
   case result of
     ftUnknown:
-      if VD.VType = varEmpty then
+      if cardinal(VD.VType) = varEmpty then
         result := ftUnknown
       else if SetVariantUnRefSimpleValue(V, tmp{%H-}) then
         result := VariantTypeToSqlDBFieldType(variant(tmp))
@@ -2899,7 +2899,7 @@ var
 begin
   CancelAll; // rewind JSON
   p := @VOID_ARRAYFIELD[fExpand];
-  inc(fTotalFileSize, fStream.Write(p^[1], ord(p^[0])));
+  inc(fWrittenBytes, fStream.Write(p^[1], ord(p^[0])));
 end;
 
 constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;

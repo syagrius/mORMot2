@@ -17,9 +17,9 @@ function PosExtString(Str: PChar): PChar; forward;
 procedure _DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 var
   tmp: TSynTempBuffer;
-begin
+begin // FPC RTL is fine, and recent Delphi just calls WideCharToMultiByte() API
   tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len); // use RTL if complex
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len);
   if Len > 0 then
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
@@ -33,13 +33,21 @@ begin
             (PCardinalArray(Name)[1] = ord('?') + ord('\') shl 16);
 end;
 
-procedure ExtendedPathName(Name: PWideChar; Len: PtrInt; var Temp: TW32Temp);
+function Win32FullPathW(Name, Dest: PWideChar; MaxDest: DWord): boolean;
 var
-  fp: PWideChar;
+  len: DWord;
+  dummy: PWideChar;
+begin
+  len := GetFullPathNameW(Name, MaxDest, Dest, dummy);
+  result := (len > 0) and
+            (len <= MaxDest); // ensure was not actually truncated in Dest[]
+end;
+
+procedure ExtendedPathName(Name: PWideChar; Len: PtrInt; var Temp: TW32Temp);
 begin
   Len := Len * 2 + 2; // in bytes, +2 to include ending #0
   if (Len <= MAX_PATH * 2) or
-     ((Len <= SizeOf(Temp) - 8) and
+     ((Len <= SizeOf(Temp)) and
       IsExtendedPathNameW(Name)) then // in '\\?\...' format
   begin
     MoveFast(Name^, Temp[0], Len); // we can use the supplied UTF-16 file name
@@ -47,17 +55,22 @@ begin
   end;
   // need to switch to extended-length path
   Temp[0] := #0;
-  if Len > SizeOf(Temp) - 8 then
+  if Len >= SizeOf(Temp) - 16 then
     exit; // avoid buffer overflow
   // append the full path name to the \\?\ prefix
-  Temp[0] := '\';
-  Temp[1] := '\';
-  Temp[2] := '?';
-  Temp[3] := '\';
-  if ((ord(Name[0]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
-      (Name[1] = ':')) or
-     (GetFullPathNameW(Name, high(Temp) - 4, @Temp[4], fp) = 0) then
-    MoveFast(Name^, Temp[4], Len);
+  PCardinal(@Temp[0])^ := ord('\') + ord('\') shl 16;
+  PCardinal(@Temp[2])^ := ord('?') + ord('\') shl 16;
+  if (ord(Name[0]) in [ord('A')..ord('Z'), ord('a')..ord('z')]) and
+     (Name[1] = ':') then // 'c:\toto' can directly return '\\?\c:\toto'
+    MoveFast(Name^, Temp[4], Len)
+  else if PCardinal(Name)^ = ord('\') + ord('\') shl 16 then
+  begin // '\\server\toto' should return '\\?\UNC\server\toto'
+    PCardinal(@Temp[4])^ := ord('U') + ord('N') shl 16;
+    PCardinal(@Temp[6])^ := ord('C') + ord('\') shl 16;
+    MoveFast(Name[2], Temp[8], Len - 4);
+  end
+  else if not Win32FullPathW(Name, @Temp[4], high(Temp) - 4) then
+    Temp[0] := #0; // GetFullPathNameW() failure or W32_MAX overflow
 end;
 
 {$ifdef UNICODE}
@@ -96,7 +109,7 @@ begin
   if dst <> nil then
     repeat
       dec(l);
-      dst[l] := s[l]; // fast direct conversion using 7-bit WideChar -> AnsiChar
+      dst[l] := cardinal(s[l]); // fast direct 7-bit conversion
     until l = 0;
 end;
 
@@ -131,7 +144,7 @@ begin
      IsAnsiCompatible(pointer(FileName), len) then
     // most common cases do not need any Unicode conversion
     for i := 0 to len do // includes #0 terminator
-      PWordArray(@Temp)[i] := PByteArray(FileName)[i]
+      PWordArray(@Temp)[i] := cardinal(PByteArray(FileName)[i])
   else
     // use a temporary SynUnicode variable for complex UTF-16 conversion
     // or if MAX_PATH is reached and \\?\ prefix is needed for extended-length
@@ -179,7 +192,6 @@ begin
   Win32PWideCharToString(P, StrLenW(P), string(fn));
 end;
 
-// local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
   i: PtrInt;
@@ -190,7 +202,7 @@ begin
     begin
       R := FastSetString(res, Len);
       for i := 0 to Len - 1 do
-        R[i] := PWordArray(P)[i]; // fast direct conversion
+        R[i] := PWordArray(P)[i]; // fast direct ASCII 7-bit conversion
     end
     else
       DoWin32PWideCharToUtf8(P, Len, res); // use RTL or mormot.core.unicode
@@ -303,8 +315,18 @@ begin
   if not fExtendedPath and
      (length(fCurrentDir) + length(fn) >= MAX_PATH - 5) then
   begin
+    // use long path prefix from now on
     fExtendedPath := true;
-    fCurrentDir := '\\?\' + fCurrentDir;  // use long path prefix from now on
+    if (fCurrentDir[1] <> '\') and
+       (fCurrentDir[2] <> '\') then
+      // convert e.g. into '\\?\c:\toto\'
+      fCurrentDir := '\\?\' + fCurrentDir
+    else
+    begin
+      // '\\server\toto\' should translate into '\\?\UNC\server\toto\'
+      delete(fCurrentDir, 1, 1);
+      fCurrentDir := '\\?\UNC' + fCurrentDir;
+    end;
   end;
   result := fCurrentDir + fn;
 end;
@@ -563,20 +585,20 @@ begin
   result := Windows.GetModuleHandle(lpModuleName); // call either A or W API
 end;
 
-function WinError(err: cardinal; src: pointer; ss: PShortString; s: PString): boolean;
+function WinError(err: cardinal; lib: HMODULE; ss: PShortString; s: PString): boolean;
 var
   errbak, flags, len: PtrUInt;
   tmp: array[0..511] of WideChar;
 begin
   errbak := GetLastError;
   flags := FORMAT_MESSAGE_FROM_SYSTEM;
-  if src <> nil then // Module specific error codes - no fallback to system
+  if lib <> 0 then
     flags := FORMAT_MESSAGE_FROM_HMODULE;
   // first try if there is an English message version of this error err
-  len := FormatMessageW(flags, src, err, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
+  len := FormatMessageW(flags, pointer(lib), err, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
   if len = 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
-    len := FormatMessageW(flags, src, err, 0, @tmp, SizeOf(tmp), nil);
+    len := FormatMessageW(flags, pointer(lib), err, 0, @tmp, SizeOf(tmp), nil);
   SetLastError(errbak);
   while (len <> 0) and
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
@@ -584,37 +606,46 @@ begin
   if s <> nil then
     Win32PWideCharToString(@tmp, len, s^)
   else if len <> 0 then
-    ss^[0] := AnsiChar(UnicodeToUtf8(@ss^[1], 255, @tmp, len)); // RTL
+    ss^[0] := AnsiChar(UnicodeToUtf8(@ss^[1], 255, @tmp, len)); // use RTL
   result := len <> 0;
 end;
 
-function WinApiErrorString(Code: cardinal; ModuleName: PChar): string;
+function WinApiErrorString(Code: cardinal; Lib: HMODULE): string;
 var
   tmp: TShort47;
 begin
-  if ModuleName <> nil then // first try from the supplied library name
-    if WinError(Code, pointer(GetModuleHandle(ModuleName)), nil, @result) then
-      exit;
+  if Lib <> 0 then
+    if WinError(Code, Lib, nil, @result) then
+      exit; // retrieved directly from supplied library name
   tmp[0] := #0;
   if AppendWinErrorText(Code, tmp, #0) then // try known system constants
     SetStringFromAnsi7Buffer(result, @tmp[1], ord(tmp[0]))
   else
-    WinError(Code, nil, nil, @result); // fallback to FormatMessageW()
+    WinError(Code, 0, nil, @result); // fallback to FormatMessageW()
 end;
 
-function WinApiErrorShort(Code: cardinal; ModuleName: PChar): shortstring;
+function WinApiErrorShort(Code: cardinal; Lib: HMODULE): shortstring;
 begin
-  if ModuleName <> nil then // first try from the supplied library name
-    if WinError(Code, pointer(GetModuleHandle(ModuleName)), @result, nil) then
-      exit;
-  GetErrorShortVar(Code, result); // regular system information
+  if (Lib = 0) or
+     not WinError(Code, Lib, @result, nil) then // try from library name
+    GetErrorShortVar(Code, result); // regular system information
+end;
+
+function WinApiErrorUtf8(Code: cardinal; Lib: HMODULE): RawUtf8;
+var
+  tmp: ShortString;
+begin
+  if (Lib = 0) or
+     not WinError(Code, Lib, @tmp, nil) then // try from library name
+    GetErrorShortVar(Code, tmp); // regular system information
+  ShortStringToAnsi7String(tmp, result);
 end;
 
 procedure GetErrorShortVar(error: integer; var dest: ShortString);
 begin
   dest[0] := #0;
   if not AppendWinErrorText(error, dest, #0) then // try known system constants
-    WinError(error, nil, @dest, nil); // fallback to FormatMessageW
+    WinError(error, 0, @dest, nil); // fallback to FormatMessageW
 end;
 
 procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean);
@@ -622,13 +653,14 @@ begin
   WinErrorShort(Code, Dest, NoInt);
 end;
 
-procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
+procedure RaiseLastModuleError(const Context: ShortString; Lib: HMODULE;
+  ModuleException: ExceptClass);
 var
   code: integer;
 begin
   code := GetLastError;
   raise ModuleException.CreateFmt('%s error [%s] (0x%x)',
-    [ModuleName, WinApiErrorString(code, ModuleName), code]);
+    [Context, WinApiErrorString(code, Lib), code]);
 end;
 
 function WinLastError(const Context: ShortString; Code: integer): string;
@@ -705,7 +737,7 @@ var
 
 function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
-  len: DWORD;
+  len: DWord;
   u: TSynTempBuffer;
   fn: array[0..MAX_PATH] of WideChar;
 begin
@@ -1253,7 +1285,7 @@ end;
 
 function ExpandFileName(const FileName: TFileName): TFileName;
 var
-  w, fp: PWideChar;
+  w: PWideChar;
   t1, t2: TW32Temp;
 begin
   result := FileName;
@@ -1262,11 +1294,11 @@ begin
   w := W32(FileName, t1);
   if w = nil then
     exit;
-  if not IsExtendedPathNameW(w) then // W32() may have converted to extended-length
-    if GetFullPathNameW(w, high(t2), @t2, fp) = 0 then
-      exit
+  if not IsExtendedPathNameW(w) then // W32() may have converted w^ to \\?\
+    if Win32FullPathW(w, @t2, high(t2)) then
+      w := @t2 // full expanded file name from Windows API
     else
-      w := @t2; // full expanded file name from Windows API
+      exit; // GetFullPathNameW() failure or W32_MAX overflow
   Win32PWideCharToFileName(w, result);
 end;
 
@@ -1287,8 +1319,8 @@ const
   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 2; // devmode
 var
   CreateSymbolicLinkW: function(lpSymlinkFileName, lpTargetFileName: PWideChar;
-    dwFlags: DWORD): BOOL; stdcall;
-  CreateSymbolicLinkFlags: DWORD = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    dwFlags: DWord): BOOL; stdcall;
+  CreateSymbolicLinkFlags: DWord = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 
 function FileSymLink(const SymLink, Target: TFileName): boolean;
 var
@@ -1348,7 +1380,8 @@ begin
   // warning: GetSystemTimeAsFileTime() is fast, but not monotonic!
   t32 := Windows.GetTickCount; // we only have the 32-bit counter on XP
   p := @LastTickXP;
-  inc(p^.H, ord(t32 < p^.L)); // wrap-up overflow after 49.7 days
+  if t32 < p^.L then // wrap-up overflow after 49.7 days
+    inc(p^.H);
   p^.L := t32;
   result := p^.V;
 end; // warning: FPC's GetTickCount64 doesn't handle 49.7 days wrap on XP :(
@@ -2092,15 +2125,15 @@ end;
 // some definitions missing on Delphi and/or FPC
 type
   TProcessEntry32 = record
-    dwSize: DWORD;
-    cntUsage: DWORD;
-    th32ProcessID: DWORD;          // this process
+    dwSize: DWord;
+    cntUsage: DWord;
+    th32ProcessID: DWord;          // this process
     th32DefaultHeapID: PtrUInt;
-    th32ModuleID:DWORD;            // associated exe
-    cntThreads: DWORD;
-    th32ParentProcessID: DWORD;    // this process's parent process
+    th32ModuleID:DWord;            // associated exe
+    cntThreads: DWord;
+    th32ParentProcessID: DWord;    // this process's parent process
     pcPriClassBase: integer;          // Base priority of process's threads
-    dwFlags: DWORD;
+    dwFlags: DWord;
     szExeFile: array [0..MAX_PATH - 1] of WideChar;   // Path
   end;
 
@@ -2574,7 +2607,7 @@ begin
   if not NoLineFeed then
   begin
     SetLength(txt, l + 2); // faster to reallocate than WriteFile() twice
-    PWord(@PByteArray(txt)[l])^ := CRLFW;
+    PWord(@PByteArray(txt)[l])^ := EOLW;
     inc(l, 2);
   end;
   ConsoleCriticalSection.Lock;
@@ -2994,7 +3027,7 @@ begin
 end;
 
 function TWinRegistry.ReadMax(const entry: SynUnicode;
-  Data: pointer; MaxDataLen: DWORD): DWORD;
+  Data: pointer; MaxDataLen: DWord): DWord;
 var
   tmp: RawByteString;
 begin
@@ -3056,7 +3089,7 @@ var
 function IsUacVirtualizationEnabled: boolean;
 var
   token: THandle;
-  enabled, len: DWORD;
+  enabled, len: DWord;
 begin
   if IsUacEnabled = lsUntested then
     if OSVersion < wVista then
@@ -3214,9 +3247,9 @@ type
   PCERT_INFO = pointer;
 
   CERT_CONTEXT = record
-    dwCertEncodingType: DWORD;
+    dwCertEncodingType: DWord;
     pbCertEncoded: PByte;
-    cbCertEncoded: DWORD;
+    cbCertEncoded: DWord;
     pCertInfo: PCERT_INFO;
     hCertStore: HCERTSTORE;
   end;
@@ -4158,7 +4191,7 @@ end;
 var
   OnHandleCtrlC: TThreadMethod;
 
-function ConsoleCtrlHandler(typ : dword) : BOOL; stdcall;
+function ConsoleCtrlHandler(typ : DWord) : BOOL; stdcall;
 begin
   result := false;
   if Assigned(OnHandleCtrlC) then
@@ -4666,14 +4699,14 @@ type
     ProcessorMask: PtrUInt;
     case Relationship: TSystemLogicalProcessorRelation of
       RelationProcessorCore: (
-        ProcessorCoreFlags: BYTE);
+        ProcessorCoreFlags: byte);
       RelationNumaNode: (
         NumaNodeNumber: DWord);
       RelationCache: (
         Cache: record
-          Level: BYTE;
-          Associativity: BYTE;
-          LineSize: WORD;
+          Level: byte;
+          Associativity: byte;
+          LineSize: Word;
           Size: DWord;
           CacheType: TSystemLogicalProcessorCache;
         end);

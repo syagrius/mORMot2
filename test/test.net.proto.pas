@@ -217,20 +217,21 @@ const
 const
   // some reference OpenAPI/Swagger definitions
   // - downloaded as openapi-ref.zip since some of those endpoints are unstable
-  OpenApiName: array[0 .. 5] of RawUtf8 = (
+  OpenApiName: array[0 .. 6] of RawUtf8 = (
     'FinTrack',
     'Nakama',  // https://github.com/heroiclabs/nakama
     'Pets2',   // https://petstore.swagger.io/v2/swagger.json
     'Pets3',   // https://petstore3.swagger.io/api/v3/openapi.json
     'Qdrant',  // https://qdrant.github.io/qdrant/redoc/v1.8.x/openapi.json
-    'VAS');    // https://platform-api-staging.vas.com/api/v1/swagger.json
+    'VAS',     // https://platform-api-staging.vas.com/api/v1/swagger.json
+    'JTL');    // https://developer.jtl-software.com/_spec/products/erpapi/@1.1-onprem/openapi.json?download
 
 procedure TNetworkProtocols.OpenAPI;
 var
   i: PtrInt;
   fn: TFileName;
   key, prev, dto, client: RawUtf8;
-  ref: RawByteString;
+  refzip: RawByteString;
   api: TRawUtf8DynArray;
   oa: TOpenApiParser;
   timer: TPrecisionTimer;
@@ -262,9 +263,13 @@ begin
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
         continue; // already downloaded
-      ref := DownloadFile('https://synopse.info/files/openapi-ref.zip');
-      if UnZipMemAll(ref, WorkDir) then // one url to rule them all
-        api[i] := StringFromFile(fn);  // try now
+      if refzip <> '' then
+        continue; // download .zip once
+      refzip := DownloadFile('https://synopse.info/files/openapi-ref.zip');
+      if refzip = '' then
+        refzip := 'none'
+      else if UnZipMemAll(refzip, WorkDir) then // one url to rule them all
+        api[i] := StringFromFile(fn); // try once
     end;
   for i := 0 to high(api) do
     if api[i] <> '' then
@@ -966,6 +971,7 @@ begin
   CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
   CheckEqual(DnsLookup('::1'), '127.0.0.1');
   CheckEqual(DnsLookup('1.2.3.4'), '1.2.3.4');
+  CheckEqual(NetAddrResolve('1.2.3.4'), '1.2.3.4');
   if hasinternet then
   begin
     endtix := GetTickSec + 5; // never wait forever
@@ -976,6 +982,7 @@ begin
         break;
       Sleep(100); // some DNS servers may fail at first: wait a little
     until GetTickSec > endtix;
+    CheckEqual(NetAddrResolve('synopse.info'), ip, 'NetAddrResolve');
     rev := '62.210.254.173';
     CheckEqual(ip, rev, 'dns1');
     repeat
@@ -1614,12 +1621,12 @@ end;
 
 procedure TNetworkProtocols.IPAddresses;
 var
-  i, n: PtrInt;
+  i, n, n2: PtrInt;
   s: ShortString;
-  txt: RawUtf8;
+  txt, uri: RawUtf8;
   ip: THash128Rec;
   sub: TIp4SubNets;
-  bin: RawByteString;
+  bin, bin2: RawByteString;
   timer: TPrecisionTimer;
 begin
   FillZero(ip.b);
@@ -1705,8 +1712,8 @@ begin
   try
     CheckEqual(sub.AfterAdd, 0);
     bin := sub.SaveToBinary;
-    if CheckEqual(length(bin), 4) then
-      CheckEqual(PInteger(bin)^, 0);
+    if CheckEqual(length(bin), 8) then
+      CheckEqual(PInt64(bin)^, IP4SUBNET_MAGIC);
     Check(not sub.Match('190.16.1.1'));
     Check(not sub.Match('190.16.1.135'));
     Check(not sub.Match('190.16.1.250'));
@@ -1725,7 +1732,7 @@ begin
     Check(not sub.Match('190.16.1.1'));
     Check(not sub.Match('190.16.1.135'));
     Check(not sub.Match('190.16.1.250'));
-    Check(sub.LoadFromBinary(bin), 'load1');
+    CheckEqual(sub.LoadFromBinary(bin), 1, 'load1');
     CheckEqual(sub.AfterAdd, 1);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
@@ -1749,7 +1756,7 @@ begin
     bin := sub.SaveToBinary;
     sub.Clear;
     Check(not sub.Match('190.16.43.1'));
-    Check(sub.LoadFromBinary(bin), 'load2');
+    CheckEqual(sub.LoadFromBinary(bin), 2, 'load');
     CheckEqual(sub.AfterAdd, 2);
     Check(sub.Match('190.16.1.1'));
     Check(sub.Match('190.16.1.135'));
@@ -1778,13 +1785,15 @@ begin
       'refs/heads/master/firehol_level1.netset', 'firehol.netset');
     if txt <> '' then
     begin
+      Make(['file://', WorkDir, 'firehol.netset'], uri);
+      CheckUtf8(DownloadFile(uri) = txt, uri);
       sub.Clear;
       timer.Start;
       n := sub.AddFromText(txt);
       NotifyTestSpeed('parse TIp4SubNets', n, length(txt), @timer);
-      Check(n > 4000);
+      Check(n > 4000); // typically 4520 subnets, 612,853,888 unique IPs
       CheckEqual(sub.AfterAdd, n);
-      CheckEqual(length(sub.SubNet), 18);
+      CheckUtf8(length(sub.SubNet) in [17 .. 18], 'sub=%', [length(sub.SubNet)]);
       Check(not sub.Match('1.2.3.4'));
       Check(not sub.Match('1.2.3.5'));
       Check(not sub.Match('192.168.1.1'), '192'); // only IsPublicIP() was added
@@ -1819,14 +1828,20 @@ begin
         Check(sub.AddFromText(txt) < 1000, 'spamhaus within firehol');
         sub.Clear;
         Check(not sub.Match('10.18.1.1'), '10');
-        Check(sub.AddFromText(txt) > 1000, 'spamhaus=1525');
+        n2 := sub.AddFromText(txt);
+        Check(n2 > 1000, 'spamhaus=1525');
+        Check(not sub.Match('62.210.254.173'), 'cauterets.site');
         Check(sub.Match('223.254.0.1') ,'a2'); // 223.254.0.0/16
         Check(sub.Match('223.254.1.1'), 'b2');
         Check(sub.Match('223.254.200.129'), 'c2');
+        bin2 := sub.SaveToBinary;
         CheckEqual(sub.AddFromText(txt), 0, 'twice');
+        CheckEqual(sub.SaveToBinary, bin2);
+        sub.Clear;
+        CheckEqual(sub.LoadFrom(txt), n2, 'loadtxt');
+        Check(sub.SaveToBinary = bin2, 'savebin');
       end;
-      sub.Clear;
-      Check(sub.LoadFromBinary(bin), 'loadbin');
+      CheckEqual(sub.LoadFrom(bin), n, 'loadfrom');
       Check(sub.SaveToBinary = bin, 'savebin');
       Check(sub.Match('223.254.0.1') ,'a3'); // 223.254.0.0/16
       Check(sub.Match('223.254.1.1'), 'b3');
@@ -2241,10 +2256,17 @@ var
     CheckEqual(hc.Value(2), 'value 2');
     CheckEqual(hc.Name(3), 'name3');
     CheckEqual(hc.Value(3), 'value3');
+    {$ifdef HASINLINE}
     CheckEqual(hc.Cookie['name'], 'value');
     CheckEqual(hc.Cookie['name 1'], 'value1');
     CheckEqual(hc.Cookie['name 2'], 'value 2');
     CheckEqual(hc.Cookie['name3'], 'value3');
+    {$else}
+    CheckEqual(hc.GetCookie('name'), 'value');
+    CheckEqual(hc.GetCookie('name 1'), 'value1');
+    CheckEqual(hc.GetCookie('name 2'), 'value 2');
+    CheckEqual(hc.GetCookie('name3'), 'value3');
+    {$endif HASINLINE}
   end;
 
 begin
@@ -2286,17 +2308,24 @@ begin
   CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
   CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
   // validate TUri data structure
+  U.Clear;
+  Check(U.UriScheme = usUndefined);
+  CheckEqual(U.Uri, '');
   Check(U.From('toto.com'));
   CheckEqual(U.Uri, 'http://toto.com/');
+  Check(U.UriScheme = usHttp);
   Check(not U.Https);
   Check(U.From('toto.com:123'));
   CheckEqual(U.Uri, 'http://toto.com:123/');
+  Check(U.UriScheme = usHttp);
   Check(not U.Https);
   Check(U.From('https://toto.com:123/tata/titi'));
   CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
+  Check(U.UriScheme = usHttps);
   Check(U.Https);
   CheckEqual(U.Address, 'tata/titi');
   Check(U.From('https://toto.com:123/tata/tutu:tete'));
+  Check(U.UriScheme = usHttps);
   CheckEqual(U.Address, 'tata/tutu:tete');
   CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
   Check(U.From('http://user:password@server:port/address'));
@@ -2311,17 +2340,82 @@ begin
   CheckEqual(U.User, 'user');
   CheckEqual(U.Password, '');
   Check(U.From('toto.com/tata/tutu:tete'));
+  Check(U.UriScheme = usHttp);
   CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
   CheckEqual(U.User, '');
   CheckEqual(U.Password, '');
+  CheckEqual(U.URI, 'http://toto.com/tata/tutu:tete');
   Check(U.From('file://server/path/to%20image.jpg'));
   CheckEqual(U.Scheme, 'file');
+  Check(U.UriScheme = usFile);
   CheckEqual(U.Server, 'server');
   CheckEqual(U.Address, 'path/to%20image.jpg');
-  Check(not U.From('file:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Uri, 'file://server/path/to%20image.jpg');
+  Check(U.From('file://server/c:\path\to'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'c:\path\to');
+  Check(U.From('file:////server/folder/data.xml'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'folder/data.xml');
+  Check(not U.From('file:///C:/DirA/DirB/With%20Spaces.txt'));
   CheckEqual(U.Scheme, 'file');
   CheckEqual(U.Server, '');
+  CheckEqual(U.Address, 'C:/DirA/DirB/With%20Spaces.txt');
+  Check(not U.From('FILE:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Scheme, 'FILE');
+  Check(U.UriScheme = usFile);
+  CheckEqual(U.Server, '');
+  CheckEqual(U.User, '');
+  CheckEqual(U.Password, '');
   CheckEqual(U.Address, 'path/to%20image.jpg');
+  CheckEqual(U.Uri, 'file:///path/to%20image.jpg');
+  Check(U.From('ftp://user:password@host:port/path'), 'ftp');
+  CheckEqual(U.Scheme, 'ftp');
+  Check(U.UriScheme = usFtp);
+  CheckEqual(U.Server, 'host');
+  CheckEqual(U.Port, 'port');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'path');
+  CheckEqual(U.Uri, 'ftp://host:port/path');
+  Check(U.From('ftpS://user:password@host/path'), 'ftps');
+  CheckEqual(U.Scheme, 'ftpS');
+  Check(U.UriScheme = usFtps);
+  CheckEqual(U.Server, 'host');
+  CheckEqual(U.Port, '989');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'path');
+  CheckEqual(U.Uri, 'ftps://host/path');
+  s := '?subject=This%20is%20the%20subject' +
+       '&cc=someone_else@example.com&body=This%20is%20the%20body';
+  Check(U.From('mailto://someone@example.com' + s));
+  CheckEqual(U.Scheme, 'mailto');
+  Check(U.UriScheme = usCustom);
+  CheckEqual(U.Server, 'example.com');
+  CheckEqual(U.Port, '');
+  CheckEqual(U.User, 'someone');
+  CheckEqual(U.Password, '');
+  CheckEqual(U.Address, s);
+  CheckEqual(U.Uri, 'mailto://example.com/' + s);
+  U.Clear; // TUri may be used to create an URI from some parameters
+  U.Server := '127.0.0.1';
+  U.Port := '991';
+  U.Address := 'endpoint';
+  CheckEqual(U.Uri, 'http://127.0.0.1:991/endpoint');
+  U.Clear;
+  U.Https := true;
+  U.Server := '127.0.0.1';
+  U.Address := 'endpoint';
+  CheckEqual(U.Port, '');
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  CheckEqual(U.Port, '');
+  U.Port := '443';
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  U.Port := '444';
+  CheckEqual(U.Uri, 'https://127.0.0.1:444/endpoint');
   // validate THttpCookies and CookieFromHeaders()
   hc.ParseServer('');
   CheckEqual(length(hc.Cookies), 0);
@@ -2329,20 +2423,20 @@ begin
   CheckEqual(hc.Name(0), 'name');
   CheckEqual(hc.Value(0), 'value');
   CheckEqual(length(hc.Cookies), 1);
-  CheckEqual(hc.Cookie['name'], 'value');
+  CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
   CheckEqual(hc.Cookies[0].ValueLen, 5);
-  Check(hc.Cookie['name2'] <> 'value');
+  Check(hc.GetCookie('name2') <> 'value');
   hc.Clear;
   CheckEqual(length(hc.Cookies), 0);
   hc.ParseServer(HDR2);
   CheckEqual(hc.Name(0), 'name');
   CheckEqual(hc.Value(0), 'value');
   CheckEqual(length(hc.Cookies), 1);
-  CheckEqual(hc.Cookie['name'], 'value');
+  CheckEqual(hc.GetCookie('name'), 'value');
   CheckEqual(hc.Cookies[0].NameLen, 4);
   CheckEqual(hc.Cookies[0].ValueLen, 5);
-  Check(hc.Cookie['name2'] <> 'value');
+  Check(hc.GetCookie('name2') <> 'value');
   hc.ParseServer(HDR3);
   CheckEqual(length(hc.Cookies), 4);
   Check4;

@@ -5226,7 +5226,7 @@ var
   fnt: TPdfFontTrueType;
   Glyph: word;
 begin
-  assert((Ttf <> nil) and (Ttf = Ttf.WinAnsiFont));
+  assert((Ttf <> nil) and not Ttf.Unicode);
   changed := fAddGlyphFont = fNone;
   Glyph := Ttf.fUsedWide[Ttf.FindOrAddUsedWideChar(Char)].Glyph;
   with Canvas.fDoc do
@@ -5244,7 +5244,7 @@ begin
       fAddGlyphFont := fFallBack;
       fnt := Canvas.SetFont('', Canvas.fPage.FontSize, Ttf.fStyle, -1,
         fFontFallBackIndex) as TPdfFontTrueType;
-      assert(fnt = fnt.WinAnsiFont);
+      assert(not fnt.Unicode);
       Glyph := fnt.fUsedWide[fnt.FindOrAddUsedWideChar(Char)].Glyph;
     end
     else
@@ -5994,7 +5994,11 @@ var
   n, i: integer;
   aSymbolAnsiChar: AnsiChar;
 begin
-  self := WinAnsiFont;
+  if fUnicode then // we need fUsedWide[] to be the used glyphs
+  begin
+    result := WinAnsiFont.FindOrAddUsedWideChar(aWideChar);
+    exit;
+  end;
   result := fUsedWideChar.Add(ord(aWideChar));
   if result < 0 then
   begin
@@ -6170,7 +6174,11 @@ end;
 
 function TPdfFontTrueType.GetWideCharWidth(aWideChar: WideChar): integer;
 begin
-  self := self.WinAnsiFont; // we need fUsedWide[] to be used glyphs
+  if fUnicode then
+  begin // we need fUsedWide[] to be the used glyphs
+    result := WinAnsiFont.GetWideCharWidth(aWideChar);
+    exit;
+  end;
   result := WideCharToWinAnsi(ord(aWideChar));
   if result >= 0 then
     if (fWinAnsiWidth <> nil) and
@@ -11400,7 +11408,7 @@ begin
         o := 0;
         a := {%H-}pointer(PtrUInt(data) +
              SizeOf(TEMRPolyPolyline) - SizeOf(TPoint) +
-             (data^.nPolys - 1) * SizeOf(DWORD));
+             (data^.nPolys - 1) * SizeOf(DWord));
         for i := 1 to data^.nPolys do
         begin
           f := o;
@@ -11423,7 +11431,7 @@ begin
         o := 0;
         a16 := {%H-}pointer(PtrUInt(data16) +
                SizeOf(TEMRPolyPolyline16) - SizeOf(TSmallPoint) +
-               (data16^.nPolys - 1) * SizeOf(DWORD));
+               (data16^.nPolys - 1) * SizeOf(DWord));
         for i := 1 to data16^.nPolys do
         begin
           f := o;

@@ -140,6 +140,7 @@ const
 type
   ///  TTypeKind enumerate as defined in Delphi 6 and up
   // - dkUString and following appear only since Delphi 2009
+  // - defined for FPC only, to share some minimal raw RTTI context with Delphi
   TDelphiType = (
     dkUnknown,
     dkInteger,
@@ -783,13 +784,14 @@ type
       rkClass: (
         NewInstance: pointer; // TRttiCustomNewInstance - set by mormot.core.json
         ValueClass: TClass; // = Info.RttiClass.RttiClass
-        ValueRtlClass: TRttiValueClass;
         SerializableInterface: pointer; // = TRttiCustom of the rkInterface
+        ValueRtlClass: TRttiValueClass;
       );
       rkInterface: (
         NewInterface: pointer; // same offset than rkClass NewInstance
         InterfaceGuid: PGuid;
-        SerializableClass: TClass; // = TInterfacedSerializable
+        InterfaceFactory: pointer; // = TInterfaceFactory for ExecuteCallback
+        SerializableClass: TClass; // = TInterfacedSerializableClass
         SerializableInterfaceEntryOffset: integer; // resolve once
       );
   end;
@@ -3397,9 +3399,9 @@ type
   TClonableClass = class of TClonable;
 
   /// used for backward compatibility only with existing code
-  TSynPersistentLock = class(TSynLocked);
+  TSynPersistentLock   = class(TSynLocked);
   TSynPersistentLocked = class(TSynLocked);
-  TObjectWithProps = class(TSynPersistent);
+  TObjectWithProps     = class(TSynPersistent);
 
 /// TDynArraySortCompare compatible function, sorting by TObjectWithID/TOrm.ID
 function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
@@ -7082,7 +7084,7 @@ end;
 
 procedure _StringRandom(V: PPointer; RC: TRttiCustom);
 var
-  tmp: TShort31;
+  tmp: TShort31; // 7-bit ASCII pseudo-random text
 begin
   SharedRandom.FillShort31(tmp);
   FastSetStringCP(V^, @tmp[1], ord(tmp[0]), RC.Cache.CodePage);
@@ -7090,7 +7092,7 @@ end;
 
 procedure _WStringRandom(V: PWideString; RC: TRttiCustom);
 var
-  tmp: TShort31;
+  tmp: TShort31; // 7-bit ASCII pseudo-random text
   i: PtrInt;
   W: PWordArray;
 begin
@@ -7104,7 +7106,7 @@ end;
 {$ifdef HASVARUSTRING}
 procedure _UStringRandom(V: PUnicodeString; RC: TRttiCustom);
 var
-  tmp: TShort31;
+  tmp: TShort31; // 7-bit ASCII pseudo-random text
   i: PtrInt;
   W: PWordArray;
 begin
@@ -7425,7 +7427,7 @@ begin
       FillZero(UnicodeString(Value));
     {$endif HASVARUSTRING}
     rkVariant:
-      if TVarData(Value).VType = varString then
+      if cardinal(TVarData(Value).VType) = varString then
         FillZero(RawByteString(TVarData(Value).VAny));
     rkClass:
       if TObject(Value) <> nil then
@@ -7933,9 +7935,9 @@ begin
   if (Prop = nil) or
      (OffsetGet >= 0) then
     Value.ValueToVariant(PAnsiChar(Data) + OffsetGet, Dest, Options)
-  else if Value.Cache.RttiVarDataVType <> varAny then
+  else if cardinal(Value.Cache.RttiVarDataVType) <> varAny then
     GetRttiVarDataGetter(Data, @Dest) // not TRttiVarData specific
-  else if Value.Cache.VarDataVType = varInt64 then // rkEnumeration, rkSet
+  else if cardinal(Value.Cache.VarDataVType) = varInt64 then // rkEnumeration,rkSet
   begin
     Dest.VType := varInt64;
     Dest.VInt64 := Prop^.GetInt64Value(Data);
@@ -7967,7 +7969,7 @@ procedure TRttiCustomProp.SetValueVariant(Data: pointer; var Source: TVarData);
 var
   u: pointer;
 begin
-  if Source.VType = varAny then // paranoid
+  if cardinal(Source.VType) = varAny then // paranoid
     exit;
   if Prop <> nil then
     Prop.SetValue(TObject(Data), variant(Source)) // for class properties
@@ -8252,11 +8254,11 @@ begin
   begin
     GetRttiVarData(Data, v1);
     OtherRtti.GetRttiVarData(Other, v2);
-    if (v1.Data.VType <> varAny) and
-       (v2.Data.VType <> varAny) then
+    if (cardinal(v1.Data.VType) <> varAny) and
+       (cardinal(v2.Data.VType) <> varAny) then
       // standard variant comparison function (from mormot.core.variants)
       result := SortDynArrayVariantComp(v1.Data, v2.Data, CaseInsensitive)
-    else if (v1.Data.VType = v2.Data.VType) and
+    else if (cardinal(v1.Data.VType) = cardinal(v2.Data.VType)) and
             (OtherRtti.Value = Value) then
       // v1 and v2 are both varAny, with the very same RTTI type -> use
       // mormot.core.json efficient comparison (also handle rkClass/TObject)
@@ -10970,8 +10972,9 @@ begin
   // prepare global thread-safe TRttiCustomList
   Rtti := RegisterGlobalShutdownRelease(TRttiCustomList.Create);
   // replace mormot.core.base/mormot.core.os limited implementation
-  ClassUnit := @_ClassUnit;
+  ClassUnit       := @_ClassUnit;
   GetEnumNameRtti := @GetEnumName;
+  GetEnumTrimmedNames(TypeInfo(TLanguage), @LANG_TXT);
   // redirect most used FPC RTL functions to optimized x86_64 assembly
   {$ifdef FPC_CPUX64}
   RedirectRtl;

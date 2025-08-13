@@ -61,11 +61,11 @@ const
   /// after how many parameters inlining is not worth it
   INLINED_MAX = 10;
 
-  /// the used TAuthSession.IDCardinal value if the session not started yet
+  /// the used TAuthSession.ID value if the session not started yet
   // - i.e. if the session handling is still in its handshaking phase
   CONST_AUTHENTICATION_SESSION_NOT_STARTED = 0;
 
-  /// the used TAuthSession.IDCardinal value if authentication mode is not set
+  /// the used TAuthSession.ID value if authentication mode is not set
   // - i.e. if TRest.HandleAuthentication equals FALSE
   CONST_AUTHENTICATION_NOT_USED = 1;
 
@@ -1084,6 +1084,7 @@ type
     // - this default implementation will call GetValueVar() for slow comparison
     function CompareValue(Item1, Item2: TObject; CaseInsensitive: boolean): integer; virtual;
     /// retrieve an unsigned 32-bit hash of the corresponding property
+    // - as used by TRestStorageInMemoryUnique when indexing this property
     // - not all kind of properties are handled: only main types
     // - if CaseInsensitive is TRUE, will apply NormToUpper[] 8-bit uppercase,
     // handling RawUtf8 properties just like the SYSTEMNOCASE collation
@@ -2182,8 +2183,6 @@ type
     function GetU(Row: PtrInt; const FieldName: RawUtf8): RawUtf8; overload;
     /// read-only access to a particular field value, as Win Ansi text
     function GetA(Row, Field: PtrInt): WinAnsiString;
-    /// read-only access to a particular field value, as Win Ansi text ShortString
-    function GetS(Row, Field: PtrInt): ShortString;
     /// read-only access to a particular field value, as boolean
     function GetB(Row, Field: PtrInt): boolean;
     /// read-only access to a particular field value, as a Variant
@@ -2941,7 +2940,7 @@ type
     fBlobFields: TOrmPropInfoRttiRawBlobDynArray;
     fSqlTableName: RawUtf8;
     fLastFieldsSafe: TLightLock; // topmost to ensure proper aarch64 alignment
-    fSafe: TOSLightLock;
+    fSafe: TOSLightLock; // = TOSLightMutex = SRW lock or direct pthread mutex
     fHasNotSimpleFields: boolean;
     fDynArrayFieldsHasObjArray: boolean;
     fHasTypeFields: TOrmFieldTypes;
@@ -4788,6 +4787,8 @@ begin
   IntValue := GetInteger(pointer(Value));
   if Value = '' then
     result := ''
+  else if fOrmFieldType = oftBoolean then // FPC has weird text RTTI for booleans
+    result := Ansi7ToString(BOOL_UTF8[IntValue <> 0])
   else
     result := EnumType^.GetCaption(IntValue);
 end;
@@ -6170,7 +6171,7 @@ begin
   W.Add('"');
   fPropInfo.GetWideStrProp(Instance, Value);
   if pointer(Value) <> nil then
-    W.AddJsonEscapeW(pointer(Value), 0);
+    W.AddJsonEscapeW(pointer(Value));
   W.AddDirect('"');
 end;
 
@@ -6286,7 +6287,7 @@ begin
   W.Add('"');
   fPropInfo.GetUnicodeStrProp(Instance, tmp);
   if tmp <> '' then
-    W.AddJsonEscapeW(pointer(tmp), 0);
+    W.AddJsonEscapeW(pointer(tmp));
   W.AddDirect('"');
 end;
 
@@ -6662,9 +6663,11 @@ function TOrmPropInfoRttiVariant.GetHash(Instance: TObject;
   CaseInsensitive: boolean): cardinal;
 var
   value: Variant;
+  max: integer;
 begin
   fPropInfo.GetVariantProp(Instance, value, {byref=}true);
-  result := VariantHash(value, CaseInsensitive);
+  max := 255; // inlined HashVariant/HashVariantI
+  result := VariantHash(OrmHashSeed, value, max, CaseInsensitive, nil);
 end;
 
 procedure TOrmPropInfoRttiVariant.GetJsonValues(Instance: TObject; W: TJsonWriter);
@@ -8769,7 +8772,7 @@ begin
         result := UnixTimeToDateTime(GetInt64(P));
       oftUnixMSTime:
         result := UnixMSTimeToDateTime(GetInt64(P));
-    else // oftDateTime and any other kind will try from ISO-8601 text
+    else // oftDateTime and any other kind will try f²rom ISO-8601 text
       result := Iso8601ToDateTimePUtf8Char(P);
     end;
 end;
@@ -8777,11 +8780,6 @@ end;
 function TOrmTableAbstract.GetAsDateTime(Row: PtrInt; const FieldName: RawUtf8): TDateTime;
 begin
   result := GetAsDateTime(Row, FieldIndex(FieldName));
-end;
-
-function TOrmTableAbstract.GetS(Row, Field: PtrInt): ShortString;
-begin
-  Utf8ToShortString(result, Get(Row, Field));
 end;
 
 function TOrmTableAbstract.GetB(Row, Field: PtrInt): boolean;
@@ -10482,7 +10480,7 @@ begin
   end
   else
   begin
-    if Source.VType <> VarType then
+    if cardinal(Source.VType) <> cardinal(VarType) then
       RaiseCastError;
     r := TOrmTableRowVariantData(Source).VRow;
     if r < 0 then
@@ -11682,7 +11680,8 @@ procedure InitializeUnit;
 var
   ptc: TRttiParserComplexType;
 begin
-  OrmHashSeed := SharedRandom.Generator.Next; // avoid hash flooding
+  // in-memory hashing are seeded from random to avoid hash flooding
+  OrmHashSeed := SharedRandom.Generator.Next xor StartupEntropy.c1;
   // manual set of OrmFieldTypeComp[] which are not exact TUtf8Compare match
   pointer(@OrmFieldTypeComp[oftAnsiText])   := @AnsiIComp;
   pointer(@OrmFieldTypeComp[oftUtf8Custom]) := @AnsiIComp;

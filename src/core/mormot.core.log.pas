@@ -510,6 +510,15 @@ type
   // using TSynLog.Enter: the ISynLog will be released automaticaly by the
   // compiler at the end of the method block, marking it's executation end
   // - all logging expect UTF-8 encoded text, i.e. usualy English text
+  // - warning: NEVER use this ISynLog with TSynLog.Add or direclty from
+  // a TSynLog instance: this interface requires the TSynLog.Enter class method:
+  // ! var logger: ISynLog;
+  // ! begin
+  // !   logger := TSynLog.Enter(self,'MyMethod');
+  // !   // do some stuff
+  // !   if Assigned(logger) then // may be nil if sllEnter is not enabled
+  // !     logger.Log(sllInfo,'method called');
+  // ! end; // when logger is out-of-scope, will log the method leaving
   ISynLog = interface(IUnknown)
     ['{527AC81F-BC41-4717-B089-3F74DE56F1AE}']
     /// call this method to add some information to the log at a specified level
@@ -566,6 +575,8 @@ type
     procedure LogLines(Level: TSynLogLevel; LinesToLog: PUtf8Char;
       aInstance: TObject = nil; const IgnoreWhenStartWith: PAnsiChar = nil);
     /// retrieve the associated logging instance
+    // - warning: NEVER assign the returned instance to a ISynLog variable - use
+    // the existing ISynLog, or call TSynLog.Enter/EnterLocal instead
     function Instance: TSynLog;
   end;
 
@@ -645,15 +656,15 @@ type
   // !   DestinationPath := 'C:\Logs';
   // !   Level := LOG_VERBOSE; // should better be set last
   // ! end;
-  //- then use the logging system inside a method:
+  //- then use the logging system fropm this class, e.g. inside a method:
   // ! procedure TMyDB.MyMethod;
-  // ! var ILog: ISynLog;
+  // ! var logger: ISynLog;
   // ! begin
-  // !   ILog := TSynLogDB.Enter(self,'MyMethod');
+  // !   logger := TSynLogDB.Enter(self,'MyMethod');
   // !   // do some stuff
-  // !   if Assigned(ILog) then // may be nil if sllEnter is not enabled
-  // !     ILog.Log(sllInfo,'method called');
-  // ! end; // when ILog is out-of-scope, will log the method leaving
+  // !   if Assigned(logger) then // may be nil if sllEnter is not enabled
+  // !     logger.Log(sllInfo,'method called');
+  // ! end; // when logger is out-of-scope, will log the method leaving
   TSynLogFamily = class
   protected
     fLevel, fLevelStackTrace, fLevelSysInfo: TSynLogLevels;
@@ -727,6 +738,8 @@ type
 
     /// retrieve the corresponding log file of this thread and family
     // - calls GetLog if needed (e.g. at startup or if fGlobalLog is not set)
+    // - warning: NEVER assign the returned instance to a ISynLog variable - use
+    // TSynLog.Enter or TSynLog.EnterLocal if you want to have a ISynLog
     function Add: TSynLog;
       {$ifdef HASINLINE} inline; {$endif}
     /// register one object and one echo callback for remote logging
@@ -736,8 +749,8 @@ type
     // TSynLogFamily: it will stay alive until this TSynLogFamily is destroyed,
     // or the EchoRemoteStop() method called
     // - aClientEvent should be able to send the log row to the remote server
-    procedure EchoRemoteStart(aClient: TObject; const aClientEvent: TOnTextWriterEcho;
-      aClientOwnedByFamily: boolean);
+    procedure EchoRemoteStart(aClient: TObject;
+      const aClientEvent: TOnTextWriterEcho; aClientOwnedByFamily: boolean);
     /// stop echo remote logging
     // - will free the aClient instance supplied to EchoRemoteStart
     procedure EchoRemoteStop;
@@ -1067,9 +1080,9 @@ type
     fThreadNameLogged: TIntegerDynArray; // bits for ptIdentifiedInOneFile
     fWriterStream: TStream;
     fFileName: TFileName;
-    fFileRotationBytes: cardinal; // see OnFlushToStream
+    fFileRotationBytes: integer; // see OnFlushToStream
     fNextFlushTix32, fNextFileRotateDailyTix32: cardinal; // see OnFlushToStream
-    fStreamPositionAfterHeader: cardinal;
+    fStreamPositionAfterHeader: integer;
     fStartTimestampDateTime: TDateTime;
     fWriterClass: TJsonWriterClass;
     class function FamilyCreate: TSynLogFamily;
@@ -1216,13 +1229,30 @@ type
     /// handle method enter / auto-leave tracing, with some custom text arguments
     // - expects the ISynLog to be a void variable on stack
     // - slightly more efficient - especially on FPC - than plain Enter()
-    // - optionally return the TSynLog instance (or nil) for direct usage
+    // - optionally return the TSynLog instance (or nil) for direct call
+    // - typical usage is the following, very close to TSynLog.Enter:
+    // ! var logger: ISynLog;
+    // ! begin
+    // !   TSynLog.EnterLocal(logger, self, 'MyMethod');
+    // !   // do some stuff
+    // !   if Assigned(logger) then // may be nil if sllEnter is not enabled
+    // !     logger.Log(sllInfo,'method called');
+    // ! end; // when logger is out-of-scope, will log the method leaving
     class function EnterLocal(var Local: ISynLog; aInstance: TObject;
       aMethodName: PUtf8Char): TSynLog; overload;
     /// handle method enter / auto-leave tracing, with some custom text arguments
     // - expects the ISynLog to be a void variable on stack
     // - slightly more efficient - especially on FPC - than plain Enter()
     // - optionally return the TSynLog instance (or nil) for direct usage
+    // - optionally return the TSynLog instance (or nil) for direct call
+    // - typical usage is the following, very close to TSynLog.Enter:
+    // ! var logger: ISynLog;
+    // ! begin
+    // !   TSynLog.EnterLocal(logger, 'MyMethodWithParams(%,%)', [a, b], self);
+    // !   // do some stuff
+    // !   if Assigned(logger) then // may be nil if sllEnter is not enabled
+    // !     logger.Log(sllInfo,'method called');
+    // ! end; // when logger is out-of-scope, will log the method leaving
     class function EnterLocal(var Local: ISynLog; TextFmt: PUtf8Char;
       const TextArgs: array of const; aInstance: TObject = nil): TSynLog; overload;
     /// handle method enter / auto-leave tracing, with some custom string arguments
@@ -1238,6 +1268,8 @@ type
     // ! TSynLogDB.Add.Log(llError,'The % statement didn''t work',SQL);
     // - is just a wrapper around Family.SynLog - the same code will work:
     // ! TSynLogDB.Family.SynLog.Log(llError,'The % statement didn''t work',[SQL]);
+    // - warning: NEVER assign the returned instance to a ISynLog variable - use
+    // TSynLog.Enter or TSynLog.EnterLocal if you want to have a ISynLog
     class function Add: TSynLog;
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve the family of this TSynLog class type
@@ -1451,7 +1483,7 @@ var
 
 
 type
-  /// a mORMot-compatible calback definition
+  /// a mORMot-SOA compatible callback definition
   // - used to notify a remote mORMot server via interface-based serivces
   // for any incoming event, using e.g. TSynLogCallbacks.Subscribe
   ISynLogCallback = interface(IInvokable)
@@ -1463,9 +1495,11 @@ type
     procedure Log(Level: TSynLogLevel; const Text: RawUtf8);
   end;
 
-  /// store a subscribe to ISynLogCallback
+  /// store a subscription to ISynLogCallback
   TSynLogCallback = record
+    /// the log levels supplied to TSynLogCallbacks.Subscribe()
     Levels: TSynLogLevels;
+    /// the callback interface supplied to TSynLogCallbacks.Subscribe()
     Callback: ISynLogCallback;
   end;
 
@@ -1473,7 +1507,7 @@ type
   TSynLogCallbackDynArray = array of TSynLogCallback;
 
   /// can manage a list of ISynLogCallback registrations
-  TSynLogCallbacks = class(TSynLocked)
+  TSynLogCallbacks = class(TObjectOSLock)
   protected
     fCount: integer;
     fCurrentlyEchoing: boolean;
@@ -2112,7 +2146,7 @@ type
     filesdir: TIntegerDynArray;
     isdwarf64, debugtoconsole: boolean;
     debug: TDebugFile;
-    map: TMemoryMap;
+    Map: TMemoryMap;
     function FindSections(const filename: ShortString): boolean;
     procedure ReadInit(aBase, aLimit: Int64);
     function ReadLeb128: Int64;
@@ -3623,7 +3657,7 @@ begin
     AppendShortAnsi7String(Symbols[s].Name, result);
   if line > 0 then
   begin
-    AppendShortTwoChars(' (', @result);
+    AppendShortTwoChars(ord(' ') + ord('(') shl 8, @result);
     AppendShortCardinal(line, result);
     AppendShortCharSafe(')', @result);
   end;
@@ -4344,7 +4378,7 @@ end;
 
 function TSynLogFamily.GetExistingLog(MaximumKB: cardinal): RawUtf8;
 const
-  // a 128 MB RawUtf8 is fair enough
+  // a 128 MB RawUtf8 seems fair enough
   MAXPREVIOUSCONTENTSIZE = 128 shl 20;
 var
   log: TSynLog;
@@ -4616,7 +4650,7 @@ begin
   // pre-compute GetBitPtr() constants for SetThreadInfoAndThreadName()
   dec(num);
   nfo^.ThreadBitLo := 1 shl (num and 31); // 32-bit fThreadNameLogged[] value
-  nfo^.ThreadBitHi := num shr 5; // index in fThreadNameLogged[]
+  nfo^.ThreadBitHi := num shr 5;          // index in fThreadNameLogged[]
 end;
 
 function GetThreadInfo: PSynLogThreadInfo; {$ifdef HASINLINE} inline; {$endif}
@@ -4771,12 +4805,14 @@ var
   nfo: PSynLogThreadInfo;
   refcnt: PByte;
 begin // self <> nil indicates sllEnter in fFamily.Level and nfo^.Recursion OK
+  result := 1; // should never be 0 (would release TSynLog instance)
   nfo := @PerThreadInfo; // access the threadvar - InitThreadNumber() already done
+  if nfo^.RecursionCount = 0 then
+    exit; // paranoid - but could happen if ISynLog is used from TSynLog.Add
   refcnt := @nfo^.Recursion[nfo^.RecursionCount - 1];
   inc(refcnt^); // stores ISynLog.RefCnt in lowest 8-bit
   if refcnt^ = 0 then
     ESynLogException.RaiseUtf8('Too many %._AddRef', [self]);
-  result := 1; // should never be 0 (would release TSynLog instance)
 end;
 
 function TSynLog._Release: TIntCnt; // efficient ISynLog per-thread refcount
@@ -4788,6 +4824,8 @@ var
 begin // self <> nil indicates sllEnter in fFamily.Level and nfo^.Recursion OK
   result := 1; // should never be 0 (would release TSynLog instance)
   nfo := @PerThreadInfo; // threadvar access - InitThreadNumber() already done
+  if nfo^.RecursionCount = 0 then
+    exit; // paranoid - but could happen if ISynLog is used from TSynLog.Add
   refcnt := @nfo^.Recursion[nfo^.RecursionCount - 1];
   dec(refcnt^); // stores ISynLog.RefCnt in lowest 8-bit
   if refcnt^ <> 0 then
@@ -5721,7 +5759,7 @@ begin
         if (L > 0) and
            (P^ <> '=') then
         begin
-          w.AddNoJsonEscapeW(PWord(P), 0);
+          w.AddNoJsonEscapeW(pointer(P));
           w.AddDirect(#9);
         end;
         inc(P, L + 1);
@@ -6107,7 +6145,7 @@ begin
   // enable background writing in its own TAutoFlushThread
   if fFamily.AutoFlushTimeOut <> 0 then
   begin
-    fWriter.OnFlushToStream := OnFlushToStream;
+    fWriter.OnFlushToStream := OnFlushToStream; // note: overwrites fWriterEcho
     OnFlushToStream(nil, 0);
     fFamily.EnsureAutoFlushThreadRunning;
   end;
@@ -6127,17 +6165,23 @@ begin
   end;
   // check for any PerformRotation - delayed in TSynLog.LogEnterFmt
   if not (pendingRotate in fPendingFlags) then
-    if (fFileRotationBytes > 0) and // size to rotate?
-       (fWriter.WrittenBytes + PtrUInt(Len) > PtrUInt(fFileRotationBytes)) then
+    if (fFileRotationBytes > 0) and // reached size to rotate?
+       (fWriter.WrittenBytes + Len > fFileRotationBytes) then
       include(fPendingFlags, pendingRotate)
-    else if fNextFileRotateDailyTix32 <> 0 then // time to rotate?
+    else
     begin
-      if tix32 = 0 then
-        tix32 := GetTickSec;
-      if tix32 >= fNextFileRotateDailyTix32 then
-        include(fPendingFlags, pendingRotate);
-        // PerformRotation will call ComputeFileName to recompute DailyTix32
+      flushsec := fNextFileRotateDailyTix32;
+      if flushsec <> 0 then // reached time to rotate?
+      begin
+        if tix32 = 0 then
+          tix32 := GetTickSec;
+        if tix32 >= flushsec then
+          include(fPendingFlags, pendingRotate);
+          // PerformRotation will call ComputeFileName to recompute DailyTix32
+      end;
     end;
+  // chain to the fWriterEcho process (otherwise Text/Len buffer is lost)
+  fWriterEcho.FlushToStream(Text, Len);
 end;
 
 function TSynLog.GetFileSize: Int64;
@@ -6588,6 +6632,7 @@ function TSynLogCallbacks.OnEcho(Sender: TEchoWriter; Level: TSynLogLevel;
   const Text: RawUtf8): boolean;
 var
   i: PtrInt;
+  cb: ^TSynLogCallback;
 begin
   result := false;
   if (Count = 0) or
@@ -6596,13 +6641,20 @@ begin
   fSafe.Lock; // not really concurrent, but faster
   try
     fCurrentlyEchoing := true; // avoid stack overflow if exception below
+    cb := pointer(Registration);
     for i := Count - 1 downto 0 do
-      if Level in Registration[i].Levels then
+      if Level in cb^.Levels then
       try
-        Registration[i].Callback.Log(Level, Text);
+        cb^.Callback.Log(Level, Text);
         result := true;
+        inc(cb);
       except
-        Registrations.Delete(i); // safer to unsubscribe ASAP
+        try
+          Registrations.Delete(i); // safer to unsubscribe ASAP
+        except
+          result := false;
+        end;
+        cb := @Registration[i];  // may have moved in memory
       end;
   finally
     fCurrentlyEchoing := false;

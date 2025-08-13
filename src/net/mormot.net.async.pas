@@ -745,7 +745,7 @@ type
     // - as supplied to the constructor, but may be overriden just after startup
     property ConnectionClass: TAsyncConnectionClass
       read fConnectionClass write fConnectionClass;
-    /// direct access to the internal AsyncConnectionsThread`s
+    /// direct access to the internal AsyncConnectionsThread's
     property Threads: TAsyncConnectionsThreads
       read fThreads;
   published
@@ -3639,10 +3639,7 @@ end;
 procedure TAsyncConnections.SetOnIdle(
   const aOnIdle: TOnPollSocketsIdle; Remove: boolean);
 begin
-  if Remove then
-    MultiEventRemove(fOnIdle, TMethod(aOnIdle))
-  else
-    MultiEventAdd(fOnIdle, TMethod(aOnIdle));
+  MultiEventSet(fOnIdle, TMethod(aOnIdle), Remove);
 end;
 
 {$ifdef USE_WINIOCP}
