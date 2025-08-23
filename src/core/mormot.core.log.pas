@@ -3710,9 +3710,9 @@ end;
 { ************** Logging via TSynLogFamily, TSynLog, ISynLog }
 
 var
-  _LogInfoText: array[TSynLogLevel] of RawUtf8;
+  _LogInfoText:    array[TSynLogLevel] of RawUtf8;
   _LogInfoCaption: array[TSynLogLevel] of string;
-  _LogAppText: array[TAppLogLevel] of RawUtf8;
+  _LogAppText:     array[TAppLogLevel] of RawUtf8;
 
 function ToText(event: TSynLogLevel): RawUtf8;
 begin
@@ -3760,7 +3760,7 @@ begin
         result := aplInfo;
       ord('D') + ord('E') shl 8 + ord('B') shl 16 + ord('U') shl 24:
         result := aplDebug;
-    else if PWord(Text)^ in [ord('1') .. ord('5')] then
+    else if cardinal(PWord(Text)^) in [ord('1') .. ord('5')] then
       result := TAppLogLevel(PByte(Text)^ - ord('0'))
     else
       result := aplNone;
@@ -4572,7 +4572,7 @@ begin
   indent := fThreadInfo^.RecursionCount;
   if Level = sllEnter then
     dec(indent);
-  if indent > 0 then
+  if indent > 0 then // ident <= MAX_SYNLOGRECURSION = 53 clearly within 255 bytes
   begin
     FillCharFast(P^, indent, 9); // inlined AddChars(#9, indent)
     inc(P, indent);
@@ -4833,7 +4833,7 @@ begin // self <> nil indicates sllEnter in fFamily.Level and nfo^.Recursion OK
   dec(nfo^.RecursionCount);
   if not (sllLeave in fFamily.Level) then
     exit;
-  // append e.g. 00000000001FFF23  %  -    02.096.658
+  // reached refcnt=0 -> append e.g. 00000000001FFF23  %  -    02.096.658
   QueryPerformanceMicroSeconds(ms);
   dec(ms, fStartTimestamp);
   FillInfo(nfo, @ms); // timestamp [+ threadnumber]
@@ -4845,10 +4845,10 @@ begin // self <> nil indicates sllEnter in fFamily.Level and nfo^.Recursion OK
   begin // direct AddMicroSec() output should not trigger any exception
   {$endif HASFASTTRYFINALLY}
     LogHeaderNoRecursion(fWriter, sllLeave, @nfo^.CurrentTimeAndThread);
-    rec := nfo^.RecursionCount;
-    if rec <> 0 then // manual indentation
+    rec := nfo^.RecursionCount; // rec <= MAX_SYNLOGRECURSION = 53
+    if rec <> 0 then // inlined AddChars(#9, rec)
     begin
-      FillCharFast(fWriter.B[1], rec, 9);
+      FillCharFast(fWriter.B[1], rec, 9); // LogHeaderNoRecursion did AddShort()
       inc(fWriter.B, rec);
     end;
     fWriter.AddMicroSec(ms);
@@ -7510,7 +7510,7 @@ begin
       if (p^[0] = ord('S') + ord('e') shl 8 + ord('t') shl 16 + ord('T') shl 24) and
          (p^[1] = ord('h') + ord('r') shl 8 + ord('e') shl 16 + ord('a') shl 24) and
          (p^[2] = ord('d') + ord('N') shl 8 + ord('a') shl 16 + ord('m') shl 24) and
-         (PWord(@p[3])^ = ord('e') + ord(' ') shl 8) then
+         ((p^[3] and $ffff) = ord('e') + ord(' ') shl 8) then
         PtrArrayAdd(fThreadInfo[thread].SetThreadName, LineBeg); // from now on
     end;
   end
@@ -7849,9 +7849,8 @@ begin
   if (self = nil) or
      (aPattern = '') then
     exit;
-  if fLevels = nil then
+  if fLevels = nil then // plain text search
   begin
-    // plain text search
     // search from next item
     for result := aRow + aDelta to fCount - 1 do
       if LineContains(aPattern, result) then
@@ -8172,11 +8171,11 @@ begin
       // avoid buffer overflow
       exit;
     destbuffer := PrintUSAscii(destbuffer, Host);         // HOST
-    destbuffer := PrintUSAscii(destbuffer, ProgramName); // APP-NAME
+    destbuffer := PrintUSAscii(destbuffer, ProgramName);  // APP-NAME
   end;
-  destbuffer := PrintUSAscii(destbuffer, procid);      // PROCID
-  destbuffer := PrintUSAscii(destbuffer, msgid);      // MSGID
-  destbuffer := PrintUSAscii(destbuffer, '');        // no STRUCTURED-DATA
+  destbuffer := PrintUSAscii(destbuffer, procid);         // PROCID
+  destbuffer := PrintUSAscii(destbuffer, msgid);          // MSGID
+  destbuffer := PrintUSAscii(destbuffer, '');             // no STRUCTURED-DATA
   destbuffer^ := ' ';
   inc(destbuffer);
   len := length(msg);

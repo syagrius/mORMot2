@@ -1001,7 +1001,7 @@ type
     fServer: TRestServer;
     fOptions: TRestServerAuthenticationOptions;
     fAlgoName: RawUtf8;
-    // GET ModelRoot/auth?UserName=...&Session=... -> release session
+    // GET ModelRoot/auth?UserName=...&Session=... from TRestClientUri.SessionClose
     function AuthSessionRelease(Ctxt: TRestServerUriContext;
       const aUserName: RawUtf8): boolean;
     /// retrieve an User instance from its logon name
@@ -1250,33 +1250,19 @@ type
   /// authentication of the current logged user using Windows Security Support
   // Provider Interface (SSPI) or the GSSAPI library on Linux
   // - is able to authenticate the currently logged user on the client side,
-  // using either NTLM (Windows only) or Kerberos - it will allow to safely
-  // authenticate on a mORMot server without prompting the user to enter its
-  // password
-  // - if ClientSetUser() receives aUserName as '', aPassword should be either
-  // '' if you expect NTLM authentication to take place, or contain the SPN
-  // registration (e.g. 'mymormotservice/myserver.mydomain.tld') for Kerberos
-  // authentication
+  // using Kerberos - it will allow to safelyauthenticate on a mORMot server
+  // without prompting the user to enter its password
+  // - if ClientSetUser() receives aUserName as '', aPassword should contain
+  // the Kerber SPN e.g. 'mymormotservice/myserver.mydomain.tld'
   // - if ClientSetUser() receives aUserName as 'DomainName\UserName', then
   // authentication will take place on the specified domain, with aPassword
   // as plain password value
   // - this class is not available on some targets (e.g. Android)
   TRestServerAuthenticationSspi = class(TRestServerAuthenticationSignedUri)
-  protected
-    /// Windows built-in authentication
-    // - holds information between calls to ServerSspiAuth() for NTLM
-    // - such an array seems not needed with Kerberos two-way handshake
-    // - this array is thread-safe because Auth() is called within lock
-    fSspiAuthContext: TSecContextDynArray;
-    fSspiAuthContexts: TDynArray;
-    fSspiAuthContextCount: integer;
   public
     /// initialize this SSPI/GSSAPI authentication scheme
     constructor Create(aServer: TRestServer); override;
-    /// finalize internal sspi/gssapi allocated structures
-    destructor Destroy; override;
     /// will try to handle the RESTful authentication via SSPI/GSSAPI
-    // - to be called in a two pass algorithm, used to cypher the password
     // - the client-side logged user will be identified as valid, according
     // to a Windows SSPI API secure challenge
     function Auth(Ctxt: TRestServerUriContext;
@@ -1808,6 +1794,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     function GetAuthenticationSchemesCount: integer;
     function StatusCodeToText(Code: cardinal): PRawUtf8; virtual;
+    procedure HandleUriError(Ctxt: TRestServerUriContext; E: Exception);
     /// ensure the thread will be taken into account during process
     procedure OnBeginCurrentThread(Sender: TThread); override;
     procedure OnEndCurrentThread(Sender: TThread); override;
@@ -2614,6 +2601,8 @@ type
   // - rsoRedirectServerRootUriForExactCase to search root URI case-sensitive,
   // mainly to avoid errors with HTTP cookies, which path is case-sensitive -
   // when set, such not exact case will be redirected via a HTTP 307 command
+  // - rsoWebSocketsUpgradeSigned will allow WebSockets upgrade only following
+  // TRestHttpServer.WebSocketsUrl/WebSocketsBearer() authorization
   // - rsoAllowSingleServerNoRoot will allow URI with no Model.Root prefix, i.e.
   // 'GET url' to be handled as 'GET root/url' - by design, it would work only
   // with a single registered TRestServer (to know which Model.Root to use)
@@ -2633,6 +2622,7 @@ type
     rsoOnlyJsonRequests,
     rsoOnlyValidUtf8,
     rsoRedirectServerRootUriForExactCase,
+    rsoWebSocketsUpgradeSigned,
     rsoAllowSingleServerNoRoot,
     rsoHeadersUnFiltered,
     rsoCompressSynLZ,
@@ -2976,7 +2966,7 @@ begin
             if Assigned(fLog) and
                (sllUserAuth in Server.fLogLevel) and
                (s.RemoteIP <> '') and
-               not IsLocalHost(pointer(s.RemoteIP)) then
+               (PCardinal(s.RemoteIP)^ <> HOST_127) then
               fLog.Log(sllUserAuth, '%/% %',
                 [s.User.LogonName, s.ID, s.RemoteIP], self);
             exit;
@@ -3532,16 +3522,9 @@ begin
   end;
 end;
 
-const
-  SQL_METHOD_WRITE: array[0..3] of PUtf8Char = (
-   'INSERT', // 'INSERT ... FROM ...'    -> mPOST
-   'UPDATE', // 'UPDATE (....) FROM ...' -> mPUT
-   'DELETE', // 'DELETE FROM ...'        -> mDELETE
-   nil);
-
 procedure TRestServerUriContext.OrmGetNoTable(params: PUtf8Char);
 var
-  sqlselect, sql: RawUtf8;
+  sqlfields, sql: RawUtf8;
   sqlisselect: boolean;
   tableindexes: TIntegerDynArray;
   opt: TOrmWriterOptions;
@@ -3561,12 +3544,12 @@ begin
         break;
   end
   else
-    // GET with a sql statement sent as UTF-8 body (not 100% HTTP compatible)
+    // GET with a sql statement sent as body (somewhat allowed in RFC 7231)
     sql := fCall^.InBody;
   if sql = '' then
     exit;
   // check permissions
-  sqlisselect := IsSelect(pointer(sql), @sqlselect);
+  sqlisselect := IsSelect(pointer(sql), @sqlfields);
   if not (sqlisselect or
           (reSql in fCall^.RestAccessRights^.AllowRemoteExecute)) then
     exit;
@@ -3611,19 +3594,19 @@ begin
   if fCall^.OutBody = '' then
     exit;
   // got JSON list '[{...}]' ?
-  if (sqlselect <> '') and
+  if (sqlfields <> '') and
      (length(tableindexes) = 1) then
   begin
     InternalSetTableFromTableIndex(tableindexes[0]);
     opt := ClientOrmOptions;
     if opt <> [] then
-      OrmGetConvertOutBodyAsPlainJson(sqlselect, opt);
+      OrmGetConvertOutBodyAsPlainJson(sqlfields, opt);
   end;
   fCall^.OutStatus := HTTP_SUCCESS;  // 200 OK
   if not sqlisselect then
     // needed for fStats.NotifyOrm(Method) below
-    fMethod := TUriMethod(IdemPPChar(SqlBegin(pointer(sql)),
-      @SQL_METHOD_WRITE) + 2); // not found (-1) -> +2 -> mGET=1
+    fMethod := TUriMethod(IdemPCharSep( // not found (-1) -> +2 -> mGET=1
+      SqlBegin(pointer(sql)), 'INSERT|UPDATE|DELETE|') + 2);
 end;
 
 procedure TRestServerUriContext.OrmGetTableID;
@@ -3705,8 +3688,6 @@ var
 begin
   // GET ModelRoot/TableName with 'select=..&where=' or YUI paging
   totalrowcount := 0;
-  // if no ?select= is specified, default is to return all IDs of this table
-  select := ROWID_TXT;
   if params <> nil then
   begin
     // extract '?select=...&where=...' or '?where=...' parameters
@@ -3733,6 +3714,8 @@ begin
         UrlDecodeValue(params, paging^.Where, where, @params);
       until params = nil;
     end;
+    if select = '' then
+      select := ROWID_TXT; // no ?select= returns all IDs of this table
     // let SQLite3 do the sort and the paging (will be ignored by Static)
     wherecount := where; // "select count(*)" won't expect any ORDER
     if (sort <> '') and
@@ -4489,7 +4472,8 @@ begin
   if result and
      (Server <> nil) and
      (Server.fIPWhiteJwt <> nil) and
-     (fCall^.RemoteIPNotLocal <> nil) and
+     (fCall.LowLevelRemoteIP <> '') and
+     (PCardinal(fCall.LowLevelRemoteIP)^ <> HOST_127) and
      not Server.fIPWhiteJwt.Exists(fCall^.LowLevelRemoteIP) then
   begin
     Error('Invalid IP [%]', [fCall^.LowLevelRemoteIP], HTTP_FORBIDDEN);
@@ -4854,11 +4838,10 @@ begin
         [fUser, fUser.IDValue], self);
   // compute the next Session ID and its associated private key
   fID := InterlockedIncrement(aCtxt.Server.fSessionCounter); // 20-bit number
-  if PInteger(@ServerProcessKdf)^ <> 0 then  // use our thread-safe CSPRNG
+  if PInteger(@ServerProcessKdf)^ <> 0 then  // use local thread-safe CSPRNG
     ServerProcessKdf.Compute(@fID, 8, rnd.b) // 8 > 4 bytes nonce ticks
   else
-    RandomBytes(rnd.Lo); // Lecuyer as fallback (paranoid)
-  XorMemory(rnd.l, rnd.h); // don't leak full state, but use full result
+    Random128(@rnd); // safe (but paranoid) unpredictable fallback
   BinToHexLower(@rnd, SizeOf(rnd.l), fPrivateKey); // 128-bit is enough
   ComputeProtectedValues(aCtxt.TickCount64);
   // this session has been successfully created
@@ -5218,7 +5201,7 @@ begin
   result := nil; // indicates invalid signature
 end;
 
-var // the HMAC-SHA-256 ServerProcessKdf() of the last two 4.3 minutes ticks
+var // cache HMAC-SHA-256 ServerProcessKdf() of the last two 4.3 minutes ticks
   ServerNonceCache: array[{previous=}boolean] of record
     safe: TLightLock;
     tix: cardinal;
@@ -5347,12 +5330,15 @@ var
   end;
 
 begin
+  // our default schemes require an user name
   result := aUserName <> '';
-  if not result then // let's try another TRestServerAuthentication class
-    exit;
+  if not result then
+    exit; // let's try another TRestServerAuthentication class
+  // try auth?UserName=...&Session=... from TRestClientUri.SessionClose
   result := true;
   if AuthSessionRelease(Ctxt, aUserName) then
     exit;
+  // GET ModelRoot/auth?UserName=...&PassWord=...&ClientNonce=... -> handshaking
   nonce := Ctxt.GetInputValue('ClientNonce');
   if (nonce <> nil) and
      (length(nonce^) > 32) then
@@ -5434,12 +5420,15 @@ function TRestServerAuthenticationNone.Auth(Ctxt: TRestServerUriContext;
 var
   usr: TAuthUser;
 begin
+  // our default schemes require an user name
   result := aUserName <> '';
-  if not result then // let's try another TRestServerAuthentication class
+  if not result then
+    exit; // let's try another TRestServerAuthentication class
+  // try auth?UserName=...&Session=... from TRestClientUri.SessionClose
+  if AuthSessionRelease(Ctxt, aUserName) then // auth?UserName=...&Session=...
     exit;
-  // keep result = true: this kind of weak authentication avoid stronger ones
-  if AuthSessionRelease(Ctxt, aUserName) then
-    exit;
+  // GET ModelRoot/auth?UserName=... is enough to create a new session
+  // (this kind of weak authentication avoid stronger ones: keep result = true)
   usr := GetUser(Ctxt, aUserName);
   if usr = nil then
     Ctxt.AuthenticationFailed(afUnknownUser)
@@ -5565,11 +5554,6 @@ end;
 {$ifdef DOMAINRESTAUTH}
 { will use mormot.lib.sspi/gssapi units depending on the OS }
 
-const
-  /// maximum number of Windows Authentication context to be handled at once
-  // - 64 should be big enough
-  MAXSSPIAUTHCONTEXTS = 64;
-
 
 { TRestServerAuthenticationSspi }
 
@@ -5580,136 +5564,109 @@ begin
     ESecurityException.RaiseUtf8('%.Create with no %', [self, SECPKGNAMEAPI]);
   // initialize this authentication scheme
   inherited Create(aServer);
-  // TDynArray access to fSspiAuthContext[] by TRestConnectionID (ptInt64)
-  fSspiAuthContexts.InitSpecific(TypeInfo(TSecContextDynArray),
-    fSspiAuthContext, ptInt64, @fSspiAuthContextCount);
-end;
-
-destructor TRestServerAuthenticationSspi.Destroy;
-var
-  i: PtrInt;
-begin
-  for i := 0 to fSspiAuthContextCount - 1 do
-    FreeSecContext(fSspiAuthContext[i]); // abort NTLM pending auths (unlikely)
-  inherited Destroy;
 end;
 
 // about Browser support and SPNEGO handshake via HTTP headers, see e.g.
 // https://learn.microsoft.com/en-us/previous-versions/ms995330(v=msdn.10)
 
-// note that Negotiate/Kerberos is two-way, and NTLM three-way so we need to
-// maintain a list of pending contexts in fSspiAuthContext[] for NTLM only
-// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sip/96a33a84-36cb-41dc-a630-f0c42820ec16
+// note that Negotiate/Kerberos is two-way so a single call is enough
+// (NTLM three-way is deprecated since Windows 11 version 24H2 and Server 2025
+// so was removed from mORMot in August 2025)
 
 function TRestServerAuthenticationSspi.Auth(Ctxt: TRestServerUriContext;
   const aUserName: RawUtf8): boolean;
 var
-  i, ndx: PtrInt;
-  usr, indataenc: RawUtf8;
-  tix: Int64;
-  connectionID: TRestConnectionID;
-  browserauth: boolean;
+  usr, data: RawUtf8;
   outdata: RawByteString;
+  sec: TSecContext;
+  browserauth: boolean;
   user: TAuthUser;
   session: TAuthSession;
 begin
-  // GET ModelRoot/auth?username=...&data=... -> SSPI/GSSAPI auth
+  // auth?UserName=...&Session=... from TRestClientUri.SessionClose
   result := AuthSessionRelease(Ctxt, aUserName);
-  if result or
-     (aUserName = '') or
-     not Ctxt.InputExists['Data'] then
+  if result then
     exit;
-  // use connectionID to find authentication session
+  // GET ModelRoot/auth?username=&data=... -> SSPI/GSSAPI handshaking
+  // (username= is not needed with Kerberos so either void or missing)
   browserauth := false;
-  connectionID := Ctxt.Call^.LowLevelConnectionID;
-  indataenc := Ctxt.InputUtf8['Data'];
-  if indataenc = '' then
-  begin
-    // client is browser and used HTTP headers to send auth data
-    FindNameValue(Ctxt.Call.InHead, pointer(SECPKGNAMEHTTPAUTHORIZATION), indataenc);
-    if indataenc = '' then
-    begin
-      // no auth data sent, reply with supported auth method(s)
-      Ctxt.Call.OutHead := SECPKGNAMEHTTPWWWAUTHENTICATE;
-      Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
-      Ctxt.Call.OutBody := Ctxt.StatusCodeToText(HTTP_UNAUTHORIZED)^;
-      exit;
-    end;
-    browserauth := true;
-  end;
-  // SSPI authentication
-  // thread-safe deletion of deprecated fSspiAuthContext[] pending auths
-  tix := Ctxt.TickCount64 - 30000; // tokens last for 30 seconds
-  for i := fSspiAuthContextCount - 1  downto 0 do // downwards for Delete()
-    if tix > fSspiAuthContext[i].CreatedTick64 then
-    begin
-      FreeSecContext(fSspiAuthContext[i]);
-      fSspiAuthContexts.Delete(i);
-    end;
-  // if no auth context specified, create a new one
-  result := true;
-  ndx := fSspiAuthContexts.Find(connectionID);
-  if ndx < 0 then
-  begin
-    // 1st call: create SecCtxId
-    if fSspiAuthContextCount >= MAXSSPIAUTHCONTEXTS then
-    begin
-      fServer.InternalLog('Too many Windows Authenticated session in pending' +
-        ' state: MAXSSPIAUTHCONTEXTS=%', [MAXSSPIAUTHCONTEXTS], sllUserAuth);
-      exit;
-    end;
-    ndx := fSspiAuthContexts.New; // add a new entry to fSspiAuthContext[]
-    InvalidateSecContext(fSspiAuthContext[ndx], connectionID, Ctxt.TickCount64);
-  end;
-  // call SSPI provider
-  if ServerSspiAuth(fSspiAuthContext[ndx], Base64ToBin(indataenc), outdata) then
-  begin
-    // 1st call: send back outdata to the client
-    if browserauth then
-    begin
-      Ctxt.Call.OutHead := (SECPKGNAMEHTTPWWWAUTHENTICATE + ' ') +
-                             BinToBase64(outdata);
-      Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
-      Ctxt.Call.OutBody := Ctxt.StatusCodeToText(HTTP_UNAUTHORIZED)^;
-    end
+  // validate base-64 encoded input data in URI (REST) or HTTP header (browser)
+  data := Ctxt.InputUtf8OrVoid['Data'];
+  if data = '' then
+    if aUserName <> '' then
+      exit // may be another REST auth - keep result=false
     else
-      Ctxt.Returns(['result', '',
-                    'data', BinToBase64(outdata)]);
+    begin
+      // client is browser and should use HTTP headers to send auth data
+      FindNameValue(Ctxt.Call.InHead, 'AUTHORIZATION: ', data);
+      if data = '' then
+      begin
+        // no auth data sent, reply with supported auth method(s)
+        Ctxt.Call.OutHead := SECPKGNAMEHTTPWWWAUTHENTICATE;
+        Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
+        Ctxt.Call.OutBody := Ctxt.StatusCodeToText(HTTP_UNAUTHORIZED)^;
+        result := true; // do not try another auth
+        exit;
+      end;
+      if not IdemPChar(pointer(data), 'NEGOTIATE ') then
+        exit; // may be e.g. 'Basic VXNlcjpzeW5vcHNl'
+      delete(data, 1, 10); // was 'Authorization: Negotiate <base64 encoding>'
+      browserauth := true;
+    end;
+  result := true;
+  if not InitializeDomainAuth then
+  begin
+    Ctxt.AuthenticationFailed(afRemoteServiceExecutionNotAllowed);
     exit;
   end;
-  // 2nd call: user was authenticated -> release used context
-  ServerSspiAuthUser(fSspiAuthContext[ndx], usr);
-  if sllUserAuth in fServer.fLogLevel then
-    fServer.InternalLog('% Authentication success for %',
-      [SecPackageName(fSspiAuthContext[ndx]), usr], sllUserAuth);
-  // now client is authenticated -> create a session for aUserName
-  // and send back outdata
+  data := Base64ToBin(data);
+  if (data = '') or                // should be valid Base64
+     ServerSspiDataNtlm(data) then // two-way Kerberos only
+  begin
+    Ctxt.AuthenticationFailed(afInvalidPassword);
+    exit;
+  end;
+  // make the actual SSPI/GSSAPI handshake
+  InvalidateSecContext(sec);
   try
-    if usr = '' then
-      exit;
-    user := GetUser(Ctxt, usr);
-    if user <> nil then
     try
-      user.PasswordHashHexa := ''; // override with context
-      fServer.SessionCreate(user, Ctxt, session);
-      // SessionCreate would call Ctxt.AuthenticationFailed on error
-      if session <> nil then
-        with session.user do
+      // should be in a single call
+      if not ServerSspiAuth(sec, data, outdata) then
+      begin
+        Ctxt.AuthenticationFailed(afSessionCreationAborted);
+        exit;
+      end;
+      outdata := BinToBase64(outdata);
+      // now client is authenticated: identify the user
+      ServerSspiAuthUser(sec, usr);
+      if sllUserAuth in fServer.fLogLevel then
+        fServer.InternalLog('% success for %', [self, usr], sllUserAuth);
+      user := nil;
+      if usr <> '' then
+        user := GetUser(Ctxt, usr);
+      if user <> nil then
+      try
+        // create a session for this user and send back outdata
+        user.PasswordHashHexa := ''; // override with context
+        fServer.SessionCreate(user, Ctxt, session);
+        // SessionCreate would call Ctxt.AuthenticationFailed on error
+        if session <> nil then
           if browserauth then
             SessionCreateReturns(Ctxt, session, session.fPrivateSalt, '',
-              (SECPKGNAMEHTTPWWWAUTHENTICATE + ' ') + BinToBase64(outdata))
+              SECPKGNAMEHTTPWWWAUTHENTICATE + outdata)
           else
             SessionCreateReturns(Ctxt, session,
-              BinToBase64(SecEncrypt(fSspiAuthContext[ndx], session.fPrivateSalt)),
-              BinToBase64(outdata),'');
-    finally
-      user.Free;
-    end
-    else
-      Ctxt.AuthenticationFailed(afUnknownUser);
+              BinToBase64(SecEncrypt(sec, session.fPrivateSalt)), outdata,'');
+      finally
+        user.Free;
+      end
+      else
+        Ctxt.AuthenticationFailed(afUnknownUser);
+    except
+      Ctxt.AuthenticationFailed(afSessionCreationAborted); // on ESynSspi
+    end;
   finally
-    FreeSecContext(fSspiAuthContext[ndx]);
-    fSspiAuthContexts.Delete(ndx);
+    FreeSecContext(sec);
   end;
 end;
 
@@ -7647,6 +7604,16 @@ begin
   inherited OnEndCurrentThread(Sender);
 end;
 
+procedure TRestServer.HandleUriError(Ctxt: TRestServerUriContext; E: Exception);
+begin
+  if (not Assigned(OnErrorUri)) or
+     OnErrorUri(ctxt, E) then
+    if PClass(E)^ = EInterfaceFactory then
+      Ctxt.Error(E, '', [], HTTP_NOTACCEPTABLE)
+    else
+      Ctxt.Error(E, '', [], HTTP_SERVERERROR);
+end;
+
 procedure TRestServer.Uri(var Call: TRestUriParams);
 // this is the main server-side REST processing method
 var
@@ -7662,10 +7629,12 @@ begin
     exit;
   end;
   if (fIPBan <> nil) and
-     (Call.RemoteIPNotLocal <> nil) and
+     (Call.LowLevelRemoteIP <> '') and
+     (PCardinal(Call.LowLevelRemoteIP)^ <> HOST_127) and
      fIPBan.Exists(Call.LowLevelRemoteIP) then
   begin
-    fLogClass.Add.Log(sllServer, 'Uri: banned %', [Call.LowLevelRemoteIP], self);
+    if sllServer in fLogLevel then
+      InternalLog('Uri: banned %', [Call.LowLevelRemoteIP], sllServer);
     Call.OutStatus := HTTP_TEAPOT; // I'm a teapot!
     exit;
   end;
@@ -7675,8 +7644,9 @@ begin
     Call.OutStatus := OnStartUri(Call);
     if Call.OutStatus <> HTTP_SUCCESS then
     begin
-      fLogClass.Add.Log(sllServer, 'Uri: rejected by OnStartUri(% %)=%',
-          [Call.Method, Call.Url, Call.OutStatus], self);
+      if sllServer in fLogLevel then
+        InternalLog('Uri: rejected by OnStartUri(% %)=%',
+          [Call.Method, Call.Url, Call.OutStatus], sllServer);
       exit;
     end;
   end;
@@ -7741,12 +7711,7 @@ begin
         ctxt.ExecuteCommand;
     except
       on E: Exception do
-        if (not Assigned(OnErrorUri)) or
-           OnErrorUri(ctxt, E) then
-          if PClass(E)^ = EInterfaceFactory then
-            ctxt.Error(E, '', [], HTTP_NOTACCEPTABLE)
-          else
-            ctxt.Error(E, '', [], HTTP_SERVERERROR);
+        HandleUriError(Ctxt, E);
     end;
     // 8. return expected result to the client
     if StatusCodeIsSuccess(Call.OutStatus) then
@@ -7793,13 +7758,12 @@ begin
     if (Call.OutHead <> '') and
        not (rsoHttpHeaderCheckDisable in fOptions) and
        IsInvalidHttpHeader(Call.OutHead) then
-      ctxt.Error('Unsafe HTTP header rejected [%]',
-        [EscapeToShort(Call.OutHead)], HTTP_SERVERERROR);
+      ctxt.Error('Unsafe HTTP header rejected', HTTP_SERVERERROR);
   finally
     // 10. gather statistics and log execution
     if StatLevels <> [] then
       ctxt.ComputeStatsAfterCommand;
-    if (ctxt.fLog <> nil) and
+    if (ctxt.Log <> nil) and
        (fLogLevel * [sllServer, sllServiceReturn] <> []) then
       ctxt.LogFromContext;
     // 11. finalize execution context
@@ -7870,8 +7834,7 @@ begin
     n := PDALen(PAnsiChar(a) - _DALEN)^ + _DAOFF;
     repeat
       if a^.Auth(Ctxt, usr^) then
-        // found an authentication, which may be successful or not
-        break;
+        break; // found an authentication, which may be successful or not
       inc(a);
       dec(n);
     until n = 0;

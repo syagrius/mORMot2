@@ -2303,7 +2303,7 @@ asm
 end;
 
 procedure AesNiCtrAnyEncrypt(self, BufIn, BufOut: pointer; Count: cardinal);
-asm
+asm     // called from TAesC64.Encrypt
         push    ebx
         push    esi
         push    edi
@@ -2344,6 +2344,242 @@ asm
 end;
 
 
+{$ifdef USEAESNICTR}
+
+// use TAesContext.buf as state machine: c0=src c1=dst c2=iv c3=blocks
+
+// AES-CTR over a 32-bit counter - handle a few blocks until 4x alignment
+procedure AesNiEncryptCtrNist32By1(ctxt: PAesContext);
+  {$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        push    esi
+        push    edi
+        mov     esi, [eax].TAesContext.buf.c0  // esi=src
+        mov     edi, [eax].TAesContext.buf.c1  // edi=dst
+        mov     edx, [eax].TAesContext.buf.c2  // edx=iv
+        mov     ecx, [edx].THash128Rec.c3      // ecx=ctr
+        {$ifdef FPC} align 8 {$endif}
+@by1:   movups  xmm7, [edx]
+        bswap   ecx
+        call    dword ptr [eax].TAesContext.AesNi32 // AES.Encrypt(xmm7)
+        add     ecx, 1
+        movups  xmm0, [esi]
+        lea     esi, dword ptr [esi + 16]
+        pxor    xmm0, xmm7
+        bswap   ecx
+        movups  [edi], xmm0
+        lea     edi, dword ptr [edi + 16]
+        mov     [edx].THash128Rec.c3, ecx
+        dec     dword ptr [eax].TAesContext.buf.c3 // blocks
+        jnz     @by1
+        mov     [eax].TAesContext.buf.c0, esi
+        mov     [eax].TAesContext.buf.c1, edi
+@done:  pop     edi
+        pop     esi
+end;
+
+// AES-CTR with 4x AES-NI interleave factor and SSE 4.1 over a 32-bit counter
+procedure AesNiEncryptCtrNist32By4(ctxt: PAesContext);
+  {$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        push    esi
+        push    edi
+        push    ebx
+        mov     edx, [eax].TAesContext.buf.c2  // edx=iv
+        lea     eax, dword ptr [eax + $70] // for smaller codegen
+        // prepare ecx = 32-bit ctr
+        mov     ecx, [edx].THash128Rec.c3
+        bswap   ecx
+        {$ifdef FPC} align 16 {$endif}
+@by4:   // prepare xmm0-xmm3 as iv0-iv3
+        movups  xmm0, [edx]
+        movaps  xmm1, xmm0
+        movaps  xmm2, xmm0
+        movaps  xmm3, xmm0
+        lea     ebx, [ecx + 1]
+        lea     esi, [ecx + 2]
+        lea     edi, [ecx + 3]
+        bswap   ecx
+        bswap   ebx
+        bswap   esi
+        bswap   edi
+        pinsrd  xmm0, ecx, 3  // SSE 4.1 instruction
+        pinsrd  xmm1, ebx, 3
+        pinsrd  xmm2, esi, 3
+        pinsrd  xmm3, edi, 3
+        bswap   ecx
+        lea     ecx, [ecx + 4]
+        // 4x interleaved AES process
+        mov     esi, [eax - $70].TAesContext.buf.c0  // esi=src
+        mov     edi, [eax - $70].TAesContext.buf.c1  // edi=dst
+        mov     bl, byte ptr [eax - $70].TAesContext.Rounds
+        movups  xmm4, [eax + $00 - $70]
+        movups  xmm5, [eax + $10 - $70]
+        movups  xmm6, [eax + $20 - $70]
+        movups  xmm7, [eax + $30 - $70]
+        pxor    xmm0, xmm4
+        pxor    xmm1, xmm4
+        pxor    xmm2, xmm4
+        pxor    xmm3, xmm4
+        aesenc  xmm0, xmm5
+        aesenc  xmm1, xmm5
+        aesenc  xmm2, xmm5
+        aesenc  xmm3, xmm5
+        aesenc  xmm0, xmm6
+        aesenc  xmm1, xmm6
+        aesenc  xmm2, xmm6
+        aesenc  xmm3, xmm6
+        aesenc  xmm0, xmm7
+        aesenc  xmm1, xmm7
+        aesenc  xmm2, xmm7
+        aesenc  xmm3, xmm7
+        movups  xmm4, [eax + $40 - $70]
+        movups  xmm5, [eax + $50 - $70]
+        movups  xmm6, [eax + $60 - $70]
+        movups  xmm7, [eax + $70 - $70]
+        aesenc  xmm0, xmm4
+        aesenc  xmm1, xmm4
+        aesenc  xmm2, xmm4
+        aesenc  xmm3, xmm4
+        aesenc  xmm0, xmm5
+        aesenc  xmm1, xmm5
+        aesenc  xmm2, xmm5
+        aesenc  xmm3, xmm5
+        aesenc  xmm0, xmm6
+        aesenc  xmm1, xmm6
+        aesenc  xmm2, xmm6
+        aesenc  xmm3, xmm6
+        aesenc  xmm0, xmm7
+        aesenc  xmm1, xmm7
+        aesenc  xmm2, xmm7
+        aesenc  xmm3, xmm7
+        movups  xmm4, [eax + $80 - $70]
+        movups  xmm5, [eax + $90 - $70]
+        movups  xmm6, [eax + $a0 - $70]
+        movups  xmm7, [eax + $b0 - $70]
+        aesenc  xmm0, xmm4
+        aesenc  xmm1, xmm4
+        aesenc  xmm2, xmm4
+        aesenc  xmm3, xmm4
+        aesenc  xmm0, xmm5
+        aesenc  xmm1, xmm5
+        aesenc  xmm2, xmm5
+        aesenc  xmm3, xmm5
+        cmp     bl, 10
+        ja      @192
+@last:  aesenclast xmm0, xmm6
+        aesenclast xmm1, xmm6
+        aesenclast xmm2, xmm6
+        aesenclast xmm3, xmm6
+@write: // dst := src xor AES(iv)
+        movups  xmm4, [esi + $00]
+        movups  xmm5, [esi + $10]
+        movups  xmm6, [esi + $20]
+        movups  xmm7, [esi + $30]
+        lea     esi, dword ptr [esi + $40]
+        mov     [eax - $70].TAesContext.buf.c0, esi
+        pxor    xmm4, xmm0
+        pxor    xmm5, xmm1
+        pxor    xmm6, xmm2
+        pxor    xmm7, xmm3
+        lea     esi, dword ptr [edi + $40]
+        mov     [eax - $70].TAesContext.buf.c1, esi
+        movups  [edi + $00], xmm4
+        movups  [edi + $10], xmm5
+        movups  [edi + $20], xmm6
+        movups  [edi + $30], xmm7
+        dec     dword ptr [eax - $70].TAesContext.buf.c3 // 4x blocks
+        jnz     @by4
+@done:  pop     ebx
+        pop     edi
+        pop     esi
+        ret
+@192:   movups  xmm4, [eax + $c0 - $70]
+        movups  xmm5, [eax + $d0 - $70]
+        aesenc  xmm0, xmm6
+        aesenc  xmm1, xmm6
+        aesenc  xmm2, xmm6
+        aesenc  xmm3, xmm6
+        aesenc  xmm0, xmm7
+        aesenc  xmm1, xmm7
+        aesenc  xmm2, xmm7
+        aesenc  xmm3, xmm7
+        cmp     bl, 12
+        ja      @256
+        aesenclast xmm0, xmm4
+        aesenclast xmm1, xmm4
+        aesenclast xmm2, xmm4
+        aesenclast xmm3, xmm4
+        jmp     @write
+@256:   movups  xmm6, [eax + $e0 - $70]
+        aesenc  xmm0, xmm4
+        aesenc  xmm1, xmm4
+        aesenc  xmm2, xmm4
+        aesenc  xmm3, xmm4
+        aesenc  xmm0, xmm5
+        aesenc  xmm1, xmm5
+        aesenc  xmm2, xmm5
+        aesenc  xmm3, xmm5
+        jmp     @last
+end;
+
+{
+ 1) our simple 4x algorithm is much faster than OpenSSL for small content < 1KB
+ 2) for big content, OpenSSL is slightly faster
+ 3) weirdly enough, our very same 4x algorithm is slower on x86_64 than on i386
+
+ AesNiEncryptCtrNist32 Win32 on a Core i5 15400:
+ 500 mormot aes-128-ctr 8 in 18us i.e. 26.4M/s, aver. 36ns, 211.9 MB/s
+ 500 mormot aes-256-ctr 8 in 20us i.e. 23.8M/s, aver. 40ns, 190.7 MB/s
+ 500 mormot aes-128-ctr 50 in 21us i.e. 22.7M/s, aver. 42ns, 1.1 GB/s
+ 500 mormot aes-256-ctr 50 in 21us i.e. 22.7M/s, aver. 42ns, 1.1 GB/s
+ 500 mormot aes-128-ctr 100 in 37us i.e. 12.8M/s, aver. 74ns, 1.2 GB/s
+ 500 mormot aes-256-ctr 100 in 42us i.e. 11.3M/s, aver. 84ns, 1.1 GB/s
+ 500 mormot aes-128-ctr 1000 in 74us i.e. 6.4M/s, aver. 148ns, 6.2 GB/s
+ 500 mormot aes-256-ctr 1000 in 93us i.e. 5.1M/s, aver. 186ns, 5 GB/s
+ 500 mormot aes-128-ctr 10000 in 493us i.e. 0.9M/s, aver. 986ns, 9.4 GB/s
+ 500 mormot aes-256-ctr 10000 in 641us i.e. 761.7K/s, aver. 1.28us, 7.2 GB/s
+
+ OpenSSL 3.5.1 Win32:
+ 500 openssl aes-128-ctr 8 in 117us i.e. 4M/s, aver. 234ns, 32.6 MB/s
+ 500 openssl aes-256-ctr 8 in 113us i.e. 4.2M/s, aver. 226ns, 33.7 MB/s
+ 500 openssl aes-128-ctr 50 in 116us i.e. 4.1M/s, aver. 232ns, 205.5 MB/s
+ 500 openssl aes-256-ctr 50 in 116us i.e. 4.1M/s, aver. 232ns, 205.5 MB/s
+ 500 openssl aes-128-ctr 100 in 119us i.e. 4M/s, aver. 238ns, 400.7 MB/s
+ 500 openssl aes-256-ctr 100 in 121us i.e. 3.9M/s, aver. 242ns, 394 MB/s
+ 500 openssl aes-128-ctr 1000 in 154us i.e. 3.1M/s, aver. 308ns, 3 GB/s
+ 500 openssl aes-256-ctr 1000 in 165us i.e. 2.8M/s, aver. 330ns, 2.8 GB/s
+ 500 openssl aes-128-ctr 10000 in 477us i.e. 1M/s, aver. 954ns, 9.7 GB/s
+ 500 openssl aes-256-ctr 10000 in 621us i.e. 786.2K/s, aver. 1.24us, 7.5 GB/s
+
+}
+
+// AES-NI + SSE 4.1 asm with 4x interleave factor
+procedure AesNiEncryptCtrNist32(
+  src, dst: pointer; blocks: PtrUInt; ctxt: PAesContext; iv: PHash128Rec); inline;
+var
+  state: PHash128Rec; // = TAesContext.buf
+begin
+  if blocks = 0 then
+    exit;
+  state := @ctxt^.buf;
+  state^.c0 := PtrUInt(src);
+  state^.c1 := PtrUInt(dst);
+  state^.c2 := PtrUInt(iv);
+  // handle 1..3 blocks for 4x process
+  state^.c3 := blocks and 3;
+  if state^.c3 <> 0 then
+    AesNiEncryptCtrNist32By1(ctxt);
+  blocks := blocks shr 2;
+  if blocks = 0 then
+    exit;
+  // 4x interleaved process
+  ctxt^.buf.c3 := blocks;
+  AesNiEncryptCtrNist32By4(ctxt);
+end;
+
+{$endif USEAESNICTR}
+
 {$ifdef HASAESNI} // oldest Delphi don't handle some opcode used below
 
 // compute a := a * b in GF(2^128) using pclmulqdq on WestMere CPUs
@@ -2353,7 +2589,11 @@ procedure gf_mul_pclmulqdq(a, b: pointer);
 asm
         movups  xmm0, dqword ptr [a]
         movups  xmm1, dqword ptr [b]
+        {$ifdef FPC}
+        movaps  xmm2, dqword ptr [@swap]
+        {$else} // the Delphi asm has trouble aligning
         movups  xmm2, dqword ptr [@swap]
+        {$endif FPC}
         pshufb  xmm0, xmm2
         pshufb  xmm1, xmm2
         movdqa  xmm5, xmm0
@@ -2416,7 +2656,11 @@ asm
         psllq   xmm3, 57
         por     xmm4, xmm7
         psrlq   xmm0, 7
+        {$ifdef FPC}
+        movaps  xmm7, dqword ptr [@swap]
+        {$else} // the Delphi asm has trouble aligning
         movups  xmm7, dqword ptr [@swap]
+        {$endif FPC}
         por     xmm0, xmm3
         psllq   xmm5, 62
         pxor    xmm1, xmm0
@@ -2429,6 +2673,7 @@ asm
         pshufb  xmm0, xmm7
         movups  dqword ptr [a], xmm0
         ret
+        {$ifdef FPC} align 16 {$endif}
 @swap:  db 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
 end;
 
@@ -3209,7 +3454,7 @@ end;
 {$ifdef USEAESNIHASH}
 
 var
-  // 16*4=64 random bytes set at startup to avoid hash flooding
+  // 16*4=64 random bytes (512-bit) set at startup to avoid hash flooding
   // - defined as a pointer from GetMemAligned() which is mandatory on Delphi
   AesNiHashKey: pointer; // = 512-bit AesNiHashAntiFuzzTable
   AesNiHashMem: RawByteString;

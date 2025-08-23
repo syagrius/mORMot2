@@ -423,7 +423,7 @@ type
     // - if Authority is nil, will generate a self-signed certificate
     // - the supplied Issuer name would be stored using AsciiToBaudot(),
     // truncated to the Issuer buffer size, i.e. 16 bytes - if Issuer is '',
-    // TAesPrng.Fill() will be used
+    // Random128() will be used
     // - you may specify some validity time range, if needed
     // - default ParanoidVerify=true will validate the certificate digital
     // signature via a call Ecc256r1Verify() to ensure its usefulness
@@ -2818,13 +2818,13 @@ begin
         ValidityStart := EccDate(StartDate);
       ValidityEnd := ValidityStart + ExpirationDays;
     end;
-    TAesPrng.Main.Fill(TAesBlock(Serial));
+    Random128(@Serial);
     fContent.SetUsage(word(Usage), MaxVers);
     if IssuerText = '' then
       if Subjects <> '' then
         fContent.SetSubject(Subjects, MaxVers)
       else
-        TAesPrng.Main.Fill(TAesBlock(Issuer))
+        Random128(@Issuer)
     else
       EccIssuer(IssuerText, Issuer);
     if not ecc_make_key_pas(PublicKey, fPrivateKey) then
@@ -2947,7 +2947,7 @@ begin
     plain := SaveToBinary;
     if plain <> '' then
       try
-        RandomByteString(PRIVKEY_SALTSIZE, salt); // public: Lecuyer is enough
+        RandomByteString(PRIVKEY_SALTSIZE, salt); // public: TLecuyer is enough
         Pbkdf2HmacSha256(PassWord, salt, Pbkdf2Round, aeskey);
         a := Aes.Create(aeskey);
         try
@@ -4655,27 +4655,23 @@ end;
 procedure HmacCrc256c(key, msg: pointer; keylen, msglen: integer;
   out result: THash256);
 var
-  i: PtrInt;
   h1, h2: cardinal;
-  k0, k0xorIpad, step7data: THash512Rec;
+  k0, step7data: THash512Rec;
 begin
   FillCharFast(k0, SizeOf(k0), 0);
   if keylen > SizeOf(k0) then
     crc256c(key, keylen, k0.Lo)
   else
     MoveFast(key^, k0, keylen);
-  for i := 0 to 15 do
-    k0xorIpad.c[i] := k0.c[i] xor $36363636;
-  for i := 0 to 15 do
-    step7data.c[i] := k0.c[i] xor $5c5c5c5c;
-  h1 := crc32c(crc32c(0, @k0xorIpad, SizeOf(k0xorIpad)), msg, msglen);
-  h2 := crc32c(crc32c(h1, @k0xorIpad, SizeOf(k0xorIpad)), msg, msglen);
+  XorBy128(@step7data, @k0, 15, $5c5c5c5c);
+  XorBy128(@k0, @k0, 15, $36363636);
+  h1 := crc32c(crc32c(0,  @k0, SizeOf(k0)), msg, msglen);
+  h2 := crc32c(crc32c(h1, @k0, SizeOf(k0)), msg, msglen);
   crc256cmix(h1, h2, @result);
-  h1 := crc32c(crc32c(0, @step7data, SizeOf(step7data)), @result, SizeOf(result));
+  h1 := crc32c(crc32c(0,  @step7data, SizeOf(step7data)), @result, SizeOf(result));
   h2 := crc32c(crc32c(h1, @step7data, SizeOf(step7data)), @result, SizeOf(result));
   crc256cmix(h1, h2, @result);
   FillCharFast(k0, SizeOf(k0), 0);
-  FillCharFast(k0xorIpad, SizeOf(k0), 0);
   FillCharFast(step7data, SizeOf(k0), 0);
 end;
 
@@ -4700,21 +4696,17 @@ end;
 
 procedure THmacCrc32c.Init(key: pointer; keylen: integer);
 var
-  i: PtrInt;
-  k0, k0xorIpad: THash512Rec;
+  k0: THash512Rec;
 begin
   FillCharFast(k0, SizeOf(k0), 0);
   if keylen > SizeOf(k0) then
     crc256c(key, keylen, k0.Lo)
   else
     MoveFast(key^, k0, keylen);
-  for i := 0 to 15 do
-    k0xorIpad.c[i] := k0.c[i] xor $36363636;
-  for i := 0 to 15 do
-    step7data.c[i] := k0.c[i] xor $5c5c5c5c;
-  seed := crc32c(0, @k0xorIpad, SizeOf(k0xorIpad));
+  XorBy128(@step7data, @k0, 15, $5c5c5c5c);
+  XorBy128(@k0, @k0, 15, $36363636);
+  seed := crc32c(0, @k0, SizeOf(k0));
   FillCharFast(k0, SizeOf(k0), 0);
-  FillCharFast(k0xorIpad, SizeOf(k0xorIpad), 0);
 end;
 
 procedure THmacCrc32c.Update(msg: pointer; msglen: integer);
@@ -5255,7 +5247,7 @@ begin
   FillCharFast(aClient, SizeOf(aClient), 0);
   aClient.algo := fAlgo;
   // client-side randomness for ephemeral keys and signatures
-  SharedRandom.Fill(@fRndA, SizeOf(fRndA)); // public and unique: use Lecuyer
+  Random128(@fRndA); // unpredictable
   aClient.RndA := fRndA;
   // generate the client ephemeral key
   if fAlgo.auth <> authClient then
@@ -5377,7 +5369,7 @@ begin
   FillCharFast(aServer, SizeOf(aServer), 0);
   aServer.algo := fAlgo;
   aServer.RndA := fRndA;
-  SharedRandom.Fill(@fRndB, SizeOf(fRndB)); // public and unique: use Lecuyer
+  Random128(@fRndB); // unpredictable
   aServer.RndB := fRndB;
   if fAlgo.auth <> authServer then
     if not Ecc256r1MakeKey(aServer.QF, dF) then

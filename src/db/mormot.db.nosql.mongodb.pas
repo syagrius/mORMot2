@@ -2477,7 +2477,7 @@ begin
   while item.FromNext(bson) do
     case item.NameLen of
       2:
-        if PWord(item.Name)^ = ord('i') + ord('d') shl 8 then
+        if cardinal(PWord(item.Name)^) = ord('i') + ord('d') shl 8 then
           // fCursorID<>0 if getMore is needed
           fCursorID := item.ToInteger;
       9:
@@ -3701,7 +3701,7 @@ begin
     // SCRAM-SHA-1
     // https://tools.ietf.org/html/rfc5802#section-5
     user := StringReplaceAll(UserName, ['=', '=3D', ',', '=2C']);
-    SharedRandom.Fill(@rnd, SizeOf(rnd)); // public and unique: use Lecuyer
+    SharedRandom.Fill(@rnd, SizeOf(rnd)); // public from client: use TLecuyer
     nonce := BinToBase64(@rnd, SizeOf(rnd));
     FormatUtf8('n=%,r=%', [user, nonce], first);
     BsonVariantType.FromBinary('n,,' + first, bbtGeneric, bson);

@@ -2675,7 +2675,7 @@ begin
             not ConsoleHandleCtrlCPressed do
       begin
         if IsMultiThread then
-          CheckSynchronize{$ifndef DELPHI6OROLDER}(100){$endif}
+          CheckSynchronize(100)
         else
           Windows.Sleep(100);
         while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
@@ -2744,6 +2744,7 @@ var
     if VerQueryValueW(pt, Utf8ToWin32PWideChar(lngnfo + From, u), str, sz) and
        (sz > 0) then
       Win32PWideCharToUtf8(str, Res);
+    u.Done;
   end;
 
 begin
@@ -2793,7 +2794,7 @@ begin
         result := true;
       end;
     finally
-      Freemem(pt);
+      FreeMem(pt);
     end;
   end;
 end;
@@ -4397,7 +4398,7 @@ var
   var
     new: RawByteString;
     pending, n: cardinal;
-    tmp: TSynTempBuffer;
+    tmp: TBuffer4K;
   begin
     repeat
       pending := 0;
@@ -4849,7 +4850,7 @@ begin
   if (PtrUInt(P) > MIN_PTR_VALUE) and
      (PtrUInt(SystemInfo.lpMinimumApplicationAddress) <= MIN_PTR_VALUE) then
     PtrUInt(SystemInfo.lpMinimumApplicationAddress) := MIN_PTR_VALUE;
-  Freemem(P);
+  FreeMem(P);
   FillCharFast(mem, SizeOf(mem), 0);
   mem.dwLength := SizeOf(mem);
   if GlobalMemoryStatusEx(mem) then

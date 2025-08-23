@@ -189,7 +189,7 @@ type
     procedure AuthorizeBasic(const UserName: RawUtf8; const Password: SpiUtf8);
     /// setup web authentication using the Digest access algorithm
     procedure AuthorizeDigest(const UserName: RawUtf8; const Password: SpiUtf8);
-    /// setup web authentication using Kerberos/NTLM via SSPI/GSSAPI and credentials
+    /// setup web authentication using Kerberos via SSPI/GSSAPI and credentials
     // - if you want to authenticate with the current logged user, just set
     // ! Auth.Scheme := wraNegotiate;
     procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8);
@@ -705,7 +705,7 @@ type
     procedure AuthorizeDigest(const UserName: RawUtf8; const Password: SpiUtf8;
       Algo: TDigestAlgo = daMD5_Sess);
     {$ifdef DOMAINRESTAUTH}
-    /// setup web authentication using Kerberos/NTLM via SSPI/GSSAPI for this instance
+    /// setup web authentication using Kerberos via SSPI/GSSAPI for this instance
     // - will store the user/paswword credentials, and set OnAuthorizeSspi callback
     // - if Password is '', will search for an existing Kerberos token on UserName
     // - an in-memory token will be used to authenticate the connection
@@ -714,14 +714,14 @@ type
     // may prefer to load a proper libgssapi_krb5.dylib instead
     procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8;
       const KerberosSpn: RawUtf8 = '');
-    /// web authentication callback of the current logged user using Kerberos/NTLM
+    /// web authentication callback of the current logged user using Kerberos
     // - calling the Security Support Provider Interface (SSPI) API on Windows,
     // or GSSAPI on Linux (only Kerboros)
     // - match the OnAuthorize: TOnHttpClientSocketAuthorize callback signature
     // - see also ClientForceSpn() and AuthorizeSspiSpn property
     class function OnAuthorizeSspi(Sender: THttpClientSocket;
       var Context: THttpClientRequest; const Authenticate: RawUtf8): boolean;
-    /// proxy authentication callback of the current logged user using Kerberos/NTLM
+    /// proxy authentication callback of the current logged user using Kerberos
     // - calling the Security Support Provider Interface (SSPI) API on Windows,
     // or GSSAPI on Linux (only Kerboros)
     // - match the OnProxyAuthorize: TOnHttpClientSocketAuthorize signature
@@ -3047,7 +3047,7 @@ var
 begin
   if not SockIsDefined then
     exit;
-  if SockIn = nil then // done once
+  if SockIn = nil then
     CreateSockIn; // use SockIn by default if not already initialized: 2x faster
   fSndBufLen := 0;
   if (url = '') or
@@ -3679,7 +3679,7 @@ var
   channelbindingtemp: THash512Rec;
 begin
   if (Sender = nil) or
-     not IdemPChar(pointer(Authenticate), pointer(SECPKGNAMEHTTP_UPPER)) then
+     not IdemPChar(pointer(Authenticate), SECPKGNAMEHTTP_UPPER) then
     exit;
   unauthstatus := Context.status; // either 401 (http auth) or 407 (proxy auth)
   bak := Context.header;
@@ -5823,8 +5823,6 @@ begin
     TLS or (Server.Port = '465') or (Server.Port = '587'), TLSIgnoreCertError);
 end;
 
-{$I-}
-
 function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
   const Text: RawByteString; const Headers, User, Pass, Port, TextCharSet: RawUtf8;
   TLS, TLSIgnoreCertError: boolean): boolean;
@@ -5836,9 +5834,7 @@ var
     res: RawUtf8;
   begin
     repeat
-      readln(sock.SockIn^, res);
-      if ioresult <> 0 then
-        ESendEmail.RaiseUtf8('read error for %', [res]);
+      sock.SockRecvLn(res);
     until (Length(res) < 4) or
           (res[4] <> '-'); // - indicates there are other headers following
     if IdemPChar(pointer(res), pointer(answer)) then
@@ -5853,8 +5849,6 @@ var
   begin
     sock.SockSend(Command);
     sock.SockSendFlush;
-    if ioresult <> 0 then
-      ESendEmail.RaiseUtf8('Write error for %', [Command]);
     Expect(answer)
   end;
 
@@ -5869,7 +5863,7 @@ begin
   sock := SocketOpen(Server, Port, TLS, nil, nil, TLSIgnoreCertError);
   if sock <> nil then
   try
-    sock.CreateSockIn; // we use SockIn for readln in Expect()
+    sock.CreateSockIn; // we use SockIn for buffered SockRecvLn() in Expect()
     Expect('220');
     if (User <> '') and
        (Pass <> '') then
@@ -5913,13 +5907,11 @@ begin
     sock.SockSend(Text);
     Exec('.', '25');
     Exec('QUIT', '22');
-    result := ioresult = 0;
+    result := true;
   finally
     sock.Free;
   end;
 end;
-
-{$I+}
 
 function SendEmailSubject(const Text: string): RawUtf8;
 begin

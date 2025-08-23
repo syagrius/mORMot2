@@ -702,7 +702,7 @@ begin
       aProtocol.OnBeforeIncomingFrame := fOnBeforeIncomingFrame;
       // send initial upgrade request
       RequestSendHeader(aWebSocketsURI, 'GET');
-      SharedRandom.Fill(@key, SizeOf(key)); // public and unique: use Lecuyer
+      SharedRandom.Fill(@key, SizeOf(key)); // public and unique: use TLecuyer
       bin1 := BinToBase64(@key, SizeOf(key));
       SockSendLine(['Content-Length: 0'#13#10 +
                     'Connection: Upgrade'#13#10 +
@@ -762,14 +762,9 @@ begin
           exit;
       end;
       // if we reached here, connection is successfully upgraded to WebSockets
-      if (Server = 'localhost') or
-         (Server = '127.0.0.1') then
-      begin
-        aProtocol.RemoteIP := '127.0.0.1';
-        aProtocol.RemoteLocalhost := true;
-      end
-      else
-        aProtocol.RemoteIP := Server;
+      aProtocol.RemoteIP := RemoteIP;
+      aProtocol.RemoteLocalhost := (RemoteIP = '') or
+                                   (PCardinal(RemoteIP)^ = HOST_127);
       // initialize the TWebSocketProcess
       result := ''; // no error message = success
       SetInt64(pointer(HeaderGetValue('SEC-WEBSOCKET-CONNECTION-ID')), id);

@@ -2830,7 +2830,7 @@ type
     function ExtractAt(var Dest: PAnsiChar; var Count: PtrInt;
       var Pos: PtrInt): PtrInt;
     /// retrieve the current Buffer/Len content as RawUtf8 text
-    // - with some optional overhead bytes to avoid reallocmem at concatenation
+    // - with some optional overhead bytes to avoid ReallocMem at concatenation
     // - won't force Len to 0: caller should call Reset if done with it
     procedure AsText(out Text: RawUtf8; Overhead: PtrInt = 0);
     /// how many bytes are currently used in the Buffer
@@ -5342,7 +5342,7 @@ var
   len: integer;
   R: PAnsiChar;
   crc: cardinal;
-  tmp: array[0..16383] of AnsiChar;  // big enough to resize result in-place
+  tmp: TBuffer16K;  // big enough to resize result in-place
 begin
   result := '';
   if (PlainLen = 0) or
@@ -6497,7 +6497,7 @@ begin // this loop is faster than mORMot 1 manual x86 asm, even on Delphi 7
     c := (ord(sp[0]) shl 16) or (ord(sp[1]) shl 8) or ord(sp[2]);
     rp[0] := enc[(c shr 18) and $3f];
     rp[1] := enc[(c shr 12) and $3f];
-    rp[2] := enc[(c shr 6) and $3f];
+    rp[2] := enc[(c shr 6)  and $3f];
     rp[3] := enc[c and $3f];
     inc(rp, 4);
     inc(sp, 3);
@@ -7695,7 +7695,7 @@ begin
             IdemPCharAndGetNextItem(P, 'FILENAME="', part.FileName, '"');
           end;
         end
-        else if IdemPCharAndGetNextItem(P, 'CONTENT-TYPE: ', part.ContentType) then
+        else if IdemPCharAndGetNextItem(P, HEADER_CONTENT_TYPE_UPPER, part.ContentType) then
         begin
           if IdemPChar(pointer(part.ContentType), 'MULTIPART/MIXED') then
             if GetBoundary(part.ContentType) then
@@ -7746,7 +7746,7 @@ function MultiPartFormDataNewBound(var boundaries: TRawUtf8DynArray): RawUtf8;
 var
   random: array[0..2] of cardinal;
 begin
-  SharedRandom.Fill(@random, SizeOf(random)); // public and unique: use Lecuyer
+  SharedRandom.Fill(@random, SizeOf(random)); // public and unique: use TLecuyer
   result := BinToBase64uri(@random, SizeOf(random));
   AddRawUtf8(boundaries, result);
 end;
@@ -8768,7 +8768,7 @@ begin
         $ffd8ff:
           result := mtJpg;  // FF D8 FF DB/E0/E1/E2/E3/E8
       else
-        case PWord(Content)^ of
+        case cardinal(PWord(Content)^) of
           $4D42:
             result := mtBmp; // 42 4D
           else if Len > 12 then // [0]=boxlen [1]='ftyp'box [2]=brand
@@ -8818,7 +8818,7 @@ begin
       begin
         result := mtUnknown;
         if Len > 600 then
-          case PWordArray(Content)^[256] of // at offset 512
+          case cardinal(PWordArray(Content)^[256]) of // at offset 512
             $a5ec:
               result := mtDoc; // EC A5 C1 00
             $fffd: // FD FF FF
@@ -8857,15 +8857,11 @@ begin
 end;
 
 const // https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/MIME_types/Common_types
-  MIME_EXT: array[0 .. 57] of PUtf8Char = ( // for IdemPPChar() start check
-    'PNG',  'GIF',  'TIF',  'JP',  'BMP',  'DOC',  'HTM',  'CSS',
-    'JSON', 'ICO',  'WOF',  'TXT', 'SVG',  'ATOM', 'RDF',  'RSS',
-    'WEBP', 'APPC', 'MANI', 'XML', 'JS',   'MJS',  'OGA',  'OGV',
-    'MP4',  'M2V',  'M2P',  'MP3', 'H264', 'TEXT', 'LOG',  'GZ',
-    'WEBM', 'MKV',  'RAR',  '7Z',  'BZ2',  'WMA',  'WMV',  'AVI',
-    'PPT',  'XLS',  'PDF',  'DCM', 'DICOM', 'SQLIT', 'DB3', 'HEIC',
-    'H265', 'AVIF', 'AAC', 'CSV',  'MD',   'ICS', 'OGX',  'OGG', 'OPUS', nil);
-  MIME_EXT_TYPE: array[0 .. high(MIME_EXT) - 1] of TMimeType = (
+  MIME_EXT = 'PNG|GIF|TIF|JP|BMP|DOC|HTM|CSS|JSON|ICO|WOF|TXT|SVG|ATOM|RDF|' +
+     'RSS|WEBP|APPC|MANI|XML|JS|MJS|OGA|OGV|MP4|M2V|M2P|MP3|H264|TEXT|LOG|' +
+     'GZ|WEBM|MKV|RAR|7Z|BZ2|WMA|WMV|AVI|PPT|XLS|PDF|DCM|DICOM|SQLIT|DB3|' +
+     'HEIC|H265|AVIF|AAC|CSV|MD|ICS|OGX|OGG|OPUS|';
+  MIME_EXT_TYPE: array[0 .. 56] of TMimeType = (
     mtPng,  mtGif,  mtTiff,  mtJpg,  mtBmp,  mtDoc,  mtHtml, mtCss,
     mtJson, mtXIcon, mtFont, mtText, mtSvg,  mtXml,  mtXml,  mtXml,
     mtWebp, mtManifest, mtManifest,  mtXml,  mtJS,   mtJS, mtOga, mtOgv,
@@ -8881,14 +8877,14 @@ begin
   result := mtUnknown;
   case length(Ext) of
     0: ;
-    1: // IdemPPChar() requires 2 chars len minimum
+    1: // IdemPCharSep() requires 2 chars len minimum
       case ext[1] of
         'x', 'X':
           result := mtXcomp;
       end;
   else
     begin
-      i := IdemPPChar(pointer(Ext), @MIME_EXT); // quick search by first 2 chars
+      i := IdemPCharSep(pointer(Ext), MIME_EXT); // quick search by first 2 chars
       if i >= 0 then
         result := MIME_EXT_TYPE[i]
     end;
@@ -9195,7 +9191,7 @@ end; // invalid file or unable to memory map its content -> Count := 0
 
 destructor TMemoryMapText.Destroy;
 begin
-  Freemem(fLines);
+  FreeMem(fLines);
   fMap.UnMap;
   inherited;
 end;
@@ -9339,7 +9335,7 @@ begin
     inc(P, 3); // ignore any UTF-8 BOM (still appears on Windows)
   ParseLines(P, fMapEnd, self);
   if fLinesMax > fCount + 16384 then
-    Reallocmem(fLines, fCount * SizeOf(pointer)); // size down only if worth it
+    ReallocMem(fLines, fCount * SizeOf(pointer)); // size down only if worth it
 end;
 
 procedure TMemoryMapText.AddInMemoryLine(const aNewLine: RawUtf8);
@@ -9689,7 +9685,7 @@ begin
       repeat
         W.AddByteToHexLower(Data^);
         inc(Data);
-        W.Add(SepChar);
+        W.AddDirect(SepChar);
         dec(Len);
         if Len = 0 then
           break;

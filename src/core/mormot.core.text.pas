@@ -393,7 +393,7 @@ type
 
   /// may be used to allocate on stack a 8KB work buffer for a TTextWriter
   // - via the TTextWriter.CreateOwnedStream overloaded constructor
-  TTextWriterStackBuffer = array[0..8191] of AnsiChar;
+  TTextWriterStackBuffer = TBuffer8K;
   PTextWriterStackBuffer = ^TTextWriterStackBuffer;
 
   /// available options for TTextWriter.WriteObject() method
@@ -724,10 +724,11 @@ type
     /// append CR+LF (#13#10) chars and #9 indentation
     // - indentation depth is defined by the HumanReadableLevel value
     procedure AddCRAndIndent; virtual;
-    /// write the same character multiple times
+    /// write the same character multiple times (up to the internal buffer size)
     procedure AddChars(aChar: AnsiChar; aCount: PtrInt);
+      {$ifdef HASINLINE}inline;{$endif}
     /// append an integer Value as fixed-length 2 digits text with comma
-    procedure Add2(Value: PtrUInt);
+    procedure Add2(Value: cardinal);
     /// append an integer Value as fixed-length 3 digits text without any comma
     procedure Add3(Value: cardinal);
     /// append an integer Value as fixed-length 4 digits text with comma
@@ -815,7 +816,7 @@ type
     /// append up to 4 chars, encoded as 32-bit constant
     // - called e.g. as (JSON_BASE64_MAGIC_C, 3) / (JSON_BASE64_MAGIC_QUOTE_C, 4)
     // or (JSON_SQLDATE_MAGIC_C, 3) / (JSON_SQLDATE_MAGIC_QUOTE_C, 4)
-    procedure AddShort(Text4Chars: cardinal; const TextLen: PtrInt); overload;
+    procedure AddShort4(Text4Chars: cardinal; const TextLen: PtrInt = 4);
       {$ifdef HASINLINE}inline;{$endif}
     /// append 'null' as text
     procedure AddNull;
@@ -873,6 +874,10 @@ type
     /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeUtf8(const Text: RawUtf8;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere);
+    /// low-level function removing all &lt; &gt; &amp; &quot; HTML entities
+    procedure AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
+    /// low-level function removing all HTML <tag> and &entities;
+    procedure AddHtmlAsText(p, tag: PUtf8Char; plen: PtrUInt);
     /// append some chars, escaping all XML special chars as expected
     // - i.e.   < > & " '  as   &lt; &gt; &amp; &quote; &apos;
     // - and all control chars (i.e. #1..#31) as &#..;
@@ -1013,6 +1018,7 @@ type
     // - returns #0 if no char has been written yet, or the buffer has been just
     // flushed: so this method is to be handled only in some particular usecases
     function LastChar: AnsiChar;
+      {$ifdef HASINLINE}inline;{$endif}
     /// how many bytes are currently in the internal buffer and not on disk/stream
     // - see TextLength for the total number of bytes, on both stream and memory
     function PendingBytes: PtrUInt;
@@ -1140,6 +1146,9 @@ procedure ConsoleObject(Value: TObject;
 /// check if some UTF-8 text would need HTML escaping
 function NeedsHtmlEscape(text: PUtf8Char; fmt: TTextWriterHtmlFormat): boolean;
 
+/// low-level conversion of an &amp; HTML entity into 32-bit Unicode Code Point
+function EntityToUcs4(entity: PUtf8Char; len: byte): Ucs4CodePoint;
+
 /// escape some UTF-8 text into HTML
 // - just a wrapper around TTextWriter.AddHtmlEscape() process,
 // replacing < > & " chars depending on the HTML layer
@@ -1161,6 +1170,10 @@ procedure HtmlEscapeString(const text: string; var result: RawUtf8;
 
 /// convert all &lt; &gt; &amp; &quot; HTML entities into their UTF-8 equivalency
 function HtmlUnescape(const text: RawUtf8): RawUtf8;
+
+/// minimal HTML-to-text conversion function
+// - trim all HTML <tag></tag> and &entities; - with minimal CRLF formatting
+function HtmlToText(const text: RawUtf8): RawUtf8;
 
 /// check if some UTF-8 text would need XML escaping
 function NeedsXmlEscape(text: PUtf8Char): boolean;
@@ -1938,7 +1951,7 @@ procedure Prepend(var Text: RawUtf8; const Args: array of const); overload;
 procedure Prepend(var Text: RawByteString; const Args: array of const); overload;
 
 /// append some text to a RawUtf8, ensuring previous text is separated with CRLF
-// - could be used e.g. to update HTTP headers
+// - could be used e.g. to update HTTP headers since here EOL = #13#10
 procedure AppendLine(var Text: RawUtf8; const Args: array of const;
   const Separator: RawUtf8 = EOL);
 
@@ -2207,6 +2220,9 @@ type
 
   /// meta-class of the ESynException hierarchy
   ESynExceptionClass = class of ESynException;
+
+/// retrieve Exception.Message as UTF-8 - handling ESynException.MessageUtf8
+procedure ExceptionUtf8(E: Exception; var Message: RawUtf8);
 
 
 { **************** HTTP/REST Common Headers Parsing (e.g. cookies) }
@@ -2940,7 +2956,7 @@ begin // caller should ensure that (P <> nil) and (Sep > ' ')
     dec(E); // trim right
   Item := P;
   Len := E - P;
-  if (PWord(S)^ = EOLW) or
+  if (cardinal(PWord(S)^) = EOLW) or
      (S^ = Sep) then
     P := S + 1
   else if S^ = #10 then
@@ -4241,6 +4257,22 @@ begin
   inc(B, 2); // with proper constant propagation above when inlined
 end;
 
+procedure TTextWriter.AddShorter(const Short8: TShort8);
+begin
+  if B >= BEnd then
+    FlushToStream;
+  PInt64(B + 1)^ := PInt64(@Short8[1])^;
+  inc(B, ord(Short8[0]));
+end;
+
+procedure TTextWriter.AddShort4(Text4Chars: cardinal; const TextLen: PtrInt);
+begin
+  if B >= BEnd then
+    FlushToStream;
+  PCardinal(B + 1)^ := Text4Chars;
+  inc(B, TextLen);
+end;
+
 class procedure TTextWriter.RaiseUnimplemented(const Method: ShortString);
 begin
   raise ESynException.CreateUtf8(
@@ -4355,7 +4387,7 @@ begin
     vtPointer,
     vtInterface:
       if V^.VPointer = nil then
-        AddShort(NULL_LOW, 4)
+        AddShort4(NULL_LOW)
       else
         Add(PtrInt(V^.VPointer)); // as VarRecToVariant()
     vtPChar:
@@ -4383,25 +4415,9 @@ begin
   RaiseUnimplemented('WrBase64');
 end;
 
-procedure TTextWriter.AddShorter(const Short8: TShort8);
-begin
-  if B >= BEnd then
-    FlushToStream;
-  PInt64(B + 1)^ := PInt64(@Short8[1])^;
-  inc(B, ord(Short8[0]));
-end;
-
-procedure TTextWriter.AddShort(Text4Chars: cardinal; const TextLen: PtrInt);
-begin
-  if B >= BEnd then
-    FlushToStream;
-  PCardinal(B + 1)^ := Text4Chars;
-  inc(B, TextLen);
-end;
-
 procedure TTextWriter.AddNull;
 begin
-  AddShort(NULL_LOW, 4);
+  AddShort4(NULL_LOW);
 end;
 
 function TTextWriter.AddPrepare(Len: PtrInt): pointer;
@@ -4972,50 +4988,46 @@ end;
 
 procedure TTextWriter.AddCRAndIndent;
 var
-  ntabs: cardinal;
+  ntabs: PtrUInt;
+  p: PUtf8Char;
 begin
-  if (B >= fTempBuf) and
-     (B^ = #9) then
+  p := B;
+  if (p >= fTempBuf) and
+     (p^ = #9) then
     exit; // we just already added an indentation level - do it once
   ntabs := fHumanReadableLevel;
-  if ntabs >= cardinal(fTempBufSize) then
+  if ntabs >= PtrUInt(fTempBufSize) then
     ntabs := 0; // fHumanReadableLevel=-1 after the last level of a document
-  if BEnd - B <= PtrInt(ntabs) then // note: PtrInt(BEnd - B) could be < 0
+  if PtrInt(BEnd - p) <= PtrInt(ntabs) then // note: PtrInt(BEnd - B) could be < 0
+  begin
     FlushToStream;
-  PCardinal(B + 1)^ := 13 + 10 shl 8; // CR + LF
-  if ntabs > 0 then
-    FillCharFast(B[3], ntabs, 9); // #9=tab
-  inc(B, ntabs + 2);
+    p := B;
+  end;
+  PCardinal(p + 1)^ := $09090a0d; // CR + LF [ + #9 + #9 ]
+  if ntabs > 2 then
+    FillCharFast(p[3], ntabs, 9); // #9=tab
+  B := @p[ntabs + 2];
 end;
 
 procedure TTextWriter.AddChars(aChar: AnsiChar; aCount: PtrInt);
-var
-  n: PtrInt;
 begin
-  if aCount > 0 then
-    repeat
-      n := BEnd - B; // note: PtrInt(BEnd - B) could be < 0
-      if n <= aCount then
-      begin
-        FlushToStream;
-        n := BEnd - B;
-      end;
-      if aCount < n then
-        n := aCount;
-      FillCharFast(B[1], n, ord(aChar));
-      inc(B, n);
-      dec(aCount, n);
-    until aCount = 0;
+  if aCount <= 0 then
+    exit;
+  if PtrInt(BEnd - B) < aCount then // note: PtrInt(BEnd - B) could be < 0
+    FlushToStream;
+  FillCharFast(B[1], MinPtrInt(aCount, fTempBufSize), ord(aChar));
+  inc(B, aCount);
 end;
 
-procedure TTextWriter.Add2(Value: PtrUInt);
+procedure TTextWriter.Add2(Value: cardinal);
 begin
   if B >= BEnd then
     FlushToStream;
   if Value > 99 then
-    PCardinal(B + 1)^ := $3030 + ord(',') shl 16
+    Value := $3030 + ord(',') shl 16
   else     // '00,' if overflow
-    PCardinal(B + 1)^ := TwoDigitLookupW[Value] + ord(',') shl 16;
+    Value := TwoDigitLookupW[Value] + ord(',') shl 16;
+  PCardinal(B + 1)^ := Value;
   inc(B, 3);
 end;
 
@@ -5026,12 +5038,13 @@ begin
   if B >= BEnd then
     FlushToStream;
   if Value > 999 then
-    PCardinal(B + 1)^ := $303030 // '000,' if overflow
+    Value := $303030 // '000,' if overflow
   else
   begin
     V := Value div 10;
-    PCardinal(B + 1)^ := TwoDigitLookupW[V] + (Value - V * 10 + 48) shl 16;
+    Value := TwoDigitLookupW[V] + (Value - V * 10 + 48) shl 16;
   end;
+  PCardinal(B + 1)^ := Value;
   inc(B, 4);
   B^ := ',';
 end;
@@ -5070,7 +5083,7 @@ begin // append in 00.000.000 TSynLog format
   MicroSec := Value3Digits(MicroSec, P + 7, W);
   if MicroSec = 0 then // most common case < 1ms
   begin
-    PCardinal(P)^ := ord('0') + ord('0') shl 8 + ord('.') shl 16;
+    PCardinal(P)^     := ord('0') + ord('0') shl 8 + ord('.') shl 16;
     PCardinal(P + 3)^ := ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('.') shl 24;
   end
   else
@@ -5241,7 +5254,7 @@ end;
 procedure TTextWriter.AddRawJson(const json: RawJson);
 begin
   if json = '' then
-    AddShort(NULL_LOW, 4)
+    AddShort4(NULL_LOW)
   else
     AddString(json);
 end;
@@ -6090,6 +6103,133 @@ begin
   AddHtmlEscape(pointer(Text), length(Text), Fmt);
 end;
 
+procedure TTextWriter.AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
+var
+  l: PtrUInt;
+  c: Ucs4CodePoint;
+begin
+  repeat
+    if amp = nil then
+    begin
+      amp := PosChar(p, plen, '&');
+      if amp = nil then
+      begin
+        AddNoJsonEscape(p, plen); // no more content to escape
+        exit;
+      end;
+    end;
+    l := amp - p;
+    if l <> 0 then
+    begin
+      AddNoJsonEscape(p, l);
+      dec(plen, l);
+      if plen = 0 then
+        exit;
+      p := amp;
+    end;
+    amp := nil; // call PosChar() on next iteration
+    inc(p); // ignore '&'
+    dec(plen);
+    l := 0;
+    while (l < plen) and
+          (p[l] in ['a'..'z', 'A'..'Z', '1'..'4']) do
+      inc(l);
+    if p[l] = ';' then
+    begin
+      c := EntityToUcs4(p, l); // &lt; -> ord('<')
+      if c <> 0 then
+      begin
+        if c = $00a0 then // &nbsp;
+          Add(' ')
+        else if c = $2026 then
+          AddShort4(ord('.') + ord('.') shl 8 + ord('.') shl 16, 3) // &hellip;
+        else
+          AddWideChar(WideChar(c));
+        inc(p, l + 1);
+        dec(plen, l + 1);
+        continue;
+      end;
+    end;
+    Add('&');
+  until plen = 0;
+end;
+
+function HtmlTagNeedsCRLF(tag: PUtf8Char): boolean;
+var
+  taglen: PtrUInt;
+begin
+  result := false;
+  if tag^ = '/' then
+    inc(tag); // identify </p> just like <p>
+  taglen := 0;
+  if tag[taglen] in ['a'..'z', 'A'..'Z'] then
+    repeat
+      inc(taglen);
+    until (taglen > 3) or
+          not (tag[taglen] in ['a'..'z', 'A'..'Z', '1'..'9']);
+  case taglen of
+    1:
+      result := tag^ in ['p', 'P'];
+    2:
+      case cardinal(PWord(tag)^) and $dfdf of
+        ord('B') + ord('R') shl 8,
+        ord('L') + ord('I') shl 8,
+        ord('H') + (ord('1') and $df) shl 8,
+        ord('H') + (ord('2') and $df) shl 8,
+        ord('H') + (ord('3') and $df) shl 8,
+        ord('H') + (ord('4') and $df) shl 8,
+        ord('H') + (ord('5') and $df) shl 8,
+        ord('H') + (ord('6') and $df) shl 8:
+          result := true;
+      end;
+    3:
+      result := PCardinal(tag)^ and $00dfdfdf =
+                  ord('D') + ord('I') shl 8 + ord('V') shl 16;
+  end;
+
+end;
+
+procedure TTextWriter.AddHtmlAsText(p, tag: PUtf8Char; plen: PtrUInt);
+var
+  l: PtrInt;
+begin
+  repeat
+    if tag = nil then
+    begin
+      tag := PosChar(p, plen, '<');
+      if tag = nil then
+      begin
+        AddHtmlUnescape(p, nil, plen);
+        exit;
+      end;
+    end;
+    l := tag - p;
+    if l <> 0 then
+    begin
+      AddHtmlUnescape(p, nil, l);
+      dec(plen, l);
+      if plen = 0 then
+        exit;
+      p := tag;
+    end;
+    inc(p); // ignore '<'
+    dec(plen);
+    tag := PosChar(p, plen, '>');
+    if tag = nil then
+      Add('<') // not a real tag
+    else
+    begin
+      if HtmlTagNeedsCRLF(p) then
+        if LastChar >= ' ' then // <p> <h1> append once a line feed
+          AddDirect(#13, #10);
+      l := tag - p + 1;
+      inc(p, l);
+      dec(plen, l);
+    end;
+    tag := nil; // call PosChar() on next iteration
+  until plen = 0;
+end;
+
 var
   XML_ESC: TAnsiCharToByte;
 const
@@ -6277,48 +6417,39 @@ end;
 function HtmlUnescape(const text: RawUtf8): RawUtf8;
 var
   W: TTextWriter;
-  p, amp: PUtf8Char;
-  l: PtrUInt;
-  c: Ucs4CodePoint;
+  amp: PUtf8CHar;
   temp: TTextWriterStackBuffer;
 begin
-  l := PosExChar('&', text);
-  if (l = 0) or
-     (PByteArray(text)[l] = 0) then
+  amp := PosChar(pointer(text), length(text), '&');
+  if amp = nil then
   begin
-    result := text;
+    result := text; // nothing to change
     exit;
   end;
   W := TTextWriter.CreateOwnedStream(temp);
   try
-    p := pointer(text);
-    amp := p + l - 1;
-    repeat
-      W.AddNoJsonEscape(p, amp - p);
-      p := amp + 1;
-      l := 0;
-      while p[l] in ['a'..'z', 'A'..'Z', '1'..'4'] do
-        inc(l);
-      if p[l] = ';' then
-      begin
-        c := EntityToUcs4(p, l); // &lt; -> ord('<')
-        if c <> 0 then
-        begin
-          if c = $00a0 then // &nbsp;
-            w.Add(' ')
-          else if c = $2026 then
-            W.AddShorter('...') // &hellip;
-          else
-            W.AddWideChar(WideChar(c));
-          inc(p, l + 1);
-          amp := PosChar(p, '&');
-          continue;
-        end;
-      end;
-      W.Add('&');
-      amp := PosChar(p, '&');
-    until amp = nil;
-    W.AddNoJsonEscape(p);
+    W.AddHtmlUnescape(pointer(text), amp, length(text));
+    W.SetText(result);
+  finally
+    W.Free;
+  end;
+end;
+
+function HtmlToText(const text: RawUtf8): RawUtf8;
+var
+  W: TTextWriter;
+  tag: PUtf8CHar;
+  temp: TTextWriterStackBuffer;
+begin
+  tag := PosChar(pointer(text), length(text), '<');
+  if tag = nil then
+  begin
+    result := HtmlUnescape(text); // no tag, but there may be some &entity;
+    exit;
+  end;
+  W := TTextWriter.CreateOwnedStream(temp);
+  try
+    W.AddHtmlAsText(pointer(text), tag, length(text));
     W.SetText(result);
   finally
     W.Free;
@@ -7282,6 +7413,7 @@ end;
 
 function Utf8ToFloatNan(s: PUtf8Char; len: PtrInt): TFloatNan;
 begin
+  result := fnNumber;
   case len of
     3:
       case PInteger(s)^ and $dfdfdf of
@@ -7289,8 +7421,6 @@ begin
           result := fnNan;
         ord('I') + ord('N') shl 8 + ord('F') shl 16:
           result := fnInf;
-      else
-        result := fnNumber;
       end;
     4:
       case PInteger(s)^ and $dfdfdfff of
@@ -7298,11 +7428,7 @@ begin
           result := fnInf;
         ord('-') + ord('I') shl 8 + ord('N') shl 16 + ord('F') shl 24:
           result := fnNegInf;
-      else
-        result := fnNumber;
       end;
-  else
-    result := fnNumber;
   end;
 end;
 
@@ -7332,18 +7458,22 @@ begin
 end;
 
 function FloatToJsonNan(s: PShortString): PShortString;
+var
+  fn: TFloatNan;
 begin
-  case PInteger(s)^ and $ffdfdfdf of
+  result := s;
+  case PInteger(s)^ and $dfdfdfff of
     3 + ord('N') shl 8 + ord('A') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnNan];
+      fn := fnNan;
     3 + ord('I') shl 8 + ord('N') shl 16 + ord('F') shl 24,
-    4 + ord('+') shl 8 + ord('I') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnInf];
-    4 + ord('-') shl 8 + ord('I') shl 16 + ord('N') shl 24:
-      result := @JSON_NAN[fnNegInf];
+    4 + (ord('+') and $df) shl 8 + ord('I') shl 16 + ord('N') shl 24:
+      fn := fnInf;
+    4 + (ord('-') and $df) shl 8 + ord('I') shl 16 + ord('N') shl 24:
+      fn := fnNegInf;
   else
-    result := s;
+    exit;
   end;
+  result := @JSON_NAN[fn];
 end;
 
 function ExtendedToJson(tmp: PShortString; Value: TSynExtended;
@@ -8795,8 +8925,9 @@ begin
   aValue := 0;
   result := false;
   if (aIP = nil) or
-     (IdemPChar(aIP, '127.0.0.1') and
-      (aIP[9] = #0)) then
+     ((PCardinalArray(aIP)[0] = HOST_127) and    // 127.
+      (PCardinalArray(aIP)[1] = HOST_127_4) and  // 0.0.
+      (PWordArray(aIP)[4] = ord('1'))) then      // 1
     exit;
   for i := 0 to 3 do
   begin
@@ -8807,11 +8938,10 @@ begin
       exit;
     b[i] := c;
   end;
-  if PCardinal(@b)^ <> $0100007f then // may be e.g. '127.000.000.001'
-  begin
-    aValue := PCardinal(@b)^;
-    result := true;
-  end;
+  if PCardinal(@b)^ = $0100007f then // may be e.g. '127.000.000.001'
+    exit;
+  aValue := PCardinal(@b)^;
+  result := true;
 end;
 
 function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean;
@@ -9668,7 +9798,7 @@ begin
   if (Format = '') or
      (high(Args) < 0) then // no formatting needed
     Result := Format
-  else if PWord(Format)^ = ord('%') then // optimize raw conversion
+  else if cardinal(PWord(Format)^) = ord('%') then // optimize raw conversion
     VarRecToUtf8(@Args[0], Result)
   else
   begin
@@ -9938,7 +10068,7 @@ var
   t: PtrInt;
 begin
   t := length(Text);
-  SetLength(Text, t + 1); // is likely to avoid any reallocmem
+  SetLength(Text, t + 1); // is likely to avoid any ReallocMem
   MoveFast(PByteArray(Text)[0], PByteArray(Text)[1], t);
   PByteArray(Text)[0] := ord(Added);
 end;
@@ -10471,6 +10601,14 @@ end;
 
 {$endif NOEXCEPTIONINTERCEPT}
 
+procedure ExceptionUtf8(E: Exception; var Message: RawUtf8);
+begin
+  if E.InheritsFrom(ESynException) then
+    Message := ESynException(E).MessageUtf8 // no conversion needed
+  else
+    StringToUtf8(E.Message, Message);
+end;
+
 
 { **************** HTTP/REST Common Headers Parsing (e.g. cookies) }
 
@@ -10681,7 +10819,7 @@ begin
     if l = 0 then
       break; // void line is only for the end of headers
     inc(p, l);
-    if PWord(p)^ = EOLW then
+    if cardinal(PWord(p)^) = EOLW then
       inc(p, 2)
     else if p^ = #0 then
       exit // allow ending without any CRLF

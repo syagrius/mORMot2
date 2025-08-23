@@ -53,7 +53,7 @@ const
   // - this constant is used internally to optimize memory usage in the
   // generated asm code, and statically allocate some arrays for better speed
   // - note that due to compiler restriction, 256 is the maximum value
-  // (this is the maximum number of items in a Delphi/FPC set)
+  // (this is the absolute highest number of items in a Delphi/FPC set)
   {$ifdef MAX_SQLFIELDS_128}
   MAX_SQLFIELDS = 128;
   {$else}
@@ -875,14 +875,23 @@ function SqlBegin(P: PUtf8Char): PUtf8Char;
 /// add a condition to a SQL WHERE clause, with an ' and ' if where is not void
 procedure SqlAddWhereAnd(var where: RawUtf8; const condition: RawUtf8);
 
+/// returns PosI(' FROM ', SQL) + 6 if found
+function PosSelectTable(Sql: PUtf8Char): PUtf8Char;
+
 /// return true if the parameter is void or begin with a 'SELECT' SQL statement
 // - used to avoid code injection and to check if the cache must be flushed
 // - VACUUM, PRAGMA, or EXPLAIN statements also return true, since they won't
 // change the data content
 // - WITH recursive statement expect no INSERT/UPDATE/DELETE pattern in the SQL
-// - if P^ is a SELECT and SelectClause is set to a variable, it would
+// - if P^ is a SELECT and SelectFields is set to a variable, it would
 // contain the field names, from SELECT ...field names... FROM
-function IsSelect(P: PUtf8Char; SelectClause: PRawUtf8 = nil): boolean;
+function IsSelect(Sql: PUtf8Char; SelectFields: PRawUtf8 = nil): boolean;
+
+/// check if the SQL is a cacheable Data Manipulation Language (DML) statement
+// - i.e. is SELECT, INSERT, UPDATE, DELETE with ? parameter(s), or a
+// SELECT without any WHERE clause
+// - is the default implementation of TSqlDBConnectionProperties.IsCacheable()
+function IsCacheableDML(Sql: PUtf8Char): boolean;
 
 /// compute the SQL corresponding to a WHERE clause
 // - returns directly the Where value if it starts with one the
@@ -926,11 +935,11 @@ function SelectInClause(const PropName: RawUtf8; const Values: array of TID;
   const Suffix: RawUtf8 = ''; ValuesInlinedMax: integer = 0): RawUtf8; overload;
 
 /// naive search of '... FROM TableName ...' pattern in the supplied SQL
-function GetTableNameFromSqlSelect(const SQL: RawUtf8;
+function GetTableNameFromSqlSelect(const Sql: RawUtf8;
   EnsureUniqueTableInFrom: boolean): RawUtf8;
 
 /// naive search of '... FROM Table1,Table2 ...' pattern in the supplied SQL
-function GetTableNamesFromSqlSelect(const SQL: RawUtf8): TRawUtf8DynArray;
+function GetTableNamesFromSqlSelect(const Sql: RawUtf8): TRawUtf8DynArray;
 
 
 { ************ TResultsWriter Specialized for Database Export }
@@ -1329,20 +1338,19 @@ type
   TJsonObjectDecoder = object
   {$endif USERECORDWITHMETHODS}
   public
-    /// contains the decoded field names text
-    FieldNames: array[0..MAX_SQLFIELDS - 1] of PUtf8Char;
-    /// contains the decoded field names length
-    FieldNamesL: array[0..MAX_SQLFIELDS - 1] of byte;
-    /// contains the decoded field values
-    FieldValues: array[0..MAX_SQLFIELDS - 1] of RawUtf8;
-    /// Decode() will set each field type approximation
-    // - will recognize also JSON_BASE64_MAGIC_C/JSON_SQLDATE_MAGIC_C prefix
-    FieldTypeApproximation:
-      array[0..MAX_SQLFIELDS - 1] of TJsonObjectDecoderFieldType;
     /// number of fields decoded in FieldNames[] and FieldValues[]
     FieldCount: integer;
     /// define if and how the parameters are to be :(...): inlined
     InlinedParams: TJsonObjectDecoderParams;
+    /// contains the decoded field names length
+    FieldNamesL: array[0..MAX_SQLFIELDS - 1] of byte;
+    /// contains the decoded field names text
+    FieldNames: array[0..MAX_SQLFIELDS - 1] of PUtf8Char;
+    /// contains the decoded field values
+    FieldValues: array[0..MAX_SQLFIELDS - 1] of RawUtf8;
+    /// Decode() will set each field type approximation
+    // - will recognize also JSON_BASE64_MAGIC_C/JSON_SQLDATE_MAGIC_C prefix
+    FieldTypeApproximation: array[0..MAX_SQLFIELDS - 1] of TJsonObjectDecoderFieldType;
     /// internal pointer over field names to be used after Decode() call
     // - either FieldNames[], either Fields[] array as defined in Decode(), or
     // external names as set by TRestStorageExternal.JsonDecodedPrepareToSql
@@ -2390,104 +2398,215 @@ begin
   QuotedStrJson(value, result, ':(', '):');
 end;
 
-const
-  SELECT_STMT: array[0..6] of PAnsiChar = (
-    'SELECT',
-    'EXPLAIN ',
-    'VACUUM',
-    'PRAGMA',
-    'WITH',
-    'EXECUTE',
-    nil);
-
-function IsSelect(P: PUtf8Char; SelectClause: PRawUtf8): boolean;
-var
-  from: PUtf8Char;
+function PosSelectTable(Sql: PUtf8Char): PUtf8Char;
 begin
-  P := SqlBegin(P);
-  if P <> nil then
-  begin
-    case IdemPPChar(P, @SELECT_STMT) of
+  if Sql <> nil then
+    repeat
+      case Sql^ of
+        #0:
+          break;
+        #9 .. ' ':
+          begin
+            repeat
+              inc(Sql);
+              if Sql^ = #0 then
+                break;
+            until Sql^ > ' ';
+            if (PCardinal(Sql)^ and $dfdfdfdf = ord('F') +
+                 ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24) and
+               (Sql[4] <= ' ') then // found 'FROM table1,table2'
+            begin
+              result := GotoNextNotSpace(Sql + 5); // return 'table1,table2'
+              exit;
+            end;
+          end;
+      end;
+      inc(Sql);
+    until false;
+  result := nil;
+end;
+
+function IsSelect(Sql: PUtf8Char; SelectFields: PRawUtf8): boolean;
+var
+  beg: PUtf8Char;
+  len: PtrInt;
+begin
+  result := false;
+  Sql := SqlBegin(Sql);
+  if Sql <> nil then
+    case IdemPCharSep(Sql, 'SELECT|EXPLAIN|VACUUM|PRAGMA|WITH|EXECUTE|') of
       0:
         // SELECT SelectClause^ FROM ...
-        if (P[6] <= ' ') and
-           (P[6] <> #0) then
         begin
-          if SelectClause <> nil then
-          begin
-            inc(P, 7);
-            from := StrPosI(' FROM ', P);
-            if from = nil then
-              SelectClause^ := ''
-            else
-              FastSetString(SelectClause^, P, from - P);
-          end;
+          inc(Sql, 6);
+          if Sql^ > ' ' then
+            exit;
           result := true;
-        end
-        else
-          result := false;
+          if SelectFields = nil then
+            exit;
+          FastAssignNew(SelectFields^);
+          repeat
+            inc(Sql);
+            if Sql^ = #0 then
+              exit;
+          until Sql^ > ' ';
+          beg := Sql;
+          repeat // efficiently search for the end of fields, i.e. FROM clause
+            case Sql^ of
+              #0:
+                exit; // premature ending
+              #9 .. ' ':
+                begin
+                  len := Sql - beg;
+                  repeat
+                    inc(Sql);
+                    if Sql^ = #0 then
+                      exit;
+                  until Sql^ > ' ';
+                  if (PCardinal(Sql)^ and $dfdfdfdf = ord('F') +
+                       ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24) and
+                     (Sql[4] <= ' ') then
+                  begin
+                    FastSetString(SelectFields^, beg, len);
+                    break;
+                  end;
+                end;
+            end;
+            inc(Sql);
+          until false;
+        end;
       1:
         // EXPLAIN ...
-        result := true;
+        result := Sql[7] in [#1 .. ' '];
       2,
       3:
         // VACUUM or PRAGMA
-        result := P[6] in [#0..' ', ';'];
+        result := Sql[6] in [#0..' ', ';'];
       4:
         // WITH ... INSERT/UPDATE/DELETE
-        result := (P[4] <= ' ') and
-                  (StrPosI('INSERT', P + 5) = nil) and
-                  (StrPosI('UPDATE', P + 5) = nil) and
-                  (StrPosI('DELETE', P + 5) = nil);
+        begin
+          inc(Sql, 4);
+          if Sql^ > ' ' then
+            exit;
+          repeat // parse the Common Table Expressions (CTE)
+            case Sql^ of
+              #0:
+                break;
+              '''':
+                // ignore chars within quotes (? or 'where' may safely appear there)
+                repeat
+                  inc(Sql);
+                  if Sql^ = #0 then
+                    exit; // missing end quote -> ignore this invalid statement
+                until Sql^ = ''''; // double quotes will reuse this loop
+              #9 .. ' ':
+                begin
+                  repeat
+                    inc(Sql);
+                  until not (Sql^ in [#1 .. ' ']);
+                  if (IdemPCharSep(Sql, 'INSERT|UPDATE|DELETE|') >= 0) and
+                     (Sql[6] in [#1 .. ' ']) then
+                    exit;
+                  repeat
+                    inc(Sql);
+                  until not (Sql^ in [#1 .. ' ']);
+                end;
+            end;
+            inc(Sql);
+          until false;
+          result := true;
+        end;
       5:
         // FireBird specific EXECUTE BLOCK RETURNS
         begin
-          P := GotoNextNotSpace(P + 7);
-          result := IdemPChar(P, 'BLOCK') and
-                    IdemPChar(GotoNextNotSpace(P + 5), 'RETURNS');
+          Sql := GotoNextNotSpace(Sql + 7);
+          result := IdemPChar(Sql, 'BLOCK') and
+                    IdemPChar(GotoNextNotSpace(Sql + 5), 'RETURNS');
         end;
-    else
-      result := false;
-    end;
-  end
+    end
   else
     result := true; // assume '' statement is SELECT command
 end;
 
-function SqlBegin(P: PUtf8Char): PUtf8Char;
+function IsCacheableDML(Sql: PUtf8Char): boolean;
+var
+  c: PtrInt;
 begin
-  if P <> nil then
+  // DML considered cacheable if with ? parameter or SELECT without WHERE clause
+  result := false;
+  if Sql = nil then
+    exit;
+  while Sql^ in [#1..' '] do
+    inc(Sql);
+  c := IdemPCharSep(Sql, 'SELECT|INSERT|UPDATE|DELETE|'); // DML statements
+  if (c < 0) or
+     not (Sql[6] in [#1 .. ' ']) then
+    exit; // CREATE,ALTER,GRANT... DDL/DCL statements should never be cached
+  result := c = 0;
+  repeat  // naive but efficient parsing
+    case Sql^ of
+      #0:
+        exit;
+      '''':
+        // ignore chars within quotes (? or 'where' may safely appear there)
+        repeat
+          inc(Sql);
+          if Sql^ = #0 then
+            exit; // missing end quote -> don't cache this invalid statement
+        until Sql^ = ''''; // double quotes will reuse this loop
+      #9 .. ' ':
+        if result and
+           (PCardinal(Sql + 1)^ and $dfdfdfdf = ord('W') +
+              ord('H') shl 8 + ord('E') shl 16 + ord('R') shl 24) and
+           (PCardinal(Sql + 5)^ and $ffdf = ord('E') + ord(' ') shl 8) then
+          result := false; // don't cache SELECT with WHERE and no ?
+      '?':
+        begin
+          result := true; // exit as cacheable if any ? parameter is found
+          exit;
+        end;
+    end;
+    inc(Sql);
+  until false;
+end;
+
+function SqlBegin(P: PUtf8Char): PUtf8Char;
+var
+  c: cardinal;
+begin
+  result := P;
+  if result <> nil then
     repeat
-      if P^ <= ' ' then
+      if result^ <= ' ' then
         // ignore blanks
         repeat
-          if P^ = #0 then
+          if result^ = #0 then
             break
           else
-            inc(P)
-        until P^ > ' ';
-      if PWord(P)^ = ord('-') + ord('-') shl 8 then
+            inc(result)
+        until result^ > ' ';
+      c := PWord(result)^;
+      if c = ord('-') + ord('-') shl 8 then
         // SQL comments
         repeat
-          inc(P)
-        until P^ in [#0, #10]
-      else if PWord(P)^ = ord('/') + ord('*') shl 8 then
+          inc(result)
+        until result^ in [#0, #10]
+      else if c = ord('/') + ord('*') shl 8 then
       begin
         // C comments
-        inc(P);
+        inc(result);
         repeat
-          inc(P);
-          if PWord(P)^ = ord('*') + ord('/') shl 8 then
+          inc(result);
+          if cardinal(PWord(result)^) = ord('*') + ord('/') shl 8 then
           begin
-            inc(P, 2);
+            inc(result, 2);
             break;
           end;
-        until P^ = #0;
+        until result^ = #0;
       end
       else
         break;
     until false;
-  result := P;
 end;
 
 procedure SqlAddWhereAnd(var Where: RawUtf8; const Condition: RawUtf8);
@@ -2495,27 +2614,16 @@ begin
   if Where = '' then
     Where := Condition
   else
-    Where := Where + ' and ' + Condition;
+    Append(Where, ' and ', Condition);
 end;
 
-const
-  _ENDCLAUSE: array[0..10] of PUtf8Char = (
-      'ORDER BY ',
-      'GROUP BY ',
-      'LIMIT ',
-      'OFFSET ',
-      'LEFT ',
-      'RIGHT ',
-      'INNER ',
-      'OUTER ',
-      'JOIN ',
-      'WHERE ', // https://synopse.info/forum/viewtopic.php?pid=38842#p38842
-      nil);
 
 function SqlWhereIsEndClause(const Where: RawUtf8): boolean;
 begin
   result := (Where <> '') and
-            (IdemPPChar(GotoNextNotSpace(pointer(Where)), @_ENDCLAUSE) >= 0);
+            (IdemPCharSep(GotoNextNotSpace(pointer(Where)),
+    'ORDER BY |GROUP BY |LIMIT |OFFSET |LEFT |RIGHT |INNER |OUTER |JOIN |WHERE |'
+             ) >= 0); // https://synopse.info/forum/viewtopic.php?pid=38842#p38842
 end;
 
 function SqlFromWhere(const Where: RawUtf8): RawUtf8;
@@ -2523,9 +2631,9 @@ begin
   if Where = '' then
     result := ''
   else if SqlWhereIsEndClause(Where) then
-    result := ' ' + Where
+    Join([' ', Where], result)
   else
-    result := ' WHERE ' + Where;
+    Join([' WHERE ', Where], result);
 end;
 
 function SqlFromSelect(const TableName, Select, Where, SimpleFields: RawUtf8): RawUtf8;
@@ -2535,7 +2643,7 @@ begin
     result := SimpleFields
   else
     result := Select;
-  result := 'SELECT ' + result + ' FROM ' + TableName + SqlFromWhere(Where);
+  result := Join(['SELECT ', result, ' FROM ', TableName, SqlFromWhere(Where)]);
 end;
 
 function SqlGetOrder(const Sql: RawUtf8): RawUtf8;
@@ -2554,7 +2662,7 @@ begin
     if P = nil then
       P := PosChar(pointer(result), ';');
     if P <> nil then
-      SetLength(result, P - pointer(result)); // trim right
+      FakeLength(result, P - pointer(result)); // trim right
   end;
   if result = '' then // by default, a SQLite3 query is ordered by ID
     result := ROWID_TXT;
@@ -2652,68 +2760,50 @@ begin
     result := '';
 end;
 
-function GetTableNameFromSqlSelect(const SQL: RawUtf8;
+function GetTableNameFromSqlSelect(const Sql: RawUtf8;
   EnsureUniqueTableInFrom: boolean): RawUtf8;
 var
-  i, j, k: PtrInt;
+  p, beg: PUtf8Char;
 begin
-  i := PosI(' FROM ', SQL);
-  if i > 0 then
-  begin
-    inc(i, 6);
-    while SQL[i] in [#1..' '] do
-      inc(i);
-    j := 0;
-    while tcIdentifier in TEXT_CHARS[SQL[i + j]] do
-      inc(j);
-    if cardinal(j - 1) < 64 then
-    begin
-      k := i + j;
-      while SQL[k] in [#1..' '] do
-        inc(k);
-      if not EnsureUniqueTableInFrom or
-         (SQL[k] <> ',') then
-      begin
-        FastSetString(result, PAnsiChar(PtrInt(SQL) + i - 1), j);
-        exit;
-      end;
-    end;
-  end;
-  result := '';
+  FastAssignNew(result);
+  p := PosSelectTable(pointer(Sql));
+  if p = nil then
+    exit;
+  beg := p;
+  while tcIdentifier in TEXT_CHARS[p^] do
+    inc(p);
+  if EnsureUniqueTableInFrom then
+    if GotoNextNotSpace(p)^ = ',' then
+      exit; // there is another table name
+  FastSetString(result, beg, p - beg);
 end;
 
-function GetTableNamesFromSqlSelect(const SQL: RawUtf8): TRawUtf8DynArray;
+function GetTableNamesFromSqlSelect(const Sql: RawUtf8): TRawUtf8DynArray;
 var
-  i, j, k, n: PtrInt;
+  p, beg: PUtf8Char;
+  l, n: PtrUInt;
 begin
   result := nil;
+  p := PosSelectTable(pointer(Sql));
+  if p = nil then
+    exit;
   n := 0;
-  i := PosI(' FROM ', SQL);
-  if i > 0 then
-  begin
-    inc(i, 6);
-    repeat
-      while SQL[i] in [#1..' '] do
-        inc(i);
-      j := 0;
-      while tcIdentifier in TEXT_CHARS[SQL[i + j]] do
-        inc(j);
-      if cardinal(j - 1) > 64 then
-      begin
-        result := nil;
-        exit; // seems too big
-      end;
-      k := i + j;
-      while SQL[k] in [#1..' '] do
-        inc(k);
-      SetLength(result, n + 1);
-      FastSetString(result[n], PAnsiChar(PtrInt(SQL) + i - 1), j);
-      inc(n);
-      if SQL[k] <> ',' then
-        break;
-      i := k + 1;
-    until false;
-  end;
+  repeat
+    beg := p;
+    while tcIdentifier in TEXT_CHARS[p^] do
+      inc(p);
+    l := p - beg;
+    if l = 0 then
+      break;
+    SetLength(result, n + 1);
+    FastSetString(result[n], beg, l);
+    p := GotoNextNotSpace(p);
+    if p^ <> ',' then
+      exit; // reached last table name
+    inc(n);
+    p := GotoNextNotSpace(p + 1);
+  until false;
+  result := nil;
 end;
 
 
@@ -3080,12 +3170,6 @@ end;
 
 const
   NULL_UPP = ord('N') + ord('U') shl 8 + ord('L') shl 16 + ord('L') shl 24;
-  ENDCLAUSE: array[0..4] of PAnsiChar = (
-    'LIMIT',   // 0
-    'OFFSET',  // 1
-    'ORDER',   // 2
-    'GROUP',   // 3
-    nil);
 
 constructor TSelectStatement.Create(const SQL: RawUtf8;
   const GetFieldIndex: TOnGetFieldIndex;
@@ -3164,9 +3248,9 @@ var
         exit;
       P := GotoNextNotSpace(P);
     end;
-    if IdemPChar(P, 'AS ') then
+    if PCardinal(P)^ and $ffdfdf = ord('A') + ord('S') shl 8 + ord(' ') shl 16 then
     begin
-      inc(P, 3);
+      inc(P, 3); // ignore 'AS '
       if not GetNextFieldProp(P, select.Alias) then
         exit;
     end;
@@ -3331,25 +3415,27 @@ var
           'S':
             begin
               P := GotoNextNotSpace(P + 2);
-              if IdemPChar(P, 'NULL') then
-              begin
-                Where.Value := NULL_STR_VAR;
-                Where.Operation := opIsNull;
-                Where.ValueSql := P;
-                Where.ValueSqlLen := 4;
-                TVarData(Where.ValueVariant).VType := varNull;
-                inc(P, 4);
-                result := true;
-              end
-              else if IdemPChar(P, 'NOT NULL') then
-              begin
-                Where.Value := 'not null';
-                Where.Operation := opIsNotNull;
-                Where.ValueSql := P;
-                Where.ValueSqlLen := 8;
-                TVarData(Where.ValueVariant).VType := varNull;
-                inc(P, 8);
-                result := true; // leave ValueVariant=unassigned
+              case IdemPCharSep(P, 'NULL|NOT NULL|') of
+                0:
+                  begin
+                    Where.Value := NULL_STR_VAR;
+                    Where.Operation := opIsNull;
+                    Where.ValueSql := P;
+                    Where.ValueSqlLen := 4;
+                    TVarData(Where.ValueVariant).VType := varNull;
+                    inc(P, 4);
+                    result := true;
+                  end;
+                1:
+                  begin
+                    Where.Value := 'not null';
+                    Where.Operation := opIsNotNull;
+                    Where.ValueSql := P;
+                    Where.ValueSqlLen := 8;
+                    TVarData(Where.ValueVariant).VType := varNull;
+                    inc(P, 8);
+                    result := true; // leave ValueVariant=unassigned
+                  end;
               end;
               exit;
             end;
@@ -3378,7 +3464,7 @@ var
         end; // 'i','I':
       'l',
       'L':
-        if IdemPChar(P + 1, 'IKE') then
+        if PCardinal(P + 1)^ and $dfdfdf = ord('I') + ord('K') shl 8 + ord('E') shl 16 then
         begin
           inc(P, 3);
           Where.Operation := opLike;
@@ -3523,7 +3609,7 @@ lim:P := GotoNextNotSpace(P);
           not (P^ in [#0, ';']) do
     begin
       GetNextFieldProp(P, prop);
-lim2: case IdemPPChar(pointer(prop), @ENDCLAUSE) of
+lim2: case IdemPCharSep(pointer(prop), 'LIMIT|OFFSET|ORDER|GROUP|') of
         0:
           // LIMIT
           fLimit := GetNextItemCardinal(P, ' ');
@@ -3845,7 +3931,7 @@ begin
     begin
       // insert explicit RowID as first parameter
       id := @ID_SHORT[not ReplaceRowIDWithID];
-      FieldNames[0] := @id^[1];
+      FieldNames[0]  := @id^[1];
       FieldNamesL[0] := ord(id^[0]);
       Int64ToUtf8(RowID, FieldValues[0]);
       FieldTypeApproximation[0] := ftaNumber;
@@ -4071,7 +4157,7 @@ begin
     EJsonObjectDecoder.RaiseUtf8(
       'Too many fields for TJsonObjectDecoder.AddField(%) max=%',
       [FieldName, MAX_SQLFIELDS]);
-  FieldNames[FieldCount] := pointer(FieldName); // so FieldName should remain available
+  FieldNames[FieldCount] := pointer(FieldName); // FieldName should remain available
   FieldNamesL[FieldCount] := length(FieldName);
   FieldValues[FieldCount] := FieldValue;
   FieldTypeApproximation[FieldCount] := FieldType;

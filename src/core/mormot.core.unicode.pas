@@ -261,7 +261,7 @@ function IsValidUtf8Small(const source: RawByteString): boolean;
 // 21 GB/s parsing speed on a Core i5-13500
 // - warning: AVX2 version won't refuse #0 characters within the buffer - use
 // IsValidUtf8NotVoid() if you are not sure that your input is pure text
-function IsValidUtf8(const source: RawByteString): boolean; overload;
+function IsValidUtf8(const source: RawByteString): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding and no #0 within
@@ -272,15 +272,13 @@ function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean; overload;
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding and no #0 within
 // - will also refuse #0 characters within the buffer even on AVX2
 function IsValidUtf8NotVoid(const source: RawByteString): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
 
-/// returns TRUE if the supplied buffer has valid UTF-8 encoding
-// - will stop when the buffer contains #0
+/// returns TRUE if the supplied #0-ending buffer has valid UTF-8 encoding
 // - just a wrapper around IsValidUtf8Buffer(source, StrLen(source)) so if you
 // know the source length, you would better call IsValidUtf8Buffer() directly
 // - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM, reaching e.g.
 // 15 GB/s parsing speed on a Core i5-13500 - StrLen() itself runs at 37 GB/s
-function IsValidUtf8(source: PUtf8Char): boolean; overload;
+function IsValidUtf8Ptr(source: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// detect UTF-8 content and mark the variable with the CP_UTF8 codepage
@@ -1592,6 +1590,16 @@ function IdemPCharArray(p: PUtf8Char; const upArray: array of PAnsiChar): intege
 // - warning: this function expects up^ items to have AT LEAST TWO CHARS
 // (it will use a fast 16-bit comparison of initial 2 bytes)
 function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
+
+/// returns the index of a matching beginning of p^ in '|' separated up^ array
+// - returns -1 if no item matched
+// - ignore case - up^ must be already Upper, delimited AND ENDED with '|'
+// !  IdemPCharSep('tWo', 'ZERO|ONE|TWO|THREE|') = 2
+// - chars are compared as 7-bit Ansi only (no accentuated chars, nor UTF-8)
+// - warning: this function expects up^ items to have AT LEAST TWO CHARS
+// (it will use a fast 16-bit comparison of initial 2 bytes)
+// - slightly faster than IdemPPChar() since has better CPU L1 cache locality
+function IdemPCharSep(p, up: PUtf8Char): PtrInt;
 
 /// returns the index of a matching beginning of p^ in upArray two characters
 // - returns -1 if no item matched
@@ -3364,7 +3372,7 @@ done:
   result := PtrUInt(source) = PtrUInt(len) + 4;
 end;
 
-function IsValidUtf8(source: PUtf8Char): boolean;
+function IsValidUtf8Ptr(source: PUtf8Char): boolean;
 begin
   result := IsValidUtf8Buffer(source, StrLen(source));
 end;
@@ -3379,12 +3387,6 @@ function IsValidUtf8(const source: RawByteString): boolean;
 begin
   result := (source = '') or
     IsValidUtf8Buffer(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
-end;
-
-function IsValidUtf8NotVoid(const source: RawByteString): boolean;
-begin
-  result := (source = '') or
-    IsValidUtf8NotVoid(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
 end;
 
 {$ifdef ASMX64AVXNOCONST}
@@ -3403,6 +3405,12 @@ begin
   result := IsValidUtf8Pas(source, len);
 end;
 {$endif ASMX64AVXNOCONST}
+
+function IsValidUtf8NotVoid(const source: RawByteString): boolean;
+begin
+  result := (source = '') or
+    IsValidUtf8NotVoid(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
+end;
 
 procedure DetectRawUtf8(var source: RawByteString);
 begin
@@ -4886,7 +4894,7 @@ begin
   result := bomNone;
   if (Buffer <> nil) and
      (BufferSize >= 2) then
-    case PWord(Buffer)^ of
+    case cardinal(PWord(Buffer)^) of
       ord(BOM_UTF16LE):
         begin
           inc(PByte(Buffer), 2);
@@ -6198,7 +6206,7 @@ begin
     {$ifndef CPUX86NOTPIC}
     tab := @NormToUpperAnsi7;
     {$endif CPUX86NOTPIC}
-    w := tab[ord(p[0])] + tab[ord(p[1])] shl 8;
+    w := PtrUInt(tab[ord(p[0])]) + PtrUInt(tab[ord(p[1])]) shl 8;
     up := @upArray[0];
     for result := 0 to high(upArray) do
       if (PWord(up^)^ = w) and
@@ -6228,7 +6236,7 @@ begin
     {$ifndef CPUX86NOTPIC}
     tab := @NormToUpperAnsi7;
     {$endif CPUX86NOTPIC}
-    w := tab[ord(p[0])] + tab[ord(p[1])] shl 8;
+    w := PtrUInt(tab[ord(p[0])]) + PtrUInt(tab[ord(p[1])]) shl 8;
     result := 0;
     repeat
       // quickly check the first 2 up^[result] chars
@@ -6254,6 +6262,52 @@ begin
       until false;
       inc(result);
     until false;
+  end;
+  result := -1;
+end;
+
+function IdemPCharSep(p, up: PUtf8Char): PtrInt;
+var
+  w: word;
+  p2: PtrUInt;
+  c: byte;
+  {$ifdef CPUX86NOTPIC}
+  tab: TNormTableByte absolute NormToUpperAnsi7;
+  {$else}
+  tab: PByteArray; // faster on PIC/ARM and x86_64
+  {$endif CPUX86NOTPIC}
+begin
+  if p <> nil then
+  begin
+    // uppercase the first two p^ chars
+    {$ifndef CPUX86NOTPIC}
+    tab := @NormToUpperAnsi7;
+    {$endif CPUX86NOTPIC}
+    w := PtrUInt(tab[ord(p[0])]) + PtrUInt(tab[ord(p[1])]) shl 8;
+    result := 0;
+    repeat
+      if PWord(up)^ = w then // quickly check the first 2 up chars
+      begin
+        p2 := PtrUInt(p); // = if IdemPCharByte(tab, p + 2, up^ + 2) then exit
+        dec(p2, PtrUInt(up));
+        inc(up, 2);
+        repeat
+          c := PByte(up)^;
+          if c = ord('|') then
+            exit   // found IdemPChar(p^, up^[result])
+          else if tab[PtrUInt(up[p2])] <> c then
+            break; // at least one char doesn't match
+          inc(up);
+        until false;
+      end
+      else
+        inc(up);
+      repeat
+        inc(up);
+      until up^ = '|';
+      inc(result);
+      inc(up);
+    until up^ = #0;
   end;
   result := -1;
 end;

@@ -92,7 +92,7 @@ type
     fLastError: TNetResult;
   public
     /// reintroduced constructor with TNetResult information
-    constructor Create(msg: string; const args: array of const;
+    constructor Create(msg: string; obj: TObject; const args: array of const;
       error: TNetResult = nrOK; errnumber: system.PInteger = nil); reintroduce;
     /// reintroduced constructor with NetLastError call
     constructor CreateLastError(const msg: string; const args: array of const;
@@ -107,6 +107,8 @@ type
     property LastError: TNetResult
       read fLastError default nrOk;
   end;
+  /// meta-class of ENetSock type definition
+  ENetSockClass = class of ENetSock;
 
   /// one data state to be tracked on a given socket
   TNetEvent = (
@@ -326,7 +328,7 @@ type
     // - ms < 0 means an infinite timeout (blocking until events happen)
     function WaitFor(ms: integer; scope: TNetEvents;
       loerr: system.PInteger = nil): TNetEvents;
-    /// compute how many bytes are actually pending in the receiving queue
+    /// retrieve how many bytes are actually pending in the receiving queue
     function RecvPending(out pending: integer): TNetResult;
     /// return how many pending bytes are in the receiving queue
     // - returns 0 if no data is available, or if the connection is broken: call
@@ -1801,46 +1803,48 @@ type
     fProxyHttp);
 
   {$M+}
-  /// Fast low-level Socket implementation
+  /// fast low-level Socket implementation with optional input/output bufferring
   // - direct access to the OS (Windows, Linux) network layer API
-  // - use Open/OpenUri constructor or Create + ConnectUri for a client socket
-  // - use Bind constructor to initialize a server
-  // - call CreateSockIn to use readln(SockIn^, ...) as with standard text files
-  // - even if you do not use read(SockIn^), you may call CreateSockIn then
-  // read the (binary) content via SockInRead/SockInPending methods, which would
-  // benefit of the SockIn^ input buffer to maximize reading speed
-  // - use SockSend() overloaded methods, followed by a SockFlush call
-  // - CreateSockOut for write/writeln are now deprecated because the RTL doesn't
-  // use its buffer to reduce syscalls, so explicit SockSend/SockFlush is better
+  // - use Open/OpenUri constructor or Create + ConnectUri for a client socket,
+  // or the Bind constructor to initialize a server
+  // - call CreateSockIn to instantiate an input buffer for faster process via
+  // SockInReadLn/SockInRead methods or even regular readln(SockIn^, ...)
+  // - use SockSend() overloaded methods, followed by an eventual SockFlush
+  // call, for buffered output (mORMot 1 CreateSockOut is now deprecated because
+  // the RTL doesn't properly use its buffer to reduce syscalls)
   // - since this class relies on its internal optimized SockSend/SockFlush
   // buffering system, TCP_NODELAY option is set to disable the Nagle algorithm
   // - can use TLS (using the SChannel API on Windows, or by including
   // mormot.lib.openssl11 unit to your project) or HTTP Proxy/Tunnel
   TCrtSocket = class
   protected
-    fSock: TNetSocket; // wrapper to raw socket, stored as a pointer
+    fSock: TNetSocket; // wrapper to a raw socket handle, stored as a pointer
+    fSecure: INetTls;
     fServer: RawUtf8;
     fPort: RawUtf8;
     fFlags: TCrtSocketFlags;
     fSocketLayer: TNetLayer;
     fSocketFamily: TNetFamily;
-    fProxyUrl: RawUtf8;
-    fRemoteIP: RawUtf8;    // set by OpenBind() or AcceptRequest() from TNetAddr
-    fOpenUriFull: RawUtf8; // set by OpenUri()
+    fTimeOut: integer;
     fSockIn: PTextFile;    // allocated by CreateSockIn with its own buffer
+    fSndBufLen: PtrInt;    // updated by every SockSend() call
+    fSndBuf: RawByteString;
+    fRemoteIP: RawUtf8;    // set by OpenBind() or AcceptRequest() from TNetAddr
+    fProxyUrl: RawUtf8;
+    fOpenUriFull: RawUtf8; // set by OpenUri()
     fBytesIn: Int64;
     fBytesOut: Int64;
-    fSecure: INetTls;
-    fTimeOut: integer;
-    fSndBufLen: integer; // updated by every SockSend() call
-    fSndBuf: RawByteString;
+    procedure DoRaise(const msg: string; const args: array of const;
+      error: TNetResult = nrOK; errnumber: system.PInteger = nil;
+      exc: ENetSockClass = nil); overload;
+    procedure DoRaise(const msg: string); overload;
     procedure SetKeepAlive(aKeepAlive: boolean); virtual;
     procedure SetLinger(aLinger: integer); virtual;
     procedure SetReceiveTimeout(aReceiveTimeout: integer); virtual;
     procedure SetSendTimeout(aSendTimeout: integer); virtual;
     procedure SetTcpNoDelay(aTcpNoDelay: boolean); virtual;
-    function EnsureSockSend(Len: integer): pointer;
-      {$ifdef HASINLINE}inline;{$endif}
+    function EnsureSockSend(Len: PtrInt): PUtf8Char;
+      {$ifdef FPC}inline;{$endif}
     function GetRawSocket: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
     function GetAborted: boolean;
@@ -1921,15 +1925,13 @@ type
     // - this function reflects the actual aTLS parameter supplied to OpenBind()
     function ServerTls: boolean;
       {$ifdef HASINLINE} inline; {$endif}
-    /// initialize SockIn for receiving with read[ln](SockIn^,...)
-    // - data is buffered, filled as the data is available
-    // - read(char) or readln() is indeed very fast
-    // - multithread applications would also use this SockIn pseudo-text file
-    // - default 1KB is big enough for headers (content will be read directly)
-    // - by default, expect CR+LF as line feed (i.e. the HTTP way)
+    /// initialize SockIn text file instance, and its internal SockIn^.Buffer
+    // - readln(SockIn^) and SockInReadLn/SockInRead methods benefit from this buffer
+    // - default 1KB seems big enough for headers (content will be read directly)
+    // - by default, expects CR+LF as line feed (i.e. the HTTP way)
     procedure CreateSockIn(LineBreak: TTextLineBreakStyle = tlbsCRLF;
       InputBufferSize: integer = 1024);
-    /// finalize SockIn receiving buffer
+    /// finalize the SockIn text file instance and its SockIn^.Buffer
     // - you may call this method when you are sure that you don't need the
     // input buffering feature on this connection any more (e.g. after having
     // parsed the HTTP header, then rely on direct socket comunication)
@@ -1937,28 +1939,31 @@ type
     /// close and shutdown the connection
     // - called from Destroy, but is reintrant so could be called earlier
     procedure Close; virtual;
-    /// close the opened socket, and corresponding SockIn^ text file (if any)
+    /// close the opened socket, and corresponding SockIn text file (if any)
     destructor Destroy; override;
     /// mark the internal Aborted flag to let any blocking loop abort ASAP
     // - will also close any associated socket at OS level
     procedure Abort; virtual;
-    /// read Length bytes from SockIn buffer + Sock if necessary
+    /// read Length bytes from SockIn^.Buffer and raw socket if necessary
     // - if SockIn is available, it first gets data from SockIn^.Buffer,
     // then directly receive data from socket if UseOnlySockIn = false
-    // - if UseOnlySockIn = true, it will return the data available in SockIn^,
-    // and returns the number of bytes
+    // - if UseOnlySockIn = true, it will return only the data available in
+    // SockIn^.Buffer and returns the corresponding number of bytes
     // - can be used also without SockIn: it will call directly SockRecv()
     // in such case (assuming UseOnlySockin=false)
-    function SockInRead(Content: PAnsiChar; Length: integer;
+    function SockInRead(Content: PAnsiChar; Length: PtrInt;
       UseOnlySockIn: boolean = false): integer; overload;
-    /// read Length bytes from SockIn buffer + Sock if necessary into a string
+    /// read Length bytes from SockIn^.Buffer and raw socket if necessary
     // - just allocate a result string and call SockInRead() to fill it
     function SockInRead(Length: integer;
       UseOnlySockIn: boolean = false): RawByteString; overload;
-    /// returns the number of bytes in SockIn buffer or pending in Sock
-    // - CreatesSockIn is mandatory
-    // - it first check and quickly return any data pending in SockIn^.Buffer
-    // - if the buffer is void, will call InputSock to fill it
+    /// read the next line of text from SockIn^.Buffer or from the socket API
+    // - returns the line size in bytes, stored with an ending #0 in Buffer
+    // - returns -1 if Buffer's Size is too short, or raise an ENetSock on error
+    function SockInReadLn(Buffer: PAnsiChar; Size: PtrInt): PtrInt;
+    /// returns the number of bytes in SockIn^.Buffer or pending in the OS stack
+    // - it first checks and quickly returns any length pending in SockIn^.Buffer
+    // - if buffer is void, will call InputSock to fill it or check the socket API
     // - returns -1/-2 in case of a socket error (e.g. broken/closed connection)
     // - returns the number of bytes available in input buffers (SockIn or TLS):
     // there may be more waiting at the socket level
@@ -1977,10 +1982,12 @@ type
     // - slightly faster than SockSend([]) if all appended items are RawUtf8
     procedure SockSendLine(const Values: array of RawUtf8);
     /// simulate writeln() with a single line - includes trailing #13#10
-    procedure SockSend(const Line: RawByteString; NoCrLf: boolean = false); overload;
+    procedure SockSend(const Line: RawByteString); overload;
     /// append P^ data into SndBuf (used by SockSend(), e.g.) - no trailing #13#10
     // - call SockSendFlush to send it through the network via SndLow()
-    procedure SockSend(P: pointer; Len: integer); overload;
+    procedure SockSend(P: pointer; Len: PtrInt); overload;
+    /// append PWideChar as UTF-8 (used by SockSend(), e.g.) - no trailing #13#10
+    procedure SockSendW(w: PWideChar; l: PtrInt);
     /// append headers content, normalizing #13#10 in the content and at ending
     procedure SockSendHeaders(const headers: RawUtf8);
     /// append #13#10 characters on all platforms, never #10 even on POSIX
@@ -1999,16 +2006,16 @@ type
     function SockSendStream(Stream: TStream; ChunkSize: integer = 1 shl 20;
       aNoRaise: boolean = false; aCheckRecv: boolean = false): TNetResult;
     /// how many bytes could be added by SockSend() in the internal buffer
-    function SockSendRemainingSize: integer;
+    function SockSendRemainingSize: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// fill the Buffer with Length bytes
     // - wait TimeOut milliseconds until Length bytes are actually received
-    // - bypass the SockIn^ buffers
+    // - bypass the SockIn^.Buffer
     // - raise ENetSock exception on socket error, or if Length was not reached
     procedure SockRecv(Buffer: pointer; Length: integer); overload;
     /// fill a RawByteString Buffer with Length bytes
     // - wait TimeOut milliseconds until Length bytes are actually received
-    // - bypass the SockIn^ buffers
+    // - bypass the SockIn^.Buffer
     // - raise ENetSock exception on socket error, or if Length was not reached
     function SockRecv(Length: integer): RawByteString; overload;
     /// check if there are some pending bytes in the input sockets API buffer
@@ -2028,7 +2035,7 @@ type
       RawError: system.PInteger = nil): RawByteString;
     /// fill the Buffer with Length bytes
     // - use TimeOut milliseconds wait for incoming data
-    // - bypass the SockIn^ buffers
+    // - bypass the SockIn^.Buffer
     // - return true on success, or false on any fatal socket error - NetResult^
     // (if not nil) would contain the actual socket error
     // - call Close if the socket is identified as shutdown from the other side
@@ -2038,19 +2045,19 @@ type
     function TrySockRecv(Buffer: pointer; var Length: integer;
       StopBeforeLength: boolean = false; NetResult: PNetResult = nil;
       RawError: system.PInteger = nil): boolean;
-    /// call readln(SockIn^,Line) or simulate it with direct use of Recv(Sock, ..)
-    // - char are read one by one if needed
+    /// faster readln(SockIn^,Line) or simulate it with direct use of Recv(Sock, ..)
+    // - just wrap SockInReadLn() with a 16KB buffer (which is enough e.g. with HTTP)
     // - use TimeOut milliseconds wait for incoming data
     // - raise ENetSock exception on socket error
-    // - by default, will handle #10 or #13#10 as line delimiter (as normal text
-    // files), but you can delimit lines using #13 if CROnly is TRUE
-    procedure SockRecvLn(out Line: RawUtf8; CROnly: boolean = false); overload;
-    /// call readln(SockIn^) or simulate it with direct use of Recv(Sock, ..)
-    // - char are read one by one
+    // - will handle #10 or #13#10 as line delimiter (as normal text content)
+    procedure SockRecvLn(out Line: RawUtf8); overload;
+    /// faster readln(SockIn^) or simulate it with direct use of Recv(Sock, ..)
+    // - just wrap SockInReadLn(Buffer=nil)
     // - use TimeOut milliseconds wait for incoming data
     // - raise ENetSock exception on socket error
-    // - line content is ignored
+    // - any remaining line content is just ignored - as with RTL readln()
     procedure SockRecvLn; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// direct send data through network
     // - raise a ENetSock exception on any error
     // - bypass the SockSend() buffers
@@ -2082,6 +2089,7 @@ type
     // THttpServerGeneric.RemoteIPHeader (e.g. 'X-Real-IP' for nginx)
     // - with SocketLayer = nlUdp, InputSock will put here the 'ip:port' of the
     // received packet during SocketIn^ process
+    // - equals '' for localhost/127.0.0.1
     property RemoteIP: RawUtf8
       read fRemoteIP write fRemoteIP;
     /// the full requested URI, as specified to OpenUri() constructor
@@ -2134,7 +2142,9 @@ type
     // - may be using OpenSSL or the SChannel API
     property Secure: INetTls
       read fSecure;
-    /// after CreateSockIn, use Readln(SockIn^,s) to read a line from the opened socket
+    /// after CreateSockIn, use e.g. Readln(SockIn^,s) to read a line of text
+    // - consider the faster SockRecvLn/SockInReadLn methods which will still
+    // benefit from SockIn^.Buffer but with no ioresult overhead
     property SockIn: PTextFile
       read fSockIn;
     /// equals true when the Abort method has been called
@@ -2367,9 +2377,11 @@ end;
 
 { ENetSock }
 
-constructor ENetSock.Create(msg: string; const args: array of const;
-  error: TNetResult; errnumber: system.PInteger);
+constructor ENetSock.Create(msg: string; obj: TObject;
+  const args: array of const; error: TNetResult; errnumber: system.PInteger);
 begin
+  if obj <> nil then
+    msg := format('%s.%s', [ClassNameShort(obj)^, msg]);
   if error <> nrOK then
   begin
     fLastError := error;
@@ -2393,7 +2405,7 @@ begin
     error := NetLastError(NO_ERROR, @err)
   else
     err := NO_ERROR;
-  Create(msg, args, error, @err);
+  Create(msg, nil, args, error, @err);
 end;
 
 class procedure ENetSock.Check(res: TNetResult; const context: ShortString;
@@ -2401,7 +2413,7 @@ class procedure ENetSock.Check(res: TNetResult; const context: ShortString;
 begin
   if (res <> nrOK) and
      (res <> nrRetry) then
-    raise Create('%s failed', [context], res, errnumber);
+    raise Create('%s failed', nil, [context], res, errnumber);
 end;
 
 class procedure ENetSock.CheckLastError(const Context: ShortString;
@@ -2866,7 +2878,8 @@ begin
           ({%H-}p > 65535) then
     result := nrNotFound // port should be valid
   else if (address = '') or
-          IsLocalHost(pointer(address)) or
+          (address = cLocalhost) or
+          (address = c6Localhost) or
           PropNameEquals(address, 'localhost') or
           (address = cAnyHost) then // for client: '0.0.0.0' -> '127.0.0.1'
     result := addr.SetIP4Port(cLocalhost32, p)
@@ -3100,7 +3113,7 @@ procedure TNetSocketWrap.SetOpt(prot, name: integer;
   value: pointer; valuelen: integer);
 begin
   if @self = nil then
-    raise ENetSock.Create('SetOptions(%d,%d) with no socket', [prot, name]);
+    raise ENetSock.Create('SetOptions(%d,%d) with no socket', nil, [prot, name]);
   if setsockopt(TSocket(@self), prot, name, value, valuelen) <> NO_ERROR then
     raise ENetSock.CreateLastError('SetOptions(%d,%d)', [prot, name]);
 end;
@@ -3110,7 +3123,7 @@ var
   len: integer;
 begin
   if @self = nil then
-    raise ENetSock.Create('GetOptInt(%d,%d) with no socket', [prot, name]);
+    raise ENetSock.Create('GetOptInt(%d,%d) with no socket', nil, [prot, name]);
   result := 0;
   len := SizeOf(result);
   if getsockopt(TSocket(@self), prot, name, @result, @len) <> NO_ERROR then
@@ -5785,14 +5798,26 @@ begin
     aTLSContext^ := TLS; // copy back information to the caller TNetTlsContext
 end;
 
+procedure TCrtSocket.DoRaise(const msg: string; const args: array of const;
+  error: TNetResult; errnumber: system.PInteger; exc: ENetSockClass);
+begin
+  if exc = nil then
+    exc := ENetSock;
+  raise exc.Create(msg, self, args, error, errnumber);
+end;
+
+procedure TCrtSocket.DoRaise(const msg: string);
+begin
+  raise ENetSock.Create(msg, self, [], nrOk, nil);
+end;
+
 constructor TCrtSocket.OpenUri(const aUri: TUri; const aUriFull, aTunnel: RawUtf8;
   aTimeOut: cardinal; aTLSContext: PNetTlsContext);
 var
   t: TUri;
 begin
   if aUri.Server = '' then
-    raise ENetSock.Create('%s.OpenUri(%s): invalid URI',
-                          [ClassNameShort(self)^, aUriFull]);
+    DoRaise('OpenUri(%s): invalid URI', [aUriFull]);
   fOpenUriFull := aUriFull;
   t.From(aTunnel);
   Open(aUri.Server, aUri.Port, nlTcp, aTimeOut, aUri.Https, aTLSContext, @t);
@@ -5832,15 +5857,13 @@ begin
   begin
     {$ifdef OSLINUX} // try systemd activation
     if not sd.IsAvailable then
-      raise ENetSock.Create('%s.Bind('''') but Systemd is not available',
-        [ClassNameShort(self)^]);
+      DoRaise('Bind('''') but Systemd is not available');
     if sd.listen_fds(0) > 1 then
-      raise ENetSock.Create('%s.Bind(''''): Systemd activation failed - too ' +
-        'many file descriptors received', [ClassNameShort(self)^]);
+      DoRaise('Bind(''''): Systemd activation failed - too many file descriptors');
     aSock := SD_LISTEN_FDS_START + 0;
     {$else}
-    raise ENetSock.Create('%s.Bind(''''), i.e. Systemd activation, ' +
-      'is not allowed on this platform', [ClassNameShort(self)^]);
+    DoRaise('Bind(''''), i.e. Systemd activation, is not allowed on this platform');
+    aSock := 0; // make compiler happy
     {$endif OSLINUX}
   end
   else
@@ -5886,13 +5909,11 @@ begin
   if fSecure = nil then // ignore duplicated calls
   try
     if not Assigned(NewNetTls) then
-      raise ENetSock.Create('%s.DoTlsAfter: TLS support not compiled ' +
-        '- try including mormot.lib.openssl11 in your project',
-        [ClassNameShort(self)^]);
+      DoRaise('DoTlsAfter: TLS support not compiled ' +
+        '- try including mormot.lib.openssl11 in your project');
     fSecure := NewNetTls;
     if fSecure = nil then
-      raise ENetSock.Create('%s.DoTlsAfter: TLS is not available on this ' +
-        'system - try installing OpenSSL 1.1/3.x', [ClassNameShort(self)^]);
+      DoRaise('DoTlsAfter: TLS is not available - try installing OpenSSL');
     case caller of
       cstaConnect:
         fSecure.AfterConnection(fSock, TLS, fServer);
@@ -5910,8 +5931,7 @@ begin
     on E: Exception do
     begin
       fSecure := nil; // reset TLS context
-      raise ENetSock.CreateFmt('%s.DoTlsAfter: TLS failed [%s %s]',
-        [ClassNameShort(self)^, ClassNameShort(E)^, E.Message]);
+      DoRaise('DoTlsAfter: TLS failed [%s %s]', [ClassNameShort(E)^, E.Message]);
     end;
   end;
 end;
@@ -5921,8 +5941,7 @@ var
   u: TUri;
 begin
   if not u.From(aUri) then
-    raise ENetSock.Create('%s.ConnectUri(%s): invalid URI',
-            [ClassNameShort(self)^, aUri]);
+    DoRaise('ConnectUri(%s): invalid URI', [aUri]);
   OpenBind(u.Server, u.Port, {doBind=}false, u.Https);
   if aAddress <> nil then
     aAddress^ := u.Address;
@@ -5964,9 +5983,9 @@ begin
       fProxyUrl := Tunnel.URI;
       if Tunnel.Https and aTLS then
         // single TLS parameter for either the Tunnel or the destination
-        raise ENetSock.Create(
-          '%s.Open(%s:%s): %s proxy - unsupported dual TLS layers',
-          [ClassNameShort(self)^, fServer, fPort, fProxyUrl]);
+        DoRaise('Open(%s:%s): %s proxy - unsupported dual TLS layers',
+          [fServer, fPort, fProxyUrl]);
+      res := nrOk;
       try
         res := NewSocket(Tunnel.Server, Tunnel.Port, nlTcp, {doBind=}false,
           fTimeout, fTimeout, fTimeout, {retry=}2, fSock, @addr);
@@ -5992,12 +6011,12 @@ begin
         end;
       except
         on E: Exception do
-          raise ENetSock.Create('%s.Open(%s:%s): %s proxy error %s',
-            [ClassNameShort(self)^, fServer, fPort, fProxyUrl, E.Message]);
+          DoRaise('Open(%s:%s): %s proxy error %s',
+            [fServer, fPort, fProxyUrl, E.Message]);
       end;
       if res <> nrOk then
-        raise ENetSock.Create('%s.Open(%s:%s): %s proxy error',
-          [ClassNameShort(self)^, fServer, fPort, fProxyUrl], res);
+        DoRaise('Open(%s:%s): %s proxy error',
+          [fServer, fPort, fProxyUrl], res);
       if Assigned(OnLog) then
         OnLog(sllTrace, 'Open(%:%) via proxy CONNECT %',
           [fServer, fPort, fProxyUrl], self);
@@ -6026,8 +6045,8 @@ begin
     //  OnLog(sllTrace, 'After NewSocket=%', [ToText(res)^], self);
     addr.IP(fRemoteIP, true);
     if res <> nrOK then
-      raise ENetSock.Create('%s %s.OpenBind(%s:%s) [remoteip=%s]',
-        [BINDMSG[doBind], ClassNameShort(self)^, fServer, fPort, fRemoteIP], res);
+      DoRaise('OpenBind(%s:%s): %s [remoteip=%s]',
+        [fServer, fPort, BINDMSG[doBind], fRemoteIP], res);
     fSocketFamily := addr.Family;
   end
   else
@@ -6113,7 +6132,7 @@ end;
 function InputSock(var F: TTextRec): integer;
 // SockIn pseudo text file fill its internal buffer only with available data
 // -> no unwanted wait time is added
-// -> very optimized use for readln() in HTTP stream
+// -> very optimized for readln/SockRecvLn/SockInReadLn in HTTP headers
 var
   size: integer;
   addr: TNetAddr;
@@ -6177,7 +6196,7 @@ begin
   F.CloseFunc := @CloseSock;
   if F.Mode = fmInput then
   begin
-    // ReadLn - as used from SockIn^
+    // ReadLn - as used from SockIn^ text pseudo-file
     F.InOutFunc := @InputSock;
     F.FlushFunc := nil;
     result := NO_ERROR;
@@ -6200,6 +6219,16 @@ begin
   end;
 end;
 {$endif FPC}
+
+procedure DoInputSock(r: PTextRec; const ctx: ShortString);
+var
+  res: integer;
+begin
+  res := InputSock(r^);
+  if res < 0 then
+    with TextRecUserData(r^)^ do
+      Owner.DoRaise('%s', [ctx], LastNetResult, @LastRawError);
+end;
 
 const
   SOCKMINBUFSIZE = 1024; // big enough for headers (body is read directly)
@@ -6233,7 +6262,7 @@ begin
   if (self = nil) or
      (fSockIn = nil) then
     exit;
-  Freemem(fSockIn);
+  FreeMem(fSockIn);
   fSockIn := nil;
 end;
 
@@ -6250,7 +6279,7 @@ var // closesocket() or shutdown() are slow e.g. on Windows with wrong Linger
 begin
   // reset internal state
   fSndBufLen := 0; // always reset (e.g. in case of further Open after error)
-  ioresult; // reset readln/writeln value
+  ioresult;        // reset readln/writeln value
   rec := pointer(fSockIn);
   if rec <> nil then
   begin
@@ -6315,10 +6344,121 @@ begin
   inherited Destroy;
 end;
 
-function TCrtSocket.SockInRead(Content: PAnsiChar; Length: integer;
+function TCrtSocket.SockInReadLn(Buffer: PAnsiChar; Size: PtrInt): PtrInt;
+var
+  len, line: PtrInt;
+  read, err: integer;
+  res: TNetResult;
+  p: PUtf8Char;
+  c: AnsiChar;
+  r: PTextRec;
+
+  function GetSockInLineLength: PtrInt; {$ifdef FPC} inline; {$endif}
+  begin
+    repeat
+      len := r^.BufEnd - r^.BufPos;
+      if len > 0 then
+      begin
+        p := @r^.BufPtr[r^.BufPos];
+        result := BufferLineLength(p, p + len); // SSE2 asm on x86-64
+        exit;
+      end;
+      DoInputSock(r, 'SockInReadLn');
+    until fAborted in fFlags;
+    result := 0;
+  end;
+
+begin
+  result := 0;
+  r := pointer(fSockIn);
+  if r = nil then // no SockIn^ buffer -> need multiple sockets API calls
+  begin
+    repeat
+      read := 1; // one syscall per char: may be very slow on Windows
+      if not TrySockRecv(@c, read, {StopBeforeLength=}false, @res, @err) then
+        case res of
+          nrRetry:
+            begin
+              SleepHiRes(1); // this is a slow loop anyway
+              continue;
+            end;
+          nrClosed:
+            break; // like EOF(SockIn^)
+        else
+          DoRaise('SockInReadLn: TrySockRecv(c) failed', [], res, @err);
+        end
+      else if read <> 1 then
+        DoRaise('SockInReadLn: TrySockRecv(c) read=%d', [read]);
+      if c <> #13 then
+        if c = #10 then
+          break
+        else if Buffer <> nil then // Buffer=nil to go to end of line
+        begin
+          Buffer[result] := c;
+          inc(result);
+          if result = Size then
+          begin
+            result := -1; // avoid buffer overflow: notify Buffer is too short
+            exit;
+          end;
+        end;
+    until fAborted in fFlags;
+    if Buffer <> nil then
+      Buffer[result] := #0;
+    exit;
+  end;
+  if Buffer <> nil then
+  begin
+    // read the next line content from SockIn^ into Buffer^
+    repeat
+      line := GetSockInLineLength;
+      if line >= Size then
+      begin
+        result := -1; // avoid buffer overflow
+        exit;
+      end;
+      MoveFast(p^, Buffer^, line);
+      inc(r^.bufpos, line);
+      inc(Buffer, line);
+      inc(result, line);
+      if (line <= Size) and
+         (line < len) then
+        break; // we got a line
+      dec(Size, line);
+    until fAborted in fFlags;
+    Buffer[0] := #0;
+    inc(p, line);
+    dec(len, line);
+    line := 0;
+  end
+  else
+  begin
+    len := 0; // called with Buffer = nil to go to end of line
+    line := 0;
+  end;
+  // read the next line feed
+  repeat
+    while line < len do
+    begin
+      inc(r^.bufpos);
+      case p[line] of
+        #10:
+          exit;
+        #13:
+          inc(line); // loop to handle the following #10
+      else // p[line] should be either #10 or #13
+        DoRaise('SockInReadln: BufferLineLength^=#%d', [ord(p[line])]);
+      end;
+    end;
+    line := GetSockInLineLength;
+    inc(r^.bufpos, line); // just ignore any text up to the line feed
+  until fAborted in fFlags;
+end;
+
+function TCrtSocket.SockInRead(Content: PAnsiChar; Length: PtrInt;
   UseOnlySockIn: boolean): integer;
 var
-  len, res: integer;
+  len: PtrInt;
   r: PTextRec;
 // read Length bytes from SockIn^ buffer + Sock if necessary
 begin
@@ -6326,7 +6466,7 @@ begin
   result := 0;
   if Length <= 0 then
     exit;
-  r := pointer(SockIn);
+  r := pointer(fSockIn);
   if r <> nil then
     repeat
       len := r^.BufEnd - r^.BufPos;
@@ -6345,27 +6485,22 @@ begin
         exit; // we got everything we wanted
       if not UseOnlySockIn then
         break;
-      res := InputSock(r^);
-      if res < 0 then
-        with TextRecUserData(r^)^ do
-          raise ENetSock.Create('%.SockInRead', [ClassNameShort(self)^],
-            LastNetResult, @LastRawError);
+      DoInputSock(r, 'SockInRead');
       // loop until Timeout
     until Timeout = 0;
   // direct receiving of the remaining bytes from socket
-  if Length > 0 then
-  begin
-    SockRecv(Content, Length); // raise ENetSock if failed to read Length
-    inc(result, Length);
-  end;
+  if Length <= 0 then
+    exit;
+  SockRecv(Content, Length); // raise ENetSock if failed to read Length
+  inc(result, Length);
 end;
 
 function TCrtSocket.SockInRead(Length: integer; UseOnlySockIn: boolean): RawByteString;
 begin
   if (self = nil) or
      (Length <= 0) or
-     (SockInRead(FastSetString(
-       RawUtf8(result), Length), Length, UseOnlySockIn) <> Length) then
+     (SockInRead(FastSetString(RawUtf8(result), Length),
+                 Length, UseOnlySockIn) <> Length) then
     result := '';
 end;
 
@@ -6373,19 +6508,20 @@ function TCrtSocket.SockInPending(aTimeOutMS: integer): integer;
 var
   backup: PtrInt;
 begin
-  if SockIn = nil then
-    raise ENetSock.Create('%s.SockInPending(nil)', [ClassNameShort(self)^]);
   if aTimeOutMS < 0 then
-    raise ENetSock.Create('%s.SockInPending(-1)', [ClassNameShort(self)^]);
+    DoRaise('SockInPending(-1)');
   // first try in SockIn^.Buffer
-  with PTextRec(SockIn)^ do
-    result := BufEnd - BufPos;
+  result := 0;
+  if SockIn <> nil then
+    with PTextRec(SockIn)^ do
+      result := BufEnd - BufPos;
   if result <> 0 then
     exit;
   // no data in SockIn^.Buffer, so try if some pending at socket/TLS level
   case SockReceivePending(aTimeOutMS) of // check both TLS and socket levels
     cspDataAvailable,
     cspDataAvailableOnClosedSocket:
+      if SockIn <> nil then
       begin
         backup := fTimeOut;
         fTimeOut := 0; // not blocking call to fill SockIn buffer
@@ -6399,7 +6535,9 @@ begin
         finally
           fTimeOut := backup;
         end;
-      end;
+      end
+      else
+        result := Sock.HasData; // using FIONREAD
     cspSocketError:
       result := -1; // indicates broken socket
     cspSocketClosed:
@@ -6415,18 +6553,27 @@ begin
             (fSock.GetPeer(addr) = nrOK); // OS may return ENOTCONN/WSAENOTCONN
 end;
 
-function TCrtSocket.EnsureSockSend(Len: integer): pointer;
+function EnsureSockSendResize(var buf: RawByteString; Len: PtrInt): pointer;
+  {$ifdef HASINLINEDELPHI} inline; {$endif}
 var
-  cap: integer;
+  cap: PtrInt;
 begin
-  cap := Length(fSndBuf);
-  if fSndBufLen + Len > cap then
-    SetLength(fSndBuf, Len + cap + cap shr 3 + 2048); // generous 2KB provision
-  result := @PByteArray(fSndBuf)[fSndBufLen];
+  cap := Length(buf);
+  SetLength(buf, Len + cap + cap shr 3 + 2048); // generous 2KB provision
+  result := pointer(buf);
+end;
+
+function TCrtSocket.EnsureSockSend(Len: PtrInt): PUtf8Char;
+begin
+  result := pointer(fSndBuf);
+  if (result = nil) or
+     (Len + fSndBufLen > PStrLen(result - _STRLEN)^) then
+    result := EnsureSockSendResize(fSndBuf, Len);
+  inc(result, fSndBufLen);
   inc(fSndBufLen, Len);
 end;
 
-procedure TCrtSocket.SockSend(P: pointer; Len: integer);
+procedure TCrtSocket.SockSend(P: pointer; Len: PtrInt);
 begin
   if Len > 0 then
     MoveFast(P^, EnsureSockSend(Len)^, Len);
@@ -6437,13 +6584,28 @@ begin
   PWord(EnsureSockSend(2))^ := EOLW;
 end;
 
+procedure TCrtSocket.SockSendW(w: PWideChar; l: PtrInt);
+var
+  p: PUtf8Char;
+  tmp: TBuffer8K;
+begin
+  if w <> nil then
+    if IsAnsiCompatibleW(w, l) then
+    begin
+      p := EnsureSockSend(l);
+      repeat
+        dec(l);
+        p[l] := AnsiChar(w[l]);
+      until l = 0;
+    end
+    else
+      SockSend(@tmp, Unicode_WideToAnsi(w, @tmp, l, SizeOf(tmp), CP_UTF8));
+end;
+
 procedure TCrtSocket.SockSend(const Values: array of const);
 var
   v: PVarRec;
   i: PtrInt;
-  j, l: PtrInt;
-  w: PWordArray;
-  p: PByteArray;
   t: PAnsiChar;
   tmp: TTemp24;
 begin
@@ -6457,25 +6619,14 @@ begin
         if v^.VAnsiString <> nil then
           SockSend(v^.VAnsiString, PStrLen(v^.VPChar - _STRLEN)^);
       vtPWideChar,
-      {$ifdef HASVARUSTRING}
-      vtUnicodeString,
-      {$endif HASVARUSTRING}
       vtWideString:
-        begin // constant text is expected to be pure ASCII-7
-          w := v^.VWideString;
-          if w <> nil then
-          begin
-            {$ifdef HASVARUSTRING}
-            if v^.VType = vtUnicodeString then
-              l := PStrLen(v^.VPChar - _STRLEN)^
-            else
-            {$endif HASVARUSTRING}
-              l := StrLenW(pointer(w));
-            p := EnsureSockSend(l);
-            for j := 0 to l - 1 do
-              p[j] := w[j];
-          end;
-        end;
+        if v^.VWideString <> nil then
+          SockSendW(v^.VWideString, StrLenW(v^.VWideString));
+      {$ifdef HASVARUSTRING}
+      vtUnicodeString:
+        if v^.VUnicodeString <> nil then
+          SockSendW(v^.VUnicodeString, PStrLen(v^.VPChar - _STRLEN)^);
+      {$endif HASVARUSTRING}
       vtPChar:
         SockSend(v^.VPChar, StrLen(v^.VPChar));
       vtChar:
@@ -6494,8 +6645,7 @@ begin
           SockSend(t, @tmp[23] - t);
         end;
     else
-      raise ENetSock.CreateFmt('%s.SockSend: unsupported VType=%d',
-        [ClassNameShort(self)^, v^.VType]); // paranoid
+      DoRaise('SockSend: unsupported VType=%d', [v^.VType]); // paranoid
     end;
     inc(v);
   end;
@@ -6520,7 +6670,7 @@ begin
   PWord(p)^ := EOLW;
 end;
 
-procedure TCrtSocket.SockSend(const Line: RawByteString; NoCrLf: boolean);
+procedure TCrtSocket.SockSend(const Line: RawByteString);
 var
   len: PtrInt;
   p: PUtf8Char;
@@ -6528,8 +6678,7 @@ begin
   len := length(Line);
   p := EnsureSockSend(len + 2);
   MoveFast(pointer(Line)^, p^, len);
-  if not NoCrLf then
-    PWord(p + len)^ := EOLW;
+  PWord(p + len)^ := EOLW;
 end;
 
 procedure TCrtSocket.SockSendHeaders(const headers: RawUtf8);
@@ -6555,7 +6704,7 @@ begin
   until false;
 end;
 
-function TCrtSocket.SockSendRemainingSize: integer;
+function TCrtSocket.SockSendRemainingSize: PtrInt;
 begin
   result := Length(fSndBuf) - fSndBufLen;
 end;
@@ -6563,7 +6712,8 @@ end;
 function TCrtSocket.SockSendFlush(const aBody: RawByteString;
   aNoRaise: boolean): TNetResult;
 var
-  bodylen, buflen, rawError: integer;
+  bodylen, buflen: PtrInt;
+  rawError: integer;
 begin
   buflen := fSndBufLen;
   fSndBufLen := 0; // always reset the output buffer position
@@ -6594,14 +6744,14 @@ begin
       if aNoRaise then
         exit
       else
-        raise ENetSock.Create('%s.SockSendFlush(%s) len=%d',
-          [ClassNameShort(self)^, fServer, buflen], result, @rawError);
+        DoRaise('SockSendFlush(%s) len=%d',
+          [fServer, buflen], result, @rawError);
   // direct sending of the remaining bodylen bytes (if needed)
   if bodylen > 0 then
     if not TrySndLow(pointer(aBody), bodylen, @result, @rawError) then
       if not aNoRaise then
-        raise ENetSock.Create('%s.SockSendFlush(%s) bodylen=%',
-          [ClassNameShort(self)^, fServer, bodylen], result, @rawError);
+        DoRaise('SockSendFlush(%s) bodylen=%d',
+          [fServer, bodylen], result, @rawError);
 end;
 
 function TCrtSocket.SockSendStream(Stream: TStream; ChunkSize: integer;
@@ -6630,9 +6780,9 @@ begin
       if aNoRaise then
         break
       else
-        raise ENetSock.Create('%s.SockSendStream(%s,%d) rd=%d pos=%d to %s:%s',
-          [ClassNameShort(self)^, ClassNameShort(Stream)^, ChunkSize, rd, pos,
-           fServer, fPort], result, @rawError);
+        DoRaise('SockSendStream(%s,%d) rd=%d pos=%d to %s:%s',
+          [ClassNameShort(Stream)^, ChunkSize, rd, pos, fServer, fPort],
+          result, @rawError);
     inc(pos, rd);
   until false;
 end;
@@ -6645,8 +6795,8 @@ begin
   read := Length;
   if not TrySockRecv(Buffer, read, {StopBeforeLength=}false, @res, @rawError) or
      (Length <> read) then
-    raise ENetSock.Create('%s.SockRecv(%d) read=%d at %s:%s',
-      [ClassNameShort(self)^, Length, read, fServer, fPort], res, @rawError);
+    DoRaise('SockRecv(%d) read=%d at %s:%s',
+      [Length, read, fServer, fPort], res, @rawError);
 end;
 
 function TCrtSocket.SockRecv(Length: integer): RawByteString;
@@ -6796,86 +6946,22 @@ begin
   result := (res = nrOK);
 end;
 
-procedure TCrtSocket.SockRecvLn(out Line: RawUtf8; CROnly: boolean);
-
-  procedure RecvLn(eol: AnsiChar);
-  var
-    P: PAnsiChar;
-    LP, L: PtrInt;
-    tmp: array[0..1023] of AnsiChar; // avoid ReallocMem() every char
-  begin
-    P := @tmp;
-    L := 0;
-    repeat
-      SockRecv(P, 1); // this is very slow under Windows -> use SockIn^ instead
-      if (eol = #13) or
-         (P^ <> #13) then // NCSA 1.3 does send a #10 only -> ignore #13
-        if (P^ = eol) or
-           (P^ = #0) then
-        begin
-          if Line = '' then // get line
-            FastSetString(Line, @tmp, P - tmp)
-          else
-          begin
-            // append to already read chars
-            LP := P - tmp;
-            Setlength(Line, L + LP);
-            MoveFast(tmp, PByteArray(Line)[L], LP);
-          end;
-          exit;
-        end
-        else if P = @tmp[high(tmp)] then
-        begin
-          // tmp[] buffer full? -> append to already read chars
-          Setlength(Line, L + SizeOf(tmp));
-          MoveFast(tmp, PByteArray(Line)[L], SizeOf(tmp));
-          inc(L, SizeOf(tmp));
-          P := @tmp;
-        end
-        else
-          inc(P);
-    until fAborted in fFlags;
-  end;
-
+procedure TCrtSocket.SockRecvLn(out Line: RawUtf8);
 var
-  err: integer;
+  tmp: TBuffer16K; // should be enough in our context (parsing HTTP headers)
+  len: PtrInt;
 begin
-  if CROnly then
-    RecvLn(#13)
-  else if SockIn <> nil then
-  begin
-    {$I-}
-    readln(SockIn^, Line); // use RTL over SockIn^ buffer
-    err := ioresult;
-    if err <> 0 then
-      raise ENetSock.Create('%s.SockRecvLn ioresult=%d after %d chars',
-        [ClassNameShort(self)^, err, Length(Line)]);
-    {$I+}
-  end
-  else
-    RecvLn(#10); // slow under Windows -> prefer SockIn^
+  len := SockInReadLn(@tmp, SizeOf(tmp)); // with or without SockIn^
+  if len = 0 then
+    exit;
+  if len < 0 then
+    DoRaise('SockRecvLn: line too long (>16KB)');
+  FastSetString(Line, @tmp, len);
 end;
 
 procedure TCrtSocket.SockRecvLn;
-var
-  c: AnsiChar;
-  err: integer;
 begin
-  if SockIn <> nil then
-  begin
-    {$I-}
-    readln(SockIn^);
-    err := ioresult;
-    if err <> 0 then
-      raise ENetSock.Create('%s.SockRecvLn ioresult=%d',
-        [ClassNameShort(self)^, err]);
-    {$I+}
-  end
-  else
-    repeat
-      SockRecv(@c, 1);
-    until (fAborted in fFlags) or
-          (c = #10);
+  SockInReadLn({Buffer=}nil, 0);
 end;
 
 procedure TCrtSocket.SndLow(P: pointer; Len: integer);
@@ -6885,8 +6971,7 @@ var
 begin
   if (Len <> 0) and
      not TrySndLow(P, Len, @res, @rawError) then
-    raise ENetSock.Create('%s.SndLow(%s) len=%d',
-      [ClassNameShort(self)^, fServer, Len], res, @rawError);
+    DoRaise('SndLow(%s) len=%d', [fServer, Len], res, @rawError);
 end;
 
 procedure TCrtSocket.SndLow(const Data: RawByteString);
@@ -7148,7 +7233,7 @@ var
   sock: TNetSocket;
   len: PtrInt;
   res: TNetResult;
-  tmp: TSynTempBuffer;
+  tmp: TBuffer4K;
 begin
   result := false;
   if addr.SetFrom(aServer, aPort, nlUdp) <> nrOK then

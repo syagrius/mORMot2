@@ -3986,7 +3986,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// enter an exclusive non-reentrant lock
     procedure Lock;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// try to enter an exclusive non-reentrant lock
     // - if returned true, caller should eventually call UnLock()
     // - could also be used to thread-safely acquire a shared resource
@@ -3997,7 +3997,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// leave an exclusive non-reentrant lock
     procedure UnLock;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
   end;
   PLightLock = ^TLightLock;
 
@@ -4811,13 +4811,12 @@ function RandomDouble: double;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fill a memory buffer with random bytes from the gsl_rng_taus2 generator
-// - will actually XOR the Dest buffer with Lecuyer numbers
-// - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
+// - this method is good enough e.g. for padding or generating test data
+// - consider cryptographic-level mormot.core.crypt TAesPrng.Main.FillRandom()
+// method or Random128() function to initialize a safe secret key, nonce or IV
+// - will actually XOR the Dest buffer with TLecuyer numbers
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
-procedure RandomBytes(Dest: pointer; Count: integer); overload;
-
-/// fill 128-bit buffer with random bytes from the gsl_rng_taus2 generator
-procedure RandomBytes(out Dest: THash128); overload;
+procedure RandomBytes(Dest: pointer; Count: integer);
 
 /// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
 // - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
@@ -5935,12 +5934,9 @@ begin
 end;
 
 function IsLocalHost(Host: PUtf8Char): boolean;
-var
-  c: cardinal;
 begin
-  c := PCardinal(Host)^;
-  result := (c = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24) or
-            (c = ord(':') + ord(':') shl 8 + ord('1') shl 16); // c6Localhost
+  result := (PCardinal(Host)^ = HOST_127) or // also check for c6Localhost:
+            (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
 end;
 
 
@@ -7971,7 +7967,7 @@ begin
       result := true
     else
     begin
-      Freemem(fBuf);
+      FreeMem(fBuf);
       fBuf := nil;
       fLoadedNotMapped := false;
     end;
@@ -8018,7 +8014,7 @@ procedure TMemoryMap.UnMap;
 begin
   if fLoadedNotMapped then
     // mapping was not worth it
-    Freemem(fBuf)
+    FreeMem(fBuf)
   else
     // call actual Windows/POSIX map API
     DoUnMap;
@@ -11055,11 +11051,6 @@ procedure RandomBytes(Dest: pointer; Count: integer);
 begin
   if Count > 0 then
     SharedRandom.Fill(Dest, Count);
-end;
-
-procedure RandomBytes(out Dest: THash128);
-begin
-  SharedRandom.Fill(@Dest, SizeOf(dest));
 end;
 
 function RandomByteString(Count: integer; var Dest; CodePage: cardinal): pointer;

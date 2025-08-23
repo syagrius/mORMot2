@@ -1203,6 +1203,10 @@ type
       read fLastApi;
   end;
 
+/// can be used instead of EHttpApiServer.RaiseOnError class procedure if
+// raising an exception is an overkill
+function HttpApiSucceed(Api: THttpApiFunction; var Message: RawUtf8;
+  Error: integer): boolean;
 
 
 const
@@ -1215,6 +1219,20 @@ procedure HttpApiInitialize;
 /// compute a http.sys compatible URI from https://root:port fields
 function RegURL(aRoot, aPort: RawUtf8; Https: boolean;
   aDomainName: RawUtf8): SynUnicode;
+
+/// will authorize a specified URL prefix to the http.sys sytem
+// - will allow to call Http.AddUrl() later for any user on the computer
+// - if aRoot is left '', it will authorize any root for this port
+// - must be called with Administrator rights: this class function is to be
+// used in a Setup program for instance, especially under Vista or Seven,
+// to reserve the Url for the server
+// - add a new record to the http.sys URL reservation store
+// - return '' on success, an error message otherwise
+// - will first delete any matching rule for this URL prefix
+// - if OnlyDelete is true, will delete but won't add the new authorization;
+// in this case, any error message at deletion will be returned
+function HttpApiAuthorize(const aRoot, aPort: RawUtf8; Https: boolean;
+  const aDomainName: RawUtf8; OnlyDelete: boolean = false): RawUtf8;
 
 /// low-level adjustement of the HTTP_REQUEST headers
 function RetrieveHeadersAndGetRemoteIPConnectionID(const Request: HTTP_REQUEST;
@@ -2052,6 +2070,51 @@ begin
   end;
 end;
 
+const
+  /// will allow AddUrl() registration to everyone
+  // - 'GA' (GENERIC_ALL) to grant all access
+  // - 'S-1-1-0'	defines a group that includes all users
+  HTTPADDURLSECDESC: PWideChar = 'D:(A;;GA;;;S-1-1-0)';
+
+function HttpApiAuthorize(const aRoot, aPort: RawUtf8;
+  Https: boolean; const aDomainName: RawUtf8; OnlyDelete: boolean): RawUtf8;
+var
+  err: integer;
+  prefix: SynUnicode;
+  cfg: HTTP_SERVICE_CONFIG_URLACL_SET;
+begin
+  result := 'Invalid parameters';
+  prefix := RegURL(aRoot, aPort, Https, aDomainName);
+  if prefix = '' then
+    exit;
+  result := ''; // success
+  try
+    HttpApiInitialize;
+    if HttpApiSucceed(hInitialize, result,
+         Http.Initialize(Http.Version, HTTP_INITIALIZE_CONFIG)) then
+    try
+      FillcharFast(cfg, SizeOf(cfg), 0);
+      cfg.KeyDesc.pUrlPrefix := pointer(prefix);
+      // first delete any existing information
+      err := Http.DeleteServiceConfiguration(0, hscUrlAclInfo, @cfg, SizeOf(cfg));
+      if OnlyDelete then
+        HttpApiSucceed(hDeleteServiceConfiguration, result, err)
+      else
+      begin
+        // then add authorization rule
+        cfg.KeyDesc.pUrlPrefix := pointer(prefix);
+        cfg.ParamDesc.pStringSecurityDescriptor := HTTPADDURLSECDESC;
+        HttpApiSucceed(hSetServiceConfiguration, result,
+          Http.SetServiceConfiguration(0, hscUrlAclInfo, @cfg, SizeOf(cfg)));
+      end;
+    finally
+      Http.Terminate(HTTP_INITIALIZE_CONFIG);
+    end;
+  except
+    on E: ESynException do
+      ExceptionUtf8(E, result);
+  end;
+end;
 
 
 { EHttpApiServer }
@@ -2074,7 +2137,17 @@ begin
   fLastApiError := Error;
   fLastApi := api;
   inherited CreateUtf8('%() failed: % (%)',
-    [HttpApiFunction[api], WinApiErrorShort(Error, Http.Module), Error])
+    [HttpApiFunction[api], WinApiErrorShort(Error, Http.Module), Error]);
+end;
+
+
+function HttpApiSucceed(Api: THttpApiFunction; var Message: RawUtf8;
+  Error: integer): boolean;
+begin
+  result := Error in [NO_ERROR, ERROR_ALREADY_EXISTS];
+  if not result then
+    FormatUtf8('%() failed: % (%)', [HttpApiFunction[api],
+      WinApiErrorShort(Error, Http.Module), Error], Message);
 end;
 
 
@@ -2136,90 +2209,68 @@ begin
     until false;
 end;
 
+const
+  KNOWNHEADERS =
+    'CACHE-CONTROL:|CONNECTION:|DATE:|KEEP-ALIVE:|PRAGMA:|TRAILER:|' +
+    'TRANSFER-ENCODING:|UPGRADE:|VIA:|WARNING:|ALLOW:|CONTENT-LENGTH:|' +
+    'CONTENT-TYPE:|CONTENT-ENCODING:|CONTENT-LANGUAGE:|CONTENT-LOCATION:|' +
+    'CONTENT-MD5:|CONTENT-RANGE:|EXPIRES:|LAST-MODIFIED:|ACCEPT-RANGES:|AGE:|' +
+    'ETAG:|LOCATION:|PROXY-AUTHENTICATE:|RETRY-AFTER:|SERVER:|SET-COOKIE:|' +
+    'VARY:|WWW-AUTHENTICATE:|';
+
 function HTTP_RESPONSE.AddCustomHeader(P: PUtf8Char;
   var UnknownHeaders: HTTP_UNKNOWN_HEADERS;
   ForceCustomHeader: boolean): PUtf8Char;
-const
-  KNOWNHEADERS: array[reqCacheControl..succ(respWwwAuthenticate)] of PAnsiChar = (
-    'CACHE-CONTROL:',
-    'CONNECTION:',
-    'DATE:',
-    'KEEP-ALIVE:',
-    'PRAGMA:',
-    'TRAILER:',
-    'TRANSFER-ENCODING:',
-    'UPGRADE:',
-    'VIA:',
-    'WARNING:',
-    'ALLOW:',
-    'CONTENT-LENGTH:',
-    'CONTENT-TYPE:',
-    'CONTENT-ENCODING:',
-    'CONTENT-LANGUAGE:',
-    'CONTENT-LOCATION:',
-    'CONTENT-MD5:',
-    'CONTENT-RANGE:',
-    'EXPIRES:',
-    'LAST-MODIFIED:',
-    'ACCEPT-RANGES:',
-    'AGE:',
-    'ETAG:',
-    'LOCATION:',
-    'PROXY-AUTHENTICATE:',
-    'RETRY-AFTER:',
-    'SERVER:',
-    'SET-COOKIE:',
-    'VARY:',
-    'WWW-AUTHENTICATE:',
-    nil);
 var
-  UnknownName: PUtf8Char;
+  name: PUtf8Char;
+  known: PHTTP_KNOWN_HEADER;
+  unknown: PHTTP_UNKNOWN_HEADER;
   i: integer;
 begin
   if ForceCustomHeader then
     i := -1
   else
-    i := IdemPPChar(P, @KNOWNHEADERS);
-  // WebSockets need CONNECTION as unknown header
+    i := IdemPCharSep(P, KNOWNHEADERS);
   if (i >= 0) and
+     // WebSockets need reqConnection / CONNECTION: as unknown header
      (THttpApiHeader(i) <> reqConnection) then
-    with Headers.KnownHeaders[THttpApiHeader(i)] do
-    begin
-      while P^ <> ':' do
-        inc(P);
-      inc(P); // jump ':'
-      while P^ = ' ' do
-        inc(P);
-      pRawValue := pointer(P);
-      while P^ >= ' ' do
-        inc(P);
-      RawValueLength := P - pRawValue;
-    end
+  begin
+    while P^ <> ':' do
+      inc(P);
+    inc(P); // jump ':'
+    while P^ = ' ' do
+      inc(P);
+    known := @Headers.KnownHeaders[THttpApiHeader(i)];
+    known^.pRawValue := pointer(P);
+    while P^ >= ' ' do
+      inc(P);
+    known^.RawValueLength := P - known^.pRawValue;
+  end
   else
   begin
-    UnknownName := pointer(P);
+    name := pointer(P);
     while (P^ >= ' ') and
           (P^ <> ':') do
       inc(P);
     if P^ = ':' then
-      with UnknownHeaders[Headers.UnknownHeaderCount] do
+    begin
+      unknown := @UnknownHeaders[Headers.UnknownHeaderCount];
+      unknown^.pName := name;
+      unknown^.NameLength := P - name;
+      repeat
+        inc(P)
+      until P^ <> ' ';
+      unknown^.pRawValue := pointer(P);
+      while P^ >= ' ' do
+        inc(P);
+      unknown^.RawValueLength := P - unknown^.pRawValue;
+      if Headers.UnknownHeaderCount = high(UnknownHeaders) then
       begin
-        pName := UnknownName;
-        NameLength := P - pName;
-        repeat
-          inc(P)
-        until P^ <> ' ';
-        pRawValue := pointer(P);
-        while P^ >= ' ' do
-          inc(P);
-        RawValueLength := P - pRawValue;
-        if Headers.UnknownHeaderCount = high(UnknownHeaders) then
-        begin
-          SetLength(UnknownHeaders, Headers.UnknownHeaderCount + 32);
-          Headers.pUnknownHeaders := pointer(UnknownHeaders);
-        end;
-        inc(Headers.UnknownHeaderCount);
-      end
+        SetLength(UnknownHeaders, Headers.UnknownHeaderCount + 32);
+        Headers.pUnknownHeaders := pointer(UnknownHeaders);
+      end;
+      inc(Headers.UnknownHeaderCount);
+    end
     else
       while P^ >= ' ' do
         inc(P);

@@ -452,26 +452,17 @@ function gss_compare_oid(oid1, oid2: gss_OID): boolean;
 { ****************** Middle-Level GSSAPI Wrappers }
 
 type
-  /// GSSAPI Auth context
-  // - first field should be an Int64 ID - typically a THttpServerConnectionID
+  /// GSSAPI high-level  Auth context
   TSecContext = record
-    ID: Int64;
     CredHandle: pointer;
     CtxHandle: pointer;
-    CreatedTick64: Int64;
     ChannelBindingsHash: pointer;
     ChannelBindingsHashLen: cardinal;
   end;
   PSecContext = ^TSecContext;
 
-  /// dynamic array of Auth contexts
-  // - used to hold information between calls to ServerSspiAuth
-  TSecContextDynArray = array of TSecContext;
-
-
-/// Sets aSecHandle fields to empty state for a given connection ID
-procedure InvalidateSecContext(var aSecContext: TSecContext;
-  aConnectionID: Int64 = 0; aTick64: Int64 = 0);
+/// set aSecHandle fields to empty state for a new handshake
+procedure InvalidateSecContext(var aSecContext: TSecContext);
 
 /// Free aSecContext on client or server side
 procedure FreeSecContext(var aSecContext: TSecContext);
@@ -542,6 +533,9 @@ function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aInData: RawByteString; const aUserName: RawUtf8;
   const aPassword: SpiUtf8; const aSecKerberosSpn: RawUtf8;
   out aOutData: RawByteString; aMech: gss_OID = nil): boolean;
+
+/// check if a binary request packet from a client is using NTLM
+function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
 
 /// Server-side authentication procedure
 // - aSecContext holds information between function calls
@@ -626,17 +620,17 @@ const
 
   /// HTTP Challenge name
   // - GSS API only supports Negotiate/Kerberos - NTLM is unsafe and deprecated
-  SECPKGNAMEHTTP: RawUtf8 = 'Negotiate';
+  SECPKGNAMEHTTP = 'Negotiate';
 
   /// HTTP Challenge name, converted into uppercase for IdemPChar() pattern
-  SECPKGNAMEHTTP_UPPER: RawUtf8 = 'NEGOTIATE';
+  SECPKGNAMEHTTP_UPPER = 'NEGOTIATE';
 
   /// HTTP header to be set for authentication
   // - GSS API only supports Negotiate/Kerberos - NTLM is unsafe and deprecated
-  SECPKGNAMEHTTPWWWAUTHENTICATE: RawUtf8 = 'WWW-Authenticate: Negotiate';
+  SECPKGNAMEHTTPWWWAUTHENTICATE = 'WWW-Authenticate: Negotiate ';
 
   /// HTTP header pattern received for authentication
-  SECPKGNAMEHTTPAUTHORIZATION: RawUtf8 = 'AUTHORIZATION: NEGOTIATE ';
+  SECPKGNAMEHTTPAUTHORIZATION = 'AUTHORIZATION: NEGOTIATE ';
 
   /// character used as marker in user name to indicates the associated domain
   SSPI_USER_CHAR = '@';
@@ -861,15 +855,9 @@ end;
 
 { ****************** Middle-Level GSSAPI Wrappers }
 
-procedure InvalidateSecContext(var aSecContext: TSecContext;
-  aConnectionID, aTick64: Int64);
+procedure InvalidateSecContext(var aSecContext: TSecContext);
 begin
-  aSecContext.ID := aConnectionID;
-  aSecContext.CredHandle := nil;
-  aSecContext.CtxHandle := nil;
-  aSecContext.CreatedTick64 := aTick64;
-  aSecContext.ChannelBindingsHash := nil;
-  aSecContext.ChannelBindingsHashLen := 0;
+  FillCharFast(aSecContext, SizeOf(aSecContext), 0);
 end;
 
 procedure FreeSecContext(var aSecContext: TSecContext);
@@ -1188,6 +1176,13 @@ begin
             ClientSspiAuthWorker(aSecContext, aInData, spn, aOutData, aMech);
 end;
 
+function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
+begin
+  result := (aInData <> '') and
+            (PCardinal(aInData)^ or $20202020 =
+               ord('n') + ord('t') shl 8 + ord('l') shl 16 + ord('m') shl 24);
+end;
+
 function ServerSspiAuth(var aSecContext: TSecContext;
   const aInData: RawByteString; out aOutData: RawByteString): boolean;
 var
@@ -1200,7 +1195,7 @@ begin
   RequireGssApi;
   if aSecContext.CredHandle = nil then // initial call
   begin
-    if IdemPChar(pointer(aInData), 'NTLM') then
+    if ServerSspiDataNtlm(aInData) then
       raise ENotSupportedException.Create(
         'NTLM authentication not supported by the GSSAPI library');
     MajStatus := GssApi.gss_acquire_cred(
@@ -1473,14 +1468,14 @@ begin
   result := '';
   if AuthUser <> nil then
     AuthUser^ := '';
-  auth := FindNameValue(pointer(InputHeaders), 'AUTHORIZATION: NEGOTIATE ');
+  auth := FindNameValue(pointer(InputHeaders), SECPKGNAMEHTTPAUTHORIZATION);
   if (auth = nil) or
      not InitializeDomainAuth then // late initialization of the GSS library
     exit;
   authend := PosChar(auth, #13); // parse 'Authorization: Negotiate <base64 encoding>'
   if (authend = nil) or
      not Base64ToBin(PAnsiChar(auth), authend - auth, bin) or
-     IdemPChar(pointer(bin), 'NTLM') then // two-way Kerberos only
+     ServerSspiDataNtlm(bin) then // two-way Kerberos only
     exit;
   if (self <> nil) and
      (fKeyTab <> '') then
@@ -1494,7 +1489,7 @@ begin
       exit;
     if AuthUser <> nil then
       ServerSspiAuthUser(ctx, AuthUser^);
-    result := BinToBase64(bout, 'WWW-Authenticate: Negotiate ', '', false);
+    result := BinToBase64(bout, SECPKGNAMEHTTPWWWAUTHENTICATE, '', false);
   finally
     FreeSecContext(ctx);
   end;

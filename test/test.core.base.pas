@@ -4621,6 +4621,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, 'Nan'));
   Check(ShortToFloatNan(a) = fnNan);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNan]);
   s := 'INF';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4628,6 +4629,7 @@ begin
   DoubleToShort(@a, d);
   Check((a = '+Inf') or (a = 'INF'));
   Check(ShortToFloatNan(a) = fnInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnInf]);
   s := '-INfinity';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4635,6 +4637,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, '-Inf'));
   Check(ShortToFloatNan(a) = fnNegInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNegInf]);
   Check(IsAnsiCompatible('t'));
   Check(IsAnsiCompatible('te'));
   Check(IsAnsiCompatible('tes'));
@@ -5547,10 +5550,24 @@ begin
   check(mormot.core.base.StrLen(@res[1]) = i);
   res := 'one,two,three';
   Check(IdemPCharArrayBy2(nil, 'ONTWTH') < 0);
-  Check(IdemPCharArrayBy2(pointer(res), 'OFTWTH') < 0);
-  Check(IdemPCharArrayBy2(pointer(res), 'ONTWTH') = 0);
-  Check(IdemPCharArrayBy2(pointer(res), 'TWONTW') = 1);
-  Check(IdemPCharArrayBy2(pointer(res), 'TWTHON') = 2);
+  CheckEqual(IdemPCharArrayBy2(pointer(res), 'OFTWTH'), -1);
+  CheckEqual(IdemPCharArrayBy2(pointer(res), 'ONTWTH'), 0);
+  CheckEqual(IdemPCharArrayBy2(pointer(res), 'TWONTW'), 1);
+  CheckEqual(IdemPCharArrayBy2(pointer(res), 'TWTHON'), 2);
+  CheckEqual(IdemPCharSep('one','one|two|three'), -1);
+  CheckEqual(IdemPCharSep('one','ONE|TWO|THREE|'), 0);
+  CheckEqual(IdemPCharSep('one','ZERO|ONE|TWO|THREE|'), 1);
+  CheckEqual(IdemPCharSep('One','ONE|'), 0);
+  CheckEqual(IdemPCharSep('OnE','ONE|'), 0);
+  CheckEqual(IdemPCharSep('ONE','ONE|'), 0);
+  CheckEqual(IdemPCharSep('oN','ONE|ON|'), 1);
+  CheckEqual(IdemPCharSep('ONE?','ONE|'), 0);
+  CheckEqual(IdemPCharSep('0ne','ONE|'), -1);
+  CheckEqual(IdemPCharSep('one','ZERO|ONE|'), 1);
+  CheckEqual(IdemPCharSep('tWo','ZERO|ONE|TWO|THREE|'), 2);
+  CheckEqual(IdemPCharSep('threE','ZERO|ONE|TWO|THREE|'), 3);
+  CheckEqual(IdemPCharSep('threEf','ZERO|ONE|TWO|THREE|'), 3);
+  CheckEqual(IdemPCharSep('thre0','ZERO|ONE|TWO|THREE|'), -1);
   Check(StartWith('three', 'THREE'));
   for i := 1 to length(res) do
     Check(StartWith(res, UpperCase(copy(res, 1, i))));
@@ -5945,9 +5962,9 @@ begin
     Check(length(W) = len);
     U := WinAnsiToUtf8(W);
     Check(length(U) >= len);
-    check(IsValidUtf8(U), 'IsValidUtf8U');
+    check(IsValidUtf8(U), 'IsValidUtf8');
     P := UniqueRawUtf8(U);
-    check(IsValidUtf8(P), 'IsValidUtf8');
+    check(IsValidUtf8Ptr(P), 'IsValidUtf8Ptr');
     check(PosChar(P, #10) = nil);
     if len > 0 then
     begin
@@ -9778,7 +9795,7 @@ begin
     CheckEqual(dict.Capacity, 0);
     key := 'Foobar';
     val := 'lol';
-    dict.AddOrUpdate(key, val);
+    Check(dict.AddOrUpdate(key, val) >= 0);
     CheckEqual(dict.Count, 1);
     json := dict.SaveToJson;
     CheckEqual(json, '{"Foobar":"lol"}');
