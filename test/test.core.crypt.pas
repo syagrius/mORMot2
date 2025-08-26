@@ -19,6 +19,7 @@ uses
   mormot.core.datetime,
   mormot.core.log,
   mormot.crypt.core,
+  mormot.crypt.other,
   mormot.crypt.openssl,
   mormot.crypt.secure,
   mormot.core.perf,
@@ -1308,7 +1309,7 @@ type
     bAES128CBCO, bAES128CFBO, bAES128OFBO, bAES128CTRO, bAES128GCMO,
     bAES256CBCO, bAES256CFBO, bAES256OFBO, bAES256CTRO, bAES256GCMO,
     {$endif USE_OPENSSL}
-    bSHAKE128, bSHAKE256);
+    bSHAKE128, bSHAKE256, bBlowFish);
 
 procedure TTestCoreCrypto.Benchmark;
 const
@@ -1340,12 +1341,12 @@ const
     128, 128, 128, 128, 128, 256, 256, 256, 256, 256);
   OPENSSL_HASH: array[bSHA1O .. bSHA3_512O] of THashAlgo = (
     hfSHA1, hfSHA1, hfSHA256, hfSHA256, hfSHA384, hfSHA384, hfSHA512, hfSHA384,
-    hfSHA512, hfSHA3_256, hfSHA3_512);
-  {$endif USE_OPENSSL}
+    hfSHA512, hfSHA3_256, hfSHA3_512
+  {$endif USE_OPENSSL});
 var
   b: TBenchmark;
   s, i, size, n: integer;
-  data, encrypted: RawByteString;
+  data, encrypted, s1, s2: RawByteString;
   dig: THash512Rec;
   MD: TMd5;
   SHA1: TSha1;
@@ -1354,6 +1355,7 @@ var
   SHA512: TSha512;
   SHA512_256: TSha512_256;
   SHA3, SHAKE128, SHAKE256: TSha3;
+  bf: TBlowFishCtr;
   RC4: TRC4;
   timer: TPrecisionTimer;
   time: array[TBenchmark] of Int64;
@@ -1383,6 +1385,7 @@ begin
   {$endif USE_OPENSSL}
   SHAKE128.InitCypher('secret', SHAKE_128);
   SHAKE256.InitCypher('secret', SHAKE_256);
+  bf := TBlowFishCtr.Create('secret');
   RC4.InitSha3(dig, SizeOf(dig));
   FillCharFast(time, SizeOf(time), 0);
   size := 0;
@@ -1390,7 +1393,7 @@ begin
   for s := 0 to high(SIZ) do
   begin
     data := RandomWinAnsi(SIZ[s]);
-    Check(length(data) = SIZ[s]);
+    CheckEqual(length(data), SIZ[s]);
     SetLength(encrypted, SIZ[s]);
     for b := low(b) to high(b) do
     if (b < low(AES)) or
@@ -1422,7 +1425,7 @@ begin
           bCRC32:
             dig.d0 := crc32(0, pointer(data), SIZ[s]);
           bMD4:
-            MD.Full(pointer(data), SIZ[s], dig.h0, {forcemd4=}true);
+            MD4Buf(pointer(data)^, SIZ[s], dig.h0);
           bMD5:
             MD.Full(pointer(data), SIZ[s], dig.h0);
           bSHA1:
@@ -1500,6 +1503,8 @@ begin
             SHAKE128.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
           bSHAKE256:
             SHAKE256.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
+          bBlowFish:
+            bf.EncryptBuffer(pointer(data), pointer(encrypted), SIZ[s]);
         else
           ESynCrypto.RaiseUtf8('Unexpected %', [TXT[b]]);
         end;
@@ -1514,6 +1519,13 @@ begin
     end;
     inc(size, SIZ[s] * COUNT);
     inc(n, COUNT);
+    // we may add some small additionnal tests here (outside timers)
+    CheckEqual(StrLen(pointer(data)), SIZ[s], 'datastrlen');
+    s1 := bf.Encrypt(data, {ivatbeg=}true);
+    CheckEqual(length(s1), SIZ[s] + 8);
+    s2 := bf.Decrypt(s1, {ivatbeg=}true);
+    CheckEqual(length(s2), SIZ[s]);
+    CheckEqual(s2, data);
   end;
   for b := low(b) to high(b) do
     if time[b] <> 0 then
@@ -1522,6 +1534,7 @@ begin
         KB((Int64(size) * 1000000) div time[b])]));
   for b := low(AES) to high(AES) do
     AES[b].Free;
+  bf.Free;
 end;
 
 {
@@ -1720,15 +1733,19 @@ const
 
 var
   buf: RawByteString;
-  u, pw: RawUtf8;
+  u, pw, exp: RawUtf8;
+  iv: Int64;
   P: PAnsiChar;
   unalign: PtrInt;
-  n: integer;
-  exp321, exp322, exp323, exp324, exp325: cardinal;
+  n, rounds, rnd: integer;
+  i64: Int64;
+  exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
   exp641, exp642: QWord;
   hasher: TSynHasher;
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
+  mcf: TModularCryptFormat;
+  timer: TPrecisionTimer;
 begin
   // validate THashAlgo and TSignAlgo recognition
   for h := low(h) to high(h) do
@@ -1784,13 +1801,13 @@ begin
   Check(not TextToSignAlgo('SHA5122', s));
   Check(not TextToSignAlgo('SHA512256', s));
   // validate our 32-bit, 64-bit and 128-bit hash functions
-  Check(Adler32SelfTest);
   SetLength(buf, HASHESMAX + HASHALIGN);
   exp321 := 0;
   exp322 := 0;
   exp323 := 0;
   exp324 := 0;
   exp325 := 0;
+  exp326 := 0;
   exp641 := 0;
   exp642 := 0;
   for unalign := 0 to HASHALIGN - 1 do // ensure alignment doesn't change result
@@ -1804,6 +1821,7 @@ begin
     if Assigned(AesNiHash32) then
       Hash32Test(P, @AesNiHash32, exp324);
     Hash32Test(P, @crc32fast,     exp325);
+    Hash32Test(P, @adler32,       exp326);
     Hash64Test(P, @crc32cTwice, exp641);
     if Assigned(AesNiHash64) then
       Hash64Test(P, @AesNiHash64, exp642);
@@ -1811,43 +1829,188 @@ begin
     if Assigned(AesNiHash128) then
       Hash128Test(P, @AesNiHash128);
   end;
-  // verify TSynHasher.UnixCryptHash()
-  h := hfMD5;
+  CheckEqual(exp321, 4022360595);
+  CheckEqual(exp321, exp322);
+  CheckEqual(exp323, 1465265692);
+  CheckEqual(exp325, 3408302637);
+  CheckEqual(exp326, 4027950528);
+  CheckEqual(adler32fast(0, P, HASHESMAX), exp326);
+  CheckEqual(exp641, -1170836861443089901);
+  // verify "Modular Crypt" hashing functions
   u := '$5$rounds=12345$q3hvJE5mn5jKRsW.$BbbYTFiaImz9rTy03GGi.Jf9YY5bmxN0LU3p3uI1iUB';
-  Check(hasher.UnixCryptVerify('password', u, @h));
-  Check(h = hfSha256);
-  Check(not hasher.UnixCryptVerify('p4ssword', u, @h));
+  Check(ModularCryptIdentify(u) = mcfSha256Crypt);
+  Check(ModularCryptVerify('password', u) = mcfSha256Crypt);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  Check(ModularCryptVerify('password', u) = mcfSha256Crypt);
+  delete(u, 5, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
+  Check(ModularCryptVerify('password', u) = mcfInvalid);
+  delete(u, 2, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
   u := '$1$3azHgidD$SrJPt7B.9rekpmwJwtON31';
-  Check(hasher.UnixCryptVerify('password', u, @h));
-  Check(h = hfMD5);
-  Check(hasher.UnixCryptVerify('the minimum number is still observed',
-    '$5$rounds=10$roundstoolow$yfvwcWrQ8l/K0DAWyuPMDNHpIVlTQebY9l/gL972bIC', @h));
-  Check(h = hfSha256);
-  Check(not hasher.UnixCryptVerify('secret', u, @h));
-  Check(h = hfMD5);
+  Check(ModularCryptIdentify(u) = mcfMd5Crypt);
+  Check(ModularCryptVerify('password', u) = mcfMd5Crypt);
+  Check(ModularCryptVerify('secret', u) = mcfInvalid);
+  Check(ModularCryptVerify('the minimum number is still observed',
+    '$5$rounds=10$roundstoolow$yfvwcWrQ8l/K0DAWyuPMDNHpIVlTQebY9l/gL972bIC') =
+     mcfSha256Crypt);
   u := '$6$rounds=1400$anotherlongsalts$POfYwTEok97VWcjxIiSOjiykti.o/pQs.wP' +
        'vMxQ6Fm7I6IoYN3CmLs66x9t0oSwbtEW7o7UmJEiDwGqd8p4ur1';
-  Check(hasher.UnixCryptVerify('a very much longer text to encrypt.  ' +
-  'This one even stretches over morethan one line.', u, @h));
-  Check(h = hfSHA512);
-  Check(not hasher.UnixCryptVerify('a very much longer text to encrypt.  ' +
-  'This one even stretches over more than one line.', u, @h));
-  for h := hfMD5 to hfSHA512 do
-    if h in [hfMD5, hfSHA256, hfSHA512] then
-      for n := 1 to 10 do
-      begin
-        pw := RandomIdentifier(n * 7);
-        u := hasher.UnixCryptHash(h, pw, {rounds=}1000 + n, {saltsize=}n);
-        Check(u <> '');
-        if h <> hfMD5 then
-          CheckEqual(PosEx(Make(['$rounds=', 1000 + n, '$']), u), 3);
-        h2 := succ(h);
-        Check(h2 <> h);
-        Check(hasher.UnixCryptVerify(pw, u, @h2));
-        Check(h2 = h);
-        dec(PByteArray(u)[length(u) - 5]);
-        Check(not hasher.UnixCryptVerify(pw, u, @h2));
+  Check(ModularCryptVerify('a very much longer text to encrypt.  ' +
+    'This one even stretches over morethan one line.', u) = mcfSha512Crypt);
+  Check(ModularCryptVerify('a very much longer text to encrypt.  ' +
+    'This one even stretches over more than one line.', u) = mcfInvalid);
+  Check(ModularCryptIdentify(u) = mcfSha512Crypt);
+  delete(u, 5, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
+  // official test vectors from test_handlers_pbkdf2.py
+  u := '$pbkdf2$1212$OB.dtnSEXZK8U5cgxU/GYQ$y5LKPOplRmok7CZp/aqVDVg8zGI';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha1);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha1);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha256$1212$4vjV83LKPjQzk31VI4E0Vw$hsYF68OiOUPdDZ1Fg.fJPeq1h/gXXY7acBp9/6c.tmQ';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha256$6400$.6UI/S.nXIk8jcbdHx3Fhg$98jZicV16ODfEsEZeYPGHU3kbrUrvUEXOPimVSQDD44';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha512$1212$RHY0Fr3IDMSVO/RSZyb5ow$eNLfBK.eVozomMr.1gYa1' +
+       '7k9B7KIK25NOEshvhrSX.esqY3s.FvWZViXz4KoLlQI.BzY/YTNJOiKc5gBYFYGww';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha512);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha512);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha3$1000$G85lPNdJLXoDVzhbCmsBCA$T6UjUUihUTmnYpwiRbhH8yi' +
+       'BjOLTRzARcwK5gr7OEX.fRj9HD/ME7NivCFzgQ5W7BbBaAyoHKeirdX7cDPF59A';
+  u := ModularCryptHash(mcfPbkdf2Sha3, 'password', 1000); // our own format
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha3);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha3);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  // BCrypt reference material
+  for n := -100 to 100 do
+  begin
+    i64 := n;
+    iv := BSwap64(i64);
+    BlowFishCtrInc(@iv);
+    CheckEqual(iv, BSwap64(i64 + 1), 'bfctr0');
+    inc(i64, Int64(1) shl 32);
+    iv := BSwap64(i64);
+    BlowFishCtrInc(@iv);
+    CheckEqual(iv, BSwap64(i64 + 1), 'bfctr1');
+  end;
+  i64 := cardinal(-1);
+  iv := BSwap64(i64);
+  BlowFishCtrInc(@iv);
+  CheckEqual(iv, BSwap64(i64 + 1), 'bfctr2');
+  Check(ModularCryptVerify('',
+    '$2b$06$DCq7YPn5Rq63x1Lad4cll.TV4S6ytwfsfvkgY8jIucDrjc8deX1s.') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2a$06$m0CrhHm10qJ3lXRY.5zDGO3rS2KdeeWLuGmsfGlMfOxih58VYVfxe') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2y$06$m0CrhHm10qJ3lXRY.5zDGO3rS2KdeeWLuGmsfGlMfOxih58VYVfxe') = mcfBCrypt);
+  Check(ModularCryptVerify('<.S.2K(Zq''',
+    '$2b$04$VYAclAMpaXY/oqAo9yUpkuWmoYywaPzyhu56HxXpVltnBIfmO9tgu') = mcfBCrypt);
+  Check(ModularCryptVerify('5.rApO%5jA',
+    '$2a$05$kVNDrnYKvbNr5AIcxNzeIuRcyIF5cZk6UrwHGxENbxP5dVv.WQM/G') = mcfBCrypt);
+  Check(ModularCryptVerify('oW++kSrQW^',
+    '$2b$06$QLKkRMH9Am6irtPeSKN5sObJGr3j47cO6Pdf5JZ0AsJXuze0IbsNm') = mcfBCrypt);
+  Check(ModularCryptVerify('ggJ\KbTnDG',
+    '$2b$07$4H896R09bzjhapgCPS/LYuMzAQluVgR5iu/ALF8L8Aln6lzzYXwbq') = mcfBCrypt);
+  Check(ModularCryptVerify('49b0:;VkH/',
+    '$2b$08$hfvO2retKrSrx5f2RXikWeFWdtSesPlbj08t/uXxCeZoHRWDz/xFe') = mcfBCrypt);
+  Check(ModularCryptVerify('>9N^5jc##''',
+    '$2b$09$XZLvl7rMB3EvM0c1.JHivuIDPJWeNJPTVrpjZIEVRYYB/mF6cYgJK') = mcfBCrypt);
+  Check(ModularCryptVerify('\$ch)s4WXp',
+    '$2b$10$aIjpMOLK5qiS9zjhcHR5TOU7v2NFDmcsBmSFDt5EHOgp/jeTF3O/q') = mcfBCrypt);
+  Check(ModularCryptVerify('RYoj\_>2P7',
+    '$2b$12$esIAHiQAJNNBrsr5V13l7.RFWWJI2BZFtQlkFyiWXjou05GyuREZa') = mcfBCrypt);
+  Check(ModularCryptVerify('password',
+    '$2b$12$GhvMmNVjRW29ulnudl.LbuAnUtN/LRfe1JsBm1Xu6LE3059z5Tr8m') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.l4WvgHIVg17ZawDIrDM2IjlE64GDNQS') = mcfBCrypt);
+  Check(ModularCryptVerify('aa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.AyUxBk.ThHlsLvRTH7IqcG7yVHJ3SXq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.BxOVac5xPB6XFdRc/ZrzM9FgZkqmvbW') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.Qbr209bpCtfl5hN7UQlG/L4xiD3AKau') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.oWszihPjDZI0ypReKsaDOW1jBl7oOii') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ./k.Xxn9YiqtV/sxh3EHbnOHd0Qsq27K') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.PYJqRFQbgRbIjMd5VNKmdKS4sBVOyDe') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ..VMYfzaw1wP/SGxowpLeGf13fxCCt.q') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.5B0p054nO5WgAD1n04XslDY/bqY9RJi') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.INBTgqm7sdlBJDg.J5mLMSRK25ri04y') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.s3y7CdFD0OR5p6rsZw/eZ.Dla40KLfm') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.Jx742Djra6Q7PqJWnTAS.85c28g.Siq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.oKMXW3EZcPHcUV0ib5vDBnh9HojXnLu') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.w6nIjWpDPNSH5pZUvLjC1q25ONEQpeS') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.k1b2/r9A/hxdwKEKurg6OCn4MwMdiGq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.3prCNHVX1Ws.7Hm2bJxFUnQOX9f7DFa') = mcfBCrypt);
+  u := RawUtf8OfChar('a', 260);
+  exp := '$2b$04$QqpSfI8JYX8HSxNwW5yx8Ohp12sNboonE6e5jfnGZ0fD4ZZwQkOOK';
+  Check(ModularCryptVerify(u, exp) = mcfBCrypt);
+  Check(ModularCryptVerify(u, exp, [mcfMd5Crypt, mcfBCrypt]) = mcfBCrypt);
+  Check(ModularCryptVerify(u, exp, [mcfMd5Crypt, mcfSha512Crypt]) = mcfUnknown);
+  Check(ModularCryptVerify(u, exp, [], {maxrounds=}3) = mcfInvalid);
+  u[200] := 'b'; // BCrypt truncates the password at 72 bytes long
+  Check(ModularCryptVerify(u, exp) = mcfBCrypt);
+  u[10] := 'b';
+  Check(ModularCryptVerify(u, exp) = mcfInvalid);
+  for mcf := mcfMd5Crypt to high(mcf) do
+  begin
+    timer.Start;
+    rounds := 0;
+    for n := 1 to 10 do
+    begin
+      RandomByteString(n * 7, pw); // should reach at least 64 bytes = 512-bit
+      case mcf of
+        mcfMd5Crypt:
+          begin
+            rnd := 1000; // fixed number
+            inc(rounds, 3000);
+          end;
+        mcfBCrypt:
+          begin
+            rnd := 4 + n shr 2; // cost = 4..5 is enough here
+            inc(rounds, 3 * (1 shl rnd));
+          end;
+      else
+        begin
+          rnd := 1000 + n;
+          inc(rounds, 3 * rnd);
+        end;
       end;
+      u := ModularCryptHash(mcf, pw, rnd, {saltsize=}n);
+      Check(u <> '');
+      case mcf of
+        mcfSha256Crypt .. mcfSha512Crypt:
+          CheckEqual(PosEx(Make(['$rounds=', rnd, '$']), u), 3);
+        mcfBCrypt:
+          CheckEqual(PosEx(Make(['$', UInt2DigitsToShort(rnd), '$']), u), 4);
+      end;
+      Check(ModularCryptIdentify(u) = mcf);
+      Check(ModularCryptVerify(pw, u) = mcf);
+      if u = '' then
+        continue; // avoid GPF
+      dec(PByteArray(u)[length(u) - 5]);
+      Check(ModularCryptVerify(pw, u) = mcfInvalid);
+    end;
+    if not fOwner.MultiThread then
+      NotifyTestSpeed('% rounds', [ToText(mcf)^], rounds, 0, @timer);
+  end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
   CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 3), '1ac907');
@@ -2276,6 +2439,7 @@ var
   ValuesCrypted, ValuesOrig: array[0..6] of RawByteString;
   Tags: array[0..2, 7..9] of THash256DynArray; // Tags[k,m]
   h32: array[0..2, 0..9] of TCardinalDynArray;
+  tab: PCardinalArray;
   {$ifdef CPUINTEL}
   backup: TIntelCpuFeatures;
   {$endif CPUINTEL}
@@ -2284,6 +2448,18 @@ begin
   backup := CpuFeatures;
   {$endif CPUINTEL}
   Check(AesTablesTest, 'Internal Tables');
+  tab := AesTables;
+  CheckEqual(tab[0],  $50a7f451);
+  CheckEqual(tab[99],  0);
+  CheckEqual(tab[255],  $4257b8d0);
+  CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
+  CheckEqual(tab[$300 + 255],  $d04257b8);
+  CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
+  CheckEqual(tab[$400 + 255],  $3a16162c);
+  CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
+  CheckEqual(tab[$500 + 255],  $16162c3a);
+  CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
+  CheckEqual(tab[$700 + 255],  $2c3a1616);
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -3025,14 +3201,19 @@ begin
   for ismd4 := false to true do
     for n := 256 - 80 to 256 do
     begin
+      // char-by-char update validation
       if ismd4 then
-        md.InitMD4
+        Md4Init(md)
       else
         md.Init;
       for i := 0 to n - 1 do
         md.Update(bytes[i], 1);
       md.Final(dig);
-      md.Full(@bytes, n, dig2, ismd4);
+      // full buffer single call validation
+      if ismd4 then
+        Md4Buf(bytes, n, dig2)
+      else
+        md.Full(@bytes, n, dig2);
       check(IsEqual(dig, dig2), 'MDrefA');
       check(CompareMem(@dig, @dig2, SizeOf(dig)), 'MDrefB');
     end;

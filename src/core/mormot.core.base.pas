@@ -3362,24 +3362,28 @@ var
   // - consider rather XorEntropy() XorOSEntropy() or TAesPrng.GetEntropy()
   _Fill256FromOs: procedure(out e: THash256Rec);
 
-/// convert the endianness of a given unsigned 16-bit integer into BigEndian
+/// convert the endianness of a given unsigned 16-bit integer
 function bswap16(a: cardinal): cardinal;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert the endianness of a given unsigned 32-bit integer into BigEndian
+/// convert the endianness of a given unsigned 32-bit integer
 function bswap32(a: cardinal): cardinal;
   {$ifndef CPUINTEL}inline;{$endif}
 
-/// convert the endianness of a given unsigned 64-bit integer into BigEndian
+/// in-place convert the endianness of several unsigned 32-bit integers
+// - n is required to be > 0
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+
+/// convert the endianness of a given unsigned 64-bit integer
 function bswap64({$ifdef FPC_X86}constref{$else}const{$endif} a: QWord): QWord;
   {$ifndef CPUINTEL}inline;{$endif}
 
-/// convert the endianness of an array of unsigned 64-bit integer into BigEndian
+/// convert the endianness of an array of unsigned 64-bit integer
 // - n is required to be > 0
 // - warning: on x86, a should be <> b
 procedure bswap64array(a, b: PQWordArray; n: PtrInt);
 
-/// copy one memory buffer to another, swapping the bytes order
+/// copy one memory buffer to another, swapping their bytes order
 // - used e.g. by TBigInt.Load/Save to follow DER big-endian encoding
 // - warning: src and dst should not overlap
 procedure MoveSwap(dst, src: PByte; n: PtrInt);
@@ -3734,6 +3738,9 @@ procedure crcblockfast(crc128, data128: PBlock128);
 // - combine crcblocks() with 4 parallel crc32c() for 1..15 trailing bytes
 procedure crc32c128(hash: PHash128; buf: PAnsiChar; len: cardinal);
 
+/// compute ADLER32 checksum on the supplied buffer - use adler32() instead
+function adler32fast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+
 var
   /// compute CRC32C (Castagnoli/iSCSI) checksum on the supplied buffer
   // - result is not compatible with zlib/IEEE-802 crc32() - Intel/SCSI crc32c()
@@ -3772,8 +3779,8 @@ var
   crc32: THasher = crc32fast;
 
   /// compute ADLER32 checksum on the supplied buffer
-  // - is only available if mormot.lib.z.pas unit is included in the project
-  adler32: THasher;
+  // - mormot.lib.z.pas unit may include the much faster version from libdeflate
+  adler32: THasher = adler32fast;
 
 /// compute CRC16-CCITT checkum on the supplied buffer
 // - i.e. 16-bit CRC-CCITT, with polynomial x^16 + x^12 + x^5 + 1 ($1021)
@@ -9389,6 +9396,31 @@ begin
   result := PosExPas(pointer(SubStr), pointer(S), Offset); // inlined call
 end;
 
+function adler32fast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+var
+  s1, s2, n, c: cardinal;
+begin
+  s1 := crc and $ffff;
+  s2 := crc shr 16;
+  if len > 0 then
+    repeat
+      n := 5552;
+      if len < n then
+        n := len;
+      c := n;
+      repeat
+        inc(s1, ord(buf^));
+        inc(buf);
+        inc(s2, s1);
+        dec(c);
+      until c = 0;
+      s1 := s1 mod 65521;
+      s2 := s2 mod 65521;
+      dec(len, n);
+    until len = 0;
+  result := (s1 and $ffff) + (s2 and $ffff) shl 16;
+end;
+
 {$endif CPUX86}
 
 function StrCompW(Str1, Str2: PWideChar): PtrInt;
@@ -10846,6 +10878,14 @@ end;
 function bswap32(a: cardinal): cardinal;
 begin
   result := SwapEndian(a); // use fast platform-specific function
+end;
+
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+begin
+  repeat // assume n > 0 like the asm
+    dec(n);
+    a[n] := SwapEndian(a[n]);
+  until n = 0;
 end;
 
 function bswap64(const a: QWord): QWord;
