@@ -47,7 +47,8 @@ uses
   mormot.core.os.security, // low-level Windows Security API
   mormot.core.unicode,
   mormot.core.text,
-  mormot.core.rtti;
+  mormot.core.rtti,
+  mormot.core.buffers;
 
 
 type
@@ -113,7 +114,15 @@ procedure XorBlock16(A, B, C: PPtrIntArray);
 /// logical XOR memory buffers with a 32-bit mask, as done e.g. during HMAC
 // - fill all dst[] cardinals, by 128-bit chunks (e.g. last = 15 or 31):
 // ! dst[i] := src[i] xor mask;
-procedure XorBy128(dst, src: PCardinalArray; last: PtrUInt; mask: cardinal);
+procedure Xor32By128(dst, src: PCardinalArray; last: PtrUInt; mask: cardinal);
+
+/// logical XOR of 512-bit = 64 bytes - use SSE2 on Intel/AMD
+procedure Xor512(dst, src: PPtrIntArray);
+  {$ifndef CPUINTEL} inline;{$endif}
+
+/// efficient Move of 512-bit = 64 bytes - use SSE2 on Intel/AMD
+procedure Move512(dst, src: PPtrIntArray);
+  {$ifndef CPUINTEL} inline;{$endif}
 
 // little endian fast conversion
 // - 160 bits = 5 integers
@@ -154,6 +163,11 @@ procedure RawSha256Compress(var Hash; Data: pointer);
 /// entry point of the raw SHA-512 transform function - for low-level use
 procedure RawSha512Compress(var Hash; Data: pointer);
 
+type
+  /// the prototype of our SCrypt() raw function
+  TSCriptRaw = function(const Password: RawUtf8; const Salt: RawByteString;
+    N, R, P, DestLen: PtrUInt): RawByteString;
+
 var
   /// 32-bit truncation of GoLang runtime aeshash, using aesni opcode
   // - just a wrapper around AesNiHash128() with proper 32-bit zeroing
@@ -187,10 +201,16 @@ var
   // - AesNiHashAntiFuzzTable <> nil if AES-NI and SSE 3 are available on this CPU
   AesNiHashAntiFuzzTable: PHash512;
 
-  /// mcfBCrypt implementation function - injected by mormot.crypt.other.pas
-  // - Cost should be in range 4..31 and Salt exactly 22 characters (128-bit)
+  /// BCrypt raw implementation function - injected by mormot.crypt.other.pas
+  // - Cost should be in range 4..31 and Salt '' or exactly 22 characters (128-bit)
   // - returns e.g. '$2b$12$GhvMmNVjRW29ulnudl.LbuAnUtN/LRfe1JsBm1Xu6LE3059z5Tr8m'
-  BCrypt: function(const Password, Salt: RawUtf8; Cost: byte): RawUtf8;
+  BCrypt: function(const Password: RawUtf8; const Salt: RawUtf8 = '';
+    Cost: byte = 12; HashPos: PInteger = nil; PreSha256: boolean = false): RawUtf8;
+
+  /// SCrypt raw implementation function
+  // - injected by mormot.crypt.openssl.pas or by mormot.crypt.other.pas (slower)
+  // - as defined by http://www.tarsnap.com/scrypt.html and RFC 7914
+  SCrypt: TSCriptRaw;
 
 
 { *************** 256-bit BigInt Low-Level Computation for ECC }
@@ -1684,8 +1704,12 @@ type
     // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
     // excluding ;,= to allow direct use in CSV content
     function RandomPassword(Len: integer): SpiUtf8;
+    /// validate or generate a random Salt with custom Base64-URI encoding
+    // - as used e.g. by the "Modular Crypt" process
+    function RandomSalt(var bin, b64: RawByteString; defsiz: integer;
+      const salt: RawUtf8 = ''; enc: PChar64 = nil; dec: PAnsiCharDec = nil): boolean;
     /// would force the internal generator to re-seed its private key
-    // - avoid potential attacks on backward or forward security
+    // - avoid potential attacks on backward or forward secrecy
     // - would be called by FillRandom() methods, according to SeedAfterBytes
     // - this method is thread-safe, and does nothing by default
     procedure Seed; virtual;
@@ -1783,16 +1807,16 @@ type
   // - FillRandom() is thread-safe, and its AES process is not blocking: only
   // the CTR is pre-computed inside a lock
   // - use fast hardware AES-NI, and our 8X interleaved asm on x86_64 asm:
-  // $  mORMot Random32 in 3.95ms i.e. 25,303,643/s, aver. 0us, 96.5 MB/s
-  // $  mORMot FillRandom in 46us, 2 GB/s
-  // - it is actually much faster than OpenSSL with the same 256-bit safety level:
-  // $  OpenSSL Random32 in 288.71ms i.e. 346,363/s, aver. 2us, 1.3 MB/s
-  // $  OpenSSL FillRandom in 240us, 397.3 MB/s
-  // - on i386, numbers are similar, but for FillRandom which is not interleaved:
-  // $ mORMot Random32 in 5.54ms i.e. 18,044,027/s, aver. 0us, 68.8 MB/s
-  // $ mORMot FillRandom in 203us, 469.7 MB/s
-  // $ OpenSSL Random32 in 364.24ms i.e. 274,540/s, aver. 3us, 1 MB/s
-  // $ OpenSSL FillRandom in 371us, 257 MB/s
+  // $  mORMot FillRandom in 1.22ms, 7.6 GB/s
+  // $  OpenSSL FillRandom in 1.22ms, 7.6 GB/s
+  // - for small blocks, the OpenSSL overhead seems huge (40x slower):
+  // $  mORMot Random32 in 1.32ms i.e. 72M/s, aver. 13ns, 288.3 MB/s
+  // $  OpenSSL Random32 in 49.61ms i.e. 1.9M/s, aver. 496ns, 7.6 MB/s
+  // - on i386, numbers are quite similar, thanks to our 4X interleaved asm:
+  // $  mORMot FillRandom in 1.23ms, 7.5 GB/s
+  // $  OpenSSL FillRandom in 1.23ms, 7.5 GB/s
+  // $  mORMot Random32 in 1.32ms i.e. 71.7M/s, aver. 13ns, 287 MB/s
+  // $  OpenSSL Random32 in 73.33ms i.e. 1.3M/s, aver. 733ns, 5.2 MB/s
   TAesPrng = class(TAesPrngAbstract)
   protected
     fBytesSinceSeed: PtrUInt;
@@ -1828,7 +1852,7 @@ type
     /// would force the internal generator to re-seed its private key
     // - as called by FillRandom() methods once SeedAfterBytes limit is reached
     // - (re)initialize the internal AES-CTR engine from PBKDF2-SHA-256 of
-    // GetEntropy() to avoid potential attacks on backward or forward security
+    // GetEntropy() to avoid potential attacks on backward or forward secrecy
     // - this method is thread-safe
     procedure Seed; override;
     /// retrieve some entropy bytes from the Operating System and process state
@@ -1894,7 +1918,7 @@ var
   /// the shared TAesPrng instance returned by TAesPrng.Main class function
   // - you may override this to a customized instance, e.g. for a specific
   // random generator to be used, like TSystemPrng or TAesPrngOsl
-  MainAesPrng: TAesPrngAbstract;
+  MainAesPrng: TAesPrng;
 
   /// low-level RAND_bytes() OpenSSL API function set by mormot.crypt.openssl
   // - used by TAesPrng.GetEntropy if available to add some audited entropy
@@ -2361,7 +2385,7 @@ type
   TSha1Digest = THash160;
   PSha1Digest = ^TSha1Digest;
 
-  TMd5In = array[0..15] of cardinal;
+  TMd5In = TBlock512;
   PMd5In = ^TMd5In;
   TMd5Buf = TBlock128;
 
@@ -2499,6 +2523,8 @@ type
     // - iterate over all message blocks, then call Done to retrieve the HMAC
     procedure Update(const msg: RawByteString); overload;
       {$ifdef HASINLINE} inline; {$endif}
+    /// append one big-endian encoded 32-bit value
+    procedure UpdateBigEndian(c: cardinal);
     /// computes the HMAC of all supplied message according to the key
     procedure Done(out result: TSha256Digest; NoInit: boolean = false); overload;
     /// computes the HMAC of all supplied message according to the key
@@ -2534,8 +2560,13 @@ procedure HmacSha256(key, msg: pointer; keylen, msglen: integer;
 /// compute the PBKDF2 derivation of a password using HMAC over SHA-256
 // - this function expect the resulting key length to match SHA-256 digest size
 procedure Pbkdf2HmacSha256(const password, salt: RawByteString;
-  count: integer; out result: TSha256Digest;
-  const saltdefault: RawByteString = '');
+  count: integer; out result: TSha256Digest; const saltdefault: RawByteString = '';
+  partnumber: integer = 1); overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over SHA-256
+// - overload to iterate Pbkdf2HmacSha256() until destlen bytes are returned
+function Pbkdf2HmacSha256(const password, salt: RawByteString;
+  count, destlen: cardinal): RawByteString; overload;
 
 /// safe key derivation using iterated SHA-3 hashing
 // - you can use SHA3_224, SHA3_256, SHA3_384, SHA3_512 algorithm to fill
@@ -2745,7 +2776,7 @@ type
 
 const
   // used by SHA-256
-  K256: array[0..63] of cardinal = (
+  K256: TBlock2048 = (
     $428a2f98, $71374491, $b5c0fbcf, $e9b5dba5, $3956c25b, $59f111f1,
     $923f82a4, $ab1c5ed5, $d807aa98, $12835b01, $243185be, $550c7dc3,
     $72be5d74, $80deb1fe, $9bdc06a7, $c19bf174, $e49b69c1, $efbe4786,
@@ -2759,7 +2790,12 @@ const
     $90befffa, $a4506ceb, $bef9a3f7, $c67178f2);
 
 var
-  // AES computed tables - don't change the order below! (used for weak Xor)
+  {$ifdef USEAESNIHASH}
+  // 16*4=64 random bytes (512-bit) set at startup to avoid hash flooding
+  // - defined as a pointer from GetMemAligned() which is mandatory on Delphi
+  AesNiHashKey: PHash512; // = AesNiHashAntiFuzzTable
+  {$endif USEAESNIHASH}
+  // filled by ComputeAesStaticTables if needed - don't change the order below
   Td0, Td1, Td2, Td3, Te0, Te1, Te2, Te3: array[byte] of cardinal;
   SBox, InvSBox: TByteToByte;
 
@@ -2797,7 +2833,7 @@ begin
   {$endif CPU32}
 end;
 
-procedure XorBy128(dst, src: PCardinalArray; last: PtrUInt; mask: cardinal);
+procedure Xor32By128(dst, src: PCardinalArray; last: PtrUInt; mask: cardinal);
 begin
   last := PtrUInt(@src[last]);
   repeat
@@ -2821,6 +2857,50 @@ begin
       dec(count);
     until count = 0;
 end;
+
+{$ifndef CPUSSE2}
+{$ifdef CPU32}
+procedure Xor512(dst, src: PPtrIntArray); {$ifdef HASINLINE} inline; {$endif}
+var
+  i: PtrInt;
+begin
+  for i := 0 to 15 do
+    dst[i] := dst[i] xor src[i];
+end;
+
+procedure Move512(dst, src: PPtrIntArray); {$ifdef HASINLINE} inline; {$endif}
+var
+  i: PtrInt;
+begin
+  for i := 0 to 15 do
+    dst[i] := src[i];
+end;
+{$else}
+procedure Xor512(dst, src: PPtrIntArray); inline;
+begin
+  dst[0] := dst[0] xor src[0];
+  dst[1] := dst[1] xor src[1];
+  dst[2] := dst[2] xor src[2];
+  dst[3] := dst[3] xor src[3];
+  dst[4] := dst[4] xor src[4];
+  dst[5] := dst[5] xor src[5];
+  dst[6] := dst[6] xor src[6];
+  dst[7] := dst[7] xor src[7];
+end;
+
+procedure Move512(dst, src: PPtrIntArray); inline;
+begin
+  dst[0] := src[0];
+  dst[1] := src[1];
+  dst[2] := src[2];
+  dst[3] := src[3];
+  dst[4] := src[4];
+  dst[5] := src[5];
+  dst[6] := src[6];
+  dst[7] := src[7];
+end;
+{$endif CPU32}
+{$endif CPUSSE2}
 
 function Hash128ToExt(P: PHash128Rec): TSynExtended;
 const
@@ -3549,7 +3629,7 @@ var
   pow, log: TByteToByte;
   c: cardinal;
 begin
-  // 744 bytes of x86_64 code to compute 4.5 KB of tables
+  // 744 bytes of x86_64 code for delayed computation of 4.5 KB tables
   x := 1;
   for i := 0 to 255 do
   begin
@@ -3603,7 +3683,7 @@ begin
     c := c shl 8 + c shr 24;
     Td3[j] := c;
   end;
-end;
+end; // last computed item is Td3[255] = $d04257b8
 
 function ValidAesKeyBits(bits: cardinal): boolean;
 begin
@@ -3741,128 +3821,109 @@ const
   RCon: array[0..9] of cardinal = (
     $01, $02, $04, $08, $10, $20, $40, $80, $1b, $36);
 
-procedure ShiftPas(KeySize: cardinal; pk: PCardinalArray);
+procedure ShiftAes(KeySize: cardinal; pk: PCardinalArray);
 var
-  i: PtrInt;
-  temp: cardinal;
-  sb: PByteArray;  // faster on PIC
+  i: PtrUInt;
+  sb, x: PByteArray; // faster on PIC
 begin
   sb := @SBox;
   case KeySize of
     128:
       for i := 0 to 9 do
       begin
-        temp := pk^[3];
-        // SubWord(RotWord(temp)) if "word" count mod 4 = 0
-        pk^[4] := ((sb[(temp shr 8) and $ff])) xor
-                  ((sb[(temp shr 16) and $ff]) shl 8) xor
-                  ((sb[(temp shr 24)]) shl 16) xor
-                  ((sb[(temp) and $ff]) shl 24) xor
+        x := @pk^[3];
+        // SubWord(RotWord(x)) if "word" count mod 4 = 0
+        pk^[4] := ((sb[x[0]]) shl 24) xor
+                  ((sb[x[1]])) xor
+                  ((sb[x[2]]) shl 8) xor
+                  ((sb[x[3]]) shl 16) xor
                   pk^[0] xor
                   RCon[i];
-        pk^[5] := pk^[1] xor
-                  pk^[4];
-        pk^[6] := pk^[2] xor
-                  pk^[5];
-        pk^[7] := pk^[3] xor
-                  pk^[6];
-        inc(PByte(pk), 4 * 4);
+        pk^[5] := pk^[1] xor pk^[4];
+        pk^[6] := pk^[2] xor pk^[5];
+        pk^[7] := pk^[3] xor pk^[6];
+        pk := @pk[4];
       end;
     192:
       for i := 0 to 7 do
       begin
-        temp := pk^[5];
-        // SubWord(RotWord(temp)) if "word" count mod 6 = 0
-        pk^[6] := ((sb[(temp shr 8) and $ff])) xor
-                  ((sb[(temp shr 16) and $ff]) shl 8) xor
-                  ((sb[(temp shr 24)]) shl 16) xor
-                  ((sb[(temp) and $ff]) shl 24) xor
+        x := @pk^[5];
+        // SubWord(RotWord(x)) if "word" count mod 6 = 0
+        pk^[6] := ((sb[x[0]]) shl 24) xor
+                  ((sb[x[1]])) xor
+                  ((sb[x[2]]) shl 8) xor
+                  ((sb[x[3]]) shl 16) xor
                   pk^[0] xor
                   RCon[i];
-        pk^[7] := pk^[1] xor
-                  pk^[6];
-        pk^[8] := pk^[2] xor
-                  pk^[7];
-        pk^[9] := pk^[3] xor
-                  pk^[8];
+        pk^[7] := pk^[1] xor pk^[6];
+        pk^[8] := pk^[2] xor pk^[7];
+        pk^[9] := pk^[3] xor pk^[8];
         if i = 7 then
-          exit;
-        pk^[10] := pk^[4] xor
-                   pk^[9];
-        pk^[11] := pk^[5] xor
-                   pk^[10];
-        inc(PByte(pk), 6 * 4);
+          break;
+        pk^[10] := pk^[4] xor pk^[9];
+        pk^[11] := pk^[5] xor pk^[10];
+        pk := @pk[6];
       end;
   else // 256
     for i := 0 to 6 do
     begin
-      temp := pk^[7];
-      // SubWord(RotWord(temp)) if "word" count mod 8 = 0
-      pk^[8] := ((sb[(temp shr 8) and $ff])) xor
-                ((sb[(temp shr 16) and $ff]) shl 8) xor
-                ((sb[(temp shr 24)]) shl 16) xor
-                ((sb[(temp) and $ff]) shl 24) xor
+      x := @pk^[7];
+      // SubWord(RotWord(x)) if "word" count mod 8 = 0
+      pk^[8] := ((sb[x[0]]) shl 24) xor
+                ((sb[x[1]])) xor
+                ((sb[x[2]]) shl 8) xor
+                ((sb[x[3]]) shl 16) xor
                 pk^[0] xor
                 RCon[i];
-      pk^[9] := pk^[1] xor
-                pk^[8];
-      pk^[10] := pk^[2] xor
-                 pk^[9];
-      pk^[11] := pk^[3] xor
-                 pk^[10];
+      pk^[9]  := pk^[1] xor pk^[8];
+      pk^[10] := pk^[2] xor pk^[9];
+      pk^[11] := pk^[3] xor pk^[10];
       if i = 6 then
-        exit;
-      temp := pk^[11];
-      // SubWord(temp) if "word" count mod 8 = 4
-      pk^[12] := ((sb[(temp) and $ff])) xor
-                 ((sb[(temp shr 8) and $ff]) shl 8) xor
-                 ((sb[(temp shr 16) and $ff]) shl 16) xor
-                 ((sb[(temp shr 24)]) shl 24) xor
+        break;
+      x := @pk^[11];
+      // SubWord(x) if "word" count mod 8 = 4
+      pk^[12] := ((sb[x[0]])) xor
+                 ((sb[x[1]]) shl 8) xor
+                 ((sb[x[2]]) shl 16) xor
+                 ((sb[x[3]]) shl 24) xor
                  pk^[4];
-      pk^[13] := pk^[5] xor
-                 pk^[12];
-      pk^[14] := pk^[6] xor
-                 pk^[13];
-      pk^[15] := pk^[7] xor
-                 pk^[14];
-      inc(PByte(pk), 8 * 4);
+      pk^[13] := pk^[5] xor pk^[12];
+      pk^[14] := pk^[6] xor pk^[13];
+      pk^[15] := pk^[7] xor pk^[14];
+      pk := @pk[8];
     end;
   end;
 end;
 
 // compute AES decryption key from encryption key
-procedure MakeDecrKeyPas(rounds: integer; k: PCardinalArray);
+procedure MakeDecrKeyAes(rounds: integer; k: PByteArray);
 var
-  x: cardinal;
   tab: PCardinalArray; // faster on a PIC system - Td# = tab[#*$100]
   sb: PByteArray;
 begin
   tab := @Td0;
   sb := @SBox;
+  dec(rounds);
   repeat
-    inc(PByte(k), 16);
+    k := @k[16];
+    PCardinal(@k[0])^  := tab[sb[k[0]]] xor
+                          tab[sb[k[1]] + $100] xor
+                          tab[sb[k[2]] + $200] xor
+                          tab[sb[k[3]] + $300];
+    PCardinal(@k[4])^  := tab[sb[k[4]]] xor
+                          tab[sb[k[5]] + $100] xor
+                          tab[sb[k[6]] + $200] xor
+                          tab[sb[k[7]] + $300];
+    PCardinal(@k[8])^  := tab[sb[k[8]]] xor
+                          tab[sb[k[9]]  + $100] xor
+                          tab[sb[k[10]] + $200] xor
+                          tab[sb[k[11]] + $300];
+    PCardinal(@k[12])^ := tab[sb[k[12]]] xor
+                          tab[sb[k[13]] + $100] xor
+                          tab[sb[k[14]] + $200] xor
+                          tab[sb[k[15]] + $300];
     dec(rounds);
-    x := k[0];
-    k[0] := tab[$300 + sb[x shr 24]] xor
-            tab[$200 + sb[x shr 16 and $ff]] xor
-            tab[$100 + sb[x shr 8 and $ff]] xor
-            tab[sb[x and $ff]];
-    x := k[1];
-    k[1] := tab[$300 + sb[x shr 24]] xor
-            tab[$200 + sb[x shr 16 and $ff]] xor
-            tab[$100 + sb[x shr 8 and $ff]] xor
-            tab[sb[x and $ff]];
-    x := k[2];
-    k[2] := tab[$300 + sb[x shr 24]] xor
-            tab[$200 + sb[x shr 16 and $ff]] xor
-            tab[$100 + sb[x shr 8 and $ff]] xor
-            tab[sb[x and $ff]];
-    x := k[3];
-    k[3] := tab[$300 + sb[x shr 24]] xor
-            tab[$200 + sb[x shr 16 and $ff]] xor
-            tab[$100 + sb[x shr 8 and $ff]] xor
-            tab[sb[x and $ff]];
-  until rounds = 1;
+  until rounds = 0;
 end;
 
 
@@ -3973,8 +4034,14 @@ begin
      (aesNi in ctx.Flags) then
     ShiftAesNi(KeySize, @ctx.RK)
   else
+  begin
+    if Td3[255] <> $d04257b8 then // last filled item for thread-safe late init
+      ComputeAesStaticTables;
+    ShiftAes(KeySize, pointer(@ctx.RK));
+  end;
+  {$else}
+  ShiftAes(KeySize, pointer(@ctx.RK)); // for ARM or
   {$endif USEAESNI}
-    ShiftPas(KeySize, pointer(@ctx.RK));
   result := true;
 end;
 
@@ -4023,7 +4090,7 @@ begin
   end
   else
   {$endif USEAESNI}
-    MakeDecrKeyPas(ctx.Rounds, @ctx.RK);
+    MakeDecrKeyAes(ctx.Rounds, @ctx.RK);
 end;
 
 function TAes.DecryptInit(const Key; KeySize: cardinal): boolean;
@@ -4220,6 +4287,10 @@ end;
 
 function AesTables: pointer;
 begin
+  {$ifdef USEAESNI}
+  if Td3[255] <> $d04257b8 then // last filled item for thread-safe delayed init
+    ComputeAesStaticTables;
+  {$endif USEAESNI}
   result := @TD0;
 end;
 
@@ -4247,6 +4318,7 @@ begin
             // validate the AES constants as generated by ComputeAesStaticTables
             (SBox[255] = $16) and
             (InvSBox[0] = $52) and
+            (InvSBox[255] = $7d) and
             (Te0[0] = $a56363c6) and
             (Te0[255] = $3a16162c) and
             (Te1[0] = $6363c6a5) and
@@ -7306,6 +7378,22 @@ begin
          (LowerCase(result) <> result));
 end;
 
+function TAesPrngAbstract.RandomSalt(var bin, b64: RawByteString;
+  defsiz: integer; const salt: RawUtf8; enc: PChar64; dec: PAnsiCharDec): boolean;
+begin
+  result := true;
+  if salt = '' then
+  begin
+    TAesPrng.Fill(FastNewRawByteString(bin, defsiz), defsiz); // CSPRNG
+    b64 := BinToBase64uri(bin, enc);
+  end
+  else if (dec <> nil) and
+          Base64uriToBin(pointer(salt), length(salt), bin, dec) then
+    b64 := salt
+  else
+    result := false;
+end;
+
 procedure TAesPrngAbstract.Seed;
 begin
   // do nothing
@@ -7425,11 +7513,8 @@ begin
   Create({pbkdf2rounds=}16);
 end;
 
-class function TAesPrng.Main: TAesPrngAbstract;
+function SetMainAesPrng: TAesPrng;
 begin
-  result := MainAesPrng;
-  if result <> nil then
-    exit;
   GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
   try
     if MainAesPrng = nil then
@@ -7438,6 +7523,13 @@ begin
     GlobalUnLock;
   end;
   result := MainAesPrng;
+end;
+
+class function TAesPrng.Main: TAesPrngAbstract;
+begin
+  result := MainAesPrng;
+  if result = nil then
+    result := SetMainAesPrng;
 end;
 
 var
@@ -7471,12 +7563,13 @@ begin
     // XOR with some "userland" entropy - it won't hurt
     sha3.Init(SHAKE_256); // used in XOF mode for variable-length output
     // system/process information used as salt/padding from mormot.core.os
-    sha3.Update(@StartupEntropy, SizeOf(StartupEntropy)); // 128-bit
     sha3.Update(Executable.Host);
     sha3.Update(Executable.User);
     sha3.Update(Executable.ProgramFullSpec);
     sha3.Update(OSVersionText);
     sha3.Update(@SystemInfo, SizeOf(SystemInfo));
+    // 256-bit of mormot.core.os randomness state with strong forward secrecy
+    sha3.Update(@SystemEntropy, SizeOf(SystemEntropy));
     // 512-bit from gsl_rng_taus2 as retrieved at startup for AesNiHash128()
     if AesNiHashAntiFuzzTable <> nil then
       sha3.Update(AesNiHashAntiFuzzTable, SizeOf(AesNiHashAntiFuzzTable^));
@@ -7503,7 +7596,7 @@ begin
         aes.EncryptInit(bits, 128); // for in-place diffusion
       end
       else
-        // 512-bit of perfect forward security using AES-CTR diffusion
+        // 512-bit of forward secrecy using AES-CTR diffusion
         aes.DoBlocksCtr({iv=}@data, @bits, @bits, length(bits.r));
       data := bits;
       safe.UnLock;
@@ -7873,7 +7966,7 @@ procedure Sha256CompressPas(var Hash: TShaHash; Data: pointer);
 var
   HW: packed record
     H: TShaHash;
-    W: array[0..63] of cardinal;
+    W: TBlock2048;
   end;
 begin
   // calculate "expanded message blocks"
@@ -7982,7 +8075,7 @@ end;
 
 procedure Sha256CompressPas(var Hash: TShaHash; Data: PCardinalArray);
 var
-  W: array[0..63] of cardinal; // expanded buffer
+  W: TBlock2048; // expanded buffer
 begin
   // calculate "expanded message blocks"
   bswap256(@Data[0], @W[0]); // 256-bit = 8 cardinals
@@ -8016,10 +8109,12 @@ end;
 { TSha256 }
 
 const
-  SHA256_INIT: array[0..7] of cardinal = (
-    $6a09e667, $bb67ae85, $3c6ef372, $a54ff53a, $510e527f, $9b05688c, $1f83d9ab, $5be0cd19);
-  SHA224_INIT: array[0..7] of cardinal = (
-    $c1059ed8, $367cd507, $3070dd17, $f70e5939, $ffc00b31, $68581511, $64f98fa7, $befa4fa4);
+  SHA256_INIT: TBlock256 = (
+    $6a09e667, $bb67ae85, $3c6ef372, $a54ff53a,
+    $510e527f, $9b05688c, $1f83d9ab, $5be0cd19);
+  SHA224_INIT: TBlock256 = (
+    $c1059ed8, $367cd507, $3070dd17, $f70e5939,
+    $ffc00b31, $68581511, $64f98fa7, $befa4fa4);
 
 procedure TSha256.Init;
 var
@@ -8059,8 +8154,7 @@ begin
       end
       else
         {$ifdef ASMX64} // try optimized Intel x86_64 asm over whole blocks
-        if (K256Aligned <> nil) and
-           (Len >= 64) then
+        if K256Aligned <> nil then
         begin
           if cfSHA in CpuFeatures then
             Sha256ni(Buffer^, Data.Hash, Len shr 6)     // Intel SHA HW opcodes
@@ -8069,7 +8163,7 @@ begin
           bytes := Len and (not 63); // all whole blocks have been added
         end
         else
-          Sha256CompressPas(Data.Hash, Buffer); // process one block on old CPU
+          Sha256CompressPas(Data.Hash, Buffer); // process on old CPU
         {$else}
         RawSha256Compress(Data.Hash, Buffer); // may be AARCH64 version
         {$endif ASMX64}
@@ -8321,7 +8415,15 @@ begin
         RawSha512Compress(Hash, @Data);
         Index := 0;
       end
-      else // avoid temporary copy
+      {$ifdef SHA512_X64}
+      else if (Len > SizeOf(Data)) and
+              (cfSSE41 in CpuFeatures) then
+      begin
+        sha512_sse4(Buffer, @Hash, Len shr 7);
+        aLen := Len and (not 127);
+      end
+      {$endif SHA512_X64}
+      else
         RawSha512Compress(Hash, Buffer);
       dec(Len, aLen);
       inc(PByte(Buffer), aLen);
@@ -9088,8 +9190,8 @@ begin
     SHA.Full(key, keylen, k0.Lo)
   else
     MoveFast(key^, k0, keylen);
-  XorBy128(@step7data, @k0, 15, $5c5c5c5c);
-  XorBy128(@k0, @k0, 15, $36363636);
+  Xor32By128(@step7data, @k0, 15, $5c5c5c5c);
+  Xor32By128(@k0, @k0, 15, $36363636);
   SHA.Init;
   SHA.Update(@k0, SizeOf(k0));
   FillZero(k0.b);
@@ -9118,6 +9220,12 @@ end;
 procedure THmacSha256.Update(const msg: RawByteString);
 begin
   SHA.Update(pointer(msg), length(msg));
+end;
+
+procedure THmacSha256.UpdateBigEndian(c: cardinal);
+begin
+  c := bswap32(c);
+  SHA.Update(@c, 4);
 end;
 
 procedure THmacSha256.Done(out result: TSha256Digest; NoInit: boolean);
@@ -9177,7 +9285,7 @@ end;
 { ****************** PBKDF2 Key Derivation over SHA-256 and SHA-3 }
 
 procedure Pbkdf2HmacSha256(const password, salt: RawByteString; count: integer;
-  out result: TSha256Digest; const saltdefault: RawByteString);
+  out result: TSha256Digest; const saltdefault: RawByteString; partnumber: integer);
 var
   i: integer;
   tmp: TSha256Digest;
@@ -9189,22 +9297,87 @@ begin
     mac.Update(saltdefault)
   else
     mac.Update(salt); 
-  PInteger(@tmp)^ := $01000000;
-  mac.Update(@tmp, 4);
-  mac.Done(result);
-  if count < 2 then
-    exit;
-  tmp := result;
-  for i := 2 to count do
+  mac.UpdateBigEndian(partnumber); // e.g. $01000000 for default 1
+  mac.Done(result, {noinit=}true);
+  if count > 1 then
   begin
-    mac := first;
-    mac.sha.Update(@tmp, SizeOf(tmp));
-    mac.Done(tmp, true);
-    XorMemoryPtrInt(@result, @tmp, SizeOf(result) shr POINTERSHR);
+    tmp := result;
+    for i := 2 to count do
+    begin
+      mac := first;
+      mac.sha.Update(@tmp, SizeOf(tmp));
+      mac.Done(tmp, true);
+      XorMemoryPtrInt(@result, @tmp, SizeOf(result) shr POINTERSHR);
+    end;
   end;
   FillcharFast(first, SizeOf(first), 0);
   FillcharFast(mac, SizeOf(mac), 0);
   FillZero(tmp);
+end;
+
+function Pbkdf2HmacSha256(const password, salt: RawByteString;
+  count, destlen: cardinal): RawByteString;
+var
+  l, r, part, i: cardinal;
+  ti: PHash256;
+  tmp: TSha256Digest;
+  mac, first: THmacSha256; // re-use SHA context for best performance
+begin
+  result := '';
+  if (count = 0) or
+     (count > 16 shl 20) or
+     (destlen = 0) or
+     (destlen > 512 shl 20) then
+    exit;
+  l := destlen shr 5;
+  r := destlen - (l * 32); // mod
+  if r <> 0 then
+    inc(l); // ceil()
+  // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, part)
+  ti := FastNewString(l * 32); // pre-allocate destination buffer
+  pointer(result) := ti;
+  first.Init(pointer(password), length(password));
+  if count = 1 then // optimze for this specific case e.g. from RawSCrypt()
+  begin
+    first.Update(salt);
+    if l = 1 then
+    begin
+      first.UpdateBigEndian(1); // single part output
+      first.Done(ti^, true);
+    end
+    else
+      for part := 1 to l do
+      begin
+        mac := first;
+        mac.UpdateBigEndian(part);
+        mac.Done(ti^, {noinit=}part < l);
+        inc(ti); // just concatenate each Ti
+      end;
+  end
+  else
+    for part := 1 to l do
+    begin
+      mac := first;
+      mac.Update(salt);
+      mac.UpdateBigEndian(part);
+      mac.Done(ti^, true);
+      tmp := ti^;
+      for i := 2 to count do
+      begin
+        mac := first;
+        mac.sha.Update(@tmp, SizeOf(tmp));
+        mac.Done(tmp, true);
+        XorMemoryPtrInt(pointer(ti), @tmp, SizeOf(ti^) shr POINTERSHR);
+      end;
+      inc(ti); // just concatenate each Ti
+    end;
+  FillcharFast(first, SizeOf(first), 0);
+  if (count <> 1) or
+     (l <> 1) then
+    FillcharFast(mac, SizeOf(mac), 0);
+  FillZero(tmp);
+  if r <> 0 then
+    FakeLength(result, destlen); // truncate to the expected destination size
 end;
 
 procedure Pbkdf2Sha3(algo: TSha3Algo; const password, salt: RawByteString;
@@ -10209,17 +10382,13 @@ end;
 procedure InitializeUnit;
 {$ifdef USEARMCRYPTO}
 var
-  rk: TKeyArray;
   bi, bo: TAesBlock;
-  shablock: THash512;
   i: PtrInt;
 {$endif USEARMCRYPTO}
-{$ifdef ASMX64}
-var
-  dummy: THash256;
-{$endif ASMX64}
 begin
-  ComputeAesStaticTables;
+  {$ifndef USEAESNI}
+  ComputeAesStaticTables; // ARM or pure pascal would need those tables anyway
+  {$endif USEAESNI}
   {$ifdef ASMX64}
   {$ifdef CRC32C_X64}
   if (cfSSE42 in CpuFeatures) and
@@ -10239,15 +10408,10 @@ begin
     // optimized Intel's .asm using SSE4 or SHA-NI HW opcodes
     K256Aligned := @K256;
     if PtrUInt(K256Aligned) and 15 <> 0 then
-    begin
-      if K256AlignedStore = '' then
-        GetMemAligned(K256AlignedStore, @K256, SizeOf(K256), K256Aligned);
-      if PtrUInt(K256Aligned) and 15 <> 0 then
-        K256Aligned := nil; // paranoid
-    end;
+      K256Aligned := GetMemAligned(SizeOf(K256), @K256);
     if cfSHA in CpuFeatures then // detect cpuid with SSE4.1 + SHA opcodes
       try
-        Sha256ni(dummy, dummy, 1);
+        Sha256ni(SystemEntropy, SystemEntropy, 1); // cryptographic shuffle
       except
         // Intel SHA256 HW opcodes seem not available
         exclude(CpuFeatures, cfSHA);
@@ -10259,10 +10423,10 @@ begin
      (cfSSE3 in CpuFeatures) then   // PSHUFB
   begin
     // 32/64/128-bit aesnihash as implemented in Go runtime, using aesenc opcode
-    GetMemAligned(AesNiHashMem, nil, 16 * 4, AesNiHashKey, {align=}16);
+    AesNiHashKey := GetMemAligned(16 * 4);
     AesNiHashAntiFuzzTable := AesNiHashKey;
-    XorMemory(PHash128Rec(AesNiHashKey)^, StartupEntropy); // 128-bit salt
-    SharedRandom.Fill(AesNiHashKey, 16 * 4); // 512-bit of TLecuyer seed
+    Xor512(pointer(AesNiHashKey), @SystemEntropy); // 512-bit system salt
+    SharedRandom.Fill(AesNiHashKey, 16 * 4);       // 512-bit of TLecuyer seed
     AesNiHash32      := @_AesNiHash32;
     AesNiHash64      := @_AesNiHash64;
     AesNiHash128     := @_AesNiHash128;
@@ -10275,7 +10439,7 @@ begin
   {$ifdef USEARMCRYPTO}
   if ahcAes in CpuFeatures then
     try
-      aesencryptarm128(@rk, @bi, @bo); // apply to stack random
+      aesencryptarm128(@TD0, @bi, @bo); // try HW opcodes over stack random
       AesArmAvailable := true;
     except
       // ARMv8 AES HW opcodes seem not available
@@ -10283,7 +10447,7 @@ begin
     end;
   if ahcPmull in CpuFeatures then
     try
-      gf_mul_h_arm(@bi, @bo); // apply to stack random
+      gf_mul_h_arm(@bi, @bo); // try HW opcodes over stack random
       PmullArmAvailable := true;
     except
       // ARMv8 PMULL HW opcodes seem not available
@@ -10291,7 +10455,7 @@ begin
     end;
   if ahcSha2 in CpuFeatures then
     try
-      sha256_block_data_order(@rk, @shablock, 1);
+      sha256_block_data_order(@SystemEntropy, @SystemEntropy, 1); // shuffle
       ShaArmAvailable := true;
     except
       // ARMv8 SHA HW opcodes seem not available
@@ -10323,6 +10487,14 @@ end;
 
 procedure FinalizeUnit;
 begin
+  {$ifdef ASMX64}
+  if K256Aligned <> @K256 then
+    FreeMemAligned(K256Aligned, SizeOf(K256Aligned^));
+  {$endif ASMX64}
+  {$ifdef USEAESNIHASH}
+  if AesNiHashKey <> nil then
+    FreeMemAligned(AesNiHashKey, SizeOf(AesNiHashKey^));
+  {$endif USEAESNIHASH}
   {$ifdef USE_PROV_RSA_AES}
   if (CryptoApiAesProvider <> nil) and
      (CryptoApiAesProvider <> HCRYPTPROV_NOTTESTED) then

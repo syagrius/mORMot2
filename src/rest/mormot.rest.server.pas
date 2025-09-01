@@ -4405,7 +4405,7 @@ begin
       name := fInput[ndx * 2];
       if InterfaceMethod <> nil then
       begin
-        a := InterfaceMethod.ArgIndex(pointer(name), length(name), {input=}true);
+        a := InterfaceMethod.ArgIndexInput(pointer(name), length(name));
         forcestring := (a >= 0) and
                        (rcfJsonString in InterfaceMethod.Args[a].ArgRtti.Flags);
       end
@@ -5222,7 +5222,7 @@ begin
     ServerNonceCache[false].safe.Lock;
     if PInteger(@ServerProcessKdf)^ = 0 then // ensure thread-safe
     begin
-      ServerProcessKdf.Init(@StartupEntropy, SizeOf(StartupEntropy)); // salt
+      ServerProcessKdf.Init(@SystemEntropy, SizeOf(SystemEntropy)); // salt
       ServerProcessKdf.Update(tmp);
     end;
     ServerNonceCache[false].safe.UnLock;

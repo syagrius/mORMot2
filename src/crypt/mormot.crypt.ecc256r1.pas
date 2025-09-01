@@ -1205,7 +1205,7 @@ const
   MAX_TRIES = 16; // work almost always on the first trial with TAesPrng
 
 var
-  EccMakeEntropy: THash128Rec; // ensure perfect forward security
+  EccMakeEntropy: THash128Rec; // ensure forward secrecy
 
 function ecc_make_key_pas(out PublicKey: TEccPublicKey;
   out PrivateKey: TEccPrivateKey): boolean;
@@ -2106,7 +2106,7 @@ initialization
   @Ecc256r1Uncompress   := @ecc_uncompress_key_pas;
   @Ecc256r1VerifyUncomp := @ecdsa_verify_uncompressed_pas;
   // setup ecc_make_key_pas() entropy source
-  EccMakeEntropy := StartupEntropy;
+  EccMakeEntropy := SystemEntropy.Startup;
 
 end.
 

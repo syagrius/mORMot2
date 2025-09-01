@@ -58,7 +58,11 @@
 // - you can enable it if you find out some compatibility problem
 
 {$ifdef CPUX86}
-  {.$define HASNOSSE2} // force x87 code on very very old CPU
+  {.$define HASNOSSE2}
+  // if defined, bypass SSE2 asm on i386 and fallback to pascal code or x87 asm
+  // - SSE2 was introduced with Intel’s Pentium 4 (2000) so we assume it
+  // - Windows requires SSE2 since XP SP2, and FireFox/Chrome since 2017
+  // - we keep this possibility for specific applications on deprecated HW
 {$endif CPUX86}
 
 {.$define NOSYNDBZEOS}
@@ -132,7 +136,7 @@
     HASITERATORS HASIMPLICITOPERATOR HASDBFTWIDE HASDBFNEW
     HASTTHREADSTART HASTTHREADTERMINATESET HASINTERFACEASTOBJECT
     HASEXTRECORDRTTI
-    CPU32 CPU64 CPUINTEL CPUX86 CPUX64 CPUARM3264 CPUARM CPUAARCH64
+    CPU32 CPU64 CPUINTEL CPUX86 CPUX64 CPUSSE2 CPUARM3264 CPUARM CPUAARCH64
     CPUX86NOTPIC CPUX64ASM ASMINTEL ASMX86 ASMX64AVX ASMX64AVXNOCONST HASAESNI
     TSYNEXTENDED80 EXTENDEDTOSHORT_USESTR DOUBLETOSHORT_USEGRISU HASSLOWMUL64
     OSWINDOWS OSPOSIX OSBSD OSDARWIN OSBSDDARWIN OSOPENBSD OSFREEBSD
@@ -789,6 +793,12 @@
     {$define OSLINUXINTEL}
     {$define OSLINUXX64}
   {$endif CPUX64}
+  {$ifdef CPU32}
+    {$define OSLINUX32}
+  {$endif CPU32}
+  {$ifdef CPU64}
+    {$define OSLINUX64}
+  {$endif CPU64}
 {$endif OSLINUX}
 {$ifdef OSANDROID}
   {$define OSLINUXANDROID}
@@ -806,6 +816,7 @@
 // -----------
 // -- CPU specific conditionals
 
+{$undef CPUSSE2}
 {$ifdef CPUINTEL}
   {$ifdef OSWINDOWS}
     {$define OSWINTEL}
@@ -825,6 +836,13 @@
     {$endif CPUX64}
   {$endif OSPOSIX}
   {$define CPUINTELARM}
+  {$ifdef CPUX86}
+    {$ifndef HASNOSSE2} // conditional to compile for oldest CPUs
+      {$define CPUSSE2}
+    {$endif HASNOSSE2}
+  {$else}
+    {$define CPUSSE2} // x86_64 has SSE2
+  {$endif CPUX86}
 {$else}
   {$ifdef OSWINDOWS}
     {$ifdef CPUAARCH64}

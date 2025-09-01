@@ -832,6 +832,10 @@ function NextGrow(capacity: integer): integer;
 // - e.g. NextPowerOfTwo(3) = NextPowerOfTwo(4) = 4
 function NextPowerOfTwo(number: cardinal): cardinal;
 
+/// quickly check if the number is a power-of-two
+function IsPowerOfTwo(number: PtrUInt): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// equivalence to SetString(s,pansichar,len) function but from a raw pointer
 // - so works with both PAnsiChar and PUtf8Char input buffer (or even PByteArray)
 // - faster especially under FPC
@@ -937,13 +941,6 @@ function GetCodePage(const s: RawByteString): cardinal; inline;
 // - StringRefCount() is not available on oldest Delphi
 function GetRefCount(const s: RawByteString): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
-
-/// initialize a RawByteString, ensuring returned "aligned" pointer
-// is 16-bytes aligned
-// - to be used e.g. for proper SIMD process
-// - you can specify an alternate alignment, but it should be a power of two
-procedure GetMemAligned(var holder: RawByteString; fillwith: pointer; len: PtrUInt;
-  out aligned: pointer; alignment: PtrUInt = 16);
 
 /// equivalence to @u[1] expression to ensure a RawUtf8 variable is unique
 // - will ensure that the string refcount is 1, and return a pointer to the text
@@ -2344,7 +2341,7 @@ type
   PHash224 = ^THash224;
 
   /// store a 256-bit hash value in 32 bytes of memory
-  // - e.g. a SHA-256 digest, a TEccSignature result, or array[0..7] of cardinal
+  // - e.g. a SHA-256 digest, a TEccSignature result, or TBlock256
   THash256 = array[0..31] of byte;
   /// pointer to a 256-bit hash value
   PHash256 = ^THash256;
@@ -2356,7 +2353,7 @@ type
   PHash384 = ^THash384;
 
   /// store a 512-bit hash value in 64 bytes of memory
-  // - e.g. a SHA-512 digest, a TEccSignature result, or array[0..15] of cardinal
+  // - e.g. a SHA-512 digest, a TEccSignature result, or TBlock512
   THash512 = array[0..63] of byte;
   /// pointer to a 512-bit hash value
   PHash512 = ^THash512;
@@ -2366,7 +2363,14 @@ type
   TBlock128 = array[0..3] of cardinal;
   /// pointer to a 128-bit buffer
   PBlock128 = ^TBlock128;
-
+  /// store a 256-bit buffer of 32 bytes, indexed as 32-bit items
+  TBlock256 = array[0..7] of cardinal;
+  /// pointer to a 256-bit buffer, i.e. 32 bytes
+  PBlock256 = ^TBlock256;
+  /// store a 512-bit buffer of 64 bytes, indexed as 32-bit items
+  TBlock512 = array[0..15] of cardinal;
+  /// pointer to a 512-bit buffer, i.e. 64 bytes
+  PBlock512 = ^TBlock512;
   /// store a 1024-bit buffer of 128 bytes, indexed as 32-bit items
   TBlock1024 = array[0..31] of cardinal;
   /// pointer to a 1024-bit buffer, i.e. 128 bytes
@@ -2409,7 +2413,7 @@ type
   /// pointer to an infinite array of 256-bit hash values
   PHash256Array = ^THash256Array;
   /// store several 256-bit hash values
-  // - e.g. SHA-256 digests, TEccSignature results, or array[0..7] of cardinal
+  // - e.g. SHA-256 digests, TEccSignature results, or TBlock256
   // - consumes 32 bytes of memory per item
   THash256DynArray = array of THash256;
 
@@ -2423,7 +2427,7 @@ type
       3: (c0, c1: TBlock128);
       4: (b: THash256);
       5: (q: array[0..3] of QWord);
-      6: (c: array[0..7] of cardinal);
+      6: (c: TBlock256);
       7: (w: array[0..15] of word);
       8: (l, h: THash128Rec);
       9: (sha1: THash160);
@@ -2442,7 +2446,7 @@ type
   /// pointer to an infinite array of 512-bit hash values
   PHash512Array = ^THash512Array;
   /// store several 512-bit hash values
-  // - e.g. SHA-512 digests, or array[0..15] of cardinal
+  // - e.g. SHA-512 digests, or TBlock512
   // - consumes 64 bytes of memory per item
   THash512DynArray = array of THash512;
 
@@ -2461,7 +2465,7 @@ type
       7:  (b224: THash224);
       8:  (b384: THash384);
       9:  (w: array[0..31] of word);
-      10: (c: array[0..15] of cardinal);
+      10: (c: TBlock512);
       11: (i: array[0..7] of Int64);
       12: (q: array[0..7] of QWord);
       13: (r: array[0..3] of THash128Rec);
@@ -3280,6 +3284,9 @@ type
   // - when used as random generator (default when initialized with 0), Seed()
   // will gather and hash some system entropy to initialize the internal state
   // - you can seed and use your own TLecuyer (threadvar) instance, if needed
+  // - generation numbers are very good for such a simple and proven algorithm:
+  // $   Lecuyer Random32 in 708us i.e. 134.7M/s, aver. 7ns, 538.8 MB/s
+  // $   Lecuyer RandomBytes in 3.75ms, 254.3 MB/s
   {$ifdef USERECORDWITHMETHODS}
   TLecuyer = record
   {$else}
@@ -3611,7 +3618,7 @@ procedure XorMemory(Dest, Source: PByteArray; size: PtrInt); overload;
 procedure XorMemory(Dest, Source1, Source2: PByteArray; size: PtrInt); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical XOR of two 128-bit memory buffers
+/// logical XOR of two 128-bit / 16-byte memory buffers
 procedure XorMemory(var Dest: THash128Rec;
   {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec); overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -4911,6 +4918,11 @@ begin // O(1) branchless algorithm for 32-bit values
   result := result or (result shr 4);
   result := result or (result shr 8);
   result := (result or (result shr 16)) + 1;
+end;
+
+function IsPowerOfTwo(number: PtrUInt): boolean;
+begin
+  result := (number and (number - 1) = 0);
 end;
 
 {$ifndef FPC_CPUX64} // dedicated asm on x86_64 only
@@ -10027,7 +10039,7 @@ begin // Linear Feedback Shift Register (LFSR) - not inlined for better codegen
 end; // use masks of rs1:-2=31-bit rs2:-8=29-bit rs3:-16=28-bit -> 2^88 period
 
 var // filled by TestCpuFeatures from Intel cpuid/rdtsc/random and/or Linux auxv
-  LecuyerEntropy: THash512Rec; // nothing on BSD/Mac but XorEntropy() is enough
+  LecuyerEntropy: THash512Rec; // void on BSD/Mac ARM but XorEntropy() is enough
 
 procedure TLecuyer.Seed(entropy: PByteArray; entropylen: PtrInt);
 var
@@ -10039,7 +10051,7 @@ begin
   if entropy <> nil then
     crc32c128(@e.h0, pointer(entropy), entropylen); // user-supplied entropy
   XorEntropy(e); // xor 512-bit from _Fill256FromOs + thread + RdRand32 + Rdtsc
-  LecuyerEntropy := e; // forward security
+  LecuyerEntropy := e; // forward secrecy
   DefaultHasher128(@h, @e, SizeOf(e)); // may be AesNiHash128
   rs1 := MaxPtrUInt(rs1 xor h.c0, 2);  // mask = -2 in RawNext
   rs2 := MaxPtrUInt(rs2 xor h.c1, 8);  // mask = -8
@@ -13585,8 +13597,8 @@ begin
   // setup minimalistic global functions - overriden by other core units
   VariantClearSeveral      := @_VariantClearSeveral;
   SortDynArrayVariantComp  := @_SortDynArrayVariantComp;
-  _Fill256FromOs := @__Fill256FromOs;
-  ClassUnit      := @_ClassUnit;
+  _Fill256FromOs           := @__Fill256FromOs;
+  ClassUnit                := @_ClassUnit;
   // initialize CPU-specific asm
   TestCpuFeatures;
   {$ifndef ASMINTEL}

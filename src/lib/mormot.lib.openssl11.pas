@@ -254,7 +254,12 @@ const
   LIB_CRYPTO = LIB_CRYPTO1;  // for external LIB_CRYPTO function definitions
   LIB_SSL    = LIB_SSL1;     // for external LIB_SSL    function definitions
 
+  OpenSslStatic = true;
+
 {$else}
+
+const
+  OpenSslStatic = false;
 
 var
   /// internal flag used by OpenSslIsAvailable function for dynamic loading
@@ -490,6 +495,9 @@ const
   SN_delta_crl = 'deltaCRL';
   LN_delta_crl = 'X509v3 Delta CRL Indicator';
   NID_delta_crl = 140;
+  SN_id_scrypt = 'id-scrypt';
+  LN_id_scrypt = 'scrypt';
+  NID_id_scrypt = 973;
 
   EVP_PKEY_RSA = NID_rsaEncryption;
   EVP_PKEY_DSA = NID_dsa;
@@ -498,6 +506,7 @@ const
   EVP_PKEY_EC = NID_X9_62_id_ecPublicKey;
   EVP_PKEY_ED25519 = NID_ED25519;
   EVP_PKEY_POLY1305 = NID_poly1305;
+  EVP_PKEY_SCRYPT = NID_id_scrypt;
   EVP_PKEY_OP_PARAMGEN = 1 shl 1;
   EVP_PKEY_OP_KEYGEN = 1 shl 2;
   EVP_PKEY_ALG_CTRL = $1000;
@@ -2512,6 +2521,13 @@ function EVP_PKEY_keygen_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
 function EVP_PKEY_keygen(ctx: PEVP_PKEY_CTX; ppkey: PPEVP_PKEY): integer; cdecl;
 function EVP_PKEY_CTX_ctrl(ctx: PEVP_PKEY_CTX; keytype: integer; optype: integer;
   cmd: integer; p1: integer; p2: pointer): integer; cdecl;
+function EVP_PKEY_CTX_set1_pbe_pass(ctx: PEVP_PKEY_CTX;
+  pass: PAnsiChar; passlen: integer): integer; cdecl;
+function EVP_PKEY_CTX_set1_scrypt_salt(ctx: PEVP_PKEY_CTX;
+  salt: PByte; saltlen: integer): integer; cdecl;
+function EVP_PKEY_CTX_set_scrypt_N(ctx: PEVP_PKEY_CTX; n: QWord): integer; cdecl;
+function EVP_PKEY_CTX_set_scrypt_r(ctx: PEVP_PKEY_CTX; r: QWord): integer; cdecl;
+function EVP_PKEY_CTX_set_scrypt_p(ctx: PEVP_PKEY_CTX; p: QWord): integer; cdecl;
 function EVP_PKEY_CTX_new(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
 procedure EVP_PKEY_CTX_free(ctx: PEVP_PKEY_CTX); cdecl;
 function EVP_PKEY_derive_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
@@ -2725,6 +2741,17 @@ function LoadPkcs12(const Der: RawByteString): PPKCS12;
 // call CA^.FreeX509 if one is allocated
 function ParsePkcs12(const Saved: RawByteString; const Password: SpiUtf8;
   out Cert: PX509; out PrivateKey: PEVP_PKEY; CA: PPstack_st_X509 = nil): boolean;
+
+/// low-level SCrypt hash computation as available since OpenSSL 3.x
+// - see http://www.tarsnap.com/scrypt.html and RFC 7914
+// - OpenSSL is slower than mormot.crypt.other.pas i386/x86_64 tuned SSE2 code:
+// $ on Win32:     RawSCrypt in 101ms, OpenSslScrypt in 157ms
+// $ on Win64:     RawSCrypt in 92ms,  OpenSslScrypt in 124ms
+// $ on Linux x64: RawSCrypt in 74ms,  OpenSslScrypt in 103ms
+// - assigned with OpenSSL 3.x to mormot.crypt.core.pas SCrypt() redirection on
+// non-Intel (e.g. ARM) platforms - where RawSCrypt() is less optimized
+function OpenSslSCrypt(const Password: RawUtf8; const Salt: RawByteString;
+  N, R, P, DestLen: PtrUInt): RawByteString;
 
 type
   /// a convenient PX509 array wrapper to leverage mormot.core.os.pas PEM cache
@@ -3632,6 +3659,11 @@ type
     EVP_PKEY_keygen_init: function(ctx: PEVP_PKEY_CTX): integer; cdecl;
     EVP_PKEY_keygen: function(ctx: PEVP_PKEY_CTX; ppkey: PPEVP_PKEY): integer; cdecl;
     EVP_PKEY_CTX_ctrl: function(ctx: PEVP_PKEY_CTX; keytype: integer; optype: integer; cmd: integer; p1: integer; p2: pointer): integer; cdecl;
+    EVP_PKEY_CTX_set1_pbe_pass: function(ctx: PEVP_PKEY_CTX; pass: PAnsiChar; passlen: integer): integer; cdecl;
+    EVP_PKEY_CTX_set1_scrypt_salt: function(ctx: PEVP_PKEY_CTX; salt: PByte; saltlen: integer): integer; cdecl;
+    EVP_PKEY_CTX_set_scrypt_N: function(ctx: PEVP_PKEY_CTX; n: QWord): integer; cdecl;
+    EVP_PKEY_CTX_set_scrypt_r: function(ctx: PEVP_PKEY_CTX; r: QWord): integer; cdecl;
+    EVP_PKEY_CTX_set_scrypt_p: function(ctx: PEVP_PKEY_CTX; p: QWord): integer; cdecl;
     EVP_PKEY_CTX_new: function(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
     EVP_PKEY_CTX_free: procedure(ctx: PEVP_PKEY_CTX); cdecl;
     EVP_PKEY_derive_init: function(ctx: PEVP_PKEY_CTX): integer; cdecl;
@@ -3655,7 +3687,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..343] of PAnsiChar = (
+  LIBCRYPTO_ENTRIES: array[0..348] of PAnsiChar = (
     'CRYPTO_malloc',
     'CRYPTO_set_mem_functions',
     'CRYPTO_free',
@@ -3980,6 +4012,11 @@ const
     'EVP_PKEY_keygen_init',
     'EVP_PKEY_keygen',
     'EVP_PKEY_CTX_ctrl',
+    '?EVP_PKEY_CTX_set1_pbe_pass', // macros, not real functions on OpenSSL 1.1
+    '?EVP_PKEY_CTX_set1_scrypt_salt',
+    '?EVP_PKEY_CTX_set_scrypt_N',
+    '?EVP_PKEY_CTX_set_scrypt_r',
+    '?EVP_PKEY_CTX_set_scrypt_p',
     'EVP_PKEY_CTX_new',
     'EVP_PKEY_CTX_free',
     'EVP_PKEY_derive_init',
@@ -5720,6 +5757,49 @@ begin
   result := libcrypto.EVP_PKEY_CTX_ctrl(ctx, keytype, optype, cmd, p1, p2);
 end;
 
+function EVP_PKEY_CTX_set1_pbe_pass(ctx: PEVP_PKEY_CTX;
+  pass: PAnsiChar; passlen: integer): integer;
+begin
+  if Assigned(libcrypto.EVP_PKEY_CTX_set1_pbe_pass) then
+    result := libcrypto.EVP_PKEY_CTX_set1_pbe_pass(ctx, pass, passlen)
+  else
+    result := 0; // defined as macro in deprecated openssl 1.1
+end;
+
+function EVP_PKEY_CTX_set1_scrypt_salt(ctx: PEVP_PKEY_CTX;
+  salt: PByte; saltlen: integer): integer;
+begin
+  if Assigned(libcrypto.EVP_PKEY_CTX_set1_scrypt_salt) then
+    result := libcrypto.EVP_PKEY_CTX_set1_scrypt_salt(ctx, salt, saltlen)
+  else
+    result := 0; // defined as macro in deprecated openssl 1.1
+end;
+
+
+function EVP_PKEY_CTX_set_scrypt_N(ctx: PEVP_PKEY_CTX; n: QWord): integer; cdecl;
+begin
+  if Assigned(libcrypto.EVP_PKEY_CTX_set_scrypt_N) then
+    result := libcrypto.EVP_PKEY_CTX_set_scrypt_N(ctx, n)
+  else
+    result := 0; // defined as macro in deprecated openssl 1.1
+end;
+
+function EVP_PKEY_CTX_set_scrypt_r(ctx: PEVP_PKEY_CTX; r: QWord): integer; cdecl;
+begin
+  if Assigned(libcrypto.EVP_PKEY_CTX_set_scrypt_r) then
+    result := libcrypto.EVP_PKEY_CTX_set_scrypt_r(ctx, r)
+  else
+    result := 0; // defined as macro in deprecated openssl 1.1
+end;
+
+function EVP_PKEY_CTX_set_scrypt_p(ctx: PEVP_PKEY_CTX; p: QWord): integer; cdecl;
+begin
+  if Assigned(libcrypto.EVP_PKEY_CTX_set_scrypt_p) then
+    result := libcrypto.EVP_PKEY_CTX_set_scrypt_p(ctx, p)
+  else
+    result := 0; // defined as macro in deprecated openssl 1.1
+end;
+
 function EVP_PKEY_CTX_new(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX;
 begin
   result := libcrypto.EVP_PKEY_CTX_new(pkey, e);
@@ -7240,6 +7320,23 @@ function EVP_PKEY_keygen(ctx: PEVP_PKEY_CTX; ppkey: PPEVP_PKEY): integer; cdecl;
 function EVP_PKEY_CTX_ctrl(ctx: PEVP_PKEY_CTX; keytype: integer; optype: integer;
   cmd: integer; p1: integer; p2: pointer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_ctrl';
+
+function EVP_PKEY_CTX_set1_pbe_pass(ctx: PEVP_PKEY_CTX;
+  pass: PAnsiChar; passlen: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_set1_pbe_pass';
+
+function EVP_PKEY_CTX_set1_scrypt_salt(ctx: PEVP_PKEY_CTX;
+  salt: PByte; saltlen: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_set1_scrypt_salt';
+
+function EVP_PKEY_CTX_set_scrypt_N(ctx: PEVP_PKEY_CTX; n: QWord): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_set_scrypt_N';
+
+function EVP_PKEY_CTX_set_scrypt_r(ctx: PEVP_PKEY_CTX; r: QWord): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_set_scrypt_r';
+
+function EVP_PKEY_CTX_set_scrypt_p(ctx: PEVP_PKEY_CTX; p: QWord): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_set_scrypt_p';
 
 function EVP_PKEY_CTX_new(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_new';
@@ -10598,6 +10695,44 @@ begin
   pkcs12 := LoadPkcs12(Saved);
   result := pkcs12.Extract(Password, @PrivateKey, @Cert, CA);
   pkcs12.Free;
+end;
+
+function OpenSslSCrypt(const Password: RawUtf8; const Salt: RawByteString;
+  N, R, P, DestLen: PtrUInt): RawByteString;
+var
+  ctx: PEVP_PKEY_CTX;
+  len: PtrUInt;
+begin
+  result := '';
+  // validate parameters
+  if (DestLen < 16) or
+     (N <= 1) or
+     (N >= PtrUInt(1 shl 31)) or
+     (not IsPowerOfTwo(N)) or  // must be a power of 2 greater than 1
+     (R = 0) or                // R = blocksize
+     (P = 0) or                // P = parallel
+     (QWord(R) * QWord(N) * 128 >= 1 shl 30) or // consume up to 1GB of RAM
+     (R * P >= 1 shl 30) then                   // must satisfy r * p < 2^30
+    exit;
+  ctx := EVP_PKEY_CTX_new_id(EVP_PKEY_SCRYPT, nil);
+  if ctx <> nil then
+  try
+    // setup parameters
+    if (EVP_PKEY_derive_init(ctx) <= 0) or
+       (EVP_PKEY_CTX_set1_pbe_pass(ctx, pointer(Password), Length(Password)) <= 0) or
+       (EVP_PKEY_CTX_set1_scrypt_salt(ctx, pointer(Salt), length(Salt)) <= 0) or
+       (EVP_PKEY_CTX_set_scrypt_N(ctx, N) <= 0) or
+       (EVP_PKEY_CTX_set_scrypt_r(ctx, R) <= 0) or
+       (EVP_PKEY_CTX_set_scrypt_p(ctx, P) <= 0) then
+      exit;
+   // derive key
+   len := DestLen;
+   if (EVP_PKEY_derive(ctx, FastNewRawByteString(result, len), @len) <= 0) or
+      (len <> DestLen) then
+     result := '';
+  finally
+    EVP_PKEY_CTX_free(ctx);
+  end;
 end;
 
 function PX509DynArrayToPem(const X509: PX509DynArray): RawUtf8;

@@ -1864,8 +1864,7 @@ var
   /// some open-minded options for the JSON parser
   // - as supplied to LoadJson() with Tolerant=true
   // - won't block JSON unserialization due to some minor unexpected values
-  // - used e.g. by TObjArraySerializer.CustomReader and
-  // TInterfacedObjectFake.FakeCall/TServiceMethodExecute.ExecuteJson methods
+  // - as used e.g. by TInterfacedObjectFake and TServiceMethodExecute
   // - defined as var, not as const, to allow process-wide override
   JSONPARSER_TOLERANTOPTIONS: TJsonParserOptions =
     [jpoHandleCustomVariants, jpoIgnoreUnknownEnum,
@@ -2114,9 +2113,9 @@ procedure JsonEncodeNameSQLValue(const Name, SQLValue: RawUtf8;
 
 
 var
-  /// the options used by TObjArraySerializer, TInterfacedObjectFake and
-  // TServiceMethodExecute when serializing values as JSON
-  // - used as DEFAULT_WRITEOPTIONS[DontStoreVoidJson]
+  /// the options used when serializing values as JSON
+  // - mainly by TInterfacedObjectFake and TServiceMethodExecute
+  // - to be used as DEFAULT_WRITEOPTIONS[DontStoreVoidJson]
   // - you can modify this global variable to customize the whole process
   DEFAULT_WRITEOPTIONS: array[boolean] of TTextWriterWriteObjectOptions = (
     [woDontStoreDefault, woRawBlobAsBase64],
@@ -5157,7 +5156,10 @@ begin
     W.AddShort4(JSON_SQLDATE_MAGIC_QUOTE_C)
   else if PInt64(Value)^ = 0 then
   begin
-    W.AddShort4(NULL_LOW);
+    if woDateTimeNullAsVoidString in Options then
+      W.Add('"', '"') // legacy mORMot 1 format
+    else
+      W.AddShort4(NULL_LOW);
     exit;
   end
   else

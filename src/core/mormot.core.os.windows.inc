@@ -2939,6 +2939,16 @@ begin
   // nothing to be done on Windows: PAGE_EXECUTE_READWRITE always work
 end;
 
+function _GetLargeMem(BigSize: PtrUInt): pointer;
+begin
+  result := VirtualAlloc(nil, BigSize, MEM_COMMIT, PAGE_READWRITE);
+end;
+
+procedure _FreeLargeMem(p: pointer; BigSize: PtrUInt);
+begin
+  VirtualFree(p, 0, MEM_RELEASE);
+end;
+
 
 { ****************** Operating System Specific Types (e.g. TWinRegistry) }
 
@@ -4783,7 +4793,8 @@ begin
     RedirectCode(@ByteScanIndex,    @ByteScanIndexPas);
     RedirectCode(@IntegerScanIndex, @IntegerScanIndexPas);
     RedirectCode(@WordScanIndex,    @WordScanIndexPas);
-    // note: FillCharFast is handled by mormot.core.base via ERMSB
+    // note: FillCharFast is handled by mormot.core.base via ERMSB, but some
+    // other (e.g. crypto) code is likely to fail at runtime - use HASNOSSE2
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86}
@@ -5042,15 +5053,11 @@ begin
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
-  CoCreateGuid(StartupEntropy); // very fast, and won't hurt
-  {$ifdef CPUINTEL}
-  if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
-    StartupEntropy.Lo := StartupEntropy.Lo xor Rdtsc; // fast and unpredictable
-  RdRand32(@StartupEntropy.c2, 2); // no-op on older CPUs
-  {$endif CPUINTEL}
-  crc32c128(@StartupEntropy, @SystemInfo, SizeOf(SystemInfo));
-  crc32c128(@StartupEntropy, @mem, SizeOf(mem));
-  crc32c128(@StartupEntropy, @OSVersionInfo, SizeOf(OSVersionInfo));
+  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique (but not strong)
+  SystemEntropy.Startup := SystemEntropy.LiveFeed;
+  crc32c128(@SystemEntropy.Startup, @SystemInfo, SizeOf(SystemInfo));
+  crc32c128(@SystemEntropy.Startup, @mem, SizeOf(mem));
+  crc32c128(@SystemEntropy.Startup, @OSVersionInfo, SizeOf(OSVersionInfo));
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 

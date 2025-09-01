@@ -3452,12 +3452,12 @@ begin
 end;
 
 const
-  REF_LECUYER_GENERATOR: array[0..15] of cardinal = (
+  REF_LECUYER_GENERATOR: TBlock512 = (
     2094674600, 1801471443, 1564436181, 3659342702,
     1831620425, 3729943674, 687904812,  2066320563,
     3494904290, 3023528103, 1358263417, 3202492728,
     1577967257, 3235083616, 712712534,  1900728807);
-  REF_LECUYER_GENERATOR_TRAIL: array[0..15] of cardinal = (
+  REF_LECUYER_GENERATOR_TRAIL: TBlock512 = (
     2912814506, 4264204172, 1224264557, 457988427,
     3671383357, 2304790299, 1068635130, 1812365788,
     18904424,   1385490254, 3829840815, 3086100873,
@@ -4055,6 +4055,21 @@ var
   timer: TPrecisionTimer;
 begin
   CheckEqual(9007199254740991, MAX_SAFE_JS_INTEGER);
+  Check(IsPowerOfTwo(0));
+  Check(IsPowerOfTwo(1));
+  Check(IsPowerOfTwo(2));
+  Check(not IsPowerOfTwo(3));
+  Check(IsPowerOfTwo(4));
+  Check(not IsPowerOfTwo(5));
+  Check(not IsPowerOfTwo(6));
+  Check(not IsPowerOfTwo(7));
+  Check(IsPowerOfTwo(8));
+  for i := 9 to 15 do
+    Check(not IsPowerOfTwo(i));
+  Check(IsPowerOfTwo(16));
+  for i := 17 to 31 do
+    Check(not IsPowerOfTwo(i));
+  Check(IsPowerOfTwo(32));
   CheckEqual(NextPowerOfTwo(0), 1);
   CheckEqual(NextPowerOfTwo(1), 1);
   CheckEqual(NextPowerOfTwo(2), 2);
@@ -4070,8 +4085,13 @@ begin
     CheckEqual(NextPowerOfTwo(i), 2048);
   for i := 65537 to 131072 do
     CheckEqual(NextPowerOfTwo(i), 131072);
-  for i := 33554433 to 67108864 do // 33 millions tests in a few ms :)
+  for i := 33554433 to 67108864 - 1 do // millions tests in a few ms :)
+  begin
+    Check(not IsPowerOfTwo(i));
     Check(NextPowerOfTwo(i) = 67108864);
+  end;
+  Check(IsPowerOfTwo(67108864));
+  Check(NextPowerOfTwo(67108864) = 67108864);
   n := 512;
   CheckEqual(MinPtrInt(1, n), 1);
   CheckEqual(MaxPtrInt(1, n), n);

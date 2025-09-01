@@ -694,6 +694,9 @@ var
     {$endif OSDARWIN}
     {$endif OSWINDOWS};
 
+  /// the current Linux Distribution, depending on its package management system
+  OS_DISTRI: TLinuxDistribution;
+
   /// the current Operating System version, as retrieved for the current process
   // - contains e.g. 'Windows Seven 64 SP1 (6.1.7601)' or 'Windows XP SP3 (5.1.2600)' or
   // 'Windows 10 64bit 22H2 (10.0.19045.4046)' or 'macOS 13 Ventura (Darwin 22.3.0)' or
@@ -708,9 +711,6 @@ var
   // - contains e.g. 'Windows Vista' or 'Ubuntu Linux 5.4.0' or
   // 'macOS 13 Ventura 22.3.0'
   OSVersionShort: RawUtf8;
-
-  /// the current Linux Distribution, depending on its package management system
-  OS_DISTRI: TLinuxDistribution;
 
   {$ifdef OSWINDOWS}
   /// on Windows, the Update Build Revision as shown with the "ver/winver" command
@@ -727,14 +727,14 @@ var
   /// some textual information about the current CPU and its known cache
   // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz [3MB]'
   CpuInfoText: RawUtf8;
-  /// the on-chip cache size, in bytes, as returned by the OS
-  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
-  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
-  CpuCacheSize: cardinal;
   /// the available cache information as returned by the OS
   // - e.g. 'L1=2*32KB  L2=256KB  L3=3MB' on Windows or '3072 KB' on Linux
   CpuCacheText: RawUtf8;
 
+  /// the on-chip cache size, in bytes, as returned by the OS
+  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
+  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
+  CpuCacheSize: cardinal;
   /// how many hardware CPU sockets are defined on this system
   // - i.e. the number of physical CPU slots, not the number of logical CPU
   // cores as returned by SystemInfo.dwNumberOfProcessors
@@ -1062,7 +1062,34 @@ type
 
 {$endif UNICODE}
 
+{$endif OSWINDOWS}
+
 var
+  /// system and process 256-bit entropy state
+  // - could be used as 512-bit salt: followed by other system global variables
+  SystemEntropy: record
+    /// 128-bit of entropy quickly gathered during unit/process initialization
+    Startup: THash128Rec;
+    /// 128-bit shuffled each time strong randomness is retrieved from the OS
+    // - together with the intangible Startup value, ensure forward secrecy
+    LiveFeed: THash128Rec;
+  end;
+
+  /// the number of physical memory bytes available to the process
+  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
+  SystemMemorySize: PtrUInt;
+
+{$ifdef OSWINDOWS}
+
+  /// the current System information, as retrieved for the current process
+  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
+  // to retrieve the real top-most system information
+  // - note that the lpMinimumApplicationAddress field is replaced by a
+  // more optimistic/realistic value ($100000 instead of default $10000)
+  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
+  SystemInfo: TSystemInfo;
+  /// the current Windows edition, as retrieved for the current process
+  OSVersion: TWindowsVersion;
   /// is set to TRUE if the current process is a 32-bit image running under WOW64
   // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
   // to run seamlessly on 64-bit Windows
@@ -1071,22 +1098,12 @@ var
   /// is set to TRUE if the current process running through a software emulation
   // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
   IsWow64Emulation: boolean;
-  /// the current System information, as retrieved for the current process
-  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
-  // to retrieve the real top-most system information
-  // - note that the lpMinimumApplicationAddress field is replaced by a
-  // more optimistic/realistic value ($100000 instead of default $10000)
-  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
-  SystemInfo: TSystemInfo;
   /// low-level Operating System information, as retrieved for the current process
   OSVersionInfo: TOSVersionInfoEx;
-  /// the current Windows edition, as retrieved for the current process
-  OSVersion: TWindowsVersion;
 
 {$else OSWINDOWS}
 
-var
-  /// emulate only some used fields of Windows' TSystemInfo
+  /// emulate only the most used fields of Windows' TSystemInfo
   SystemInfo: record
     /// retrieved from libc's getpagesize() - is expected to not be 0
     dwPageSize: cardinal;
@@ -1103,13 +1120,6 @@ var
   end;
 
 {$endif OSWINDOWS}
-
-  /// the number of physical memory bytes available to the process
-  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
-  SystemMemorySize: PtrUInt;
-
-  /// 128-bit of entropy quickly gathered during unit/process initialization
-  StartupEntropy: THash128Rec;
 
 type
   /// used to retrieve version information from any EXE
@@ -3497,6 +3507,13 @@ type
   /// stores information about several disk partitions
   TDiskPartitions = array of TDiskPartition;
 
+/// return a memory block aligned to 16 bytes, e.g. for proper SMID processs
+// - Size >= 128KB will call the OS mmap/VirtualAlloc to returned aligned memory
+// - do not use FreeMem() on the returned pointer, but FreeMemAligned()
+function GetMemAligned(Size: PtrUInt; FillWith: pointer = nil): pointer;
+
+/// properly release GetMemAligned() allocated memory
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
 
 const
   // 16*4KB (4KB = memory granularity) for ReserveExecutableMemory()
@@ -8151,6 +8168,43 @@ begin
   end;
 end;
 
+const
+  OS_ALIGNED = 128 shl 10; // call the OS for any block >= 128KB
+
+function GetMemAligned(Size: PtrUInt; FillWith: pointer): pointer;
+var
+  pad: PtrUInt;
+begin
+  if Size >= OS_ALIGNED then
+  begin
+    Size := (Size + 65535) and not 65535;   // default wrap to 64KB boundaries
+    result := _GetLargeMem(Size)            // mmap/VirtualAlloc is 4KB aligned
+  end
+  else // smaller blocks will just use the heap, with a padding hidden prefix
+  begin
+    GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
+    pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
+    inc(PAnsiChar(result), pad);            // Delphi Win32 only needs padding
+    PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
+  end;
+  if FillWith <> nil then
+    MoveFast(FillWith^, result^, Size);
+end;
+
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
+begin
+  if p = nil then
+    exit;
+  if Size >= OS_ALIGNED then
+  begin
+    Size := (Size + 65535) and not 65535;   // as in GetMemAligned()
+    _FreeLargeMem(p, Size);                 // munmap or VirtualFree
+    exit;
+  end;
+  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
+  FreeMem(p);
+end;
+
 function SeemsRealObject(p: pointer): boolean;
 var
   i: PtrInt;
@@ -8759,8 +8813,15 @@ begin
     Command.Parse;
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
-  crc32c128(@StartupEntropy, @CpuCache, SizeOf(CpuCache)); // some more entropy
-  crcblock(@StartupEntropy, @Executable.Hash);
+  // finalize SystemEntropy.Startup
+  {$ifdef CPUINTEL}
+  if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
+    with SystemEntropy.Startup do
+      Lo := Lo xor Rdtsc; // unpredictable
+  RdRand32(@SystemEntropy.Startup.c2, 2); // no-op on older CPUs
+  {$endif CPUINTEL}
+  crc32c128(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache)); // some more
+  crcblock(@SystemEntropy.Startup, @Executable.Hash);
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -9633,8 +9694,8 @@ begin
            {$ifdef OSPOSIX}
            _AfterDecodeSmbios(RawSmbios); // persist in SMB_CACHE for non-root
            {$endif OSPOSIX}
-           DefaultHasher128(@StartupEntropy, pointer(RawSmbios.Data),
-             MinPtrInt(1024, length(RawSmbios.Data))); // won't hurt
+           DefaultHasher128(@SystemEntropy.LiveFeed, pointer(RawSmbios.Data),
+             MinPtrInt(512, length(RawSmbios.Data))); // won't hurt
            exit;
          end;
       // if not root on POSIX, SMBIOS is not available

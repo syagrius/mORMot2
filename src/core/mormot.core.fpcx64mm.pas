@@ -107,7 +107,8 @@ unit mormot.core.fpcx64mm;
 
 // customize mmap() allocation strategy
 {.$define FPCMM_MEDIUM32BIT}   // enable MAP_32BIT for OsAllocMedium() on Linux
-{.$define FPCMM_LARGEBIGALIGN} // align large chunks to 21-bit=2MB=PMD_SIZE
+{.$define FPCMM_LARGEBIGALIGN} // THP alignment of large chunks to PMD_SIZE=2MB
+{.$define FPCMM_LARGEPOPULATE} // use MAP_POPULATE flag for large blocks
 
 // force the tiny/small blocks to be in their own arena, not with medium blocks
 // - would use a little more memory, but medium pool is less likely to sleep
@@ -413,7 +414,7 @@ implementation
   - Tiny and small blocks can fed from their own pool(s), not the medium pool;
   - Lock-less free lists to reduce tiny/small/medium FreeMem thread contention;
   - Large blocks logic has been rewritten, especially realloc;
-  - OsAllocMedium() and OsAllocLarge() use MAP_POPULATE to reduce page faults;
+  - OsAllocLarge() can use MAP_POPULATE to reduce page faults;
   - On Linux, mremap is used for efficient realloc of large blocks;
   - Largest blocks can grow by 2MB=PMD_SIZE chunks for even faster mremap.
 
@@ -585,7 +586,9 @@ uses
 {$endif LINUX}
 
 // on Linux, mremap() on PMD_SIZE=2MB aligned data can make a huge speedup
-// see https://lwn.net/Articles/833208 - so FPCMM_LARGEBIGALIGN is always set
+// - Transparent Huge Pages (THP) exists since Kernel 2.6.38
+// - HAVE_MOVE_PMD enabled on arm64 since 2020 - https://lwn.net/Articles/833208
+// - FreeBSD has a similar behavior with its Superpages - feedback is needed
 {$ifdef LINUX}
   {$define FPCMM_LARGEBIGALIGN} // align large chunks to 21-bit = 2MB = PMD_SIZE
 {$endif LINUX}
@@ -603,20 +606,22 @@ const
     MAP_POPULATE = $08000;
   {$endif OLDLINUXKERNEL}
 
-  // tiny/small/medium blocks mmap() flags
-  // - MAP_POPULATE is included to enhance performance on single thread app, and
-  // also on heavily multi-threaded process (but perhaps not with few threads)
-  // - FPCMM_MEDIUM32BIT allocates as 31-bit pointers, but may be incompatible
-  // with TOrmTable for data >256KB so requires NOPOINTEROFFSET conditional,
-  // therefore is not set by default
-  MAP_MEDIUM = MAP_PRIVATE or MAP_ANONYMOUS or MAP_POPULATE
+  /// tiny/small/medium blocks mmap() flags
+  // - MAP_POPULATE is not included because small and medium blocks are sparsely
+  // accessed, and OsAllocMedium() is done within the global medium lock
+  // - FPCMM_MEDIUM32BIT allocates only 31-bit pointers, but may be incompatible
+  // e.g. with TOrmTable for data >256KB so would require the NOPOINTEROFFSET
+  // conditional - therefore is not set by default
+  MAP_MEDIUM = MAP_PRIVATE or MAP_ANONYMOUS
      {$ifdef FPCMM_MEDIUM32BIT} or MAP_32BIT {$endif};
 
-  // large blocks mmap() flags
+  /// large blocks mmap() flags
   // - no MAP_32BIT since could use the whole 64-bit address space
-  // - MAP_POPULATE is included on Linux to avoid page faults, with
-  // no penalty since mmap/mremap are called outside the large blocks lock
-  MAP_LARGE = MAP_PRIVATE or MAP_ANONYMOUS or MAP_POPULATE;
+  // - MAP_POPULATE is not included by default, even if mmap/mremap are called
+  // outside the large blocks lock: in practice, it may lead to unnecessary
+  // memory usage and increased initial mapping time - set FPCMM_LARGEPOPULATE
+  MAP_LARGE = MAP_PRIVATE or MAP_ANONYMOUS
+     {$ifdef FPCMM_LARGEPOPULATE} or MAP_POPULATE {$endif};
 
 {$ifdef FPCMM_MEDIUM32BIT}
 var
@@ -636,7 +641,7 @@ begin
     exit;
   // try with no 2GB limit from now on
   AllocMediumflags := AllocMediumflags and not MAP_32BIT;
-  result := OsAllocMedium(Size); // try with no 2GB limit from now on
+  result := OsAllocMedium(Size);
   {$endif FPCMM_MEDIUM32BIT}
 end;
 
@@ -828,55 +833,59 @@ const
     {$endif FPCMM_BOOST}
   {$endif FPCMM_BOOSTER}
 
-  NumSmallBlockTypes = 46;
+  NumSmallBlockTypes       = 46;
   NumSmallBlockTypesUnique = NumSmallBlockTypes - 2; // last 2 are redundant
-  MaximumSmallBlockSize = 2608;
+  MaximumSmallBlockSize    = 2608;
+  NumTinyBlockTypes        =
+     1 shl NumTinyBlockTypesPO2; // 8 (128B) or 16 (256B)
+  NumTinyBlockArenas       =
+     (1 shl NumTinyBlockArenasPO2) - 1; // -1 = main Small[]
+  NumSmallInfoBlock        =
+    NumSmallBlockTypes + NumTinyBlockArenas * NumTinyBlockTypes;
   SmallBlockSizes: array[0..NumSmallBlockTypes - 1] of word = (
     16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256,
     272, 288, 304, 320, 352, 384, 416, 448, 480, 528, 576, 624, 672, 736, 800,
     880, 960, 1056, 1152, 1264, 1376, 1504, 1648, 1808, 1984, 2176, 2384,
     MaximumSmallBlockSize, MaximumSmallBlockSize, MaximumSmallBlockSize);
-  NumTinyBlockTypes = 1 shl NumTinyBlockTypesPO2; // 8 (128B) or 16 (256B)
-  NumTinyBlockArenas = (1 shl NumTinyBlockArenasPO2) - 1; // -1 = main Small[]
-  NumSmallInfoBlock = NumSmallBlockTypes + NumTinyBlockArenas * NumTinyBlockTypes;
-  SmallBlockGranularity = 16;
-  TargetSmallBlocksPerPool = 48;
-  MinimumSmallBlocksPerPool = 12;
-  SmallBlockDownsizeCheckAdder = 64;
-  SmallBlockUpsizeAdder = 32;
-  SmallBlockTypePO2 = 6;  // SizeOf(TSmallBlockType)=64
 
-  MediumBlockPoolSizeMem = 20 * 64 * 1024;
-  MediumBlockPoolSize = MediumBlockPoolSizeMem - 16;
-  MediumBlockSizeOffset = 48;
-  MinimumMediumBlockSize = 11 * 256 + MediumBlockSizeOffset;
-  MediumBlockBinsPerGroup = 32;
-  MediumBlockBinGroupCount = 32;
+  SmallBlockGranularity        = 16;
+  TargetSmallBlocksPerPool     = 48;
+  MinimumSmallBlocksPerPool    = 12;
+  SmallBlockDownsizeCheckAdder = 64;
+  SmallBlockUpsizeAdder        = 32;
+  SmallBlockTypePO2            = 6;  // SizeOf(TSmallBlockType)=64
+
+  MediumBlockPoolSizeMem       = 20 * 64 * 1024;
+  MediumBlockPoolSize          = MediumBlockPoolSizeMem - 16;
+  MediumBlockSizeOffset        = 48;
+  MinimumMediumBlockSize       = 11 * 256 + MediumBlockSizeOffset;
+  MediumBlockBinsPerGroup      = 32;
+  MediumBlockBinGroupCount     = 32;
   MediumBlockBinCount = MediumBlockBinGroupCount * MediumBlockBinsPerGroup;
-  MediumBlockGranularity = 256;
-  MaximumMediumBlockSize =
+  MediumBlockGranularity       = 256;
+  MaximumMediumBlockSize       =
     MinimumMediumBlockSize + (MediumBlockBinCount - 1) * MediumBlockGranularity;
   OptimalSmallBlockPoolSizeLowerLimit =
     29 * 1024 - MediumBlockGranularity + MediumBlockSizeOffset;
   OptimalSmallBlockPoolSizeUpperLimit =
     64 * 1024 - MediumBlockGranularity + MediumBlockSizeOffset;
-  MaximumSmallBlockPoolSize =
+  MaximumSmallBlockPoolSize   =
     OptimalSmallBlockPoolSizeUpperLimit + MinimumMediumBlockSize;
-  MediumInPlaceDownsizeLimit = MinimumMediumBlockSize div 4;
+  MediumInPlaceDownsizeLimit  = MinimumMediumBlockSize div 4;
 
   {$ifdef FPCMM_SLEEPTSC}
   // pause using rdtsc (30 cycles latency on hardware but emulated on VM)
-  SpinMediumLockTSC = 10000;
-  SpinLargeLockTSC = 10000;
+  SpinMediumLockTSC          = 10000;
+  SpinLargeLockTSC           = 10000;
   {$ifdef FPCMM_PAUSE}
-  SpinSmallGetmemLockTSC = 1000;
+  SpinSmallGetmemLockTSC     = 1000;
   {$endif FPCMM_PAUSE}
   {$else}
   // pause with constant spinning counts (empirical values from fastmm4-avx)
-  SpinMediumLockCount = 2500;
-  SpinLargeLockCount = 5000;
+  SpinMediumLockCount        = 2500;
+  SpinLargeLockCount         = 5000;
   {$ifdef FPCMM_PAUSE}
-  SpinSmallGetmemLockCount = 500;
+  SpinSmallGetmemLockCount   = 500;
   {$endif FPCMM_PAUSE}
   SpinMediumFreememLockCount = 500;
   {$endif FPCMM_SLEEPTSC}
@@ -891,15 +900,15 @@ const
   {$endif FPCMM_ERMS}
 
   // some binary-level constants for internal flags
-  IsFreeBlockFlag               = 1;
-  IsMediumBlockFlag             = 2;
-  IsSmallBlockPoolInUseFlag     = 4;
-  IsLargeBlockFlag              = 4;
-  PreviousMediumBlockIsFreeFlag = 8;
-  LargeBlockIsSegmented         = 8; // see also OsRemapLarge() above
-  DropSmallFlagsMask            = -8;
-  ExtractSmallFlagsMask         = 7;
-  DropMediumAndLargeFlagsMask   = -16;
+  IsFreeBlockFlag                = 1;
+  IsMediumBlockFlag              = 2;
+  IsSmallBlockPoolInUseFlag      = 4;
+  IsLargeBlockFlag               = 4;
+  PreviousMediumBlockIsFreeFlag  = 8;
+  LargeBlockIsSegmented          = 8; // see also OsRemapLarge() above
+  DropSmallFlagsMask             = -8;
+  ExtractSmallFlagsMask          = 7;
+  DropMediumAndLargeFlagsMask    = -16;
   ExtractMediumAndLargeFlagsMask = 15;
 
 type
@@ -997,14 +1006,14 @@ type
   end;
 
 const
-  BlockHeaderSize = SizeOf(pointer);
-  SmallBlockPoolHeaderSize = SizeOf(TSmallBlockPoolHeader);
-  SmallBlockTypeSize = SizeOf(TSmallBlockType);
-  MediumBlockPoolHeaderSize = SizeOf(TMediumBlockPoolHeader);
-  LargeBlockHeaderSize = SizeOf(TLargeBlockHeader);
-  LargeBlockGranularity = 1 shl 16; // 64KB for (smallest) large blocks
+  BlockHeaderSize            = SizeOf(pointer);
+  SmallBlockPoolHeaderSize   = SizeOf(TSmallBlockPoolHeader);
+  SmallBlockTypeSize         = SizeOf(TSmallBlockType);
+  MediumBlockPoolHeaderSize  = SizeOf(TMediumBlockPoolHeader);
+  LargeBlockHeaderSize       = SizeOf(TLargeBlockHeader);
+  LargeBlockGranularityAnd   = (1 shl 16) - 1; // 64KB minimum for large blocks
   {$ifdef FPCMM_LARGEBIGALIGN}
-  LargeBlockGranularity2 = 1 shl 21;      // PMD_SIZE=2MB granularity
+  LargeBlockGranularity2And  = (1 shl 21) - 1; // PMD_SIZE=2MB granularity
   LargeBlockGranularity2Size = 2 shl 21;  // for size >= 4MB
   // on Linux, mremap() on PMD_SIZE=2MB aligned data can make a huge speedup
   {$endif FPCMM_LARGEBIGALIGN}
@@ -1403,14 +1412,15 @@ end;
 function ComputeLargeBlockSize(size: PtrUInt): PtrUInt; inline;
 begin
   inc(size, LargeBlockHeaderSize - 1 + BlockHeaderSize);
+  // aligned_size := ((size + align - 1) AND (NOT (align - 1)))
   {$ifdef FPCMM_LARGEBIGALIGN}
   // on Linux, mremap() on PMD_SIZE=2MB aligned data make a huge speedup
   if size >= LargeBlockGranularity2Size then // trigger if size>=4MB
-    result := (size + LargeBlockGranularity2) and -LargeBlockGranularity2
+    result := (size + LargeBlockGranularity2And) and not LargeBlockGranularity2And
   else
   {$endif FPCMM_LARGEBIGALIGN}
-    // use default 64KB granularity
-    result := (size + LargeBlockGranularity) and -LargeBlockGranularity;
+    // use default 64KB granularity for large blocks up to 4MB
+    result := (size + LargeBlockGranularityAnd) and not LargeBlockGranularityAnd;
 end;
 
 function AllocateLargeBlockFrom(existing: pointer;

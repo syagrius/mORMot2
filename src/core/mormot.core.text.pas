@@ -138,8 +138,9 @@ function GetNextItemHexDisplayToBin(var P: PUtf8Char; Bin: PByte; BinBytes: PtrI
 
 type
   /// some stack-allocated zero-terminated character buffer
-  // - as used by GetNextTChar64
+  // - as used by GetNextTChar64 or ConvertToBase64 lookup tables
   TChar64 = array[0..63] of AnsiChar;
+  PChar64 = ^TChar64;
 
 /// return next CSV string from P as a #0-ended buffer, false if no more
 // - if Sep is #0, will copy all characters until next whitespace char
@@ -422,6 +423,7 @@ type
   // before the ISO-8601 encoded TDateTime value
   // - woDateTimeWithZSuffix will append the Z suffix to the ISO-8601 encoded
   // TDateTime value, to identify the content as strict UTC value
+  // - woDateTimeNullAsVoidString will store TDateTime = 0 as legacy "" content
   // - TTimeLog would be serialized as Int64, unless woTimeLogAsText is defined
   // - since TOrm.ID could be huge Int64 numbers, they may be truncated
   // on client side, e.g. to 53-bit range in JavaScript: you could define
@@ -455,6 +457,7 @@ type
     woEnumSetsAsText,
     woDateTimeWithMagic,
     woDateTimeWithZSuffix,
+    woDateTimeNullAsVoidString,
     woTimeLogAsText,
     woIDAsIDstr,
     woRawBlobAsBase64,

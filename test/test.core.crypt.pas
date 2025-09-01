@@ -41,7 +41,7 @@ type
     fDigestAlgo: TDigestAlgo;
     fCatalogAllGenerate: boolean;
     procedure CryptData(dpapi: integer; const name: string);
-    procedure Prng(meta: TAesPrngClass; const name: RawUtf8);
+    procedure Prng(meta: TAesPrngClass; const name, big: RawUtf8);
     function DigestUser(const User, Realm: RawUtf8;
       out HA0: THash512Rec): TAuthServerResult;
     procedure CatalogRunAsym(Context: TObject);
@@ -53,6 +53,7 @@ type
       const exp, msg: RawUtf8);
     procedure Kdf(a: TSignAlgo; const key, exp, msg: RawUtf8;
       const lab: RawUtf8 = 'kerberos'; const ctx: RawUtf8 = '');
+    procedure TestSCript(api: TSCriptRaw; const name: RawUtf8);
     procedure OpenSslTest(Algo: THashAlgo; const msg, exp: RawUtf8); overload;
     procedure OpenSslTest(Algo: THashAlgo; const msg, key, exp: RawUtf8); overload;
   published
@@ -158,6 +159,48 @@ begin
   res := sign.KdfSP800(a, length(exp) shr 1, bin, lab, ctx);
   CheckEqual(length(res), length(exp) shr 1);
   CheckEqualHex(res, exp, msg);
+end;
+
+procedure TTestCoreCrypto.TestSCript(api: TSCriptRaw; const name: RawUtf8);
+
+  procedure One(const Expected, Password, Salt: RawByteString; N, R, P: PtrUInt);
+  var
+    h: RawByteString;
+  begin
+    h := api(Password, Salt, N, R, P, length(Expected) div 2);
+    Check(h <> '');
+    CheckEqual(BinToHexLower(h), Expected, name);
+  end;
+
+var
+  timer: TPrecisionTimer;
+begin
+  if not Assigned(api) then
+    exit;
+  timer.Start;
+  CheckEqual(api('', '', 3, 1, 1, 16), '', 'N=3');
+  One('48b0d2a8a3272611984c50ebd630af52',
+      'p', 's', 2, 1, 1);
+  One('8756bc2e73774a06194e4042746fe3d1',
+      'p', 'p', 2, 1, 1);
+  One('482c858e229055e62f41e0ec819a5ee18bdb87251a534f75acd95ac5e50aa15f',
+      'password', 'salt', 2, 10, 10);
+  One('88bd5edb52d1dd00188772ad36171290224e74829525b18d7323a57f91963c37',
+      'password', 'salt', 16, 100, 100);
+  One('77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442f' +
+      'cd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906',
+      '', '', 16, 1, 1);
+  One('fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622' +
+      'eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640',
+      'password', 'NaCl', 1024, 8, 16);
+  One('7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d' +
+      '5432955613f0fcf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887',
+      'pleaseletmein', 'SodiumChloride', 16384, 8, 1);
+  One('c3f182ee2dec846e70a6942fb529985a3a09765ef04c612923b17f18555a37076' +
+      'deb2b9830d69de5492651e4506ae5776d96d40f67aaee37e1777b8ad5c3111432' +
+      'bb3b6f7e1264401879e641ae', 'this is a long '#0' password',
+      'and this is a long '#0' salt', 16384, 8, 1);
+  NotifyTestSpeed('%', [name], 0, 0, @timer, fOwner.MultiThread);
 end;
 
 procedure TTestCoreCrypto.OpenSslTest(Algo: THashAlgo; const msg, exp: RawUtf8);
@@ -303,6 +346,10 @@ procedure TTestCoreCrypto._SHA256;
     FillZero(Digest.b);
     sign.Pbkdf2(saSha256, 'password', 'salt', 4096, @Digest);
     check(Sha256DigestToString(Digest.Lo) = DIG4096);
+    s := BinToHexLower(sign.Pbkdf2(saSha256, 'password', 'salt', 1, 20));
+    CheckEqual(s, '120fb6cffcf8b32c43e7225256c4f837a86548c9');
+    s := BinToHexLower(Pbkdf2HmacSha256('password', 'salt', 1, 20));
+    CheckEqual(s, '120fb6cffcf8b32c43e7225256c4f837a86548c9');
     c := 'a';
     sha.Init;
     for i := 1 to 1000000 do // one million 'a' chars, read one-by-one
@@ -730,12 +777,13 @@ var
   i: integer;
   big: RawByteString;
 begin
+  SetLength(big, 100000);
   // validate TAesPrgn (+ TAesPrngOsl) generators
   check(TAesPrng.IsAvailable);
   check(TSystemPrng.IsAvailable);
-  Prng(TAesPrng, 'mORMot');
+  Prng(TAesPrng, 'mORMot', big);
   {$ifdef USE_OPENSSL}
-  Prng(TAesPrngOsl, 'OpenSSL');
+  Prng(TAesPrngOsl, 'OpenSSL', big);
   {$endif USE_OPENSSL}
   // include Lecuyer for comparison, with same benchmarks as in Prng()
   timer.Start;
@@ -746,18 +794,18 @@ begin
   for i := 0 to 50000 do
     Check(Random32(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('Lecuyer Random32', [], 100003, 100003 * 4, @timer);
-  SetLength(big, 100000);
   timer.Start;
-  RandomBytes(pointer(big), length(big));
-  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big), @timer);
+  for i := 1 to 100 do
+    RandomBytes(pointer(big), length(big));
+  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 10, @timer);
 end;
 
-procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name: RawUtf8);
+procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name, big: RawUtf8);
 var
   p: TAesPrngAbstract;
   b1, b2: TAesBlock;
   a1, a2: TAesPrngAbstract;
-  s1, s2, split, big: RawByteString;
+  s1, s2, split: RawByteString;
   c: cardinal;
   d: double;
   e: TSynExtended;
@@ -889,10 +937,10 @@ begin
   for i := 0 to 50000 do
     Check(p.Random32(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('% Random32', [name], 100003, 100003 * 4, @timer);
-  SetLength(big, 100000);
   timer.Start;
-  p.FillRandom(pointer(big), length(big));
-  NotifyTestSpeed('       % FillRandom', [name], 1, length(big), @timer);
+  for i := 1 to 100 do
+    p.FillRandom(pointer(big), length(big));
+  NotifyTestSpeed('       % FillRandom', [name], 1, length(big) * 100, @timer);
 end;
 
 function CryptDataSecretWrapper(const Data, AppSecret: RawByteString;
@@ -1318,13 +1366,13 @@ const
   bOPENSSL = [ {$ifdef USE_OPENSSL}
                bSHA1O .. bSHA3_512O, bAES128CBCO .. bAES256GCMO
                {$endif USE_OPENSSL} ];
+  COUNT = 500;
   SIZ: array[0..4] of integer = (
     8,
     50,
     100,
     1000,
     10000);
-  COUNT = 500;
 
   AESCLASS: array[bAESFIRST.. bAESLAST] of TAesAbstractClass = (
     TAesCbc, TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm,
@@ -1339,6 +1387,7 @@ const
     256, 256, 256, 256, 256, 256, 256, 256, 256
   {$ifdef USE_OPENSSL} ,
     128, 128, 128, 128, 128, 256, 256, 256, 256, 256);
+
   OPENSSL_HASH: array[bSHA1O .. bSHA3_512O] of THashAlgo = (
     hfSHA1, hfSHA1, hfSHA256, hfSHA256, hfSHA384, hfSHA384, hfSHA512, hfSHA384,
     hfSHA512, hfSHA3_256, hfSHA3_512
@@ -1521,11 +1570,14 @@ begin
     inc(n, COUNT);
     // we may add some small additionnal tests here (outside timers)
     CheckEqual(StrLen(pointer(data)), SIZ[s], 'datastrlen');
+    bf.IV := 0;
     s1 := bf.Encrypt(data, {ivatbeg=}true);
     CheckEqual(length(s1), SIZ[s] + 8);
+    CheckEqual(bf.IV, 0);
     s2 := bf.Decrypt(s1, {ivatbeg=}true);
     CheckEqual(length(s2), SIZ[s]);
     CheckEqual(s2, data);
+    CheckEqual(bf.IV, 0);
   end;
   for b := low(b) to high(b) do
     if time[b] <> 0 then
@@ -1739,6 +1791,7 @@ var
   unalign: PtrInt;
   n, rounds, rnd: integer;
   i64: Int64;
+  logN, blocksize, parallel, r,
   exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
   exp641, exp642: QWord;
   hasher: TSynHasher;
@@ -1969,6 +2022,29 @@ begin
   Check(ModularCryptVerify(u, exp) = mcfBCrypt);
   u[10] := 'b';
   Check(ModularCryptVerify(u, exp) = mcfInvalid);
+  exp := '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2';
+  Check(ModularCryptVerify('password', exp) = mcfBCryptSha256);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // pure pascal and OpenSSL SCrypt implementation
+  {$ifdef USE_OPENSSL}
+  if OpenSslIsAvailable then
+    if OpenSslVersion >= OPENSSL3_VERNUM then
+      TestSCript(@OpenSslSCrypt, 'OpenSslSCrypt');
+  {$endif USE_OPENSSL}
+  TestSCript(@RawSCrypt, 'RawSCrypt');
+  r := SCryptRounds; // default values
+  SCryptRoundsDecode(r, logN, blocksize, parallel);
+  Check(r = $8000e000);
+  CheckEqual(logN, 16);
+  CheckEqual(blocksize, 8);
+  CheckEqual(parallel, 1);
+  exp := '$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$zeGG+tsAueRzkvXfE1/F58KOKFEFfI0KpBYwE/3ZUWg';
+  Check(ModularCryptVerify('password', exp) = mcfSCrypt);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  exp := '$scrypt$ln=8,r=8,p=1$WKs1xljLudd6z9kbY0wpJQ$yCR4iDZYDKv+iEJj6yHY0lv/epnfB6f/w1EbXrsJOuQ';
+  Check(ModularCryptVerify('password', exp) = mcfSCrypt);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // validate "Modular Crypt" formats
   for mcf := mcfMd5Crypt to high(mcf) do
   begin
     timer.Start;
@@ -1982,10 +2058,19 @@ begin
             rnd := 1000; // fixed number
             inc(rounds, 3000);
           end;
-        mcfBCrypt:
+        mcfBCrypt, mcfBCryptSha256:
           begin
             rnd := 4 + n shr 2; // cost = 4..5 is enough here
             inc(rounds, 3 * (1 shl rnd));
+          end;
+        mcfSCrypt:
+          begin
+            rnd := SCryptRounds(4 + (n shr 2), 8, n);
+            SCryptRoundsDecode(rnd, logN, blocksize, parallel);
+            CheckEqual(logN, 4 + (n shr 2));
+            CheckEqual(blocksize, 8);
+            CheckEqual(parallel, n);
+            inc(rounds, (1 shl logN) * parallel);
           end;
       else
         begin
@@ -2008,8 +2093,7 @@ begin
       dec(PByteArray(u)[length(u) - 5]);
       Check(ModularCryptVerify(pw, u) = mcfInvalid);
     end;
-    if not fOwner.MultiThread then
-      NotifyTestSpeed('% rounds', [ToText(mcf)^], rounds, 0, @timer);
+    NotifyTestSpeed('% rounds', [ToText(mcf)^], rounds, 0, @timer, fOwner.MultiThread);
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
@@ -2447,19 +2531,6 @@ begin
   {$ifdef CPUINTEL}
   backup := CpuFeatures;
   {$endif CPUINTEL}
-  Check(AesTablesTest, 'Internal Tables');
-  tab := AesTables;
-  CheckEqual(tab[0],  $50a7f451);
-  CheckEqual(tab[99],  0);
-  CheckEqual(tab[255],  $4257b8d0);
-  CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
-  CheckEqual(tab[$300 + 255],  $d04257b8);
-  CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
-  CheckEqual(tab[$400 + 255],  $3a16162c);
-  CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
-  CheckEqual(tab[$500 + 255],  $16162c3a);
-  CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
-  CheckEqual(tab[$700 + 255],  $2c3a1616);
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -2552,6 +2623,20 @@ begin
       '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
       '601EC313775789A5B7A7F504BBF3D228F443E3CA4D62B59ACA84E990CACAF5C5' +
       '2B0930DAA23DE94CE87017BA2D84988DDFC9C58DB67AADA613C2DD08457941A6');
+    // check AES internal tables access
+    Check(AesTablesTest, 'Internal Tables');
+    tab := AesTables;
+    CheckEqual(tab[0],  $50a7f451);
+    CheckEqual(tab[99],  0);
+    CheckEqual(tab[255],  $4257b8d0);
+    CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
+    CheckEqual(tab[$300 + 255],  $d04257b8);
+    CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
+    CheckEqual(tab[$400 + 255],  $3a16162c);
+    CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
+    CheckEqual(tab[$500 + 255],  $16162c3a);
+    CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
+    CheckEqual(tab[$700 + 255],  $2c3a1616);
     // check both mORMot and OpenSSL against our reference vectors
     {%H-}Timer[noaesni].Init;
     for k := 0 to 2 do
@@ -2821,7 +2906,8 @@ begin
       cts.iv := iv.b;
       s2 := cts.DecryptCts(crypted);
       CheckEqual(s2, orig);
-      CheckEqual(cts.DecryptCts(cts.EncryptCts(orig, true), true), orig);
+      s3 := cts.EncryptCts(orig, true);
+      CheckEqual(cts.DecryptCts(s3, true), orig);
     end;
   finally
     cts.Free;
@@ -4412,7 +4498,7 @@ begin
   timer.Start;
   c := TRsa.GenerateNew; // with RSA_DEFAULT_GENERATION_* values
   try
-    NotifyTestSpeed('RS256 generate', -1, 0, @timer, {onlylog=}true);
+    NotifyTestSpeed('RS256 generate', -1, 0, @timer, fOwner.MultiThread);
     if CheckFailed(c <> nil, 'TimeOut') then
       exit;
     CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);
