@@ -1500,11 +1500,14 @@ begin
 end;
 
 procedure TNetworkProtocols.TunnelExecute(Sender: TObject);
+var
+  local: TTunnelLocal absolute Sender;
 begin
   // one of the two handshakes should be done in another thread
-  tunnelexecutelocal := (Sender as TTunnelLocal).Open(
-    tunnelsession, tunneloptions, 1000, tunnelappsec,
-    cLocalhost, tunnelexecuteremote);
+  tunnelexecutelocal := local.Open(
+    tunnelsession, tunneloptions, 1000, tunnelappsec, cLocalhost,
+    ['remoteHost', Executable.Host]);
+  tunnelexecuteremote := local.RemotePort;
   Check(tunnelexecutelocal <> 0);
   Check(tunnelexecuteremote <> 0);
 end;
@@ -1538,13 +1541,15 @@ begin
   clienttunnel.SetTransmit(servercb); // set before Open()
   servertunnel.SetTransmit(clientcb);
   // validate handshaking
-  tunnelsession := Random64;
+  tunnelsession := Random32;
   tunnelappsec := RandomAnsi7(10);
   TLoggedWorkThread.Create(
     TSynLog, 'servertunnel', serverinstance, TunnelExecute, TunnelExecuted);
-  local := clienttunnel.Open(
-    tunnelsession, tunneloptions, 1000, tunnelappsec, clocalhost, remote);
+  local := clientinstance.Open(
+    tunnelsession, tunneloptions, 1000, tunnelappsec, clocalhost,
+    ['remoteHost', Executable.Host]);
   Check(local <> 0);
+  remote := clienttunnel.RemotePort;
   Check(remote <> 0);
   SleepHiRes(1000, tunnelexecutedone);
   CheckEqual(local, tunnelexecuteremote);
@@ -1562,10 +1567,12 @@ begin
     1000, 1000, 1000, 0, serversock) = nrOk);
   try
     // validate raw TCP tunnelling
-    CheckEqual(clientinstance.Thread.Received, 0);
-    CheckEqual(clientinstance.Thread.Sent, 0);
-    CheckEqual(serverinstance.Thread.Received, 0);
-    CheckEqual(serverinstance.Thread.Sent, 0);
+    Check(Assigned(clientinstance.Thread));
+    Check(Assigned(serverinstance.Thread));
+    CheckEqual(clientinstance.Received, 0);
+    CheckEqual(clientinstance.Sent, 0);
+    CheckEqual(serverinstance.Received, 0);
+    CheckEqual(serverinstance.Sent, 0);
     for i := 1 to 100 do
     begin
       sent := RandomWinAnsi(Random32(200) + 1);
@@ -1579,15 +1586,18 @@ begin
       Check(serversock.RecvWait(1000, received2) = nrOk);
       CheckEqual(sent, received);
       CheckEqual(sent2, received2);
-      CheckEqual(clientinstance.Thread.Received, serverinstance.Thread.Sent);
-      CheckEqual(clientinstance.Thread.Sent, serverinstance.Thread.Received);
-      Check(clientinstance.Thread.Received <> 0);
-      Check(clientinstance.Thread.Sent <> 0);
-      Check(serverinstance.Thread.Received <> 0);
-      Check(serverinstance.Thread.Sent <> 0);
+      CheckEqual(clientinstance.Received, serverinstance.Sent);
+      CheckEqual(clientinstance.Sent, serverinstance.Received);
+      Check(clientinstance.Received <> 0);
+      Check(clientinstance.Sent <> 0);
+      Check(serverinstance.Received <> 0);
+      Check(serverinstance.Sent <> 0);
     end;
-    Check(clientinstance.Thread.Received < clientinstance.Thread.Sent, 'smaller');
-    Check(serverinstance.Thread.Received > serverinstance.Thread.Sent, 'bigger');
+    Check(clientinstance.Received < clientinstance.Sent, 'smaller');
+    Check(serverinstance.Received > serverinstance.Sent, 'bigger');
+    Check(_Safe(serverinstance.TunnelInfo)^.Count > 4);
+    Check(_Safe(clientinstance.TunnelInfo)^.Count > 4);
+    //writeln(clientinstance.TunnelInfo);
   finally
     clientsock.ShutdownAndClose(true);
     serversock.ShutdownAndClose(true);
@@ -1882,7 +1892,7 @@ end;
 
 function TNetworkProtocols.OnPeerCacheRequest(Ctxt: THttpServerRequestAbstract): cardinal;
 begin
-  // a local web server is safer than an Internet resource
+  // a local web server is safer and less error-prone than an Internet resource
   result := HTTP_SUCCESS;
   Ctxt.OutContent := FakeGif(Ctxt.Url);
   Ctxt.OutContentType := 'image/gif';

@@ -1251,7 +1251,7 @@ function BinToBase64uri(Bin: PAnsiChar; BinBytes: integer; enc: PChar64 = nil): 
 // - in comparison to Base64 standard encoding, will trim any right-sided '='
 // unsignificant characters, and replace '+' or '/' by '_' or '-'
 // - returns '' if BinBytes void or too big for the resulting ShortString
-function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer): ShortString;
+function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer; enc: PChar64 = nil): ShortString;
 
 /// conversion from any Base64 encoded value into URI-compatible encoded text
 // - warning: will modify the supplied base64 string in-place
@@ -1323,6 +1323,10 @@ function Base64uriToBin(const base64: RawByteString;
 // unsignificant characters, and replace '+' or '/' by '_' or '-'
 // - you should better not use this, but Base64uriToBin() overloaded functions
 function Base64uriDecode(sp, rp: PAnsiChar; len: PtrInt): boolean;
+
+/// quickly check if the supplied buffer contains only Base64-URI chars
+// - don't check the length itself, or against an expected value
+function Base64uriValid(p: PUtf8Char; enc: PAnsiCharDec = nil): boolean;
 
 /// conversion from a binary buffer into Base58 encoded text as TSynTempBuffer
 // - Bitcoin' Base58 was defined as alphanumeric chars without misleading 0O I1
@@ -6966,7 +6970,7 @@ begin
     FastAssignNew(result);
 end;
 
-function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer): ShortString;
+function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer; enc: PChar64): ShortString;
 var
   len: integer;
 begin
@@ -6977,7 +6981,7 @@ begin
   if len > 255 then
     exit;
   byte(result[0]) := len;
-  Base64uriEncode(@result[1], Bin, BinBytes);
+  Base64uriEncode(@result[1], Bin, BinBytes, enc);
 end;
 
 function Base64uriToBinLength(len: PtrInt): PtrInt;
@@ -7054,6 +7058,23 @@ begin
   resultLen := Base64uriToBinLength(base64len);
   result := (resultLen = binlen) and
             Base64AnyDecode(enc, base64, bin, base64len);
+end;
+
+function Base64uriValid(p: PUtf8Char; enc: PAnsiCharDec): boolean;
+begin
+  result := false;
+  if p = nil then
+    exit;
+  if enc = nil then
+    enc := @ConvertBase64UriToBin;
+  while true do
+    if p^ = #0 then
+      break // all valid
+    else if enc[p^] >= 0 then
+      inc(p)
+    else
+      exit;
+  result := true;
 end;
 
 procedure Base64ToUri(var base64: RawUtf8);
@@ -7157,6 +7178,14 @@ end;
 function _Base64MagicRawDecode(const Value: RawUtf8; var Blob: RawByteString): boolean;
 begin // caller checked that PCardinal(Value)^ and $ffffff = JSON_BASE64_MAGIC_C
   result := Base64ToBinSafe(PAnsiChar(pointer(Value)) + 3, length(Value) - 3, Blob);
+end;
+
+function _RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+begin
+  if Base64Uri then
+    result := BinToBase64uri(Bin, Bytes)
+  else
+    result := BinToBase64(Bin, Bytes);
 end;
 
 
@@ -7737,7 +7766,7 @@ begin
             inc(P, 6);
             IdemPCharAndGetNextItem(P, 'NAME="', part.Name, '"');
             if P^ = ';' then
-              P := GotoNextNotSpace(P + 1);
+              P := IgnoreAndGotoNextNotSpace(P);
             IdemPCharAndGetNextItem(P, 'FILENAME="', part.FileName, '"');
           end;
         end
@@ -7792,7 +7821,7 @@ function MultiPartFormDataNewBound(var boundaries: TRawUtf8DynArray): RawUtf8;
 var
   random: array[0..2] of cardinal;
 begin
-  SharedRandom.Fill(@random, SizeOf(random)); // public and unique: use TLecuyer
+  SharedRandom.Fill(@random, SizeOf(random)); // unique 96-bit ID from TLecuyer
   result := BinToBase64uri(@random, SizeOf(random));
   AddRawUtf8(boundaries, result);
 end;
@@ -9437,7 +9466,8 @@ var
   P: PUtf8Char;
 begin
   if high(Buffers) > high(lens) then
-    raise EBufferException.Create('Too many params in AppendBuffersToRawUtf8()');
+    raise EBufferException.Create('Too many params in AppendBuffersToRawUtf8()')
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif};
   len := 0;
   for i := 0 to high(Buffers) do
   begin
@@ -11746,6 +11776,7 @@ begin
     Base64DecodeMain := @Base64DecodeMainAvx2; //  8.7 GB/s vs 0.9 GB/s
   end;
   {$endif ASMX64AVXNOCONST}
+  RawToBase64 := _RawToBase64; // for mormot.net.sock and mormot.crypt.core
   // HTML/Emoji Efficient Parsing
   Assert(ord(high(TEmoji)) = $4f + 1);
   EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0

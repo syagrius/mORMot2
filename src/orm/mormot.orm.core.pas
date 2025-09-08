@@ -2077,7 +2077,7 @@ type
     // from a supplied JSON content
     // - is a wrapper around Create + FillFrom() methods
     // - use JSON data, as exported by GetJsonValues(), expanded or not
-    // - make an internal copy of the JSONTable RawUtf8 before calling
+    // - make an internal copy of the JsonTable RawUtf8 before calling
     // FillFrom() below
     constructor CreateFrom(const JsonRecord: RawUtf8); overload;
     /// this constructor initializes the object as above, and fills its content
@@ -2661,11 +2661,11 @@ type
     /// fill all published properties of this object from a JSON result row
     // - create a TOrmTable from the JSON data
     // - call FillPrepare() then FillRow(Row)
-    procedure FillFrom(const JSONTable: RawUtf8; Row: PtrInt); overload;
+    procedure FillFrom(const JsonTable: RawUtf8; Row: PtrInt); overload;
     /// fill all published properties of this object from a JSON object result
     // - use JSON data, as exported by GetJsonValues()
     // - JSON data may be expanded or not
-    // - make an internal copy of the JSONTable RawUtf8 before calling
+    // - make an internal copy of the JsonTable RawUtf8 before calling
     // FillFrom() below
     // - if FieldBits is defined, it will store the identified field index
     procedure FillFrom(const JsonRecord: RawUtf8; FieldBits: PFieldBits = nil); overload;
@@ -2682,11 +2682,15 @@ type
     // - copy all COPIABLE_FIELDS, i.e. all fields excluding tftMany (because
     // those fields don't contain any data, but a TOrmMany instance
     // which allow to access to the pivot table data)
+    // - warning: this method won't copy the ID field value, unless both instance
+    // are of the same exact TOrmClass
     procedure FillFrom(aRecord: TOrm); overload;
     /// fill the specified properties of this object from another object
     // - source object must be a parent or of the same class as the current record
     // - copy the fields, as specified by their bit index in the source record;
     // you may use aRecord.GetNonVoidFields if you want to update some fields
+    // - warning: this method won't copy the ID field value, unless both instance
+    // are of the same exact TOrmClass
     procedure FillFrom(aRecord: TOrm; const aRecordFieldBits: TFieldBits); overload;
     /// fill all published properties of this object from a supplied TDocVariant
     // object document
@@ -4831,9 +4835,9 @@ type
   // for obvious security reasons: but you can define reUserCanChangeOwnPassword
   // so that the current logged user will be able to change its own password
   // - reCheckSessionConnectionID will ensure that a session is accessed only
-  // from the same low-level TRestConnectionID which created it - which would
-  // refuse the authentication e.g. after IP reconnection but avoid Replays or
-  // MiM/impersonification attacks
+  // from the same low-level TRestConnectionID which created it - which may
+  // require a full re-authentication after IP reconnection but would avoid
+  // Replays or MiM/impersonification attacks
   // - order of this set does matter, since it will be stored as a byte value
   // e.g. by TOrmAccessRights.ToString: ensure that new items will always be
   // appended to the list, not inserted within
@@ -6605,42 +6609,33 @@ begin
 end;
 
 function TOrm.CreateCopy: TOrm;
-var
-  f: PtrInt;
 begin
-  // create new instance
   result := POrmClass(self)^.Create;
-  // copy properties content
-  result.fID := fID;
-  with Orm do
-    for f := 0 to length(CopiableFields) - 1 do
-      CopiableFields[f].CopyValue(self, result);
+  result.FillFrom(self); // ID + CopiableFields[]
 end;
 
 function TOrm.CreateCopy(const CustomFields: TFieldBits): TOrm;
-var
-  f: PtrInt;
 begin
   result := POrmClass(self)^.Create;
-  // copy properties content
-  result.fID := fID;
-  with Orm do
-    for f := 0 to Fields.Count - 1 do
-      if FieldBitGet(CustomFields, f) and
-         FieldBitGet(CopiableFieldsBits, f) then
-        Fields.List[f].CopyValue(self, result);
+  result.FillFrom(self, CustomFields); // ID + fields
 end;
 
 function TOrm.GetNonVoidFields: TFieldBits;
 var
-  f: PtrInt;
+  p: POrmPropInfo;
+  n: TDALen;
 begin
   FillZero(result{%H-});
-  with Orm do
-    for f := 0 to Fields.Count - 1 do
-      if FieldBitGet(CopiableFieldsBits, f) and
-         not Fields.List[f].IsValueVoid(self) then
-        FieldBitSet(result, f);
+  p := pointer(Orm.CopiableFields);
+  if p = nil then
+    exit;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+  repeat
+    if not p^.IsValueVoid(self) then
+      FieldBitSet(result, p^.PropertyIndex);
+    inc(p);
+    dec(n);
+  until n = 0;
 end;
 
 constructor TOrm.Create(const aClient: IRestOrm; aID: TID; ForUpdate: boolean);
@@ -6734,53 +6729,85 @@ begin
   // failure in above Server.CreateSqlIndex() are ignored (may already exist)
 end;
 
+procedure FillFromByName(p: POrmPropInfo; src, dst: TOrm; bits: PFieldBits);
+var
+  f: PtrInt;
+  n: TDALen;
+  d: TOrmPropInfoList;
+  wasString: boolean;
+  tmp: RawUtf8;
+begin // sub-function for named properties copy via a transient RawUtf8
+  d := dst.Orm.Fields;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+  repeat
+    if (bits = nil) or
+       FieldBitGet(bits^, p^.PropertyIndex) then
+    begin
+      f := d.IndexByNameU(pointer(p^.Name)); // fast enoug (seldom called)
+      if f >= 0 then
+      begin
+        p^.GetValueVar(src, false, tmp, @wasString);
+        d.List[f].SetValueVar(dst, tmp, wasString);
+      end;
+    end;
+    inc(p); // all copiable fields
+    dec(n);
+  until n = 0;
+end;
+
 procedure TOrm.FillFrom(aRecord: TOrm);
+var
+  p: POrmPropInfo;
+  n: TDALen;
 begin
-  if (self <> nil) and
-     (aRecord <> nil) then
-    FillFrom(aRecord, aRecord.Orm.CopiableFieldsBits);
+  if (self = nil) or
+     (aRecord = nil) or
+     (aRecord = self) then
+    exit;
+  p := pointer(aRecord.Orm.CopiableFields);
+  if POrmClass(aRecord)^ = POrmClass(self)^ then
+    fID := aRecord.fID // fast path e.g. from CreateCopy
+  else if not InheritsFrom(POrmClass(aRecord)^) then
+  begin
+    FillFromByName(p, aRecord, self, nil); // need to search by name
+    exit;
+  end;
+  if p = nil then
+    exit;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+  repeat
+    p^.CopyValue(aRecord, self); // copy all fields between sibbling classes
+    inc(p);
+    dec(n);
+  until n = 0;
 end;
 
 procedure TOrm.FillFrom(aRecord: TOrm; const aRecordFieldBits: TFieldBits);
 var
-  i, f: PtrInt;
-  S, D: TOrmPropInfoList;
-  SP: TOrmPropInfo;
-  wasString: boolean;
-  tmp: RawUtf8;
+  p: POrmPropInfo;
+  n: TDALen;
 begin
   if (self = nil) or
      (aRecord = nil) or
      IsZero(aRecordFieldBits) then
     exit;
-  D := Orm.Fields;
-  if POrmClass(aRecord)^.InheritsFrom(POrmClass(self)^) then
+  p := pointer(aRecord.Orm.CopiableFields);
+  if POrmClass(aRecord)^ = POrmClass(self)^ then
+    fID := aRecord.fID // fast path
+  else if not InheritsFrom(POrmClass(aRecord)^) then
   begin
-    // fast atttribution for two sibbling classes
-    if POrmClass(aRecord)^ = POrmClass(self)^ then
-      fID := aRecord.fID; // same class -> ID values will match
-    for f := 0 to D.Count - 1 do
-      if FieldBitGet(aRecordFieldBits, f) then
-        D.List[f].CopyValue(aRecord, self);
+    FillFromByName(p, aRecord, self, @aRecordFieldBits);
     exit;
   end;
-  // two diverse tables -> don't copy ID, and per-name field lookup
-  S := aRecord.Orm.Fields;
-  for i := 0 to S.Count - 1 do
-    if FieldBitGet(aRecordFieldBits, i) then
-    begin
-      SP := S.List[i];
-      if D.List[i].Name = SP.Name then
-        // optimistic match
-        f := i
-      else
-        f := D.IndexByNameU(pointer(SP.Name));
-      if f >= 0 then
-      begin
-        SP.GetValueVar(aRecord, false, tmp, @wasString);
-        D.List[f].SetValueVar(self, tmp, wasString);
-      end;
-    end;
+  if p = nil then
+    exit;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibbling classes
+  repeat
+    if FieldBitGet(aRecordFieldBits, p^.PropertyIndex) then
+      p^.CopyValue(aRecord, self);
+    inc(p);
+    dec(n);
+  until n = 0;
 end;
 
 procedure TOrm.FillFrom(Table: TOrmTable; Row: PtrInt);
@@ -6795,12 +6822,12 @@ begin
   end;
 end;
 
-procedure TOrm.FillFrom(const JSONTable: RawUtf8; Row: PtrInt);
+procedure TOrm.FillFrom(const JsonTable: RawUtf8; Row: PtrInt);
 var
   Table: TOrmTableJson;
   tmp: TSynTempBuffer; // work on a private copy
 begin
-  tmp.Init(JSONTable);
+  tmp.Init(JsonTable);
   try
     Table := TOrmTableJson.Create('', tmp.buf, tmp.len);
     try
@@ -7601,7 +7628,7 @@ begin
     end
     else
     begin
-      // comparison of all properties of Reference against self
+      // comparison of all properties of Reference by name and RawUtf8 value
       This := Orm;
       Ref := Reference.Orm;
       for i := 0 to length(Ref.SimpleFields) - 1 do
@@ -7620,26 +7647,33 @@ end;
 
 procedure TOrm.ClearProperties;
 var
-  i: PtrInt;
+  p: POrmPropInfo;
+  n: TDALen;
 begin
   if self = nil then
     exit;
   fInternalState := 0;
   fID := 0;
-  with Orm do
-    if fFill.JoinedFields then
-    begin
-      for i := 0 to length(CopiableFields) - 1 do
-        if CopiableFields[i].OrmFieldType <> oftID then
-          CopiableFields[i].SetValue(self, nil, 0, false)
-        else
-          // clear nested allocated TOrm
-          TOrm(TOrmPropInfoRttiInstance(CopiableFields[i]).GetInstance(self)).
-            ClearProperties;
-    end
-    else
-      for i := 0 to length(CopiableFields) - 1 do
-        CopiableFields[i].SetValue(self, nil, 0, false);
+  p := pointer(Orm.CopiableFields);
+  if p = nil then
+    exit;
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+  if fFill.JoinedFields then
+    repeat
+      if p^.OrmFieldType <> oftID then
+        p^.SetValue(self, nil, 0, false)
+      else
+        // clear nested allocated TOrm
+        TOrm(TOrmPropInfoRttiInstance(p^).GetInstance(self)).ClearProperties;
+      inc(p);
+      dec(n);
+    until n = 0
+  else
+    repeat
+      p^.SetValue(self, nil, 0, false);
+      inc(p);
+      dec(n);
+    until n = 0
 end;
 
 procedure TOrm.ClearProperties(const aFieldsCsv: RawUtf8);
@@ -8135,15 +8169,8 @@ begin
 end;
 
 procedure OrmCopyObject(Dest, Source: TObject);
-var
-  i: PtrInt;
 begin
-  if (Source = nil) or (Dest = nil) then
-    exit;
-  TOrm(Dest).fID := TOrm(Source).fID;
-  with TOrm(Dest).Orm do
-    for i := 0 to length(CopiableFields) - 1 do
-      CopiableFields[i].CopyValue(Source, Dest);
+  TOrm(Dest).FillFrom(TOrm(Source)); // we have a fast method for this
 end;
 
 class procedure TOrm.RttiCustomSetParser(Rtti: TRttiCustom);
@@ -8198,27 +8225,34 @@ end;
 
 class procedure TOrm.RttiJsonRead(var Context: TJsonParserContext; Instance: TObject);
 var
-  name: PUtf8Char;
-  namelen: integer;
-  i: PtrInt;
+  ndx: PtrInt;
+  field: TOrmPropInfo;
   orm: TOrm absolute Instance;
 begin
-  // manually parse incoming JSON object using Orm.Fields.SetValue()
+  // efficiently parse incoming JSON object using Orm.Fields.SetValue()
   if not Context.ParseObject then
     exit; // invalid or {} or null
-  i := 0; // for optimistic property name lookup
+  ndx := 0; // for optimistic property name lookup
   repeat
-     name := GetJsonPropName(Context.Get.Json, @namelen);
-     Context.Get.GetJsonFieldOrObjectOrArray;
-     if (name = nil) or
-        (Context.Json = nil) then
-     begin
-       Context.Valid := false;
-       exit;
-     end;
-     orm.FillValue(i, name, Context.Value, namelen, Context.ValueLen, Context.WasString);
+    Context.Valid := false;
+    if not Context.GetJsonFieldName then
+      exit;
+    if IsRowID(Context.Value, Context.ValueLen) then
+      orm.fID := Context.Get.GetJsonInt64
+    else
+    begin
+      field := orm.Orm.Fields.ByName(Context.Value, Context.ValueLen, ndx);
+      if field = nil then
+        exit;
+      Context.Get.GetJsonFieldOrObjectOrArray;
+      if Context.Json = nil then
+        exit;
+      field.SetValue(orm, Context.Value, Context.ValueLen, Context.WasString);
+    end;
   until Context.EndOfObject = '}';
-  Context.ParseEndOfObject;
+  Context.Json := mormot.core.json.ParseEndOfObject(Context.Json, Context.Get.EndOfObject);
+  if Context.Json <> nil then
+    Context.Valid := true;
 end;
 
 class procedure TOrm.RttiJsonWrite(W: TJsonWriter; Instance: TObject;

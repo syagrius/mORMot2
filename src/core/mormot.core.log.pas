@@ -5072,7 +5072,7 @@ begin
   pointer(result) := PAnsiChar(log) + log.fISynLogOffset; // result := self
 end;
 
-{$STACKFRAMES OFF}
+{$STACKFRAMES OFF} // back to {$W-} normal state, as in mormot.defines.inc
 
 {$else}
 
@@ -5576,7 +5576,7 @@ begin
   LogText(Level, @tmp[1], Instance); // this method with ending #0 is the fastest
 end;
 
-{$STACKFRAMES OFF}
+{$STACKFRAMES OFF} // back to {$W-} normal state, as in mormot.defines.inc
 
 {$ifdef WIN64DELPHI} // Delphi Win64 has no 64-bit inline assembler
 procedure DebugBreak;
@@ -6393,6 +6393,9 @@ var
   thrdnam: PShortString;
   last: ^TLastException;
   i, n: PtrInt;
+  {$ifdef FPC}
+  curr, prev: PtrUInt;
+  {$endif FPC}
 label
   adr, fin;
 begin
@@ -6464,12 +6467,16 @@ adr:  // regular exception context log with its stack trace
       try
         TDebugFile.Log(log.fWriter, Ctxt.EAddr, {notcode=}true, {symbol=}false);
         {$ifdef FPC}
+        prev := Ctxt.EAddr;
         // we rely on the stack trace supplied by the FPC RTL
         for i := 0 to Ctxt.EStackCount - 1 do
-          if (i = 0) or
-             (Ctxt.EStack[i] <> Ctxt.EStack[i - 1]) then
-            TDebugFile.Log(log.fWriter,
-              Ctxt.EStack[i], {notcode=}false, {symbol=}false);
+        begin
+          curr := Ctxt.EStack[i];
+          if curr = prev then
+            continue; // don't log twice
+          TDebugFile.Log(log.fWriter, curr, {notcode=}false, {symbol=}false);
+          prev := curr;
+        end;
         {$else}
         {$ifdef CPUX86}
         // stack frame OK only for RTLUnwindProc by now

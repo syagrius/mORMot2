@@ -2060,7 +2060,7 @@ begin
     exit;
   rec := fStoredClass.Create;
   try
-    rec.FillFrom(SentData);
+    rec.FillFrom(SentData); // make an internal copy of SentData
     StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineAdd'{$endif});
     try
       result := AddOne(rec, rec.IDValue > 0, SentData);
@@ -4074,8 +4074,8 @@ begin
       fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
         ID, '', nil, fValue[i]);
     if fTrackChangesFieldBitsOffset <> 0 then
-      InternalTrackChangeUpdated(
-        fValue[i], fStoredClassRecordProps.CopiableFieldsBits);
+      InternalTrackChangeUpdated(fValue[i],
+                                 fStoredClassRecordProps.CopiableFieldsBits);
   finally
     StorageUnLock;
   end;

@@ -822,6 +822,18 @@ const
   SIGNER_SHA3 = [saSha3224 .. saSha3S256];
   SIGNER_DEFAULT_SALT = 'I6sWioAidNnhXO9BK';
   SIGNER_DEFAULT_ALGO = saSha3S128;
+  /// which ModularCryptIdentify/ModularCryptVerify() results are correct
+  mcfValid = [mcfMd5Crypt .. high(TModularCryptFormat)];
+var
+  /// default number of rounds for PBKDF2 "Modular Crypt" functions
+  // - numbers adjusted on 2025, and align with OWASP Password Storage Cheat
+  // Sheet, NIST SP 800-63B and RFC 8018, and are higher than "$pbkdf2" passlib
+  // - typical values on my Core i5-13500 PC with SHA-NI are Pbkdf2Sha1=68.28ms
+  // Pbkdf2Sha256=35.89ms Pbkdf2Sha512=110.55ms and Pbkdf2Sha3=112.58ms
+  // - made as a global variable, since you can adjust those values for your
+  // own purpose, as they are part of the hash text itself
+  MCF_ROUNDS: array[mcfMd5Crypt .. mcfPbkdf2Sha3] of cardinal = (
+    1000, 535000, 535000, 600000, 310000, 210000, 200000);
 
 type
   /// JSON-serializable object as used by TSynSigner.Pbkdf2() overloaded methods
@@ -1086,22 +1098,38 @@ const
   MCF_ALGO: array[TModularCryptFormat] of THashAlgo = (hfShake128, hfShake128,
     hfMD5, hfSHA256, hfSHA512, hfSHA1, hfSHA256, hfSHA512, hfSHA3_512,
     hfShake128, hfSHA256, hfSHA256);
-  /// which ModularCryptIdentify/ModularCryptVerify() results are correct
-  mcfValid = [succ(mcfInvalid) .. high(TModularCryptFormat)];
 
 /// compute the "Modular Crypt" hash of a given password
 // - as returned by the python passlib library
 // - see associated ModularCryptIdentify/ModularCryptVerify() functions
 // - for mcfBCrypt, rounds is the 2^Cost value, so should be in 4..31 range
 // - for mcfSCrypt, rounds is <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+// - with default rounds=0 timings on a Core i5-13500 with SHA-NI are Md5Crypt=77us
+// Sha256Crypt=35.91ms Sha512Crypt=94.18ms Pbkdf2Sha1=68.28ms Pbkdf2Sha256=35.89ms
+// Pbkdf2Sha512=110.55ms Pbkdf2Sha3=112.58ms BCrypt=169.59ms BCryptSha256=170.85ms
+// and SCrypt=143.66ms - consider mcfSha256Crypt for fast and safe hashing, and
+// mcfBCrypt/mcfSCrypt for proven password storage, and align with OWASP/NIST
+// recommendations for password hashing (100-250 ms) - note that SCrypt consumes
+// 64MB of RAM and BCrypt always 4KB - see also MCF_ROUNDS[] global variable
 function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
-  rounds: cardinal = 0; saltsize: cardinal = 0; const salt: RawUtf8 = ''): RawUtf8;
+  rounds: cardinal = 0; saltsize: cardinal = 0; const salt: RawUtf8 = ''): RawUtf8; overload;
+
+/// compute the "Modular Crypt" hash of a given password from expected format
+// - the format is the value returned by info^ in ModularCryptIdentify(), e.g.
+// !ModularCryptHash('$1$gV5s/FALJ/0x8nyo$', 'password') = '$1$gV5s/FALJ/0x8nyo$6yO.DIuu/ZF/eJaK5oHu90'
+// - the format can e.g. be send back to the client to make the proper modular
+// crypt hashing on its side, and then the hash (or nonced proof) to the server
+function ModularCryptHash(const format, password: RawUtf8): RawUtf8; overload;
 
 /// identify if a given hash matches any "Modular Crypt" format
 // - e.g. returns true and mcfMd5Crypt for '$1${salt}${checksum}' or
 // mcfSha256Crypt for '$5$rounds={rounds}${salt}${checksum}'
 // - just check the '${ident}$' prefix, without actually checking the content
-function ModularCryptIdentify(const hash: RawUtf8): TModularCryptFormat;
+// - can optionally return the header without the checksum, e.g. to notify a
+// client side for the expected hash algorithm and parameters, i.e. the
+// '${ident}${params}${salt}$' part excluding ending '{checksum}'
+function ModularCryptIdentify(const hash: RawUtf8;
+  info: PRawUtf8 = nil): TModularCryptFormat;
 
 /// decode and check a password against a hash in "Modular Crypt" format
 // - if allowed is not default [], it would return mcfUnknown if not in this set
@@ -1116,29 +1144,39 @@ function ModularCryptVerify(const password, hash: RawUtf8;
 function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
   var salt: RawUtf8): TModularCryptFormat;
 
+/// return a "Modular Crypt" text format with fake salt computed from an ID
+// - without {checksum} - as returned by ModularCryptIdentify() info^ parameter
+// - used e.g. by TRestServer.ReturnNonce() with an unknown UserName, to avoid
+// the client being able to guess by fuzzing that this UserName is unknown
+function ModularCryptFakeInfo(const id: RawUtf8;
+  format: TModularCryptFormat = mcfUnknown): RawUtf8;
+
 /// compute the fake "rounds" value for ModularCryptHash(mcfSCrypt)
 // - i.e. <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
 // - accepts LogN as [1..31], BlockSize=R as [1..16384] and Parallel=P as [1..8192]
+// - default is LogN=16, R=8, P=2 for safe interactive login (140ms and 64MB RAM)
 function SCryptRounds(LogN: cardinal = 16; BlockSize: cardinal = 8;
-  Parallel: cardinal = 1): cardinal;
+  Parallel: cardinal = 2): cardinal;
 
 /// decode the fake "rounds" value for ModularCryptHash(mcfSCrypt) into LogN/R/P
 // - is the reverse function of SCryptRounds()
-// - for Rounds = 0, returns default LogN=16 BlockSize=R=8 Parallel=P=1 values
+// - for Rounds = 0, returns default LogN=16 BlockSize=R=8 Parallel=P=2 values,
+// which seems fine for interactive login (148ms and 64MB RAM):
 procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
 
 /// SCrypt password hashing function compatible with passlib.hash.scrypt output
 // - as defined by https://www.tarsnap.com/scrypt/scrypt.pdf and RFC 7914
-// - SCrypt is more memory sensitive than BCrypt, so may be preferred
+// - returning '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>' passlib format
+// - SCrypt is more memory sensitive than BCrypt, so may be preferred if you
+// have enough RAM on your server, or you use challenge-like algorithm like S
 // - in SCrypt terms, LogN will generate N = 2^LogN work factor scale, BlockSize
 // is the R parameter (to match CPU cache line), and Parallel the P parameter
-// - memory and CPU usage will scale linearly - e.g. 64MB with default LogN=16
-// and Blocksize=8 (to compare with the 4KB of BCrypt) - see SCryptMemoryUse()
+// - default is LogN=16, R=8, P=2 for safe interactive login (148ms and 64MB RAM):
+// memory and CPU will scale linearly (BCrypt uses 4KB) - see SCryptMemoryUse()
 // - P will increase the CPU time without affecting memory requirements
-// - returning '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>' format
 // - will call the available SCrypt() function defined - or a custom API
 function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
-  LogN: PtrUInt = 16; BlockSize: PtrUInt = 8; Parallel: PtrUInt = 1;
+  LogN: PtrUInt = 16; BlockSize: PtrUInt = 8; Parallel: PtrUInt = 2;
   HashPos: PInteger = nil; Api: TSCriptRaw = nil): RawUtf8;
 
 
@@ -1243,6 +1281,8 @@ procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
 function BasicRealm(const FromServer: RawUtf8): RawUtf8;
 
 /// compute the HA0 for a given set of Digest access credentials
+// - i.e. HA0 = Hash(username:realm:password)
+// - return the number of binary hash bytes stored into HA0
 function DigestHA0(Algo: TDigestAlgo; const UserName, Realm: RawUtf8;
   const Password: SpiUtf8; out HA0: THash512Rec): integer;
 
@@ -4150,7 +4190,7 @@ begin
       #0:
         break;
       '.', '/', '0'..'9', 'A'..'Z', 'a'..'z':
-        inc(p); // valid chars
+        inc(p); // valid HASH64_CHARS
     else
       exit;
     end;
@@ -4164,18 +4204,21 @@ var
   c: AnsiChar;
   siz, n, aPasswordSize: PtrUInt;
   sbin, sb64, dp, ds: RawByteString;
+  prepared: array of RawByteString;
+  prep: PRawByteString;
   alt: THash512Rec;
 begin
   result := '';
-  if aRounds = 0 then
-    aRounds := 535000 // default for hfSha256/hfSha512
-  else
-    aRounds := MaxPtrUInt(aRounds, 1000); // >= 1000
+  if aAlgo <> hfMD5 then // fixed to 1000 rounds (sooo weak!) for MD5-CRYPT
+    if aRounds = 0 then
+      aRounds := MCF_ROUNDS[mcfSha256Crypt] // same default for mcfSha512Crypt
+    else
+      aRounds := MaxPtrUInt(1000, aRounds); // >= 1000
   case aAlgo of
     hfMD5:
       begin
         aRounds := 1000; // fixed
-        aSaltSize := MinPtrUInt(aSaltSize, 8); // lower range
+        aSaltSize := MinPtrUInt(8, aSaltSize); // lower range - default 8
         result := '$1$';
       end;
     hfSha256:
@@ -4188,9 +4231,8 @@ begin
   aPasswordSize := length(aPassword);
   if aSalt = '' then
   begin
-    if aSaltSize = 0 then
-      aSaltSize := 8
-    else if aSaltSize > 16 then
+    if (aSaltSize = 0) or
+       (aSaltSize > 16) then
       aSaltSize := 16; // for hfSha256/hfSha512
     TAesPrng.Main.RandomSalt(sbin, sb64, aSaltSize, '', @HASH64_CHARS, nil);
     FakeLength(sb64, aSaltSize); // aSaltSize is in base-64 chars, not bytes
@@ -4251,24 +4293,31 @@ begin
         FinalBin(ds, aSaltSize);
       end;
   end;
-  for n := 0 to aRounds - 1 do
+  SetLength(prepared, 42); // pre-compute all possible rounds combinations
+  prep := pointer(prepared);
+  for n := 0 to 41 do
   begin
     if (n and 1) <> 0 then // add key or last result
-      Update(pointer(dp), aPasswordSize)
-    else
-      Update(@alt, siz);
+      Append(prep^, pointer(dp), aPasswordSize);
     if (n mod 3) <> 0 then // add salt for numbers not divisible by 3
-      Update(pointer(ds), aSaltSize);
+      Append(prep^, pointer(ds), aSaltSize);
     if (n mod 7) <> 0 then // add key for numbers not divisible by 7
-      Update(pointer(dp), aPasswordSize);
+      Append(prep^, pointer(dp), aPasswordSize);
     if (n and 1) = 0 then  // add key or last result
-      Update(pointer(dp), aPasswordSize)
-    else
+      Append(prep^, pointer(dp), aPasswordSize);
+    inc(prep);             // will avoid some memory copy in the main loop
+  end;
+  for n := 0 to aRounds - 1 do
+  begin
+    if (n and 1) = 0 then       // add last result first every even round
+      Update(@alt, siz);
+    Update(prepared[n mod 42]);
+    if (n and 1) <> 0 then      // add last result last every odd round
       Update(@alt, siz);
     Final(alt);
   end;
   p := b64append(result, siz, aHashPos);
-  case siz of // shuffled Base64uriEncode()
+  case siz of // shuffled Base64uriEncode() with custom HASH64_CHARS
     SizeOf(HASH64_128):
       b64enclast(b64enc(p, @alt.b, @HASH64_128, 5), 0, alt.b[11], siz);
     SizeOf(HASH64_256):
@@ -4686,7 +4735,7 @@ begin
           result := mcfInvalid;
           exit;
         end;
-      end; // for mcfBCrypt: '$2a$rounds$saltchecksum' - here = cost (4..31)
+      end; // for mcfBCrypt: '$2a$rounds$saltchecksum' - rounds = cost (4..31)
     mcfBCryptSha256:
       begin // '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uk...'
         result := mcfInvalid;
@@ -4712,27 +4761,27 @@ begin
         if not IdemPChar(P, 'LN=') then
           exit;
         inc(P, 3);
-        sLogN := GetNextItemCardinal(P, ','); // logN in [1..31]
+        sLogN := GetNextItemCardinal(P, ','); // logN in [1..31] - default 16
         if (sLogN = 0) or
            (sLogN > 31) or
            not IdemPChar(P, 'R=') then
           exit;
         inc(P, 2);
-        sR := GetNextItemCardinal(P, ',');     // R in [1..16384]
+        sR := GetNextItemCardinal(P, ',');     // R in [1..16384] - default 8
         if (sR = 0) or
            (sR > 16384) or
            not IdemPChar(P, 'P=') then
           exit;
         inc(P, 2);
-        sP := GetNextItemCardinal(P, '$');     // P in [1..8191]
+        sP := GetNextItemCardinal(P, '$');     // P in [1..8191] - default 2
         if (sP = 0) or
            (sP > 8192) then
           exit;
         // rounds := <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
         rounds := SCryptRounds(sLogN, sR, sP);
         GetNextItem(P, '$', salt);
-        if (salt = '') or
-           (P = nil) then
+        if not Base64uriValid(pointer(salt), @ConvertBase64ToBin) or
+           not Base64uriValid(P, @ConvertBase64ToBin) then
           exit;
         result := mcfSCrypt;
         exit; // b64valid() is not the $scrypt$ charset but standard base64
@@ -4743,12 +4792,10 @@ begin
       exit;
     end;
   end;
-  if result = mcfBCrypt then
+  if result = mcfBCrypt then // mcfBCrypt: '$2a$rounds$saltchecksum'
   begin
     FastSetString(salt, P, 22); // fixed 22 chars salt
-    inc(P, 22);
-    if StrLen(P) <> 31 then     // fixed 31 chars checksum
-      P := nil;
+    inc(P, 22);                 // fixed 31 chars checksum (may be > with OPRF)
   end
   else
     GetNextItem(P, '$', salt);
@@ -4757,7 +4804,7 @@ begin
     result := mcfInvalid;
 end; // on success, P points to the {checksum} part
 
-function ModularCryptIdentify(const hash: RawUtf8): TModularCryptFormat;
+function ModularCryptIdentify(const hash: RawUtf8; info: PRawUtf8): TModularCryptFormat;
 var
   dummyrounds: cardinal;
   dummysalt: RawUtf8;
@@ -4765,6 +4812,10 @@ var
 begin
   P := pointer(hash);
   result := ModularCryptParse(P, dummyrounds, dummysalt);
+  if (info <> nil) and
+     (result in mcfValid) and
+     (P <> nil) then
+    FastSetString(info^, pointer(hash), P - pointer(hash));
 end;
 
 function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
@@ -4791,6 +4842,20 @@ begin
   else
     result := '';
   end;
+end;
+
+function ModularCryptHash(const format, password: RawUtf8): RawUtf8;
+var
+  mcf: TModularCryptFormat;
+  P: PUtf8char;
+  rounds: cardinal;
+  salt: RawUtf8;
+begin
+  FastAssignNew(result);
+  P := pointer(format);
+  mcf := ModularCryptParse(P, rounds, salt);
+  if mcf in mcfValid then
+    result := ModularCryptHash(mcf, password, rounds, 0, salt);
 end;
 
 function ModularCryptVerify(const password, hash: RawUtf8;
@@ -4841,6 +4906,37 @@ begin
     result := mcfInvalid;
 end;
 
+function ModularCryptFakeInfo(const id: RawUtf8; format: TModularCryptFormat): RawUtf8;
+var
+  h: THash256Rec; // always return the same fake content for the same id
+  enc: PChar64;
+  salt: TShort23;
+const
+  RANGE = cardinal(high(TModularCryptFormat)) - cardinal(mcfMd5Crypt); // = 9
+begin
+  HmacSha256(@SystemEntropy.Startup, pointer(id), 16, length(id), h.b);
+  if format <= mcfMd5Crypt then // compute consistent format if none supplied
+    format := TModularCryptFormat(h.b[0] mod RANGE + byte(succ(mcfMd5Crypt)));
+  Join(['$', MCF_IDENT[format], '$'], result);
+  enc := @HASH64_CHARS;
+  if format = mcfSCrypt then
+    enc := @ConvertToBase64;
+  salt[0] := #22;  // return consistent salt between calls for the same id
+  Base64uriEncode(@salt[1], @h.Hi, 16, enc);
+  case format of   // as if they were created with our default parameters
+    mcfSha256Crypt .. mcfSha512Crypt:
+      Append(result, ['rounds=', MCF_ROUNDS[format], '$', salt, '$']);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+     Append(result, [MCF_ROUNDS[format], '$', salt, '$']);
+    mcfBCrypt:
+      Append(result, ['12$', salt]);
+    mcfBCryptSha256:
+      Append(result, ['v=2,t=2b,r=12$', salt, '$']);
+    mcfSCrypt:
+      Append(result, ['ln=16,r=8,p=2$', salt, '$']);
+  end;
+end;
+
 function SCryptRounds(LogN, BlockSize, Parallel: cardinal): cardinal;
 begin // = <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
   if LogN = 0 then
@@ -4860,6 +4956,13 @@ end;
 
 procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
 begin
+  if Rounds = 0 then
+  begin
+    LogN := 16;
+    BlockSize := 8;
+    Parallel := 2; // those default values uses 64MB and 140ms - close to BCrypt
+    exit;
+  end;
   LogN := Rounds shr 27;
   if LogN = 0 then
     LogN := 16;     // LogN never 0, 5-bit up to 31
@@ -5145,8 +5248,6 @@ end;
 const
   MCF_SIGN: array[mcfPbkdf2Sha1 .. mcfPbkdf2Sha3] of TSignAlgo = (
     saSHA1, saSHA256, saSHA512, saSha3512);
-  MCF_ROUNDS: array[mcfPbkdf2Sha1 .. mcfPbkdf2Sha3] of cardinal = (
-    131000, 29000, 25000, 20000);
   HASH64_ENC: TChar64 = // the current encoding used by "$pbkdf2" passlib
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./';
 var
@@ -10984,7 +11085,7 @@ begin
     TypeInfo(TSecurityDescriptor), _TSecurityDescriptor]);
   // Rnd/Sign/Hash/Cipher/Asym/Cert/Store are registered in GlobalCryptAlgoInit
   {$ifdef OSWINDOWS}
-  X509Parse := @WinX509Parse; // use mormot.lib.sspi.pas WinCertDecode()
+  X509Parse         := @WinX509Parse; // use mormot.lib.sspi.pas WinCertDecode()
   WinCertInfoToText := @Win2Text;
   {$endif OSWINDOWS}
 end;

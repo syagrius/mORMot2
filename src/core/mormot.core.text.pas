@@ -471,6 +471,8 @@ type
 
   /// options set for TTextWriter.WriteObject() method
   TTextWriterWriteObjectOptions = set of TTextWriterWriteObjectOption;
+  /// two sets of TTextWriter.WriteObject() options
+  TTextWriterWriteObjectOptionsBoolean = array[boolean] of TTextWriterWriteObjectOptions;
 
   /// the potential places were TJsonWriter.AddHtmlEscape should process
   // proper HTML string escaping, unless hfNone is used
@@ -1242,7 +1244,7 @@ const
     [twoEnumSetsAsTextInRecord]);
 
   /// TTextWriter JSON serialization options including woEnumSetsAsText
-  TEXTWRITEROBJECTOPTIONS_ENUMASTEXT: array[boolean] of TTextWriterWriteObjectOptions = (
+  TEXTWRITEROBJECTOPTIONS_ENUMASTEXT: TTextWriterWriteObjectOptionsBoolean = (
     [],
     [woEnumSetsAsText]);
 
@@ -2187,12 +2189,15 @@ type
     // - will handle vtPointer/vtClass/vtObject/vtVariant kind of arguments,
     // appending class name for any class or object, the hexa value for a
     // pointer, or the JSON representation of any supplied TDocVariant
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseLastOSError(const Format: RawUtf8;
       const Args: array of const; const Trailer: ShortString = 'OSError');
     /// a wrapper function around raise CreateUtf8()
     // - generated executable code could be slightly shorter
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseUtf8(const Format: RawUtf8; const Args: array of const);
     /// a wrapper function around raise CreateU()
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseU(const Msg: RawUtf8);
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// can be used to customize how the exception is logged
@@ -4279,7 +4284,9 @@ end;
 class procedure TTextWriter.RaiseUnimplemented(const Method: ShortString);
 begin
   raise ESynException.CreateUtf8(
-    '%.% unimplemented: use TJsonWriter', [self, Method]);
+    '%.% unimplemented: use TJsonWriter', [self, Method])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
 end;
 
 procedure TTextWriter.Add(const Format: RawUtf8; const Values: array of const;
@@ -6394,7 +6401,7 @@ begin
   if (len < 2) or (len > 6) then
     exit;
   by4 := 0;
-  MoveByOne(entity, @by4, MinPtrUInt(len, 4));
+  MoveByOne(entity, @by4, MinPtrUInt(4, len));
   result := IntegerScanIndex(@HTML_UNESCAPE, length(HTML_UNESCAPE), by4) + 1;
   if result >= 37 then // adjust 'frac' as frac14', 'frac12' or 'frac34'
     if result > 37 then
@@ -10540,18 +10547,24 @@ begin
   error := GetLastError;
   FormatUtf8('% 0x% [%] %', [Trailer, CardinalToHexShort(error),
     StringReplaceAll(GetErrorText(error), '%', '#'), Format], fmt);
-  raise CreateUtf8(fmt, Args);
+  raise CreateUtf8(fmt, Args)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 class procedure ESynException.RaiseUtf8(const Format: RawUtf8;
   const Args: array of const);
 begin
-  raise CreateUtf8(Format, Args);
+  raise CreateUtf8(Format, Args)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 class procedure ESynException.RaiseU(const Msg: RawUtf8);
 begin
-  raise CreateU(Msg);
+  raise CreateU(Msg)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
@@ -12066,16 +12079,17 @@ var
   c: AnsiChar;
   P: PAnsiChar;
   B, B4: PByteArray;
-  m: TUriMethod;
+  pc: PCardinalArray;
   tmp: array[0..15] of AnsiChar;
 begin
   // initialize internal lookup tables for various text conversions
-  HexLookup(@TwoDigitsHex, '0123456789ABCDEF');
+  HexLookup(@TwoDigitsHex,      '0123456789ABCDEF');
   HexLookup(@TwoDigitsHexLower, '0123456789abcdef');
   {$ifdef DOUBLETOSHORT_USEGRISU}
   MoveFast(TwoDigitLookup[0], TwoDigitByteLookupW[0], SizeOf(TwoDigitLookup));
+  B := @TwoDigitByteLookupW;
   for i := 0 to 199 do
-    dec(PByteArray(@TwoDigitByteLookupW)[i], ord('0')); // '0'..'9' -> 0..9
+    dec(B[i], ord('0')); // '0'..'9' -> 0..9
   {$endif DOUBLETOSHORT_USEGRISU}
   FillcharFast(ConvertHexToBin, SizeOf(ConvertHexToBin), 255); // all to 255
   FillcharFast(ConvertHexToShl, SizeOf(ConvertHexToShl), 255);
@@ -12145,8 +12159,12 @@ begin
     if c in [#0, '&', '"'] then
       HTML_ESC[hfWithinAttributes, c] := v;
   end;
-  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
-    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
+  pc := @METHODNAME32;
+  i := length(METHODNAME32);
+  repeat
+    dec(i);
+    pc[i] := PCardinal(METHODNAME[TUriMethod(i)])^;
+  until i = 0;
   ShortToUuid := _ShortToUuid;
   AppendShortUuid := _AppendShortUuid;
   _VariantToUtf8DateTimeToIso8601 := __VariantToUtf8DateTimeToIso8601;

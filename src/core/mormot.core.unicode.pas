@@ -1512,6 +1512,12 @@ function IdemPropName(const P1, P2: ShortString): boolean; overload;
 function IdemPropName(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// case insensitive comparison of ASCII 7-bit identifiers with P1/P2 <> ''
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - behavior is undefined with UTF-8 encoding (some false positive may occur)
+function IdemPropNameNotNull(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// case insensitive comparison of ASCII 7-bit identifiers
 // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
 // - behavior is undefined with UTF-8 encoding (some false positive may occur)
@@ -2260,6 +2266,10 @@ function GotoEndOfQuotedString(P: PUtf8Char): PUtf8Char;
 
 /// get the next character not in [#1..' ']
 function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// get the next character not in [#1..' ']
+function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// get the next character not in [#9,' ']
@@ -6041,6 +6051,12 @@ begin
              IdemPropNameUSameLenNotNull(@P1[1], P2, P2Len));
 end;
 
+function IdemPropNameNotNull(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean;
+begin
+  result := (ord(P1[0]) = P2Len) and
+            IdemPropNameUSameLenNotNull(@P1[1], P2, P2Len);
+end;
+
 function IdemPropName(P1, P2: PUtf8Char; P1Len, P2Len: PtrInt): boolean;
 begin
   result := (P1Len = P2Len) and
@@ -8809,9 +8825,17 @@ begin
   {$else}
   if P^ in [#1..' '] then
     repeat
-      inc(P)
+      inc(P);
     until not (P^ in [#1..' ']);
   {$endif FPC}
+  result := P;
+end;
+
+function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
+begin
+  repeat
+    inc(P);
+  until not (P^ in [#1..' ']);
   result := P;
 end;
 
@@ -11373,52 +11397,59 @@ procedure InitializeUnit;
 var
   i: PtrInt;
   c: AnsiChar;
+  tc: TTextChar;
   ck: TCharKind;
   sc: TSnakeCase;
   lng: TLanguage;
+  p: PByteArray;
 begin
   // decompress 1KB static in the exe into 20KB UU[] array for Unicode Uppercase
   {$ifdef UU_COMPRESSED}
   InitializeUU;
   {$endif UU_COMPRESSED}
   // initialize internal lookup tables for various text conversions
+  p := @NormToNormByte;
   for i := 0 to 255 do
-    NormToNormByte[i] := i;
+    p[i] := i;
   NormToUpperAnsi7Byte := NormToNormByte;
+  p := @NormToUpperAnsi7Byte;
   for i := ord('a') to ord('z') do
-    dec(NormToUpperAnsi7Byte[i], 32);
+    dec(p[i], 32);
   NormToLowerAnsi7Byte := NormToNormByte;
+  p := @NormToLowerAnsi7Byte;
   for i := ord('A') to ord('Z') do
-    inc(NormToLowerAnsi7Byte[i], 32);
+    inc(p[i], 32);
   MoveFast(NormToUpperAnsi7, NormToUpper, 138);
   MoveFast(WinAnsiToUp, NormToUpperByte[138], SizeOf(WinAnsiToUp));
-  for i := 0 to 255 do
-  begin
-    c := NormToUpper[AnsiChar(i)];
-    if c in ['A'..'Z'] then
-      inc(c, 32); // manual lower
-    NormToLower[AnsiChar(i)] := c;
-  end;
+  MoveFast(NormToLowerAnsi7, NormToLower, 138);
+  MoveFast(WinAnsiToUp, NormToLowerByte[138], SizeOf(WinAnsiToUp));
+  p := @NormToLowerByte;
+  for i := 138 to 255 do
+    if p[i] in [ord('A') .. ord('Z')] then
+      inc(p[i], 32); // manual lower
   for c := low(c) to high(c) do
   begin
+    tc := [];
     if not (c in [#0, #10, #13]) then
-      include(TEXT_CHARS[c], tcNot01013);
+      include(tc, tcNot01013);
     if c in [#10, #13] then
-      include(TEXT_CHARS[c], tc1013);
+      include(tc, tc1013);
     if c in ['0'..'9', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcWord);
+      include(tc, tcWord);
     if c in ['_', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcIdentifierFirstChar);
+      include(tc, tcIdentifierFirstChar);
     if c in ['_', '0'..'9', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcIdentifier);
+      include(tc, tcIdentifier);
     if c in ['_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z'] then
       // '~' is part of the RFC 3986 but should be escaped in practice
       // see https://blog.synopse.info/?post/2020/08/11/The-RFC%2C-The-URI%2C-and-The-Tilde
-      include(TEXT_CHARS[c], tcUriUnreserved);
+      include(tc, tcUriUnreserved);
     if c in [#1..#9, #11, #12, #14..' '] then
-      include(TEXT_CHARS[c], tcCtrlNotLF);
+      include(tc, tcCtrlNotLF);
     if c in [#1..' ', ';'] then
-      include(TEXT_CHARS[c], tcCtrlNot0Comma);
+      include(tc, tcCtrlNot0Comma);
+    TEXT_CHARS[c] := tc;
+    ck := ckOther;
     case c of
       'a'..'z':
         ck := ckLowerAlpha;
@@ -11430,10 +11461,9 @@ begin
         ck := ckUnderscore;
       '.', ',', ';':
         ck := ckPoint;
-    else
-      ck := ckOther;
     end;
     IDENT_CHARS[c] := ck;
+    sc := [];
     case c of
       '0' .. '9':
         sc := [scDigit];
@@ -11443,8 +11473,6 @@ begin
         sc := [scLow];
       '_':
         sc := [sc_];
-    else
-      sc := [];
     end;
     SNAKE_CHARS[c] := sc;
   end;

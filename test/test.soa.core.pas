@@ -1127,8 +1127,16 @@ begin
       '{one:1,two=2}', HTTP_BADREQUEST), '');
     CheckEqual(Ask(result, 'Add', '1,2', 'n1=1&n2=2',
       '{n1:1,n2:2}', HTTP_SUCCESS), '3');
-    CheckEqual(Ask(result, 'Add', '1,0', 'n2=1',
-      '{n2:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,2', 'n2=2&n1=1',
+      '{n2:2,n1:1}', HTTP_SUCCESS), '3');
+    CheckEqual(Ask(result, 'Add', '1,0', 'n1=1',
+      '{n1:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,0', 'dummy=10&n2=1',
+      '{dummy:10,n2:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,0', 'dummy=10&n2=1&dummy2=2',
+      '{dummy:10,n2:1,dummy2:2}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '0,0', 'n2=0',
+      'null', HTTP_SUCCESS), '0');
     CheckEqual(Ask(result, 'Multiply', '2,3', 'n1=2&n2=3',
       '{n0:"abc",n2:3,m:null,n1:2}', HTTP_SUCCESS), '6');
     CheckEqual(Ask(result, 'Subtract', '23,20', 'n2=20&n1=23',
@@ -1148,11 +1156,12 @@ end;
 
 procedure TTestServiceOrientedArchitecture.Test(
   const Inst: TTestServiceInstances; Iterations: cardinal);
+var
+  rnd: TLecuyer; // local thread-safe non blocking random generator
 
   procedure TestCalculator(const I: ICalculator);
   var
-    i1, i2: PtrInt;
-    n, t, i3: integer;
+    n, t, i1, i2, i3: integer;
     c: cardinal;
     cu: currency;
     n1, n2, s1, s2: double;
@@ -1173,12 +1182,12 @@ procedure TTestServiceOrientedArchitecture.Test(
     CheckEqual(length(strs1), 3);
     for t := 1 to Iterations do
     begin
-      i1 := Random31 - Random31;
-      i2 := Random31 - i1;
-      Check(I.Add(i1, i2) = i1 + i2);
-      Check(I.Multiply(i1, i2) = Int64(i1) * Int64(i2));
-      n1 := RandomDouble * 1E-9 - RandomDouble * 1E-8;
-      n2 := n1 * RandomDouble;
+      i1 := rnd.Next31 - rnd.Next31;
+      i2 := rnd.Next31 - i1;
+      CheckEqual(I.Add(i1, i2), integer(i1 + i2));
+      CheckEqual(I.Multiply(i1, i2), Int64(i1) * Int64(i2));
+      n1 := rnd.NextDouble * 1E-9 - rnd.NextDouble * 1E-8;
+      n2 := n1 * rnd.NextDouble;
       CheckSame(I.Subtract(n1, n2), n1 - n2);
       s1 := n1;
       s2 := n2;
@@ -1229,8 +1238,8 @@ procedure TTestServiceOrientedArchitecture.Test(
       CheckSame(n1, n2);
       Rec1.FileExtension := ''; // to avoid memory leak
     end;
-    i1 := Random32;
-    i2 := Random32;
+    i1 := rnd.RawNext;
+    i2 := rnd.RawNext;
     l1 := DocList([i1, i2]);
     I.TestDocList(l1, i1, l2); // l2:=l1 & l1:=DocList([1,2,3,i1])
     CheckEqual(l1.Json, FormatUtf8('[1,2,3,%]', [i1]));
@@ -1304,6 +1313,7 @@ var
   Nav, Nav2: TConsultaNav;
   {$endif HASNOSTATICRTTI}
 begin
+  RandomLecuyer(rnd);
   CheckEqual(Inst.I.Add(1, 2), 3);
   Check(Inst.I.Multiply($1111333, $222266667) = $24693E8DB170B85, 'I.Mul');
   CheckEqual(Inst.I.StackIntMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 3628800, 'sm1');
@@ -1474,11 +1484,11 @@ begin
   for c := 0 to Iterations shr 2 do
   begin
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n1 := RandomDouble * 1000;
+    n1 := rnd.NextDouble * 1000;
     Inst.CN.Real := n1;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n2 := RandomDouble * 1000;
+    n2 := rnd.NextDouble * 1000;
     Inst.CN.Imaginary := n2;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);

@@ -881,9 +881,9 @@ const
   SpinSmallGetmemLockTSC     = 1000;
   {$endif FPCMM_PAUSE}
   {$else}
-  // pause with constant spinning counts (empirical values from fastmm4-avx)
-  SpinMediumLockCount        = 2500;
-  SpinLargeLockCount         = 5000;
+  // pause with constant spinning counts (empirical values)
+  SpinMediumLockCount        = pred(6 shl 5); // exponential backoff
+  SpinLargeLockCount         = 1000;          // linear backoff
   {$ifdef FPCMM_PAUSE}
   SpinSmallGetmemLockCount   = 500;
   {$endif FPCMM_PAUSE}
@@ -1074,7 +1074,7 @@ asm
         mov     rcx, r10
         xor     edx, edx
         cmp     qword ptr [rcx].TMediumBlockInfo.Prefetch, rdx
-        jnz     @s
+        jnz     @s // there is already a prefetched memory chunk available
         {$ifdef FPCMM_CMPBEFORELOCK_SPIN}
         cmp     byte ptr [rcx].TMediumBlockInfo.PrefetchLocked, dl
         jnz     @s
@@ -1089,7 +1089,7 @@ asm
         push    r10
         push    r11
         mov     dummy, MediumBlockPoolSizeMem
-        call    OsAllocMedium
+        call    OsAllocMedium // mmap() is usually very fast
         pop     r11
         pop     r10
         pop     rdi
@@ -1109,12 +1109,22 @@ asm
         cmp     rax, r9
         ja      @rc // timeout
         {$else}
-@s:     mov     edx, SpinMediumLockCount
-@sp:    pause
+        // same algorithm than function DoSpin() in mormot.core.os.pas
+@s:     mov     edx, SpinMediumLockCount // = pred(6 shl 5)
+@sp:    mov     ecx, SpinMediumLockCount
+        sub     ecx, edx
         dec     edx
-        jz      @rc //timeout
+        jz      @rc     // timeout
+        shr     ecx, 5  // 0..6 range, each 32 times
+        jz      @try
+        dec     ecx
+        mov     eax, 1
+        shl     eax, cl // exponential backoff: 1,2,4,8,16 x pause
+@p:     pause           // called 992 times until yield to the OS
+        dec     eax
+        jnz     @p
         {$endif FPCMM_SLEEPTSC}
-        mov     rcx, r10
+@try:   mov     rcx, r10
         mov     eax, $100
         {$ifdef FPCMM_CMPBEFORELOCK_SPIN}
         cmp     byte ptr [r10].TMediumBlockInfo.Locked, true
@@ -1127,7 +1137,7 @@ asm
         push    rdi
         push    r10
         push    r11
-        call    ReleaseCore
+        call    ReleaseCore // fpnanosleep on POSIX
         pop     r11
         pop     r10
         pop     rdi
@@ -1304,6 +1314,7 @@ end;
 
 {$ifdef FPCMM_MEDIUMPREFETCH}
 
+// munmap() takes more time than mmap() so it makes sense to cache one chunk
 function TrySaveMediumPrefetch(var Info: TMediumBlockInfo;
   MediumBlock: PMediumBlockPoolHeader): pointer; nostackframe; assembler;
 asm
@@ -1311,15 +1322,19 @@ asm
         mov     rcx, Info
         mov     rdx, MediumBlock
         {$endif MSWINDOWS}
-        cmp     qword ptr [rcx].TMediumBlockInfo.Prefetch, 0
-        jnz      @ok        // is there a prefetched memory chunk available?
+        xor     eax, eax
+        cmp     qword ptr [rcx].TMediumBlockInfo.Prefetch, rax
+        jnz     @ko // there is already a prefetched memory chunk available
         mov     eax, $100
   lock  cmpxchg byte ptr [rcx].TMediumBlockInfo.PrefetchLocked, ah
-        jne     @ok
+        jne     @ko
+        cmp     qword ptr [rcx].TMediumBlockInfo.Prefetch, 0
+        jnz     @ko2
+        // store this Medium block for the next TryAllocMediumPrefetch()
         mov     [rcx].TMediumBlockInfo.Prefetch, rdx
         xor     edx, edx // return nil if was saved
-        mov     [rcx].TMediumBlockInfo.PrefetchLocked, dl
-@ok:    mov     rax, rdx
+@ko2:   mov     byte ptr [rcx].TMediumBlockInfo.PrefetchLocked, false
+@ko:    mov     rax, rdx
 end;
 
 function TryAllocMediumPrefetch(var Info: TMediumBlockInfo): pointer;
@@ -1346,7 +1361,7 @@ end;
 
 procedure FreeMedium(ptr: PMediumBlockPoolHeader; var info: TMediumBlockInfo);
 begin
-  {$ifdef FPCMM_MEDIUMPREFETCH_untested}
+  {$ifdef FPCMM_MEDIUMPREFETCH}
   ptr := TrySaveMediumPrefetch(info, ptr);
   if ptr <> nil then
   {$endif FPCMM_MEDIUMPREFETCH}
@@ -2261,7 +2276,7 @@ asm
         mov     byte ptr [r10 + TMediumBlockInfo.Locked], false
         mov     arg1, r11
         mov     arg2, r10
-        call    FreeMedium
+        call    FreeMedium // munmap() may take time - or cache in Info.Prefetch
         jmp     @Quit
 @MakeEmptyMediumPoolSequentialFeed:
         // Get rbx = end-marker block, and recycle the current sequential feed pool

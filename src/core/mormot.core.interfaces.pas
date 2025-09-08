@@ -151,6 +151,7 @@ type
     /// we do not handle all kind of object pascal variables
     ValueType: TInterfaceMethodValueType;
     /// the variable direction as defined at code level
+    // - you may rather use high-level IsInput/IsOutput inlined methods
     ValueDirection: TInterfaceMethodValueDirection;
     /// how the variable may be stored
     ValueVar: TInterfaceMethodValueVar;
@@ -181,6 +182,12 @@ type
                  reValFpReg, reValFpRegs, reNone);
     /// 64-bit aligned position in TInterfaceMethod.ArgsSizeAsValue memory
     OffsetAsValue: cardinal;
+    /// true if is a const/var input argument
+    function IsInput: boolean;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
+    /// true if is a var/out/result output argument
+    function IsOutput: boolean;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// serialize the argument into the TServiceContainer.Contract JSON format
     // - non standard types (e.g. class, enumerate, dynamic array or record)
     // are identified by their type identifier - so contract does not extend
@@ -334,24 +341,21 @@ type
     ArgsOutputName: TRawUtf8DynArray;
     /// contains the count of variables for all used kind of arguments
     ArgsUsedCount: array[TInterfaceMethodValueVar] of byte;
-    /// retrieve a const / var argument index in Args[] from its name
+    /// retrieve a const / var argument in Args[] from its name
     // - search is case insensitive, returns -1 if not found
-    function ArgIndexInput(ArgName: PUtf8Char; ArgNameLen: integer): PtrInt;
-    /// retrieve a var / out / result argument index in Args[] from its name
+    function ArgInput(ArgName: PUtf8Char; ArgNameLen: PtrInt;
+      ArgIndex: PInteger = nil): PInterfaceMethodArgument;
+    /// retrieve a var / out / result argument Args[] from its name
     // - search is case insensitive, returns -1 if not found
-    function ArgIndexOutput(ArgName: PUtf8Char; ArgNameLen: integer): PtrInt;
+    function ArgOutput(ArgName: PUtf8Char; ArgNameLen: PtrInt;
+      ArgIndex: PInteger = nil): PInterfaceMethodArgument;
     /// retrieve an argument index in Args[] from its name
     // - search is case insensitive, returns -1 if not found
-    function ArgIndex(const ArgName: RawUtf8; Input: boolean): PtrInt;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// find the next input (const / var) argument index in Args[]
+    function ArgInputOutput(const ArgName: RawUtf8;
+      Input: boolean): PInterfaceMethodArgument;
+    /// find the next input or output argument 32-bit index in Args[]
     // - returns true if arg is the new value, false otherwise
-    function ArgNextInput(var arg: integer): boolean;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// find the next output (var / out / result) argument index in Args[]
-    // - returns true if arg is the new value, false otherwise
-    function ArgNextOutput(var arg: integer): boolean;
-      {$ifdef HASINLINE} inline; {$endif}
+    function ArgNext(var Arg: integer; Input: boolean): boolean;
     /// convert parameters encoded as a JSON array into a JSON object
     // - if Input is TRUE, will handle const / var arguments
     // - if Input is FALSE, will handle var / out / result arguments
@@ -394,9 +398,6 @@ type
     /// finalize all managed values after an execution
     // - caller should ensure that ArgsManagedCount <> 0
     procedure ArgsReleaseValues(V: PPointer);
-    /// retrieve arguments values from JSON object by checking its field names
-    // - as used by TInterfaceMethodExecute.ExecuteJson()
-    function ArgsParseJsonObject(var P: PUtf8Char; Params: PPUtf8CharArray): boolean;
   end;
 
   /// describe all mtehods of an interface-based service provider
@@ -2295,10 +2296,10 @@ type
     fStorage: TByteDynArray;
     fValues: PPointerArray;
     fAlreadyExecuted: boolean;
+    fCurrentStep: TInterfaceMethodExecuteEventStep;
     fOptions: TInterfaceMethodOptions;
     fDocVariantOptions: TDocVariantOptions;
     fOnExecute: TInterfaceMethodExecuteEventDynArray;
-    fCurrentStep: TInterfaceMethodExecuteEventStep;
     fBackgroundExecutionThread: TSynBackgroundThreadMethod;
     fLastException: Exception;
     fExecutedInstancesFailed: TRawUtf8DynArray;
@@ -2375,6 +2376,7 @@ type
     fOnCallback: TOnInterfaceMethodExecuteCallback;
     fServiceCustomAnswerHead: RawUtf8;
     fServiceCustomAnswerStatus: cardinal;
+    function ExecuteJsonParse(var Ctxt: TJsonParserContext; Error: PShortString): boolean;
   public
     /// finalize the execution instance
     destructor Destroy; override;
@@ -2769,6 +2771,16 @@ begin
   {$endif SOA_DEBUG}
 end;
 
+function TInterfaceMethodArgument.IsInput: boolean;
+begin
+  result := ValueDirection <= imdVar;
+end;
+
+function TInterfaceMethodArgument.IsOutput: boolean;
+begin
+  result := ValueDirection <> imdConst;
+end;
+
 function TInterfaceMethodArgument.SetFromJson(var Ctxt: TJsonParserContext;
   Method: PInterfaceMethod; V: pointer; Error: PShortString): boolean;
 var
@@ -2945,69 +2957,83 @@ end;
 
 { TInterfaceMethod }
 
-function TInterfaceMethod.ArgIndexInput(ArgName: PUtf8Char; ArgNameLen: integer): PtrInt;
+function TInterfaceMethod.ArgInput(ArgName: PUtf8Char; ArgNameLen: PtrInt;
+  ArgIndex: PInteger): PInterfaceMethodArgument;
 var
-  a: PInterfaceMethodArgument;
+  a: PtrInt;
 begin
-  if ArgNameLen > 0 then
+  if ArgNameLen >= 0 then
   begin
-    a := @Args[ArgsInFirst];
-    for result := ArgsInFirst to ArgsInLast do
-      if (a^.ValueDirection in [imdConst, imdVar]) and
-         IdemPropName(a^.ParamName^, ArgName, ArgNameLen) then
-          exit
-      else
-        inc(a);
+    a := ArgsInFirst;
+    result := @Args[a];
+    while a <= ArgsInLast do
+    begin
+      if result^.IsInput and
+         IdemPropNameNotNull(result^.ParamName^, ArgName, ArgNameLen) then
+      begin
+        if ArgIndex <> nil then
+          ArgIndex^ := a;
+        exit;
+      end;
+      inc(result);
+      inc(a);
+    end;
   end;
-  result := -1;
+  result := nil;
 end;
 
-function TInterfaceMethod.ArgIndexOutput(ArgName: PUtf8Char; ArgNameLen: integer): PtrInt;
+function TInterfaceMethod.ArgOutput(ArgName: PUtf8Char; ArgNameLen: PtrInt;
+  ArgIndex: PInteger): PInterfaceMethodArgument;
 var
-  a: PInterfaceMethodArgument;
+  a: PtrInt;
 begin
-  if ArgNameLen > 0 then
+  if ArgNameLen >= 0 then
   begin
-    a := @Args[ArgsOutFirst];
-    for result := ArgsOutFirst to ArgsOutLast do
-      if (a^.ValueDirection <> imdConst) and
-         IdemPropName(a^.ParamName^, ArgName, ArgNameLen) then
-          exit
-      else
-        inc(a);
+    a := ArgsOutFirst;
+    result := @Args[a];
+    while a <= ArgsOutLast do
+    begin
+      if result^.IsOutput and
+         IdemPropNameNotNull(result^.ParamName^, ArgName, ArgNameLen) then
+       begin
+         if ArgIndex <> nil then
+           ArgIndex^ := a;
+         exit;
+       end;
+      inc(result);
+      inc(a);
+    end;
   end;
-  result := -1;
+  result := nil;
 end;
 
-function TInterfaceMethod.ArgIndex(const ArgName: RawUtf8; Input: boolean): PtrInt;
+function TInterfaceMethod.ArgInputOutput(const ArgName: RawUtf8;
+  Input: boolean): PInterfaceMethodArgument;
 begin
+  result := pointer(ArgName);
+  if result <> nil then
+    if Input then
+      result := ArgInput(pointer(ArgName), PStrLen(PAnsiChar(result) - _STRLEN)^)
+    else
+      result := ArgOutput(pointer(ArgName), PStrLen(PAnsiChar(result) - _STRLEN)^);
+end;
+
+function TInterfaceMethod.ArgNext(var Arg: integer; Input: boolean): boolean;
+begin
+  result := true;
+  inc(Arg);
   if Input then
-    result := ArgIndexInput(pointer(ArgName), length(ArgName))
+    while Arg <= ArgsInLast do
+      if Args[Arg].IsInput then
+        exit
+      else
+        inc(Arg)
   else
-    result := ArgIndexOutput(pointer(ArgName), length(ArgName));
-end;
-
-function TInterfaceMethod.ArgNextInput(var arg: integer): boolean;
-begin
-  result := true;
-  inc(arg);
-  while arg <= ArgsInLast do
-    if Args[arg].ValueDirection in [imdConst, imdVar] then
-      exit
-    else
-      inc(arg);
-  result := false;
-end;
-
-function TInterfaceMethod.ArgNextOutput(var arg: integer): boolean;
-begin
-  result := true;
-  inc(arg);
-  while arg <= ArgsOutLast do
-    if Args[arg].ValueDirection <> imdConst then
-      exit
-    else
-      inc(arg);
+    while Arg <= ArgsOutLast do
+      if Args[Arg].IsOutput then
+        exit
+      else
+        inc(Arg);
   result := false;
 end;
 
@@ -3035,10 +3061,10 @@ begin
       inc(a);
       if Input then
       begin
-        if a^.ValueDirection in [imdOut, imdResult] then
+        if not a^.IsInput then
           continue;
       end
-      else if a^.ValueDirection = imdConst then
+      else if not a^.IsOutput then
         continue;
       W.AddPropName(a^.ParamName^);
       P := GotoNextNotSpace(P);
@@ -3063,7 +3089,6 @@ end;
 function TInterfaceMethod.ArgsCommandLineToObject(P: PUtf8Char; Input: boolean;
   RaiseExceptionOnUnknownParam: boolean): RawUtf8;
 var
-  i: integer;
   W: TJsonWriter;
   B: PUtf8Char;
   arginfo: PInterfaceMethodArgument;
@@ -3080,20 +3105,19 @@ begin
           (arg <> '') do
     begin
       ok := true;
-      i := ArgIndex(arg, Input);
-      if i < 0 then
+      arginfo := ArgInputOutput(arg, Input);
+      if arginfo = nil then
         if RaiseExceptionOnUnknownParam then
           EInterfaceFactory.RaiseUtf8('Unexpected [%] parameter for %',
             [arg, InterfaceDotMethodName])
         else
           ok := false;
-      arginfo := @Args[i];
       if ok then
         W.AddPropName(arginfo^.ParamName^);
       if not (P^ in [':', '=']) then
         EInterfaceFactory.RaiseUtf8('"%" parameter has no = for %',
           [arg, InterfaceDotMethodName]);
-      P := GotoNextNotSpace(P + 1);
+      P := IgnoreAndGotoNextNotSpace(P);
       if P^ in ['"', '[', '{'] then
       begin
         // name='"value"' or name='{somejson}'
@@ -3141,23 +3165,27 @@ begin
   if Input then
   begin
     Dest.InitFast(ArgsInputValuesCount, dvObject);
-    arg := @Args[ArgsInFirst];
-    for a := ArgsInFirst to ArgsInLast do
+    a := ArgsInFirst;
+    arg := @Args[a];
+    while a <= ArgsInLast do
     begin
-      if arg^.ValueDirection in [imdConst, imdVar] then
+      if arg^.IsInput then
         Dest.AddValueRtti(ArgsName[a], Values[a], arg^.ArgRtti);
       inc(arg);
+      inc(a);
     end;
   end
   else
   begin
     Dest.InitFast(ArgsOutputValuesCount, dvObject);
-    arg := @Args[ArgsOutFirst];
-    for a := ArgsOutFirst to ArgsOutLast do
+    a := ArgsOutFirst;
+    arg := @Args[a];
+    while a <= ArgsOutLast do
     begin
-      if arg^.ValueDirection <> imdConst then
+      if arg^.IsOutput then
         Dest.AddValueRtti(ArgsName[a], Values[a], arg^.ArgRtti);
       inc(arg);
+      inc(a);
     end;
   end;
 end;
@@ -3192,39 +3220,41 @@ begin
      (ArgsParams.Kind <> dvArray) then
     exit;
   if ArgsObject.Kind = dvUndefined then
-    ArgsObject.Init(ArgsParams.Options);
+    ArgsObject.Init(ArgsParams.Options, dvObject);
   ArgsObject.Capacity := ArgsObject.Count + ArgsParams.Count;
   n := 0;
   if Input then
   begin
-    if ArgsParams.Count = integer(ArgsInputValuesCount) then
+    if ArgsParams.Count <> integer(ArgsInputValuesCount) then
+      exit;
+    a := ArgsInFirst;
+    arg := @Args[a];
+    while a <= ArgsInLast do
     begin
-      arg := @Args[ArgsInFirst];
-      for a := ArgsInFirst to ArgsInLast do
+      if arg^.IsInput then
       begin
-        if arg^.ValueDirection in [imdConst, imdVar] then
-        begin
-          ArgsObject.AddValue(ArgsName[a], ArgsParams.Values[n]);
-          inc(n);
-        end;
-        inc(arg);
+        ArgsObject.AddValue(ArgsName[a], ArgsParams.Values[n]);
+        inc(n);
       end;
+      inc(arg);
+      inc(a);
     end;
   end
   else
   begin
-    if ArgsParams.Count = integer(ArgsOutputValuesCount) then
+    if ArgsParams.Count <> integer(ArgsOutputValuesCount) then
+      exit;
+    a := ArgsOutFirst;
+    arg := @Args[a];
+    while a <= ArgsOutLast do
     begin
-      arg := @Args[ArgsOutFirst];
-      for a := ArgsOutFirst to ArgsOutLast do
+      if arg^.IsOutput then
       begin
-        if arg^.ValueDirection <> imdConst then
-        begin
-          ArgsObject.AddValue(ArgsName[a], ArgsParams.Values[n]);
-          inc(n);
-        end;
-        inc(arg)
+        ArgsObject.AddValue(ArgsName[a], ArgsParams.Values[n]);
+        inc(n);
       end;
+      inc(arg);
+      inc(a);
     end;
   end;
 end;
@@ -3232,7 +3262,8 @@ end;
 procedure TInterfaceMethod.ArgsAsDocVariantFix(var ArgsObject: TDocVariantData;
   Input: boolean);
 var
-  a, ndx: PtrInt;
+  a: PtrInt;
+  arg: PInterfaceMethodArgument;
   doc: TDocVariantData;
 begin
   if ArgsObject.Count > 0 then
@@ -3240,29 +3271,42 @@ begin
       dvObject:
         for a := 0 to ArgsObject.Count - 1 do
         begin
-          ndx := ArgIndex(ArgsObject.Names[a], Input);
-          if ndx >= 0 then
-            Args[ndx].FixValue(ArgsObject.Values[a]);
+          arg := ArgInputOutput(ArgsObject.Names[a], Input);
+          if arg <> nil then
+            arg^.FixValue(ArgsObject.Values[a]);
         end;
       dvArray:
-        if Input then
         begin
-          if ArgsObject.Count <> integer(ArgsInputValuesCount) then
-            exit;
-          {%H-}doc.Init(ArgsObject.Options);
-          for a := ArgsInFirst to ArgsInLast do
-            if Args[a].ValueDirection in [imdConst, imdVar] then
-              Args[a].FixValueAndAddToObject(ArgsObject.Values[doc.Count], doc);
-          ArgsObject := doc;
-        end
-        else
-        begin
-          if ArgsObject.Count <> integer(ArgsOutputValuesCount) then
-            exit;
-          doc.Init(ArgsObject.Options);
-          for a := ArgsOutFirst to ArgsOutLast do
-            if Args[a].ValueDirection <> imdConst then
-              Args[a].FixValueAndAddToObject(ArgsObject.Values[doc.Count], doc);
+          {%H-}doc.Init(ArgsObject.Options, dvObject);
+          doc.Capacity := ArgsObject.Count;
+          if Input then
+          begin
+            if ArgsObject.Count <> integer(ArgsInputValuesCount) then
+              exit;
+            a := ArgsInFirst;
+            arg := @Args[a];
+            while a <= ArgsInLast do
+            begin
+              if arg^.IsInput then
+                arg^.FixValueAndAddToObject(ArgsObject.Values[doc.Count], doc);
+              inc(arg);
+              inc(a);
+            end;
+          end
+          else
+          begin
+            if ArgsObject.Count <> integer(ArgsOutputValuesCount) then
+              exit;
+            a := ArgsOutFirst;
+            arg := @Args[a];
+            while a <= ArgsOutLast do
+            begin
+              if arg^.IsOutput then
+                arg^.FixValueAndAddToObject(ArgsObject.Values[doc.Count], doc);
+              inc(arg);
+              inc(a);
+            end;
+          end;
           ArgsObject := doc;
         end;
     end;
@@ -3312,43 +3356,6 @@ begin
   until false;
 end;
 
-function TInterfaceMethod.ArgsParseJsonObject(var P: PUtf8Char;
-  Params: PPUtf8CharArray): boolean;
-var
-  a, a1: PtrInt;
-  NameLen: integer; // should be a 32-bit "integer" variable, not a PtrInt
-  EndOfObject: AnsiChar;
-  Val, Name: PUtf8Char;
-  arg: PInterfaceMethodArgument;
-begin
-  result := false;
-  FillCharFast(Params^[0], (ArgsInLast + 1) * SizeOf(pointer), 0);
-  a1 := ArgsInFirst;
-  repeat
-    Name := GetJsonPropName(P, @NameLen);
-    if Name = nil then
-      exit; // invalid JSON object in input
-    Val := P;
-    P := GotoNextJsonItem(P, EndOfObject);
-    if P = nil then
-      break;
-    for a := a1 to ArgsInLast do
-    begin
-      arg := @Args[a];
-      if arg^.ValueDirection <> imdOut then
-        if IdemPropName(arg^.ParamName^, Name, NameLen) then // inlined on FPC
-        begin
-          Params^[a] := Val; // fast redirection, without alloc
-          if a = a1 then
-            inc(a1); // optimistic O(1) search for in-order input
-          break;
-        end;
-    end;
-  until (P = nil) or
-        (EndOfObject = '}');
-  result := true;
-end;
-
 
 { ************ TInterfacedObjectFake with JITted Methods Execution }
 
@@ -3393,10 +3400,10 @@ var
   arg: integer;
 begin
   FillCharFast(ctxt.I64s, ctxt.Method^.ArgsUsedCount[imvv64] * SizeOf(Int64), 0);
-  a := pointer(ctxt.Method^.Args);
+  a := pointer(ctxt.Method^.Args); // always <> nil
   for arg := 1 to PDALen(PAnsiChar(a) - _DALEN)^ + (_DAOFF - 1) do
   begin
-    inc(a);
+    inc(a); // increase first, to ignore self
     V := nil;
     {$ifdef CPUX86}
     case a^.RegisterIdent of
@@ -3606,10 +3613,11 @@ begin
     else
       oopt := DEFAULT_WRITEOPTIONS[false];
     W.CustomOptions := wopt;
-    a := @ctxt.Method^.Args[ctxt.Method^.ArgsInFirst];
-    for arg := ctxt.Method^.ArgsInFirst to ctxt.Method^.ArgsInLast do
+    arg := ctxt.Method^.ArgsInFirst;
+    a := @ctxt.Method^.Args[arg];
+    while arg <= ctxt.Method^.ArgsInLast do
     begin
-      if a^.ValueDirection in [imdConst, imdVar] then
+      if a^.IsInput then
       begin
         V := ctxt.Value[arg];
         if (a^.ValueType = imvInterface) and
@@ -3622,6 +3630,7 @@ begin
         end;
       end;
       inc(a);
+      inc(arg);
     end;
     W.CancelLastComma;
     W.SetText(Json); // without [ ]
@@ -3636,78 +3645,76 @@ end;
 procedure TInterfacedObjectFake.FakeCallSetJsonToStack(
   var ctxt: TFakeCallContext; R: PUtf8Char);
 var
-  arg, nameLen: integer; // both should be integers, not PtrInt
-  name: PUtf8Char;
+  arg: integer; // should be integer, not PtrInt
   V: PPointer;
   a: PInterfaceMethodArgument;
   asJsonObject: boolean;
   c: TJsonParserContext;
 begin
-  if R <> nil then
-  begin
-    if R^ in [#1..' '] then
-      repeat
-        inc(R)
-      until not (R^ in [#1..' ']);
-    asJsonObject := false; // [value,...] JSON array format
+  if ctxt.Method^.ArgsOutputValuesCount = 0 then
+    exit;
+  if R = nil then
+    FakeCallRaiseError(ctxt, 'method returned value, but OutputJson=''''', []);
+  if R^ in [#1..' '] then
+    repeat
+      inc(R)
+    until not (R^ in [#1..' ']);
+  asJsonObject := false; // [value,...] JSON array format
+  if R^ <> '[' then
     if R^ = '{' then
       // {"paramname":value,...} JSON object format
       asJsonObject := true
-    else if R^ <> '[' then
+    else
       FakeCallRaiseError(ctxt, 'JSON array/object result expected', []);
-    c.InitParser(R + 1, nil, fFactory.JsonParserOptions,
-      @fFactory.DocVariantOptions, nil, nil);
-    arg := ctxt.Method^.ArgsOutFirst;
-    if arg > 0 then
-      repeat
-        if asJsonObject then
-        begin
-          name := GetJsonPropName(c.Get.Json, @nameLen);
-          if name = nil then
-            // end of JSON object
-            break;
-          // optimistic process of JSON object with in-order parameters
-          if (arg > 0) and
-            not IdemPropName(ctxt.Method^.Args[arg].ParamName^, name, nameLen) then
-          begin
-            // slower but safe ctxt.Method when not in-order
-            arg := ctxt.Method^.ArgIndexOutput(name, nameLen);
-            if arg < 0 then
-              FakeCallRaiseError(ctxt, 'unexpected parameter [%]', [name]);
-          end;
-        end;
-        a := @ctxt.Method^.Args[arg];
-        //assert(ValueDirection in [imdVar,imdOut,imdResult]);
-        V := ctxt.Value[arg];
-        a^.SetFromJson(c, ctxt.Method, V, nil);
-        if a^.ValueDirection = imdResult then
-        begin
-          ctxt.ResultType := a^.ValueType;
-          if a^.ValueType in [imvBoolean..imvCurrency] then
-            // ordinal/real result values to CPU/FPU registers
-            MoveFast(V^, ctxt.Result^, a^.ArgRtti.Size);
-        end;
-        if c.Json = nil then
-          break;
-        c.Json := GotoNextNotSpace(c.Json);
-        if asJsonObject then
-        begin
-          if (c.Json^ = #0) or
-             (c.Json^ = '}') then
-            break
-          else
-          // end of JSON object
-          if not ctxt.Method^.ArgNextOutput(arg) then
-            // no next result argument -> force manual search
-            arg := 0;
-        end
-        else if not ctxt.Method^.ArgNextOutput(arg) then
-          // end of JSON array
-          break;
-      until false;
-  end
-  else if ctxt.Method^.ArgsOutputValuesCount > 0 then
-    FakeCallRaiseError(ctxt, 'method returned value, but OutputJson=''''', []);
+  c.InitParser(R + 1, nil, fFactory.JsonParserOptions, @fFactory.DocVariantOptions);
+  arg := ctxt.Method^.ArgsOutFirst;
+  a := @ctxt.Method^.Args[arg];
+  repeat
+    if asJsonObject then
+    begin
+      if not c.GetJsonFieldName then
+        break; // end of JSON object
+      if (arg = 0) or // arg := 0 below to force search
+         // optimistic process of JSON object with in-order parameters
+         not IdemPropName(a^.ParamName^, c.Value, c.ValueLen) then
+      begin
+        // slower but safe ctxt.Method when not in-order (unlikely)
+        a := ctxt.Method^.ArgOutput(c.Value, c.ValueLen, @arg);
+        if a = nil then
+          FakeCallRaiseError(ctxt, 'unexpected parameter [%]', [c.Value]);
+      end;
+    end;
+    V := ctxt.Value[arg];
+    a^.SetFromJson(c, ctxt.Method, V, nil);
+    if a^.ValueDirection = imdResult then
+    begin
+      ctxt.ResultType := a^.ValueType;
+      if a^.ValueType in [imvBoolean..imvCurrency] then
+        // ordinal/real result values to CPU/FPU registers
+        MoveFast(V^, ctxt.Result^, a^.ArgRtti.Size);
+    end;
+    if c.Json = nil then
+      break;
+    c.Json := GotoNextNotSpace(c.Json);
+    if asJsonObject then
+    begin
+      if c.Json^ in [#0, '}'] then
+        break; // end of JSON object
+      if arg = 0 then
+        continue;
+    end;
+    repeat
+      inc(arg);
+      if arg > ctxt.Method^.ArgsOutLast then
+      begin
+        if not asJsonObject then
+          exit;
+        arg := 0;
+        break;
+      end;
+      inc(a);
+    until a^.IsOutput;
+  until false;
 end;
 
 procedure TInterfacedObjectFake.FakeCallInternalProcess(var ctxt: TFakeCallContext);
@@ -4112,7 +4119,7 @@ begin
         imvInterface:
           if Assigned(a^.ArgRtti.JsonWriter.Code) then
             include(a^.ValueKindAsm, vIsInterfaceJson) // e.g. IDocList
-          else if a^.ValueDirection <> imdConst then
+          else if a^.IsOutput then
             ErrorMsg := ' - interface not allowed as output: ' +
               'use a const parameter';
       end;
@@ -4125,17 +4132,17 @@ begin
       else
       begin
         m^.ArgsNotResultLast := na;
-        if a^.ValueDirection <> imdOut then
+        if a^.IsInput then
         begin
           inc(m^.ArgsInputValuesCount);
           if m^.ArgsInFirst < 0 then
             m^.ArgsInFirst := na;
           m^.ArgsInLast := na;
         end;
-        if a^.ValueDirection <> imdConst then
+        if a^.IsOutput then
           m^.ArgsOutNotResultLast := na;
       end;
-      if a^.ValueDirection <> imdConst then
+      if a^.IsOutput then
       begin
         if m^.ArgsOutFirst < 0 then
           m^.ArgsOutFirst := na;
@@ -4219,7 +4226,7 @@ begin
     SetLength(m^.ArgsInputName, m^.ArgsInputValuesCount);
     u := pointer(m^.ArgsInputName);
     for na := m^.ArgsInFirst to m^.ArgsInLast do
-      if m^.Args[na].ValueDirection in [imdConst, imdVar] then
+      if m^.Args[na].IsInput then
       begin
         ShortStringToAnsi7String(m^.Args[na].ParamName^, u^);
         inc(u);
@@ -4227,7 +4234,7 @@ begin
     SetLength(m^.ArgsOutputName, m^.ArgsOutputValuesCount);
     u := pointer(m^.ArgsOutputName);
     for na := m^.ArgsOutFirst to m^.ArgsOutLast do
-      if m^.Args[na].ValueDirection <> imdConst then
+      if m^.Args[na].IsOutput then
       begin
         ShortStringToAnsi7String(m^.Args[na].ParamName^, u^);
         inc(u);
@@ -4515,7 +4522,7 @@ begin
       WR.AddDirect('[');
       for na := m^.ArgsOutFirst to m^.ArgsOutLast do
         with m^.Args[na] do
-          if ValueDirection <> imdConst then
+          if IsOutput then
             AddDefaultJson(WR);
       WR.CancelLastComma(']');
       WR.SetText(m^.DefaultResult);
@@ -5988,6 +5995,7 @@ begin
   if cardinal(Index) >= fMethod^.ArgsInputValuesCount then
     raise EInterfaceStub.Create(fSender, fMethod^, 'Input[%>=%]', [Index,
       fMethod^.ArgsInputValuesCount])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
   else
     result := fInput[Index];
 end;
@@ -5998,6 +6006,7 @@ begin
   if cardinal(Index) >= fMethod^.ArgsOutputValuesCount then
     raise EInterfaceStub.Create(fSender, fMethod^, 'Output[%>=%]',
       [Index, fMethod^.ArgsOutputValuesCount])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
   else
     fOutput[Index] := Value;
 end;
@@ -6005,30 +6014,21 @@ end;
 function TOnInterfaceStubExecuteParamsVariant.GetInNamed(
   const aParamName: RawUtf8): variant;
 var
-  L, a, ndx: integer;
-  arg: PInterfaceMethodArgument;
+  ndx: PtrInt;
 begin
-  L := Length(aParamName);
-  ndx := 0;
-  if (L > 0) and
-     (fInput <> nil) then
-    for a := fMethod^.ArgsInFirst to fMethod^.ArgsInLast do
+  if fInput <> nil then
+  begin
+    ndx := FindPropName(pointer(fMethod^.ArgsInputName), aParamName,
+      fMethod^.ArgsInputValuesCount);
+    if ndx >= 0 then
     begin
-      arg := @fMethod^.Args[a];
-      if arg^.ValueDirection in [imdConst, imdVar] then
-      begin
-        if IdemPropName(arg^.ParamName^, pointer(aParamName), L) then
-        begin
-          result := fInput[ndx];
-          exit;
-        end;
-        inc(ndx);
-        if cardinal(ndx) >= cardinal(fMethod^.ArgsInputValuesCount) then
-          break;
-      end;
+      result := fInput[ndx];
+      exit;
     end;
-  raise EInterfaceStub.Create(fSender, fMethod^, 'unknown input parameter [%]',
-    [aParamName]);
+  end;
+  raise EInterfaceStub.Create(fSender, fMethod^,
+    'unknown input parameter [%]', [aParamName])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 function TOnInterfaceStubExecuteParamsVariant.GetInUtf8(
@@ -6043,35 +6043,26 @@ end;
 procedure TOnInterfaceStubExecuteParamsVariant.SetOutNamed(
   const aParamName: RawUtf8; const Value: variant);
 var
-  L, a, ndx: integer;
-  arg: PInterfaceMethodArgument;
+  ndx: PtrInt;
 begin
-  L := Length(aParamName);
-  ndx := 0;
-  if (L > 0) and
-     (fOutput <> nil) then
-    for a := fMethod^.ArgsOutFirst to fMethod^.ArgsOutLast do
+  if fOutput <> nil then
+  begin
+    ndx := FindPropName(pointer(fMethod^.ArgsOutputName), aParamName,
+        fMethod^.ArgsOutputValuesCount);
+    if ndx >= 0 then
     begin
-      arg := @fMethod^.Args[a];
-      if arg^.ValueDirection <> imdConst then
-      begin
-        if IdemPropName(arg^.ParamName^, pointer(aParamName), L) then
-        begin
-          fOutput[ndx] := Value;
-          exit;
-        end;
-        inc(ndx);
-        if cardinal(ndx) >= cardinal(fMethod^.ArgsOutputValuesCount) then
-          break;
-      end;
+      fOutput[ndx] := Value;
+      exit;
     end;
-  raise EInterfaceStub.Create(fSender, fMethod^, 'unknown output parameter [%]',
-    [aParamName]);
+  end;
+  raise EInterfaceStub.Create(fSender, fMethod^,
+    'unknown output parameter [%]', [aParamName])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 procedure TOnInterfaceStubExecuteParamsVariant.SetResultFromOutput;
 var
-  a: integer;
+  a: PtrInt;
   W: TJsonWriter;
   arg: PInterfaceMethodArgument;
   o: PVarData;
@@ -6084,10 +6075,11 @@ begin
   try
     W.Add('[');
     o := pointer(fOutput);
-    arg := @fMethod^.Args[fMethod^.ArgsOutFirst];
-    for a := fMethod^.ArgsOutFirst to fMethod^.ArgsOutLast do
+    a := fMethod^.ArgsOutFirst;
+    arg := @fMethod^.Args[a];
+    while a <= fMethod^.ArgsOutLast do
     begin
-      if arg^.ValueDirection <> imdConst then
+      if arg^.IsOutput then
       begin
         if cardinal(o^.VType) = varEmpty then
           arg^.AddDefaultJson(W)
@@ -6099,6 +6091,7 @@ begin
         inc(o);
       end;
       inc(arg);
+      inc(a);
     end;
     W.CancelLastComma(']');
     W.SetText(fResult);
@@ -7190,7 +7183,7 @@ begin
   fFactory := aFactory;
   fMethod := aMethod;
   SetOptions(aOptions);
-  // initialize temporary storage for call arguments and fValues pointers
+  // initialize temporary storage for all call arguments and fValues pointers
   SetLength(fStorage, integer(fMethod^.ArgsSizeAsValue) +
                       length(aMethod^.Args) shl POINTERSHR);
   // assign the parameters storage to the fValues[] pointers
@@ -7492,108 +7485,123 @@ begin
     fMethod^, tmp, nil, nil, nil, nil);
 end;
 
+function TInterfaceMethodExecute.ExecuteJsonParse(var Ctxt: TJsonParserContext;
+  Error: PShortString): boolean;
+var
+  arg: integer; // should be integer, not PtrInt
+  asJsonObject: boolean;
+  a: PInterfaceMethodArgument;
+  V: pointer;
+begin
+  result := false;
+  case Ctxt.Json^ of
+    '[': // default array of plain in-ordered values
+      asJsonObject := false;
+    '{': // retrieve arguments values from JSON object -> field name lookup
+      asJsonObject := true;
+  else
+    exit;
+  end;
+  Ctxt.Json := IgnoreAndGotoNextNotSpace(Ctxt.Json);
+  arg := fMethod^.ArgsInFirst;
+  a := @fMethod^.Args[arg];
+  repeat
+    if asJsonObject then
+    begin
+      if not Ctxt.GetJsonFieldName then
+        break; // end of JSON object
+      if (arg = 0) or // arg := 0 below to force search
+         // optimistic process of JSON object with in-order parameters
+         not IdemPropName(a^.ParamName^, Ctxt.Value, Ctxt.ValueLen) then
+      begin
+        // slower but safe ctxt.Method when not in-order
+        a := fMethod^.ArgInput(Ctxt.Value, Ctxt.ValueLen, @arg);
+        if a = nil then
+          if optErrorOnMissingParam in fOptions then
+            exit
+          else
+            arg := 0;
+      end;
+    end;
+    if a <> nil then
+    begin
+      V := fValues[arg];
+      if (imfInputIsOctetStream in fMethod.Flags) and
+         (PCardinal(Ctxt.Json)^ = JSON_BIN_MAGIC_C) then
+      begin
+        // passed as pointer from TRestServerRoutingRest.ExecuteSoaByInterface
+        inc(PCardinal(Ctxt.Get.Json));
+        PRawByteString(V)^ := PRawByteString(Ctxt.Json)^;
+        break; // single parameter
+      end;
+      if (a^.ValueType = imvInterface) and
+         not (vIsInterfaceJson in a^.ValueKindAsm) then // e.g. not IDocList
+        if Assigned(OnCallback) then
+          // retrieve TRestServerUriContext.ExecuteCallback fake interface
+          // via TServiceContainerServer.GetFakeCallback
+          OnCallback(Ctxt, a^.ArgRtti, PInterface(fValues[arg])^)
+        else
+          EInterfaceFactory.RaiseUtf8('OnCallback=nil for %(%: %)',
+            [fMethod^.InterfaceDotMethodName, a^.ParamName^,
+             a^.ArgTypeName^]) // paranoid (already checked before)
+      else if not a^.SetFromJson(Ctxt, fMethod, V, Error) then
+        exit;
+    end
+    else // ignore this unknown asJsonObject field value
+      Ctxt.Json := GotoNextJsonItem(Ctxt.Json, Ctxt.Get.EndOfObject);
+    if Ctxt.Json = nil then
+      break;
+    Ctxt.Json := GotoNextNotSpace(Ctxt.Json);
+    if asJsonObject then
+    begin
+      if Ctxt.Json^ in [#0, '}'] then
+        break; // end of JSON object
+      if arg = 0 then
+        continue; // continue manual search until finished JSON object
+    end;
+    repeat
+      inc(arg);
+      if arg > fMethod^.ArgsInLast then
+      begin
+        arg := 0; // no next result argument -> force manual search
+        break;
+      end;
+      inc(a);
+    until a^.IsInput;
+  until (arg = 0) and
+        not asJsonObject;
+  result := true;
+end;
+
 function TInterfaceMethodExecute.ExecuteJson(const Instances: array of pointer;
   P: PUtf8Char; Res: TJsonWriter; Error: PShortString; ResAsJsonObject: boolean): boolean;
 var
-  arg: integer;
-  asJsonObject: boolean;
-  opt: array[{smdVar=}boolean] of TTextWriterWriteObjectOptions;
+  arg: integer; // should be integer, not PtrInt
+  opt: TTextWriterWriteObjectOptionsBoolean;
+  a: PInterfaceMethodArgument;
   custom: PServiceCustomAnswer;
   c: TJsonParserContext;
-  a: PInterfaceMethodArgument;
-  ParObjValues: array[0 .. MAX_METHOD_ARGS - 1] of PUtf8Char;
 begin
-  // prepare all fValues[] pointers for the input/output arguments
+  // 1. prepare all fValues[] pointers for the input/output arguments
   result := false;
   BeforeExecute;
   try
-    // locate input arguments from JSON array or object
-    asJsonObject := false;
-    if (fMethod^.ArgsInputValuesCount <> 0) and
-       (P <> nil) then
-    begin
-      P := GotoNextNotSpace(P);
-      case P^ of
-        '[':
-          // input arguments as arg JSON array , e.g. '[1,2,"three"]' (default)
-          inc(P);
-        '{':
-          begin
-            // retrieve arguments values from JSON object -> field name lookup
-            repeat
-              inc(P);
-            until not (P^ in [#1..' ']);
-            if P^ <> '}' then
-              if fMethod^.ArgsParseJsonObject(P, @ParObjValues) then
-                asJsonObject := true
-              else
-                exit;
-            P := nil;
-          end;
-      else
-        if PInteger(P)^ = NULL_LOW then
-          P := nil
-        else
-          exit; // only support JSON array or JSON object as input
-      end;
-    end;
-    // parse and decode JSON input const/var arguments (if any) into fValues[]
-    if (P = nil) and
-       not asJsonObject then
-    begin
-      if (fMethod^.ArgsInputValuesCount > 0) and
-         (optErrorOnMissingParam in Options) then
-        exit; // paranoid setting
-    end
-    else if (imfInputIsOctetStream in fMethod^.Flags) and
-            (P <> nil) and
-            (PCardinal(P)^ = JSON_BIN_MAGIC_C) then
-    begin
-      // passed by reference from TRestServerRoutingRest.ExecuteSoaByInterface
-      inc(PCardinal(P));
-      PRawByteString(fValues[fMethod^.ArgsInFirst])^ := PRawByteString(P)^;
-    end
-    else
-    begin
-      // parse the JSON input values
-      c.InitParser(P, nil, fFactory.JsonParserOptions,
-        @fDocVariantOptions, nil, nil);
-      for arg := fMethod^.ArgsInFirst to fMethod^.ArgsInLast do
+    // 2. locate input arguments from JSON array or object
+    if (P <> nil) and
+       (PInteger(P)^ = NULL_LOW) then
+      P := nil;
+    if fMethod^.ArgsInputValuesCount <> 0 then
+      if P <> nil then
       begin
-        a := @fMethod^.Args[arg];
-        if a^.ValueDirection <> imdOut then
-        // (imdResult is excluded with arg <= ArgsInLast: can't appear here)
-        begin
-          if asJsonObject then
-            if ParObjValues[arg] = nil then // missing parameter in input JSON
-              if optErrorOnMissingParam in Options then
-                exit
-              else
-                // ignore and leave void value by default
-                continue
-            else
-              // value to be retrieved from JSON object
-              c.Json := ParObjValues[arg]
-          else if c.Json = nil then
-            break; // premature end of ..] (asJsonObject=false)
-          if (a^.ValueType = imvInterface) and
-             not (vIsInterfaceJson in a^.ValueKindAsm) then // e.g. not IDocList
-            if Assigned(OnCallback) then
-              // retrieve TRestServerUriContext.ExecuteCallback fake interface
-              // via TServiceContainerServer.GetFakeCallback
-              OnCallback(c, a^.ArgRtti, PInterface(fValues[arg])^)
-            else
-              EInterfaceFactory.RaiseUtf8('OnCallback=nil for %(%: %)',
-                [fMethod^.InterfaceDotMethodName, a^.ParamName^,
-                 a^.ArgTypeName^]) // paranoid (already checked before)
-          else if not a^.SetFromJson(c, fMethod, fValues[arg], Error) then
-            exit;
-        end;
-      end;
-    end;
-    // execute the method, using prepared input/output fValues[]
+        c.InitParser(GotoNextNotSpace(P), nil, fFactory.JsonParserOptions, @fDocVariantOptions);
+        if not ExecuteJsonParse(c, Error) then
+          exit;
+      end
+      else if optErrorOnMissingParam in fOptions then
+        exit; // paranoid setting
+    // 3. execute the method, using prepared input/output fValues[]
     RawExecute(@Instances[0], high(Instances));
-    // send back any var/out output arguments as JSON
+    // 4. send back any var/out output arguments as JSON
     if Res <> nil then
     begin
       // handle custom content (not JSON array/object answer)
@@ -7616,24 +7624,27 @@ begin
       else if imfResultIsServiceCustomStatus in fMethod^.Flags then
         fServiceCustomAnswerStatus := PCardinal(fValues[fMethod^.ArgsResultIndex])^;
       // write the '{"result":[...' array or object
-      opt[{smdVar=}false] := DEFAULT_WRITEOPTIONS[optDontStoreVoidJson in Options];
+      opt[{smdVar=}false] := DEFAULT_WRITEOPTIONS[optDontStoreVoidJson in fOptions];
       opt[{smdVar=}true] := []; // let var params override void/default values
-      for arg := fMethod^.ArgsOutFirst to fMethod^.ArgsOutLast do
+      arg := fMethod^.ArgsOutFirst;
+      a := @fMethod^.Args[arg];
+      while arg <= fMethod^.ArgsOutLast do
       begin
-        a := @fMethod^.Args[arg];
-        if a^.ValueDirection <> imdConst then
+        if a^.IsOutput then
         begin
           if ResAsJsonObject then
             Res.AddPropName(a^.ParamName^);
           a^.AddJson(Res, fValues[arg], opt[a^.ValueDirection = imdVar]);
           Res.AddComma;
         end;
+        inc(arg);
+        inc(a);
       end;
       Res.CancelLastComma;
     end;
     result := true;
   finally
-    // release any managed input/output parameters from fValues[]
+    // 5. release any managed input/output parameters from fValues[]
     AfterExecute;
   end;
 end;
@@ -8262,9 +8273,9 @@ begin
       'dir',       ord(ma^.ValueDirection),
       'dirName',   DIRTODELPHI[ma^.ValueDirection],
       'dirNoOut',  DIRTOSMS[ma^.ValueDirection]], arg);
-    if ma^.ValueDirection in [imdConst, imdVar] then
+    if ma^.IsInput then
       _ObjAddProp('dirInput', true, arg);
-    if ma^.ValueDirection <> imdConst then
+    if ma^.IsOutput then
       _ObjAddProp('dirOutput', true, arg);
     if ma^.ValueDirection = imdResult then
       _ObjAddProp('dirResult', true, arg);
@@ -8272,13 +8283,13 @@ begin
       _ObjAddPropU('commaArg', '; ', arg);
     if a = high(meth.Args) then
       _ObjAddProp('isArgLast', true, arg);
-    if (ma^.ValueDirection in [imdConst, imdVar]) and
+    if (ma^.IsInput) and
        (a < meth.ArgsInLast) then
       _ObjAddPropU('commaInSingle', ',', arg);
     if (ma^.ValueDirection in [imdVar, imdOut]) and
        (a < meth.ArgsOutNotResultLast) then
       _ObjAddPropU('commaOut', '; ', arg);
-    if ma^.ValueDirection <> imdConst then
+    if ma^.IsOutput then
     begin
       _ObjAddProps(['indexOutResult', UInt32ToUtf8(r) + ']'], arg);
       inc(r);

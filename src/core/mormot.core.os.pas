@@ -2696,7 +2696,7 @@ function GetTickSec: cardinal;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// returns how many seconds the system was up, accouting for time when
-// the computer is asleep
+// the computer is asleep, i.e. the time elapsed on the wall clock
 // - on Windows, computes GetTickCount64 div 1000
 // - on Linux/BSD, will use CLOCK_BOOTTIME/CLOCK_UPTIME clock
 // - on MacOS, will use mach_continuous_time() API
@@ -3854,6 +3854,11 @@ var
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
   AppendShortUuid: TAppendShortUuid;
 
+  /// late binding to binary encoding to Base64 or Base64-URI
+  // - as used by mormot.net.sock.pas for its NetBinToBase64() function
+  // - this unit raises an EOSException - properly injected by mormot.core.buffers.pas
+  RawToBase64: function(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+
   /// return the RTTI text of a given enumerate as mormot.core.rtti GetEnumName()
   // - this unit defaults to minimal code, but overriden by mormot.core.rtti.pas
   GetEnumNameRtti: function(Info: pointer; Value: integer): PShortString;
@@ -4756,6 +4761,7 @@ type
   /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
   // - just wrap a TLecuyer generator with a TLighLock in a 20-24 bytes structure
   // - as used by SharedRandom to implement Random32/RandomBytes/... functions
+  // - see RandomLecuyer() from mormot.crypt.core.pas to setup a local instance
   {$ifdef USERECORDWITHMETHODS}
   TLecuyerThreadSafe = record
   {$else}
@@ -4856,6 +4862,13 @@ procedure RandomGuid(out result: TGuid); overload;
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// mark a 128-bit random binary into a UUid value according to RFC 4122
+procedure MakeRandomGuid(u: PHash128);
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// check if the supplied UUid value was randomly-generated according to RFC 4122
+function IsRandomGuid(u: PHash128): boolean;
 
 /// seed the global gsl_rng_taus2 Random32/RandomBytes generator
 // - use XorEntropy() and optional entropy/entropylen as derivation source
@@ -5954,6 +5967,11 @@ function IsLocalHost(Host: PUtf8Char): boolean;
 begin
   result := (PCardinal(Host)^ = HOST_127) or // also check for c6Localhost:
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
+end;
+
+function _RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+begin
+  raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
 end;
 
 
@@ -7155,8 +7173,10 @@ constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
 begin
   if not ValidHandle(aHandle) then
     raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
-      [ClassNameShort(self)^, aFileName, GetErrorShort]);
-  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
+      [ClassNameShort(self)^, aFileName, GetErrorShort])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif};
+  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it
   fFileName := aFileName;
   fDontReleaseHandle := aDontReleaseHandle;
 end;
@@ -8814,14 +8834,9 @@ begin
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
   // finalize SystemEntropy.Startup
-  {$ifdef CPUINTEL}
-  if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
-    with SystemEntropy.Startup do
-      Lo := Lo xor Rdtsc; // unpredictable
-  RdRand32(@SystemEntropy.Startup.c2, 2); // no-op on older CPUs
-  {$endif CPUINTEL}
-  crc32c128(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache)); // some more
+  crcblocks(@SystemEntropy.Startup, @BaseEntropy, 512 div 128); // cpuid+rdrand+rdtsc
   crcblock(@SystemEntropy.Startup, @Executable.Hash);
+  crcblocks(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache) div SizeOf(THash128));
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -9968,35 +9983,47 @@ end;
 
 { **************** TSynLocker Threading Features }
 
+const
+  SPIN_COUNT = pred(6 shl 5); // = 191
+
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
+
 {$ifdef CPUINTEL}
+// on Intel/AMD, the pause CPU instruction would relax the core
 procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
 asm
-      pause
+      pause // modern CPUs have bigger pause latency (up to 100 cycles)
 end;
 {$endif CPUINTEL}
 
-const
-  {$ifdef CPUINTEL}
-  SPIN_COUNT = 1000;
-  {$else}
-  SPIN_COUNT = 100; // since DoPause does nothing, switch to thread sooner
-  {$endif CPUINTEL}
+{$ifdef FPC_CPUARM}
+// "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
+procedure DoPause; assembler; nostackframe;
+asm
+     yield // a few cycles, but helps modern CPU adjust their power requirements
+end;
+{$endif FPC_CPUARM}
 
 function DoSpin(spin: PtrUInt): PtrUInt;
-  {$ifdef CPUINTEL} {$ifdef HASINLINE} inline; {$endif} {$endif}
-  // on Intel, the pause CPU instruction would relax the core
-  // on ARM/AARCH64, the not-inlined function call makes a small delay
 begin
-  {$ifdef CPUINTEL}
-  DoPause;
-  {$endif CPUINTEL}
-  dec(spin);
-  if spin = 0 then
+  {$ifdef CPUINTELARM}
+  // adaptive spinning to reduce cache coherence traffic
+  result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
+  if result <> 0 then // no pause up to 32 times (low latency acquisition)
   begin
-    SwitchToThread; // fpnanosleep on POSIX
-    spin := SPIN_COUNT;
+    result := 1 shl pred(result); // exponential backoff: 1,2,4,8,16 x DoPause
+    repeat
+      DoPause; // called 992 times until yield to the OS
+      dec(result);
+    until result = 0;
+  end;
+  {$endif CPUINTELARM}
+  dec(spin);
+  if spin = 0 then // eventually yield to the OS for long wait
+  begin
+    SwitchToThread;     // fpnanosleep on POSIX
+    spin := SPIN_COUNT; // try again
   end;
   result := spin;
 end;
@@ -10212,7 +10239,8 @@ end;
 procedure TRWLock.AssertDone;
 begin
   if Flags <> 0 then
-    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags]);
+    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 // dedicated asm for this most simple (and used) method
@@ -11131,11 +11159,22 @@ begin
   RandomGuid(result);
 end;
 
-procedure RandomGuid(out result: TGuid);
+procedure MakeRandomGuid(u: PHash128);
 begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+  PCardinal(@u[6])^ := (PCardinal(@u[6])^ and $ff3f0fff) or $00804000;
+  // u[7] := PtrUInt(u[7] and $0f) or $40; // version bits 12-15 = 4 (random)
+  // u[8] := PtrUInt(u[8] and $3f) or $80; // reserved bits 6-7 = 1
+end;
+
+function IsRandomGuid(u: PHash128): boolean;
+begin
+  result := (u[7] and $f0 = $40) and (u[8] and $c0 = $80);
+end;
+
+procedure RandomGuid(out result: TGuid);
+begin
   SharedRandom.Fill(@result, SizeOf(TGuid));
-  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
-  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
+  MakeRandomGuid(@result);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -11631,6 +11670,7 @@ begin
   ShortToUuid           := _ShortToUuid;           // mormot.core.text
   AppendShortUuid       := _AppendShortUuid;
   GetEnumNameRtti       := _GetEnumNameRtti;       // mormot.core.rtti
+  RawToBase64           := _RawToBase64;           // mormot.core.buffers
 end;
 
 procedure FinalizeUnit;

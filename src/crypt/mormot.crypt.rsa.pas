@@ -241,8 +241,9 @@ type
     function MatchKnownPrime(Extend: TBigIntSimplePrime): boolean;
     /// check if the number is (likely to be) a prime following HAC 4.44
     // - can set a known simple primes Extend and Miller-Rabin tests Iterations
+    // - can reuse a TLecuyer instance between calls as probing random source
     function IsPrime(Extend: TBigIntSimplePrime = bspMost;
-      Iterations: integer = 10): boolean;
+      Iterations: integer = 10; Lecuyer: PLecuyer = nil): boolean;
     /// guess a random prime number of the exact current size
     // - a secret is generated from audited sources (OS, cpu RdRand), then
     // looped over TAesPrng.Fill and IsPrime method within a timeout period
@@ -1417,11 +1418,13 @@ begin
   result := false;
 end;
 
-function TBigInt.IsPrime(Extend: TBigIntSimplePrime; Iterations: integer): boolean;
+function TBigInt.IsPrime(Extend: TBigIntSimplePrime; Iterations: integer;
+  Lecuyer: PLecuyer): boolean;
 var
   r, a, w: PBigInt;
   s, n, attempt, bak: integer;
   v: PtrUInt;
+  rnd: TLecuyer;
 begin
   // first check if not a factor of a well-known small prime
   result := (Size = (32 div HALF_BITS)) and
@@ -1432,6 +1435,8 @@ begin
      MatchKnownPrime(Extend) then // detect most of the composite integers
     exit;
   // validate is a prime number using Miller-Rabin iterative tests (HAC 4.24)
+  if Lecuyer = nil then // 88-bit CSPRNG seed - if not supplied by caller
+    Lecuyer := RandomLecuyer(rnd); // new gsl_rng_taus2 uniform distribution
   bak := RefCnt;
   RefCnt := -1; // make permanent for use as modulo below
   w := Clone.IntSub(1); // w = value-1
@@ -1453,9 +1458,9 @@ begin
         if Size > 2 then
         begin
           repeat
-            n := Random32(Size);
+            n := Lecuyer^.Next(Size);
           until n > 1;
-          SharedRandom.Fill(@a^.Value[0], n * HALF_BYTES); // TLecuyer generator
+          Lecuyer^.Fill(@a^.Value[0], n * HALF_BYTES); // TLecuyer generator
           a^.Value[0] := a^.Value[0] or 1; // odd
           a^.Size := n;
           a^.Trim;
@@ -1463,9 +1468,9 @@ begin
         else
         begin
           if Size = 1 then
-            v := Random32(Value[0]) // ensure a<w
+            v := Lecuyer^.Next(Value[0]) // ensure a<w
           else
-            v := Random32; // only lower HalfUInt is enough for a<w
+            v := Lecuyer^.Next; // only lower HalfUInt is enough for a<w
           a^.Value[0] := v or 1; // odd
           a^.Size := 1;
         end;
@@ -1519,6 +1524,7 @@ var
   min, bytes: integer;
   last32: PCardinal;
   rnd: RawByteString;
+  lecuyer: TLecuyer;
 begin
   // ensure it is worth searching (paranoid)
   if Size <= 2 then
@@ -1540,10 +1546,12 @@ begin
   pointer(rnd) := FastNewString(bytes);
   FillSystemRandom(pointer(rnd), bytes, {mayblock=}true); // official OS API
   {$ifdef CPUINTEL} // claimed to be NIST SP 800-90A and FIPS 140-2 compliant
-  RdRand32(pointer(Value), bytes shr 2); // xor with HW CPU prng
+  RdRand32(pointer(rnd), bytes shr 2); // xor with HW CPU prng
   {$endif CPUINTEL}
   AFDiffusion(pointer(Value), pointer(rnd), bytes); // sha-256 diffusion
-  FillZero(rnd);
+  DefaultHasher128(@lecuyer, pointer(rnd), bytes);  // may be AesNiHash128
+  FillZero(rnd);         // anti-forensic counter measure
+  lecuyer.SeedGenerator; // setup 88-bit gsl_rng_taus2 uniform distribution
   repeat
     // xor the original trusted sources with our CSPRNG until we get enough bits
     TAesPrng.Main.XorRandom(Value, bytes);
@@ -1566,9 +1574,9 @@ begin
     ERsaException.RaiseU('TBigInt.FillPrime FIPS_MIN'); // paranoid
   until false;
   // brute force search for the next prime starting at this point
-  result := true; 
+  result := true;
   repeat
-    if IsPrime(Extend, Iterations) then
+    if IsPrime(Extend, Iterations, @lecuyer) then
       exit; // we got lucky
     IntAdd(2); // incremental search of odd number - see HAC 4.51
     while last32^ < FIPS_MIN do
@@ -1586,7 +1594,9 @@ begin
     //      with keysize >= 2048-bit (FIPS 186-4 appendix B.3.1 item A)
     // - see https://security.stackexchange.com/a/176396/155098
     //   and https://crypto.stackexchange.com/a/15761/40200
-  until GetTickCount64 > EndTix; // IsPrime() may be slow for sure
+    inc(min);
+  until (min and 63 = 0) and       // check only once in a while (avoid OS call)
+        (GetTickCount64 > EndTix); // IsPrime() may be slow for sure
   result := false; // timed out
 end;
 

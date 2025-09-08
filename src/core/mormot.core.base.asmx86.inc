@@ -2724,6 +2724,15 @@ begin
     result := BsrDword(c) or 32;   // search in highest 32-bit
 end;
 
-{$endif WIN32DELPHI}
+{$ifndef ISDELPHIXE2}
+function ReturnAddress: pointer;
+// note: mormot.defines.inc made {$W-} so won't overwrite ebp here
+asm
+        // Delphi Win32 generates "push ebp; mov ebp, esp" stack frame prefix
+        // so [ebp + 0] = ebp backup value and [ebp + 4] = caller return address
+        mov     eax, dword ptr [ebp + 4] // mimics the Delphi XE2+ intrinsic
+end;
+{$endif ISDELPHIXE2}
 
+{$endif WIN32DELPHI}
 
