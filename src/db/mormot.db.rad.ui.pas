@@ -370,7 +370,7 @@ begin
       if len = 0 then
         PWideChar(dest)^ := #0
       else
-        Utf8ToWideChar(dest, data, Field.DataSize shr 1, len);
+        Utf8ToWideChar(dest, data, Field.DataSize (*shr 1*), len); // Zohm
       {$else}
       // on Delphi 7, dest is PWideString
       Utf8ToWideString(data, len, PWideString(dest)^);
