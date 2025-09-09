@@ -600,7 +600,8 @@ type
     // bytes: do NOT use assign it with a string or a TBytes instance: you would
     // use the pointer to the data as key - either digest the string via
     // CreateFromPbkdf2 or use Create(TBytes)
-    constructor Create(const aKey; aKeySizeBits: cardinal); reintroduce; overload; virtual;
+    constructor Create(const aKey; aKeySizeBits: cardinal;
+      aIV: PAesBlock = nil); reintroduce; overload; virtual;
     /// Initialize AES context for AES-128 cypher
     // - first method to call before using this class
     // - just a wrapper around Create(aKey,128);
@@ -1537,7 +1538,7 @@ const
 /// create one AES instance which updates its IV between Encrypt/Decrypt calls
 // - will return either TAesFast[aesMode] or TAesInternal[aesMode] as fallback
 function AesIvUpdatedCreate(aesMode: TAesMode;
-  const key; keySizeBits: cardinal): TAesAbstract;
+  const key; keySizeBits: cardinal; iv: PAesBlock = nil): TAesAbstract;
 
 const
   /// the AES chaining modes which supports AEAD process
@@ -5139,16 +5140,18 @@ end;
 
 { TAesAbstract }
 
-constructor TAesAbstract.Create(const aKey; aKeySizeBits: cardinal);
+constructor TAesAbstract.Create(const aKey; aKeySizeBits: cardinal; aIV: PAesBlock);
 begin
   if not ValidAesKeyBits(aKeySizeBits) then
-    ESynCrypto.RaiseUtf8('%.Create(KeySize=%): 128/192/256 required',
+    ESynCrypto.RaiseUtf8('%.Create(aKeySizeBits=%): 128/192/256 required',
       [self, aKeySizeBits]);
   if @aKey = nil then
     ESynCrypto.RaiseUtf8('%.Create(aKey=nil)', [self]);
   fKeySize := aKeySizeBits;
   fKeySizeBytes := fKeySize shr 3;
   MoveFast(aKey, fKey, fKeySizeBytes);
+  if aIV <> nil then
+    fIV := aIV^;
   AfterCreate;
 end;
 
@@ -6802,23 +6805,22 @@ var
   AesModeIvUpdated: TAesAbstractClasses; // IVUpdated=true -> chain En/Decrypt
 
 function AesIvUpdatedCreate(aesMode: TAesMode;
-  const key; keySizeBits: cardinal): TAesAbstract;
+  const key; keySizeBits: cardinal; iv: PAesBlock): TAesAbstract;
 begin
   if AesModeIvUpdated[aesMode] = nil then
     AesModeIvUpdated[aesMode] := TAesFast[aesMode]; // first try the fastest
-  result := AesModeIvUpdated[aesMode].Create(key, keySizeBits);
+  result := AesModeIvUpdated[aesMode].Create(key, keySizeBits, iv);
   if not result.IVUpdated then // requires sequencial Encrypt/Decrypt() calls
   begin
     result.Free;
     AesModeIvUpdated[aesMode] := TAesInternal[aesMode]; // our code sets the IV
-    result := TAesInternal[aesMode].Create(key, keySizeBits); // fallback (once)
+    result := TAesInternal[aesMode].Create(key, keySizeBits, iv); // fallback once
   end;
 end;
 
 constructor TAesPkcs7Abstract.Create(aStream: TStream; const key;
   keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock; bufferSize: integer);
 begin
-  // IV is not used in this abstract class
   if not (aesMode in AES_PKCS7WRITER) then
     RaiseStreamError(self, ToText(aesMode)^);
   dec(bufferSize, bufferSize and AesBlockMod); // fBuf[] have full AES blocks
@@ -6827,7 +6829,7 @@ begin
     RaiseStreamError(self, 'Create');
   fBufAvailable := bufferSize;
   fStream := aStream;
-  fAes := AesIvUpdatedCreate(aesMode, key, keySizeBits);
+  fAes := AesIvUpdatedCreate(aesMode, key, keySizeBits, IV);
 end;
 
 const
@@ -6858,13 +6860,11 @@ constructor TAesPkcs7Writer.Create(outStream: TStream; const key;
 begin
   inherited Create(outStream, key, keySizeBits, aesMode, IV, bufferSize);
   SetLength(fBuf, fBufAvailable + SizeOf(TAesBlock)); // space for padding
-  if IV = nil then
+  if IV = nil then // not supplied by caller
   begin
     Random128(@fAes.fIV); // unpredictable
     fStream.WriteBuffer(fAes.fIV, SizeOf(fAes.fIV)); // stream starts with IV
-  end
-  else
-    fAes.fIV := IV^; // IV is supplied by caller
+  end;
 end;
 
 destructor TAesPkcs7Writer.Destroy;
@@ -6935,9 +6935,7 @@ begin
     RaiseStreamError(self, 'Create: invalid size');
   SetLength(fBuf, fBufAvailable);
   fBufAvailable := 0;
-  if IV <> nil then
-    fAes.IV := IV^ // IV is supplied by caller
-  else
+  if IV = nil then // not supplied by caller
   begin
     inStream.ReadBuffer(fAes.fIV, SizeOf(fAes.IV)); // stream starts with IV
     dec(fStreamSize, SizeOf(fAes.IV));

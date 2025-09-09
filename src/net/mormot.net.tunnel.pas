@@ -187,7 +187,7 @@ type
     fEcdhe: TEccKeyPair;
     fTransmit: ITunnelTransmit;
     fSignCert, fVerifyCert: ICryptCert;
-    fReceived, fSent: Int64;
+    fReceived, fSent, fFrames: Int64;
     fLogClass: TSynLogClass;
     fStartTicks: cardinal;
     fInfo: TDocVariantData;
@@ -198,6 +198,7 @@ type
     // can optionally add a signature to the main handshake frame
     procedure FrameSign(var frame: RawByteString); virtual;
     function FrameVerify(frame: PAnsiChar; framelen, payloadlen: PtrInt): boolean; virtual;
+    function GetElapsed: cardinal;
   public
     /// initialize the instance for process
     // - if no Context value is supplied, will compute an ephemeral key pair
@@ -269,6 +270,12 @@ type
     /// output TCP frames bytes
     property Sent: Int64
       read fSent;
+    /// how many frames have been received
+    property Frames: Int64
+      read fFrames;
+    /// number of seconds elapsed since Open()
+    property Elapsed: cardinal
+      read GetElapsed;
   end;
 
 function ToText(opt: TTunnelOptions): ShortString; overload;
@@ -347,22 +354,20 @@ begin
   if not IsZero(key) then
   begin
     // ecc256r1 shared secret has 128-bit resolution -> 128-bit AES-CTR
-    fAes[{sending:}false] := AesIvUpdatedCreate(mCtr, key, 128);
-    fAes[{sending:}true]  := AesIvUpdatedCreate(mCtr, key, 128);
-    // won't include an IV with each frame, but update it from (ecdhe) KDF
-    fAes[false].IV := iv;
-    fAes[true].IV := iv;
+    fAes[{sending:}false] := AesIvUpdatedCreate(mCtr, key, 128, @iv);
+    fAes[{sending:}true]  := AesIvUpdatedCreate(mCtr, key, 128, @iv);
+    // won't include an IV with each frame, but update it after each frame
   end;
   fServerSock := sock;
   FreeOnTerminate := true;
-  inherited Create({suspended=}false, nil, nil, fOwner.fLogClass, Make(['tun ', fPort]));
+  inherited Create({susp=}false, nil, nil, fOwner.fLogClass, Make(['tun', fPort]));
 end;
 
 destructor TTunnelLocalThread.Destroy;
 begin
   Terminate;
   if fOwner <> nil then
-    fOwner.ClosePort;
+    fOwner.fThread := nil;
   fServerSock.ShutdownAndClose({rdwr=}true);
   fClientSock.ShutdownAndClose({rdwr=}true);
   inherited Destroy;
@@ -508,12 +513,16 @@ var
   thread: TTunnelLocalThread;
   notifycloseport: RawByteString;
   callback: TNetSocket; // touch-and-go to the server to release main Accept()
+  log: ISynLog;
 begin
   if self = nil then
     exit;
+  fLogClass.EnterLocal(log, 'ClosePort %', [fPort], self);
   if not fClosePortNotified then
     try
       fClosePortNotified := true;
+      if Assigned(log) then
+        log.Log(sllTrace, 'ClosePort: notify other end', self);
       PInt64(FastNewRawByteString(notifycloseport, 8))^ := fSession;
       TunnelSend(notifycloseport);
     except
@@ -531,6 +540,8 @@ begin
           callback.ShutdownAndClose({rdwr=}false);
     except
     end;
+  if Assigned(log) then
+    log.Log(sllTrace, 'ClosePort: %', [self]);
   fPort := 0;
 end;
 
@@ -545,6 +556,7 @@ begin
     ETunnel.RaiseUtf8('%.Send: unexpected size=%', [self, l]);
   fSendSafe.Lock;
   try
+    inc(fFrames);
     if fHandshake <> nil then
     begin
       fHandshake.Push(aFrame); // during the handshake phase - maybe before Open
@@ -592,6 +604,15 @@ begin
                in CV_VALIDSIGN));
 end;
 
+function TTunnelLocal.GetElapsed: cardinal;
+begin
+  if (self = nil) or
+     (fStartTicks = 0) then
+    result := 0
+  else
+    result := GetUptimeSec - fStartTicks;
+end;
+
 procedure TTunnelLocal.SetTransmit(const Transmit: ITunnelTransmit);
 begin
   fTransmit := Transmit;
@@ -626,14 +647,15 @@ var
   rem: PTunnelLocalHandshake absolute remote;
   loc: TTunnelLocalHandshake;
   key, iv: THash256Rec;
-  hmackey, hmaciv: THmacSha256;
+  hmac, hmac2: THmacSha256;
   hqueue: TSynQueue;
   log: ISynLog;
 const // port is asymmetrical so not included to the KDF - nor the crc
   KDF_SIZE = SizeOf(loc.Info) - (SizeOf(loc.Info.port) + SizeOf(loc.Info.crc));
 begin
   if fLogClass <> nil then
-    fLogClass.EnterLocal(log, 'Open(%)', [Session], self);
+    fLogClass.EnterLocal(log, 'Open(%,[%])',
+      [Sess, ToText(TransmitOptions)], self);
   // validate input parameters
   if (fPort <> 0) or
      (not Assigned(fTransmit)) then
@@ -703,14 +725,13 @@ begin
     if toEncrypted * fOptions <> [] then // toEncrypt or toEcdhe
     begin
       if AppSecret = '' then
-        hmackey.Init('705FC9676148405B91A66FFE7C3B54AA') // some minimal key
+        hmac.Init('705FC9676148405B91A66FFE7C3B54AA') // some minimal key
       else
-        hmackey.Init(AppSecret);
-      hmackey.Update(@loc.Info, KDF_SIZE); // no replay (sequential session)
-      hmaciv := hmackey; // use hmaciv for info KDF
-      hmaciv.Done(key.b);
-      infoaes := TAesCtr.Create(key.Lo); // simple symmetrical encryption
-      infoaes.IV := key.Hi;
+        hmac.Init(AppSecret);
+      hmac.Update(@loc.Info, KDF_SIZE); // no replay (sequential session)
+      hmac2 := hmac; // use hmac2 to compute info KDF
+      hmac2.Done(key.b);
+      infoaes := TAesCtr.Create(key.Lo, 128, @key.Hi); // simple encryption
       info := infoaes.EncryptPkcs7(info, {ivatbeg=}false);
       infoaes.IV := key.Hi; // use the same IV for decoding "remote" info below
     end;
@@ -724,12 +745,12 @@ begin
     PInt64(@PByteArray(frame)^[l - 8])^ := fSession;
     fTransmit.TunnelSend(frame);
     if Assigned(log) then
-      log.Log(sllTrace, 'Open: after Send1 len=', [length(frame)], self);
+      log.Log(sllTrace, 'Open: after Send len=%', [length(frame)], self);
     // this method will wait until both sides sent a valid signed header
     if not fHandshake.WaitPop(TimeOutMS, nil, remote) then
       ETunnel.RaiseUtf8('Open: handshake timeout on port %', [result]);
     if Assigned(log) then
-      log.Log(sllTrace, 'Open: received len=', [length(remote)], self);
+      log.Log(sllTrace, 'Open: received len=%', [length(remote)], self);
     // ensure the returned frame is for this session
     if FrameSession(remote) <> fSession then
       ETunnel.RaiseUtf8('Open: wrong handshake trailer on port %', [result]);
@@ -757,27 +778,27 @@ begin
     FillZero(key.b);
     if toEncrypted * fOptions <> [] then // toEncrypt or toEcdhe
     begin
-      // hmackey has been pre-computed above with loc.Info and AppSecret
-      EcdheHashRandom(hmackey, loc.Ecdh, rem^.Ecdh); // rnd+pub in same order
+      // hmac has been pre-computed above with loc.Info and AppSecret
+      EcdheHashRandom(hmac, loc.Ecdh, rem^.Ecdh); // rnd+pub in same order
       if toEcdhe in fOptions then
       begin
         if Assigned(log) then
-          log.Log(sllTrace, 'Open: ECDHE shared secret', self);
+          log.Log(sllTrace, 'Open: compute ECDHE shared secret', self);
         if not Ecc256r1SharedSecret(rem^.Ecdh.pub, fEcdhe.priv, key.b) then
           exit;
-        hmackey.Update(key.b); // prime256v1 shared secret
+        hmac.Update(key.b); // prime256v1 shared secret
       end;
-      hmaciv := hmackey;     // two labeled hmacs - see NIST SP 800-108
-      hmackey.Update('AES key'#0);
-      hmackey.Done(key.b);   // AES-128-CTR key
-      hmaciv.Update('IV'#1);
-      hmaciv.Done(iv.b);     // AES-128-CTR iv
+      hmac2 := hmac;     // two labeled hmacs - see NIST SP 800-108
+      hmac.Update('AES key'#0);
+      hmac.Done(key.b);   // AES-128-CTR key
+      hmac2.Update('IV'#1);
+      hmac2.Done(iv.b);     // AES-128-CTR iv
     end;
     // launch the background processing thread
-    if Assigned(log) then
-      log.Log(sllTrace, 'Open: % success', [ToText(fOptions)], self);
     fPort := result;
     fThread := TTunnelLocalThread.Create(self, fTransmit, key.Lo, iv.Lo, sock);
+    if Assigned(log) then
+      log.Log(sllTrace, 'Open: started %', [fThread], self);
     SleepHiRes(100, fThread.fStarted);
     fStartTicks := GetUptimeSec; // wall clock
     fInfo.AddNameValuesToObject([
@@ -792,7 +813,11 @@ begin
     try
       fHandshake := nil; // ends the handshaking phase
       while hqueue.Pop(frame) do
+      begin
+        if Assigned(log) then
+          log.Log(sllDebug, 'Open: delayed frame len=%', [length(frame)], self);
         TunnelSend(frame); // paranoid
+      end;
     finally
       fSendSafe.UnLock;
       hqueue.Free;
@@ -840,12 +865,13 @@ begin
   VarClear(result);
   if fPort = 0 then
     exit;
-  dv.InitFast(fInfo.Count + 3, dvObject);
+  dv.InitFast(fInfo.Count + 4, dvObject);
   dv.AddFrom(fInfo);
   dv.AddNameValuesToObject([
-    'elapsed',  GetUptimeSec - fStartTicks,
+    'elapsed',  GetElapsed,
     'bytesIn',  fReceived,
-    'bytesOut', fSent]);
+    'bytesOut', fSent,
+    'frames',   fFrames]);
 end;
 
 
