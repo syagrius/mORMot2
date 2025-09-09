@@ -10338,6 +10338,7 @@ begin
   //        2. Indy seems to set here 1 for all connections, we are not worse ;)
   FillZero(h);
   DefaultHasher128(@h, pointer(id), length(id)); // maybe AesNiHash128()
+  SSL_CTX_set_session_id_context(result, @h, SizeOf(h));
 end;
 
 function SSL_CTX_set_session_cache_mode(ctx: PSSL_CTX; mode: integer): integer;
@@ -11211,7 +11212,7 @@ begin
   fServerAddress := ServerAddress;
   peer := @_PeerVerify;
   // prepare global TLS connection properties, as reused by AfterAccept()
-  fCtx := SSL_CTX_new(TLS_server_method);
+  fCtx := SSL_CTX_new_server(ServerAddress);
   try
     peer^ := self;
     SetupCtx(Context, {bind=}true);

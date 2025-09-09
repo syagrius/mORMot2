@@ -1118,17 +1118,20 @@ begin
 end;
 
 function TAcmeLetsEncryptClient.NewServerContext(const Cert, Key: TFileName): PSSL_CTX;
+var
+  c, k: RawUtF8;
 begin
-  result := SSL_CTX_new(TLS_server_method);
+  StringToUtf8(Cert, c);
+  StringToUtf8(Key, k);
+  result := SSL_CTX_new_server(c);
   try
-    result.SetCertificateFiles(
-      StringToUtf8(Cert), StringToUtf8(Key), fOwner.fPrivateKeyPassword);
+    result.SetCertificateFiles(c, k, fOwner.fPrivateKeyPassword);
   except
     result.Free; // release this invalid context on any EOpenSslNetTls
     result := nil;
   end;
   fLog.Add.Log(sllTrace, 'NewServerContext=% for % and %',
-    [BOOL_STR[result <> nil], Cert, Key], self);
+    [BOOL_STR[result <> nil], c, k], self);
 end;
 
 function TAcmeLetsEncryptClient.GetServerContext: PSSL_CTX;
@@ -1149,22 +1152,26 @@ begin
   fServerContextTix32 := tix32; // accessing files once per second is enough
   if result <> nil then // we already have a PSSL_CTX: check it is still valid
   begin
-    // missing key files could still return the cached PSSL_CTX
     sc := FileAgeToUnixTimeUtc(fSignedCert); // ####.crt.pem
     pk := FileAgeToUnixTimeUtc(fPrivKey);    // ####.key.pem
-    if (sc <= 0) or
-       (pk <= 0) then
-      exit;
     // unmodified key files will also return the cached PSSL_CTX (most often)
     if (fSignedCertTime = sc) and
        (fPrivKeyTime = pk) then
       exit;
+    // missing key files would still return the cached PSSL_CTX
+    if (sc <= 0) or
+       (pk <= 0) then
+    begin
+      fLog.Add.Log(sllTrace, 'GetServerContext(%): unexpected %=% %=%',
+        [fSubjects, fSignedCert, sc, fPrivKey, pk], self);
+      exit;
+    end;
   end;
   // if we reached here, we have deprecated (or no) PSSL_CTX -> create one
   result := NewServerContext(fSignedCert, fPrivKey);
   if result <> nil then
   begin
-    fSslCtx := result; // owned and cached
+    fSslCtx := result; // owned and cached - previous instance is leaked
     if sc = 0 then
       sc := FileAgeToUnixTimeUtc(fSignedCert); // ####.crt.pem
     if pk = 0 then
