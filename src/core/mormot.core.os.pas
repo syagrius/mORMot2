@@ -3730,6 +3730,19 @@ function ConsoleReadBody: RawByteString;
 /// low-level access to the keyboard state of a given key
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
+type
+  TWinWaitFor = (wwfFailed, wwfQuit, wwfTimeout, wwfSignaled);
+
+/// can wait for some time and/or event, not blocking the Windows main thread
+// - supposed to be called in a loop, so expects ms value in [50..200] range
+// - can optionally call WaitForSingleObject(h) instead of plain Sleep()
+// - can intercept messages and return wwfQuit on WM_QUIT on a sub-thread
+// - running on the main thread, would properly call CheckSynchronize(ms) then
+// Application.ProcessMessages, as expected by a regular GUI application
+// - outside the main thread, behave like a single Sleep/WaitForSingleObject
+function WinWaitFor(ms: cardinal; h: THandle = 0;
+  checkSubThreadQuit: boolean = false): TWinWaitFor;
+
 var
   /// used by Win32PWideCharToUtf8() when IsAnsiCompatibleW(P, Len) = false
   // - overriden by mormot.core.unicode for performance and Delphi 7/2007 fix
@@ -3867,9 +3880,10 @@ var
 // - under Windows, will use GetConsoleOutputCP() codepage, following CP_OEM
 // - under Linux, will expect the console to be defined with UTF-8 encoding
 // - we don't propose any ConsoleToUtf8() function because Windows depends on
-// the running program itself: most should generates CP_OEM (e.g. 850) as expected,
+// the running program itself: most generate CP_OEM (e.g. 850) as expected,
 // but some could use the system code page or even UTF-16 binary with BOM (!) -
-// so you may consider using AnsiToUtf8() with the proper code page
+// so you may consider using AnsiToUtf8() from mormot.core.unicode.pas with the
+// proper code page depending on each application
 function Utf8ToConsole(const S: RawUtf8): RawByteString;
 
 
@@ -4842,6 +4856,7 @@ function RandomDouble: double;
 procedure RandomBytes(Dest: pointer; Count: integer);
 
 /// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
+// - content is really binary, i.e. would contain the whole #0..#255 byte range
 // - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
 function RandomByteString(Count: integer; var Dest;
   CodePage: cardinal = CP_RAWBYTESTRING): pointer;
@@ -5723,10 +5738,10 @@ type
   /// callback used by RunRedirect() to notify of console output at runtime
   // - newly console output text is given as raw bytes sent by the application,
   // with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
-  // depends on the actual program so is likely to be CP_OEM but others could
-  // use the system code page or even UTF-16 binary with BOM (!) - so you
-  // may consider using AnsiToUtf8() with the proper code page
-  // - should return true to stop the execution, or false to continue
+  // depends on the actual program so most generate CP_OEM but others could use
+  // the system code page or even UTF-16 binary with BOM (!) - so you may consider
+  // calling AnsiToUtf8() from mormot.core.unicode.pas with the proper code page
+  // - should return true to stop/abort the execution, or false to continue
   // - is called once when the process is started, with text='', ignoring its return
   // - on idle state (each 200ms), is called with text='' to allow execution abort
   // - the raw process ID (dword on Windows, cint on POSIX) is also supplied
@@ -5738,101 +5753,116 @@ type
   // existing system environment variable
   // - roWinJobCloseChildren will setup a Windows Job to close any child
   // process(es) when the created process quits
-  // - roWinNoProcessDetach will avoid creating a Windows sub-process and group
+  // - roWinNoProcessDetach will avoid creating its own console and Windows group
+  // - roWinNewConsole won't inherit the parent console, but have its own console
   // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
   TRunOptions = set of (
     roEnvAddExisting,
     roWinJobCloseChildren,
     roWinNoProcessDetach,
+    roWinNewConsole,
     roWinKeepProcessOnTimeout);
+
+const
+  /// the default options for RunCommand() and RunRedirect() transient execution
+  // - detaching the process from the console and Job group by default does only
+  // make sense for RunProcess() which will use TRunOptions = []
+  RUN_CMD = [roWinNoProcessDetach];
 
 /// like SysUtils.ExecuteProcess, but allowing not to wait for the process to finish
 // - optional env value follows 'n1=v1'#0'n2=v2'#0'n3=v3'#0#0 Windows layout
+// - by default, TRunOptions = [] so would detach from the current process
+// console and Job group as we would expect from launch a new stand-alone process
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
   const arg2: TFileName = ''; const arg3: TFileName = '';
   const arg4: TFileName = ''; const arg5: TFileName = '';
   const env: TFileName = ''; options: TRunOptions = []): integer;
 
-/// like fpSystem, but cross-platform
+/// like fpSystem function, but cross-compiler and cross-platform
 // - under POSIX, calls bash only if needed, after ParseCommandArgs() analysis
+// - on Windows, consider RunCommandWin() specific version with more parameters
+// - optional env should be encoded as 'n1=v1'#0'n2=v2'#0#0 pairs
+// - TRunOptions = RUN_CMD as expected from executing a transient command
+// - parsed^ is implemented on POSIX only, and processhandle^ on Windows only
 // - under Windows (especially Windows 10/11), creating a process can be dead
 // slow https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
-// - waitfordelayms/processhandle/redirected/onoutput exist on Windows only -
-// and redirected is the raw byte output, which may be OEM, WinAnsi or UTF-16
-// depending on the program itself
-// - parsed is implemented on POSIX only
-// - optional env should be encoded as 'n1=v1'#0'n2=v2'#0#0 pairs
-function RunCommand(const cmd: TFileName; waitfor: boolean;
-  const env: TFileName = ''; options: TRunOptions = [];
-  {$ifdef OSWINDOWS}
-  waitfordelayms: cardinal = INFINITE; processhandle: PHandle = nil;
-  redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
-  const wrkdir: TFileName = ''
-  {$else}
-  parsed: PParseCommands = nil
-  {$endif OSWINDOWS}): integer;
+function RunCommand(const cmd: TFileName; waitfor: boolean = true;
+  const env: TFileName = ''; options: TRunOptions = RUN_CMD;
+  {$ifdef OSPOSIX} parsed: PParseCommands = nil
+  {$else} processhandle: PHandle = nil {$endif OSPOSIX}): integer;
 
-/// execute a command, returning its output console as UTF-8 text
-// - calling CreateProcessW on Windows (i.e. our RunCommand), and FPC RTL
-// popen/pclose on POSIX
-// - return '' on cmd execution error, or the whole output console content
-// with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
-// depends on the actual program so is likely to be CP_OEM but others could
-// use the system code page or even UTF-16 binary with BOM (!) - so you
-// may consider using AnsiToUtf8() with the proper code page
-// - abort if waitfordelayms expires
-// - will optionally call onoutput() to notify the new output state; aborts if
+/// execute a command, returning its output console as text
+// - calls CreateProcessW on Windows (via our RunCommandWin function), and
+// FPC RTL popen/pclose on POSIX to be truly cross-platform
+// - return '' on cmd execution error, or the whole output console text content
+// with no conversion (unless setresult is false - see below)
+// - on POSIX, result is likely to be UTF-8 but on Windows it depends on each
+// program so most generate CP_OEM, but others could use the system code page or
+// even UTF-16 binary with BOM - so you may consider calling AnsiToUtf8() from
+// mormot.core.unicode.pas with the proper code page generated by this command
+// - will optionally call onoutput() to notify the new output state; aborting if
 // onoutput() callback returns true - see RedirectToConsole global callback
+// - will abort once waitfordelayms expires - if not its default INFINITE
+// - force setresult=false if you only need onouput() and will discard the result
 // - optional env is Windows only, (FPC popen does not support it), and should
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
+// - TRunOptions = RUN_CMD as expected from executing a transient command
 // - warning: exitcode^ should be a 32-bit "integer" variable, not a PtrInt
 function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
   const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
   setresult: boolean = true; const env: TFileName = '';
-  const wrkdir: TFileName = ''; options: TRunOptions = []): RawByteString;
+  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): RawByteString;
 
 var
   /// a RunRedirect() callback for console output e.g. for debugging purpose
   // - you should call at least once AllocConsole to setup its content
   RedirectToConsole: TOnRedirect;
 
-  /// how many seconds we should wait for gracefull termination of a process
-  // in RunRedirect() - or RunCommand() on Windows
+  /// global variable to define how many seconds RunRedirect/RunCommand should
+  // wait for gracefull/soft process termination
   // - set 0 to disable gracefull exit, and force hard SIGKILL/TerminateProcess
   RunAbortTimeoutSecs: integer = 5;
 
 {$ifdef OSWINDOWS}
+type
+  /// for use as RunCommandWin() parameter with no "uses Windows" clause
+  TWinProcessInfo = Windows.TProcessInformation;
 
-/// Windows-specific RunCommand() function returning raw TProcessInformation
+  /// how RunRedirect/RunCommand/RunCommandWin could try to gracefully terminate
+  // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
+  // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
+  // - note that hard TerminateProcess is always called after RunAbortTimeoutSecs
+  // timeout, or if this set of methods is void - unless the
+  // roWinKeepProcessOnTimeout option has been specified
+  TRunAbortMethod = (ramCtrlC, ramQuit);
+
+/// Windows-specific RunCommand/RunRedirect function
+// - returning raw TWinProcessInfo and accepting some additional parameters
 function RunCommandWin(const cmd: TFileName; waitfor: boolean;
-  var processinfo: TProcessInformation; const env: TFileName = '';
-  options: TRunOptions = []; waitfordelayms: cardinal = INFINITE;
+  var processinfo: TWinProcessInfo; const env: TFileName = '';
+  options: TRunOptions = RUN_CMD; waitfordelayms: cardinal = INFINITE;
   redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
   const wrkdir: TFileName = ''; jobtoclose: PHandle = nil): integer;
 
-type
-  /// how RunRedirect() or RunCommand() should try to gracefully terminate
-  // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
-  // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
-  // - note that TerminateProcess is always called after RunAbortTimeoutSecs
-  // timeout, or if this set of methods is void - unless the
-  // roWinKeepProcessOnTimeout option has been specified
-  TRunAbortMethods = set of (ramCtrlC, ramQuit);
-var
-  /// RunRedirect/RunCommand methods to gracefully terminate before TerminateProcess
-  RunAbortMethods: TRunAbortMethods = [ramCtrlC, ramQuit];
 {$else}
 type
-  /// how RunRedirect() should try to gracefully terminate
+  /// how RunRedirect/RunCommand could try to gracefully terminate
   // - ramSigTerm send a fpkill(pid, SIGTERM) to the process
-  // - note that SIGKILL is always sent after RunAbortTimeoutSecs timeout,
+  // - note that hard SIGKILL is always sent after RunAbortTimeoutSecs timeout,
   // or if ramSigTerm was not supplied
-  TRunAbortMethods = set of (ramSigTerm);
-var
-  /// RunRedirect() methods to gracefully terminate before SIGKILL
-  RunAbortMethods: TRunAbortMethods = [ramSigTerm];
+  TRunAbortMethod = (ramSigTerm);
 {$endif OSWINDOWS}
+type
+  /// define how RunRedirect/RunCommand should try to gracefully terminate
+  TRunAbortMethods = set of TRunAbortMethod;
+const
+  /// by default, RunRedirect/RunCommand tries all soft killing methods
+  RUNABORT_DEFAULT = [low(TRunAbortMethod) .. high(TRunAbortMethod)];
+var
+  /// global variable to define RunRedirect/RunCommand soft termination methods
+  // - used before hard SIGKILL/TerminateProcess
+  RunAbortMethods: TRunAbortMethods = RUNABORT_DEFAULT;
 
 
 implementation

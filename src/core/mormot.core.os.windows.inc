@@ -2662,41 +2662,60 @@ begin
   ConsoleHandleCtrlCPressed := true;
 end;
 
-procedure ConsoleWaitForEnterKey;
+function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit: boolean): TWinWaitFor;
 var
+  mainthread: boolean;
   msg: TMsg;
+begin
+  mainthread := (GetCurrentThreadID = MainThreadID);
+  // first process Windows messages (if needed)
+  result := wwfQuit;
+  if mainthread then // same logic than Application.ProcessMessages
+    while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
+      if msg.Message = WM_QUIT then
+        exit // always stop waiting when the process is gracefully closing
+      else
+      begin
+        TranslateMessage(msg);
+        DispatchMessage(msg);
+      end
+  else if checkSubThreadQuit then // e.g. from ConsoleWaitForEnterKey
+    while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
+      if msg.Message = WM_QUIT then
+        exit;
+  // proper Sleep/WaitForSingleObject call
+  mainthread := mainthread and IsMultiThread;
+  if h = 0 then
+  begin
+    if mainthread then
+      CheckSynchronize(ms) // call any Synchronize() event at full speed
+    else
+      Windows.Sleep(ms);
+    result := wwfTimeout;
+    exit;
+  end;
+  if mainthread then
+    CheckSynchronize(0);
+  case WaitForSingleObject(h, ms) of
+    WAIT_TIMEOUT:
+      result := wwfTimeout;
+    WAIT_OBJECT_0:
+      result := wwfSignaled;
+  else
+    result := wwfFailed;
+  end;
+  if mainthread then
+    CheckSynchronize(0);
+end;
+
+procedure ConsoleWaitForEnterKey;
 begin
   ConsoleHandleCtrlCPressed := false;
   HandleCtrlC(TConsoleHandleCtrlC.HandleCtrlC);
   try
-    if GetCurrentThreadID = MainThreadID then
-      // process the messages from the main thread while waiting
-      while not ConsoleKeyPressed(VK_RETURN) and
-            not ConsoleHandleCtrlCPressed do
-      begin
-        if IsMultiThread then
-          CheckSynchronize(100)
-        else
-          Windows.Sleep(100);
-        while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
-          if msg.Message = WM_QUIT then
-            exit // stop waiting when the process is gracefully closing
-          else
-          begin
-            TranslateMessage(msg);
-            DispatchMessage(msg);
-          end;
-      end
-    else
-      // just intercept any WM_QUIT message on this sub-thread
-      while not ConsoleKeyPressed(VK_RETURN) and
-            not ConsoleHandleCtrlCPressed do
-      begin
-        Windows.Sleep(100);
-        if PeekMessage(msg, 0, 0, 0, PM_REMOVE) then
-          if msg.Message = WM_QUIT then
-            exit; // nothing to dispatch with PostThreadMessage()
-      end;
+    while (WinWaitFor({ms=}100, {handle=}0, {wm_quit=}true) = wwfTimeout) and
+          not ConsoleKeyPressed(VK_RETURN) and
+          not ConsoleHandleCtrlCPressed do ;
   finally
     HandleCtrlC(nil);
   end;
@@ -4374,26 +4393,41 @@ begin
 end;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
-  options: TRunOptions; waitfordelayms: cardinal; processhandle: PHandle;
-  redirected: PRawByteString; const onoutput: TOnRedirect;
-  const wrkdir: TFileName): integer;
+  options: TRunOptions; processhandle: PHandle): integer;
 var
   processinfo: TProcessInformation;
 begin
-  result := RunCommandWin(cmd, waitfor, processinfo, env, options,
-    waitfordelayms, redirected, onoutput, wrkdir);
+  result := RunCommandWin(cmd, waitfor, processinfo, env, options);
   if processhandle <> nil then
     processhandle^ := processinfo.hProcess;
 end;
 
+function RunRedirect(const cmd: TFileName; exitcode: PInteger;
+  const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
+  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
+var
+  res: integer;
+  redir: PRawByteString;
+  processinfo: TProcessInformation;
+begin
+  result := '';
+  redir := nil; // if onoutput is enough (e.g. to avoid huge result)
+  if setresult then
+    redir := @result;
+  res := RunCommandWin(cmd, {wait=}true, processinfo, env, options,
+    waitfordelayms, redir, onoutput, wrkdir);
+  if exitcode <> nil then
+    exitcode^ := res;
+end;
+
 function RunCommandWin(const cmd: TFileName; waitfor: boolean;
-  var processinfo: TProcessInformation; const env: TFileName;
+  var processinfo: TWinProcessInfo; const env: TFileName;
   options: TRunOptions; waitfordelayms: cardinal;
   redirected: PRawByteString; const onoutput: TOnRedirect;
   const wrkdir: TFileName; jobtoclose: PHandle): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
-  security: TSecurityAttributes;
+  procsec, pipesec: TSecurityAttributes;
   exe, path: TFileName;
   rd, wr, job: THandle;
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
@@ -4463,20 +4497,20 @@ var
   end;
 
   function RedirectAndWait(endtix: Int64): boolean;
-  var
-    res: cardinal;
   begin
     repeat
-      res := WaitForSingleObject(processinfo.hProcess, 50);
       // note: WaitForMultipleObjects() with rd burns 100% of one core :(
-      if res = WAIT_FAILED then
-      begin
-        ReturnLastError('RedirectAndWait');
-        result := false;
-        exit;
+      case WinWaitFor({ms=}50, processinfo.hProcess) of
+        wwfSignaled:
+          break;
+        wwfFailed, wwfQuit:
+          begin
+            ReturnLastError('RedirectAndWait abort');
+            result := false;
+            exit;
+          end;
       end;
     until RedirectOutputAborted({killed=}false) or
-          (res = WAIT_OBJECT_0) or
           ((endtix <> 0) and
            (GetTickCount64 > endtix));
     result := true;
@@ -4555,7 +4589,7 @@ begin
     path := Executable.ProgramFilePath; // prefers the current folder
   // prepare the main CreateProcessW arguments
   wcmd := SynUnicode(cmd);
-  UniqueString(wcmd);
+  UniqueString(wcmd); // CreateProcessW() modifies wcmd buffer in-place
   wpath := SynUnicode(path);
   if env <> '' then
   begin
@@ -4570,9 +4604,8 @@ begin
       UniqueString(wenv);
   end;
   // prepare redirection and execution context
-  security.nLength := SizeOf(security);
-  security.bInheritHandle := true;
-  security.lpSecurityDescriptor := nil;
+  FillCharFast(procsec, SizeOf(procsec), 0);
+  procsec.nLength := SizeOf(procsec);
   FillCharFast(startupinfo, SizeOf(startupinfo), 0);
   startupinfo.cb := SizeOf(startupinfo);
   l := 0;
@@ -4583,8 +4616,13 @@ begin
   ram := RunAbortMethods; // local copy to exclude ramCtrlC
   if Assigned(onoutput) or
      (redirected <> nil) then
-    if CreatePipe(rd, wr, @security, 0) then
+  begin
+    FillCharFast(pipesec, SizeOf(pipesec), 0);
+    pipesec.nLength := SizeOf(pipesec);
+    pipesec.bInheritHandle := true;
+    if CreatePipe(rd, wr, @pipesec, 0) then
     begin
+      procsec.bInheritHandle := true;
       SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
       startupinfo.wShowWindow := SW_HIDE;
       startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
@@ -4597,14 +4635,27 @@ begin
     end
     else
       rd := 0;
+  end;
   // https://docs.microsoft.com/en-en/windows/desktop/ProcThread/process-creation-flags
   flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE;
+  // by default, just behave as a standard Windows process would
   if not (roWinNoProcessDetach in options) then
+  begin
+    // RunProcess() option is [] to launch a fully uncoupled process
+    // RunCommand() and RunRedirect() use RUN_CMD = [roWinNoProcessDetach]
     flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
+    exclude(ram, ramCtrlC); // not compatible with detached console or group
+  end;
+  if roWinNewConsole in options then
+  begin
+    // DETACHED_PROCESS is mutually exclusive with CREATE_NEW_CONSOLE
+    flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
+    exclude(ram, ramCtrlC); // not compatible with stand-alone console
+  end;
   if roWinJobCloseChildren in options then
     flags := flags or CREATE_BREAKAWAY_FROM_JOB; // child process in a new job
   // actually create the new process
-  created := CreateProcessW(nil, pointer(wcmd), @security, @security, true,
+  created := CreateProcessW(nil, pointer(wcmd), @procsec, @procsec, true,
     flags, pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo);
   if (not created) and
      (flags and CREATE_BREAKAWAY_FROM_JOB <> 0) then
@@ -4615,7 +4666,7 @@ begin
     flags := flags and (not CREATE_BREAKAWAY_FROM_JOB);
     wcmd := SynUnicode(cmd); // CreateProcesW() modified wcmd content: recreate
     UniqueString(wcmd);
-    created := CreateProcessW(nil, pointer(wcmd), @security, @security, true,
+    created := CreateProcessW(nil, pointer(wcmd), @procsec, @procsec, true,
       flags, pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo);
   end;
   if created then
@@ -4634,28 +4685,23 @@ begin
         jobtoclose^ := job;
     end;
     if Assigned(onoutput) then
-      onoutput('', processinfo.dwProcessId);
+      onoutput('', processinfo.dwProcessId); // notify started
     // main wait (and redirect) until the process is finished (or not)
+    endtix := 0;
+    if waitfordelayms <> INFINITE then
+      endtix := GetTickCount64 + waitfordelayms;
     if rd <> 0 then
-    begin
-      // wait and redirect - https://stackoverflow.com/a/25725197/458259
-      CloseHandle(wr);
-      endtix := 0;
-      if waitfordelayms <> INFINITE then
-        endtix := GetTickCount64 + waitfordelayms;
-      RedirectAndWait(endtix);
-    end
-    else if waitfor then
-      WaitForSingleObject(processinfo.hProcess, waitfordelayms)
-    else
+      CloseHandle(wr) // https://stackoverflow.com/a/25725197/458259
+    else if not waitfor then
       exit; // no wait nor redirection: just launch the process
+    RedirectAndWait(endtix);
     // retrieve the exit code or abort the process on timeout
     if GetExitCodeProcess(processinfo.hProcess, exitcode) and
        (exitcode <> STILL_ACTIVE) then
-      result := exitcode // process finisshed with an exit code
+      result := exitcode // process finished with an exit code
     else
       AbortProcess;
-    // enventually retrieve any pending output
+    // eventually retrieve any pending output
     if rd <> 0 then
       RedirectOutputAborted({killed=}true);
   finally
@@ -4670,24 +4716,6 @@ begin
   end
   else
     ReturnLastError('CreateProcessW');
-end;
-
-function RunRedirect(const cmd: TFileName; exitcode: PInteger;
-  const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
-var
-  res: integer;
-  redir: PRawByteString;
-begin
-  result := '';
-  if setresult then
-    redir := @result
-  else
-    redir := nil;
-  res := RunCommand(cmd, true, env, options, waitfordelayms, nil,
-    redir, onoutput, wrkdir);
-  if exitcode <> nil then
-    exitcode^ := res;
 end;
 
 

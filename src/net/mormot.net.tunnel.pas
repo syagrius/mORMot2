@@ -480,9 +480,15 @@ begin
       end;
     fLog.Log(sllTrace, 'DoExecute: ending %', [self]);
   except
-    fLog.Log(sllWarning, 'DoExecute: aborted %', [self]);
-    if fOwner <> nil then
-      fOwner.ClosePort;
+    on E: Exception do
+    try
+      fLog.Log(sllWarning, 'DoExecute: aborted due to %', [self, PClass(E)^], self);
+      if fOwner <> nil then
+        fOwner.ClosePort;
+    except
+      on E2: Exception do
+        fLog.Log(sllWarning, 'DoExecute: nested %', [PClass(E2)^], self);
+    end;
   end;
   fState := stTerminated;
 end;
@@ -745,10 +751,10 @@ begin
     PInt64(@PByteArray(frame)^[l - 8])^ := fSession;
     fTransmit.TunnelSend(frame);
     if Assigned(log) then
-      log.Log(sllTrace, 'Open: after Send len=%', [length(frame)], self);
+      log.Log(sllTrace, 'Open: sent % - wait for answer', [length(frame)], self);
     // this method will wait until both sides sent a valid signed header
     if not fHandshake.WaitPop(TimeOutMS, nil, remote) then
-      ETunnel.RaiseUtf8('Open: handshake timeout on port %', [result]);
+      ETunnel.RaiseUtf8('Open: handshake %ms timeout on port %', [TimeOutMS, result]);
     if Assigned(log) then
       log.Log(sllTrace, 'Open: received len=%', [length(remote)], self);
     // ensure the returned frame is for this session

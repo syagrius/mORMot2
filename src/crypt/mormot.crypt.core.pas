@@ -358,7 +358,7 @@ type
     // - KeySize is in bits, i.e. 128, 192 or 256
     function EncryptInit(const Key; KeySize: cardinal): boolean;
     /// Initialize AES context for cipher, using 128-bit and CSPRNG
-    // - also set the internal IV field to random
+    // - also set the internal IV field to a random value
     // - used e.g. by TAesSignature or Random128() for their initialization
     procedure EncryptInitRandom;
     /// encrypt an AES data block into another data block
@@ -7337,7 +7337,7 @@ end;
 
 procedure TAesPrngAbstract.XorRandom(Buffer: pointer; Len: PtrInt);
 var
-  tmp: array[0 .. 8191] of byte;
+  tmp: TBuffer8K;
   n, wipe: PtrInt;
 begin
   wipe := MinPtrInt(SizeOf(tmp), Len);
@@ -7430,7 +7430,7 @@ begin
   begin
     if defsiz = 0 then
       defsiz := 16; // 128-bit is the common salt size in proper cryptography
-    TAesPrng.Fill(FastNewRawByteString(bin, defsiz), defsiz); // CSPRNG
+    bin := TAesPrng.Fill(defsiz); // from CSPRNG
     b64 := BinToBase64uri(bin, enc);
   end
   else if (dec <> nil) and

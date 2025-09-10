@@ -1519,6 +1519,20 @@ end;
 
 procedure TNetworkProtocols.TunnelTest(const clientcert, servercert: ICryptCert);
 var
+  log: ISynLog;
+
+  procedure CheckBlocks(const sent, recv: RawByteString; num: integer);
+  begin
+    CheckUtf8(sent = recv, 'block% %=%', [num, length(sent), length(recv)]);
+    if (sent <> recv) and
+       Assigned(log) then
+    begin
+      log.Log(sllDebug, 'block%: sent=%', [num, sent], self);
+      log.Log(sllDebug, 'block%: recv=%', [num, recv], self);
+    end;
+  end;
+
+var
   clientinstance, serverinstance: TTunnelLocal;
   clientcb, servercb: ITunnelTransmit;
   clienttunnel, servertunnel: ITunnelLocal;
@@ -1528,7 +1542,6 @@ var
   local, remote: TNetPort;
   nr: TNetResult;
   nfo: variant;
-  log: ISynLog;
 begin
   // setup the two instances with the specified options and certificates
   TSynLogTestLog.EnterLocal(log, 'TunnelTest [%]', [ToText(tunneloptions)], self);
@@ -1583,17 +1596,17 @@ begin
     CheckEqual(serverinstance.Sent, 0);
     for i := 1 to 100 do
     begin
-      sent := RandomWinAnsi(Random32(200) + 1);
-      sent2 := RandomWinAnsi(Random32(200) + 1);
+      sent  := RandomAnsi7(Random32(200) + 1);
+      sent2 := RandomAnsi7(Random32(200) + 1);
       Check(clientsock.SendAll(pointer(sent), length(sent)) = nrOk);
       Check(serversock.RecvWait(1000, received) = nrOk);
-      Check(sent = received, 'block1');
+      CheckBlocks(sent, received, 1);
       Check(clientsock.SendAll(pointer(sent2), length(sent2)) = nrOk);
       Check(serversock.SendAll(pointer(sent), length(sent)) = nrOk);
       Check(clientsock.RecvWait(1000, received) = nrOk);
       Check(serversock.RecvWait(1000, received2) = nrOk);
-      Check(sent = received, 'block2');
-      Check(sent2 = received2, 'block3');
+      CheckBlocks(sent, received, 2);
+      CheckBlocks(sent2, received2, 3);
       CheckEqual(clientinstance.Received, serverinstance.Sent);
       CheckEqual(clientinstance.Sent, serverinstance.Received);
       Check(clientinstance.Received <> 0);
@@ -1621,7 +1634,10 @@ end;
 procedure TNetworkProtocols._TTunnelLocal;
 var
   c, s: ICryptCert;
+  bak: TSynLogLevels;
 begin
+  bak := TSynLog.Family.Level;
+  TSynLog.Family.Level := LOG_VERBOSE;
   c := Cert('syn-es256').Generate([cuDigitalSignature]);
   s := Cert('syn-es256').Generate([cuDigitalSignature]);
   // plain tunnelling
@@ -1641,6 +1657,7 @@ begin
   // ECDHE encrypted tunnelling with mutual authentication
   tunneloptions := [toEcdhe];
   TunnelTest(c, s);
+  TSynLog.Family.Level := bak;
 end;
 
 procedure TNetworkProtocols.IPAddresses;
