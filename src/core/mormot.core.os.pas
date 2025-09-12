@@ -4939,7 +4939,10 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
 
 /// similar to Windows SwitchToThread API call, to be truly cross-platform
-// - call fpnanosleep(10) on POSIX systems, or the homonymous API on Windows
+// - call the homonymous API on Windows
+// - call direclty the sched_yield Linux syscall or the FPC RTL on BSD
+// - you should not call this function in your own code, especially since
+// sched_yield is reported to be unfair and misleading by Linux kernel devs
 procedure SwitchToThread;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
@@ -7933,31 +7936,30 @@ procedure SynRaiseProc(Obj: TObject; Addr: CodePointer;
 var
   ctxt: TSynLogExceptionContext;
   backuplasterror: DWord;
-  backuphandler: TOnRawLogException;
 begin
   if (Obj <> nil) and
-     Obj.InheritsFrom(Exception) then
+     Obj.InheritsFrom(Exception) and
+     Assigned(_RawLogException) then
   begin
     backuplasterror := GetLastError;
-    backuphandler := _RawLogException;
-    if Assigned(backuphandler) then
-      try
-        _RawLogException := nil; // disable nested exception
-        ctxt.EClass := PPointer(Obj)^;
-        ctxt.EInstance := Exception(Obj);
-        ctxt.EAddr := PtrUInt(Addr);
-        if Obj.InheritsFrom(EExternal) then // e.g. EDivByZero or EMathError
-          ctxt.ELevel := sllExceptionOS
-        else
-          ctxt.ELevel := sllException; // regular "raise" exception
-        ctxt.ETimestamp := UnixTimeUtc;
-        ctxt.EStack := pointer(Frame);
-        ctxt.EStackCount := FrameCount;
-        backuphandler(ctxt);
-      except
-        { ignore any nested exception }
-      end;
-    _RawLogException := backuphandler;
+    try
+      ctxt.EClass := PPointer(Obj)^;
+      ctxt.EInstance := Exception(Obj);
+      ctxt.EAddr := PtrUInt(Addr);
+      if Obj.InheritsFrom(EExternal) then // e.g. EDivByZero or EMathError
+        ctxt.ELevel := sllExceptionOS
+      else
+        ctxt.ELevel := sllException; // regular "raise" exception
+      ctxt.ETimestamp := UnixTimeUtc;
+      ctxt.EStack := pointer(Frame);
+      ctxt.EStackCount := FrameCount;
+      _RawLogException(ctxt); // e.g. SynLogException() from mormot.core.log
+      // note that SynLogException() will use PerThreadInfo.ExceptionIgnore
+      // to avoid recursive exception loggin: _RawLogException should not be set
+      // to nil or exceptions on concurrent threads would not be logged
+    except
+      { ignore any nested exception }
+    end;
     SetLastError(backuplasterror); // may have changed above
   end;
   if Assigned(OldRaiseProc) then
@@ -7967,11 +7969,11 @@ end;
 {$endif WITH_RAISEPROC}
 
 var
-  RawExceptionIntercepted: boolean;
+  RawExceptionIntercepted: boolean; // single global Exception interception
 
 procedure RawExceptionIntercept(const Handler: TOnRawLogException);
 begin
-  _RawLogException := Handler;
+  _RawLogException := Handler; // e.g. SynLogException() from mormot.core.log
   if RawExceptionIntercepted or
      not Assigned(Handler) then
     exit;
@@ -10055,20 +10057,41 @@ end;
 { **************** TSynLocker Threading Features }
 
 const
+  // default value for all spining, up to 993 "pause" opcode calls
+  // - on Intel, taking around 5us on old CPU, but modern Intel have bigger pause
+  // latency (up to 100 cycles) so takes up to 50us
+  // - AMD Zen 3 and later has a latency of only 1-2 cycles so we identify them
+  // via CPUID and adjust a SpinFactor global variable at startup to reach 5us
+  // - 5..50us range seems consistent with our eventual nanosleep(10us) syscall
   SPIN_COUNT = pred(6 shl 5); // = 191
 
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
 
+// our light locks do not use the resource of an associated futex, so are easier
+// if there is almost no contention - and really seldom call fpnanosleep(10us)
+
 {$ifdef CPUINTEL}
+var
+  SpinFactor: PtrUInt = 1; // default value on Intel - set to 10 on AMD Zen3+
+
 // on Intel/AMD, the pause CPU instruction would relax the core
-procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
+// - but it is expected to be inlined within the spinning loop itself
+// - sadly, Delphi does not support inlined asm on Win64 so we use a function
+{$ifdef WIN64DELPHI}
+procedure DoPause(n: PtrUInt);
 asm
-      pause // modern CPUs have bigger pause latency (up to 100 cycles)
+@s:   pause          // = "rep nop" opcode
+      dec     rcx
+      jnz     @s     // within its own 1..16x loop (better than nothing)
 end;
+{$endif WIN64DELPHI}
 {$endif CPUINTEL}
 
 {$ifdef FPC_CPUARM}
+const
+  SpinFactor = 2; // ARM yield has smaller latency than Intel's pause
+
 // "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
 procedure DoPause; assembler; nostackframe;
 asm
@@ -10082,18 +10105,36 @@ begin
   // adaptive spinning to reduce cache coherence traffic
   result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
   if result <> 0 then // no pause up to 32 times (low latency acquisition)
-  begin
-    result := 1 shl pred(result); // exponential backoff: 1,2,4,8,16 x DoPause
+  {$ifdef OSLINUX_SCHEDYIELDONCE}      // yield once during the process
+  {$ifndef OSLINUX_SCHEDYIELD}         // if not already = SwitchToThread
+  if spin = SPIN_COUNT shr 2 then
+    Do_SysCall(syscall_nr_sched_yield) // properly defined in syscall.pp
+  else
+  {$endif OSLINUX_SCHEDYIELD}
+  {$endif OSLINUX_SCHEDYIELDONCE}
+  begin // exponential backoff: 1,2,4,8,16 x DoPause
+    result := SpinFactor shl pred(result);
+    // "pause" called 992 times until SwithToThread = up to 50us on modern CPU
+    {$ifdef WIN64DELPHI}
+    DoPause(result);
+    {$else}
     repeat
-      DoPause; // called 992 times until yield to the OS
+      {$ifdef CPUINTEL}
+      asm
+        pause // "rep nop" opcode should be inlined within the spinning loop
+      end;
+      {$else}
+      DoPause; // "yield" arm/aarch64 opcode
+      {$endif CPUINTEL}
       dec(result);
     until result = 0;
+    {$endif WIN64DELPHI}
   end;
   {$endif CPUINTELARM}
   dec(spin);
-  if spin = 0 then // eventually yield to the OS for long wait
+  if spin = 0 then // eventually call the OS for long wait
   begin
-    SwitchToThread;     // fpnanosleep on POSIX
+    SwitchToThread; // homonymous Win API call or proper POSIX call
     spin := SPIN_COUNT; // try again
   end;
   result := spin;
@@ -11300,7 +11341,7 @@ end;
 function SleepDelay(elapsed: PtrInt): PtrInt;
 begin
   if elapsed < 50 then
-    result := 0 // 10us on POSIX, SwitchToThread on Windows
+    result := 0 // redirect to SwitchToThread
   else if elapsed < 200 then
     result := 1
   else if elapsed < 500 then
@@ -11737,6 +11778,12 @@ begin
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
+  {$ifdef CPUINTEL}
+  if (CpuManufacturer = icmAmd) and
+     (CpuFamily = $19) and
+     (CpuModel >= $30) then // Zen 3 or later
+    SpinFactor := 10;       // "pause" opcode is only 1-2 cycles
+  {$endif CPUINTEL}
   // minimal stubs which will be properly implemented in other mormot.core units
   GetExecutableLocation := _GetExecutableLocation; // mormot.core.log
   SetThreadName         := _SetThreadName;
