@@ -328,11 +328,20 @@ type
 
 { ************ TSynAngelize Main Service Launcher and Watcher }
 
+  /// each main/shared potential option used by TSynAngelizeSettings.Options
+  // - saoNoWinJob will disable the main Windows Job created by default to
+  // synchronize all children services execution with this main service process
+  TSynAngelizeOption = (
+    saoNoWinJob);
+  /// the main/shared options used by TSynAngelizeSettings.Options
+  TSynAngelizeOptions = set of TSynAngelizeOption;
+
   /// define the main TSynAngelize daemon/service behavior
   TSynAngelizeSettings = class(TSynDaemonSettings)
   protected
     fFolder, fExt, fStateFile, fCommandFile: TFileName;
     fHtmlStateFileIdentifier, fSmtp, fSmtpFrom: RawUtf8;
+    fOptions: TSynAngelizeOptions;
     fHttpTimeoutMS, fStartDelayMS, fStartTimeoutSec: integer;
   public
     /// set the default values
@@ -386,6 +395,9 @@ type
     // - expects it to be not '' void - otherwise Smtp is ignored
     property SmtpFrom: RawUtf8
       read fSmtpFrom write fSmtpFrom;
+    /// define some global options shared by all TSynAngelize services
+    property Options: TSynAngelizeOptions
+      read fOptions write fOptions;
   end;
 
   /// used to serialize the current state of the services
@@ -405,7 +417,7 @@ type
     acDoWatch
   );
 
-  /// handle internal set of services definitions
+  /// handle an internal list of services definitions in a convenient way
   {$ifdef USERECORDWITHMETHODS}
   TSynAngelizeSet = record
   {$else}
@@ -417,6 +429,8 @@ type
     Levels: TIntegerDynArray;
     /// if any service needs actually some watching practice
     HasWatchs: boolean;
+    /// union of all Service[].StartOptions
+    UsedStartOptions: TStartOptions;
     /// fill the fields from Owner.Settings.Folder files content
     function LoadServices(Owner: TSynAngelize): integer;
     /// quick check a service from its internal name
@@ -445,7 +459,7 @@ type
     fStarted: array of TSynAngelizeService;
     fLastGetServicesStateFile: RawByteString;
     fWatchThread: TSynBackgroundThreadProcess;
-    fRunJob: THandle; // a single Windows Job to rule them all
+    fRunJobToClose: THandle; // a single Windows Job to rule them all
     fSmtp: TSmtpConnection;
     fCommandFile: TFileName;
     // TSynDaemon command line methods
@@ -539,7 +553,7 @@ begin
   fCmd := aCmd;
   fEnv := aEnv;
   fWrkDir := aWrkDir;
-  // fRunOptions=[] without roWinNoProcessDetach to detach from the current process
+  // fRunOptions=[] without roWinNoProcessDetach to detach from main console
   if soWinJobCloseChildren in aService.StartOptions then
     include(fRunOptions, roWinJobCloseChildren); // just ignored on POSIX
   if not (soReplaceEnv in aService.StartOptions) then
@@ -588,14 +602,14 @@ begin
     if min > 0 then    // retry every 2 sec until 1 min
       if min < 5 then
         result := 15   // retry every 15 sec until 5 min
-      else if min > 10 then
+      else if min < 10 then
         result := 30   // retry every 30 sec until 10 min
-      else if min > 30 then
+      else if min < 30 then
         result := 60   // retry every min until 30 min
-      else if min > 60 then
+      else if min < 60 then
         result := 120  // retry every 2 min until 1 hour
       else
-        result := 240; // retry every 4 min
+        result := 240; // retry every 4 min until the eventual Apocalypse
   end;
 end;
 
@@ -1028,6 +1042,7 @@ begin
   ObjArrayClear(Service);
   Finalize(Levels);
   HasWatchs := false;
+  UsedStartOptions := [];
 end;
 
 function SortByLevel(const A, B): integer; // run and display by increasing Level
@@ -1070,6 +1085,7 @@ begin
             AddSortedInteger(Levels, s.Level);
             if s.fWatch <> nil then
               HasWatchs := true;
+            UsedStartOptions := UsedStartOptions + s.StartOptions;
             s := nil; // don't Free - will be owned by Service[]
           end
           else // s.Level <= 0
@@ -1152,8 +1168,8 @@ begin
   fSet.Done;
   fSettings.Free;
   {$ifdef OSWINDOWS}
-  if fRunJob <> 0 then
-    CloseHandle(fRunJob);
+  if fRunJobToClose <> 0 then
+    CloseHandle(fRunJobToClose);
   {$endif OSWINDOWS}
 end;
 
@@ -1845,11 +1861,13 @@ begin
   if Assigned(log) then // log=nil if LogClass=nil or sllEnter is not enabled
     one := log.Instance;
   {$ifdef OSWINDOWS}
-  // initialize a main Windows Job to kill all sub-process when main is killed
-  if fRunJob = 0 then
+  // setup a main Windows Job to kill all sub-processes when Angelize is killed
+  if (fRunJobToClose = 0) and
+     not (saoNoWinJob in fSas.Options) then
   begin
-    fRunJob := CreateJobToClose(GetCurrentProcessId);
-    AssignJobToProcess(fRunJob, GetCurrentProcess, 'CloseWithParent');
+    fRunJobToClose := CreateJobToClose(GetCurrentProcessId, 'CloseWithParent');
+    if fRunJobToClose <> 0 then
+      AssignJobToProcess(fRunJobToClose, GetCurrentProcess, 'CloseWithParent');
     // all sub-processes will now be part of this Windows Job
     // unless soWinJobCloseChildren is set, so RunRedirect() will use the
     // CREATE_BREAKAWAY_FROM_JOB flag, then create its own new Windows Job

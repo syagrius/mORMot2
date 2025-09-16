@@ -75,6 +75,7 @@ type
   // - named as Tunnel*() methods to be joined as a single service interface,
   // to leverage a single WebSockets callback
   ITunnelTransmit = interface(IInvokable)
+    ['{AA661151-81EA-4665-895E-1487EF459AFF}']
     /// main method to emit the supplied binary Frame to the relay server
     // - the raw binary frame always end with 4 bytes of 32-bit TTunnelSession
     // - no result so that the frames could be gathered e.g. over WebSockets
@@ -231,6 +232,7 @@ type
     // included to ITunnelTransmit.TunnelInfo returned object (e.g. Host name)
     // - SignCert/VerifyCert should have [cuDigitalSignature] usage, and match
     // VerifyCert/SignCert corresponding certificate on other side
+    // - raise ETunnel or return 0 on error; return the new local port on sucsess
     // - should be called only once per TTunnelLocal instance
     function Open(Sess: TTunnelSession; const Transmit: ITunnelTransmit;
       TransmitOptions: TTunnelOptions; TimeOutMS: integer; const AppSecret, Address: RawUtf8;
@@ -317,6 +319,7 @@ type
   // - here 'server' or 'client' side does not have any specific meaning - one
   // should just be at either end of the tunnel - but they must appear in a
   // coherent order during the handshake phase by using those overriden methods
+  // - class usually assigned to ITunnelConsole in the TTunnelRelay context
   TTunnelLocalServer = class(TTunnelLocal)
   protected
     procedure IncludeOptionsFromCert; override;
@@ -328,6 +331,7 @@ type
   // - here 'server' or 'client' side does not have any specific meaning - one
   // should just be at either end of the tunnel - but they must appear in a
   // coherent order during the handshake phase by using those overriden methods
+  // - class usually assigned to ITunnelAgent in the TTunnelRelay context
   TTunnelLocalClient = class(TTunnelLocal)
   protected
     procedure IncludeOptionsFromCert; override;
@@ -373,8 +377,17 @@ type
 { ******************** Abstract SOA implementation of a Relay Server }
 
 type
-  /// abstract parent to ITunnelAgent/ITunnelConsole
+  /// abstract parent to ITunnelAgent/ITunnelConsole service endpoints
   // - with shared methods to validate or cancel a two-phase startup
+  // - the steps of a TTunnelRelay session are therefore:
+  // 1) TTunnelLocalClient/TTunnelLocalServer.Create as ITunnelTransmit callbacks
+  // 2) ITunnelConsole.TunnelPrepare() to retrieve a session;
+  // 3) ITunnelAgent.TunnelPrepare() with this session;
+  // 4) TTunnelLocal.Open() on the console and agent sides to start tunnelling
+  // on a localhost TCP port;
+  // 5a) ITunnelOpen.TunnelCommit or TunnelRollback against Open() result or
+  // 5b) after a timeout, missing TunnelCommit/TunnelRollback would delete any
+  // unfinished TunnelPrepare from an internal transient/pending list
   ITunnelOpen = interface(ITunnelTransmit)
     /// finalize a relay process startup after Open() success
     // - now ITunnelTransmit.TunnelSend will redirect frames from both sides
@@ -393,6 +406,7 @@ type
   // about all associated sessions
   // - when the interface is released, will cancel all corresponding sessions
   ITunnelConsole = interface(ITunnelOpen)
+    ['{9453C229-9D4A-4F93-B5B3-E4A05E28267F}']
     /// could be used to define a TDocVariant object about this console
     // - will be completed with "agents":[] array with each associated agents
     procedure TunnelSetInfo(const info: variant);
@@ -409,6 +423,7 @@ type
   // - just maps a ITunnelTransmit, and is likely to be implemented as sicShared
   // over our SOA WebSockets
   ITunnelAgent = interface(ITunnelOpen)
+    ['{B3B39C9F-43AA-4EA0-A88E-662401755AD0}']
     /// initiate a new relay process as a two-phase commit from the agent
     // - caller should call this method, then TTunnelLocal.Open() on its side,
     // and once the handhake is ok or ko, call TunnelCommit or TunnelRollback
@@ -421,15 +436,16 @@ type
   TTunnelRelay = class;
 
   /// abstract parent of TTunnelConsole/TTunnelAgent
-  // - maintain a list of working tunnels, and another list of transient
-  // tunnels, pending for Open() handshake on both ends
+  // - maintain a list of working tunnels for ITunnelTransmit.TunnelSend() relay
+  // - maintain also a list of transient/pending sessions, to be purged after
+  // a timeout if TunnelCommit/TunnelRollback() has not been called soon enough
   TTunnelOpen = class(TInterfacedObjectRWLightLocked)
   protected
     fOwner: TTunnelRelay;
     fLogClass: TSynLogClass;
     fList: TTunnelList;
     fDeprecatedTix32, fTimeOutSecs: cardinal;
-    // transient sessions before TunnelCommit/TunnelRollback
+    // transient/pending sessions before TunnelCommit/TunnelRollback
     fSession: TIntegerDynArray;    // store TTunnelSession (=cardinal) values
     fSessionTix: TIntegerDynArray; // store GetTickSec
     fSessionCount: integer;
@@ -446,9 +462,15 @@ type
     constructor Create(aOwner: TTunnelRelay; aTimeOutSecs: cardinal); reintroduce;
     /// finalize this instance
     destructor Destroy; override;
+    /// return fList.Count or 0 if any instance is nil
+    function Count: integer;
     /// access to the associated main TTunnelRelay instance
     property Owner: TTunnelRelay
       read fOwner;
+    /// how many seconds a TunnelPrepare() would be in the transient/pending queue
+    // - auto-trim if no TunnelCommit/TunnelRollback occured within this time slot
+    property TimeOutSecs: cardinal
+      read fTimeOutSecs;
   end;
 
   /// implement ITunnelConsole on the Relay Server
@@ -487,15 +509,16 @@ type
     // note: fAgent and fConsole[] are class instances, to avoid refcount race
     fAgent: TTunnelAgent;
     fConsoleSafe: TRWLightLock;
-    fConsole: TTunnelConsoles; // per-console list of callbacks
+    fConsole: TTunnelConsoles; // per-console list of instances with callbacks
     fLogClass: TSynLogClass;
     fConsoleCount: integer;
     fTransientTimeOutSecs: cardinal;
+    fAgentInstance: ITunnelAgent;
     function HasConsolePrepared(aSession: TTunnelSession): boolean;
     function LockedFindConsole(aSession: TTunnelSession): TTunnelConsole;
     // search for matching fConsole[].TunnelSend
     procedure ConsoleTunnelSend(const Frame: RawByteString);
-    // allow to resolve ITunnelConsole instances
+    // TInterfaceResolver method to resolve ITunnelConsole instances
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
   public
     /// initialize this instance
@@ -504,20 +527,26 @@ type
     /// finalize this instance and its associated fAgent
     destructor Destroy; override;
     /// called by TTunnelConsole.Destroy to unregister its own instance
-    function DeleteConsole(aConsole: TTunnelConsole): boolean;
+    function RemoveConsole(aConsole: TTunnelConsole): boolean;
     /// ask all TunnelInfo of all opended Agent sessions as TDocVariant array
     function AgentsInfo: TVariantDynArray;
     /// ask all TunnelInfo of all opended Console sessions as TDocVariant array
     function ConsolesInfo: TVariantDynArray;
     /// low-level access to the "agents" list
+    // - usually published as SOA sicShared ITunnelAgent endpoint
     property Agent: TTunnelAgent
       read fAgent;
     /// low-level access to the "consoles" list - associated with ConsoleCount
+    // - these instances are allocated (as SOA sicPerSession) using Resolve()
     property Console: TTunnelConsoles
       read fConsole;
     /// how many items are actually stored in Console[]
     property ConsoleCount: integer
       read fConsoleCount;
+    /// how many seconds a TunnelPrepare() would be in the transient/pending queue
+    // - auto-trim if no TunnelCommit/TunnelRollback occured within this time slot
+    property TransientTimeOutSecs: cardinal
+      read fTransientTimeOutSecs;
   end;
 
 
@@ -778,6 +807,7 @@ begin
   try
     if not (fClosePortNotified in fFlags) then
       try
+        // send frame with only session (and no payload) to notify as closed
         include(fFlags, fClosePortNotified);
         if Assigned(log) then
           log.Log(sllTrace, 'ClosePort: notify other end', self);
@@ -840,7 +870,8 @@ begin
       ETunnel.RaiseUtf8('%.Send: session mismatch', [self]);
     if l = 0 then
     begin
-      include(fFlags, fClosePortNotified); // notified by the other end
+      // received frame with only session (and no payload) to notify as closed
+      include(fFlags, fClosePortNotified);
       ClosePort;
     end
     else if fThread <> nil then // = nil after ClosePort (too late)
@@ -1086,7 +1117,7 @@ begin
       fSendSafe.UnLock;
       hqueue.Free;
     end;
-    // now everything is running and we can finish by preparing the fixed info
+    // now everything is running and we can prepare the fixed info
     fInfo.AddNameValuesToObject([
       'remotePort', fRemotePort,
       'localPort',  fPort,
@@ -1094,7 +1125,9 @@ begin
       'session',    Int64(fSession),
       'encrypted',  Encrypted,
       'options',    ToText(fOptions)]);
-    AfterHandshake;
+    AfterHandshake; // may be overriden e.g. to customize fInfo
+    if Assigned(log) then
+      log.Log(sllTrace, 'Open=% %', [result, variant(fInfo)], self);
   except
     sock.ShutdownAndClose(true); // any error would abort and return 0
     result := 0;
@@ -1363,19 +1396,25 @@ constructor TTunnelRelay.Create(aLogClass: TSynLogClass;
   aTransientTimeOutSecs: cardinal);
 begin
   fLogClass := aLogClass;
+  fLogClass.Add.Log(sllDebug, 'Create timeout=%', [aTransientTimeOutSecs], self);
   fTransientTimeOutSecs := aTransientTimeOutSecs;
   fAgent := TTunnelAgent.Create(self, fTransientTimeOutSecs);
-  fAgent._AddRef; // ready to be used e.g. as a sicShared SOA instance
+  fAgentInstance := fAgent; // ready to be used e.g. as a sicShared SOA instance
 end;
 
 destructor TTunnelRelay.Destroy;
 var
   i: PtrInt;
 begin
-  fAgent._Release;
+  fLogClass.Add.Log(sllDebug, 'Destroy: AgentCount=% ConsoleCount=%',
+    [fAgent.Count, fConsoleCount], self);
+  // remove any reference to this now deprecated pointer
+  if fAgent <> nil then
+    fAgent.fOwner := nil;
   if fConsoleCount <> 0 then
     for i := 0 to fConsoleCount - 1 do
       fConsole[i].fOwner := nil; // paranoid
+  fAgentInstance := nil;
   inherited Destroy;
 end;
 
@@ -1468,19 +1507,21 @@ begin
   finally
     fConsoleSafe.WriteUnLock;
   end;
-  ITunnelConsole(Obj) := c; // resolve
-  fLogClass.Add.Log(sllTrace, 'TryResolve: new %', [pointer(c)], self);
+  ITunnelConsole(Obj) := c; // resolve as ITunnelConsole
+  fLogClass.Add.Log(sllTrace, 'TryResolve: new %', [c], self);
+  result := true;
 end;
 
-function TTunnelRelay.DeleteConsole(aConsole: TTunnelConsole): boolean;
+function TTunnelRelay.RemoveConsole(aConsole: TTunnelConsole): boolean;
 begin
   fConsoleSafe.WriteLock;
   try
-    result := ObjArrayDelete(fConsole, fConsoleCount, aConsole) >= 0;
+    result := PtrArrayDelete(fConsole, aConsole, @fConsoleCount) >= 0;
   finally
     fConsoleSafe.WriteUnLock;
   end;
-  fLogClass.Add.Log(sllTrace, 'DeleteConsole=% %', [BOOL_STR[result], aConsole], self);
+  fLogClass.Add.Log(sllTrace, 'RemoveConsole=% %',
+    [BOOL_STR[result], aConsole], self);
 end;
 
 function TTunnelRelay.AgentsInfo: TVariantDynArray;
@@ -1536,8 +1577,17 @@ end;
 
 destructor TTunnelOpen.Destroy;
 begin
+  fLogClass.Add.Log(sllTrace, 'Destroy count=%', [fList.fCount], self);
   FreeAndNil(fList);
   inherited Destroy;
+end;
+
+function TTunnelOpen.Count: integer;
+begin
+  result := 0;
+  if (self <> nil) and
+     (fList <> nil) then
+    result := fList.fCount;
 end;
 
 function TTunnelOpen.HasTransient(aSession: TTunnelSession): boolean;
@@ -1557,9 +1607,10 @@ function TTunnelOpen.AddTransient(aSession: TTunnelSession;
   const callback: ITunnelTransmit): boolean;
 var
   tix32: cardinal;
-  i, gc: PtrInt;
+  i, n, gc: PtrInt;
+  gctxt: TShort16;
 begin
-  gc := 0;
+  gctxt[0] := #0;
   result := fList.Add(aSession, callback);
   try
     if not result then
@@ -1568,28 +1619,33 @@ begin
     fSafe.WriteLock;
     try
       // add this new transient session and its timestamp
+      n := fSessionCount;
       AddInteger(fSession, fSessionCount, aSession);
       if fSessionCount >= length(fSessionTix) then
         SetLength(fSessionTix, length(fSession));
-      fSessionTix[fSessionCount - 1] := tix32;
+      fSessionTix[n] := tix32;
       // check and remove deprecated transient sessions
       if (fTimeOutSecs = 0) or
          (tix32 shr 4 = fDeprecatedTix32) then
         exit;
       fDeprecatedTix32 := tix32 shr 4; // next check in 16 seconds
-      for i := fSessionCount - 1 downto 0 do
+      if n = 0 then // fSession[n] = just above
+        exit;
+      gc := 0;
+      for i := n - 1 downto 0 do
         if cardinal(fSessionTix[i]) + fTimeOutSecs < tix32 then
         begin
           fList.Delete(fSession[i]);
           DeleteTransient(i);
           inc(gc);
         end;
+      FormatShort16('gc=%, ', [gc], gctxt);
     finally
       fSafe.WriteUnLock;
     end;
   finally
-    fLogClass.Add.Log(sllTrace, 'AddTransient(%)=% gc=%, count=%',
-      [Int64(aSession), BOOL_STR[result], gc, fSessionCount], self);
+    fLogClass.Add.Log(sllTrace, 'AddTransient(%)=% %count=%',
+      [Int64(aSession), BOOL_STR[result], gctxt, fSessionCount], self);
   end;
 end;
 
@@ -1635,7 +1691,7 @@ end;
 destructor TTunnelConsole.Destroy;
 begin
   if fOwner <> nil then
-    fOwner.DeleteConsole(self); // unregister itself
+    fOwner.RemoveConsole(self); // unregister itself from weak fConsole[] list
   inherited Destroy;
 end;
 
@@ -1683,9 +1739,14 @@ end;
 
 procedure TTunnelConsole.TunnelSend(const Frame: RawByteString);
 begin
-  if (fOwner <> nil) and
-     (fOwner.fAgent <> nil) then
-    fOwner.fAgent.fList.TunnelSend(Frame);
+  if (fOwner = nil) or
+     (fOwner.fAgent = nil) then
+    exit;
+  fOwner.fAgent.fList.TunnelSend(Frame);
+  // handle end of process notification from the other side
+  if length(Frame) = TRAIL_SIZE then
+    fLogClass.Add.Log(sllTrace, 'TunnelSend: notified ClosePort(%)',
+      [Int64(PTunnelSession(Frame)^)], self);
 end;
 
 
@@ -1704,10 +1765,27 @@ begin
 end;
 
 procedure TTunnelAgent.TunnelSend(const Frame: RawByteString);
+var
+  s: TTunnelSession;
+  ok: boolean;
 begin
   fOwner.ConsoleTunnelSend(Frame); // search for matching fConsole[].TunnelSend
+  // handle end of process notification from the other side
+  if length(Frame) = TRAIL_SIZE then
+  begin
+    s := PTunnelSession(Frame)^;
+    ok := fList.Delete(s);
+    fLogClass.Add.Log(sllTrace, 'TunnelSend: Delete(%)=% after ClosePort',
+      [Int64(s), BOOL_STR[ok]], self);
+  end;
 end;
 
+
+initialization
+  TInterfaceFactory.RegisterInterfaces([
+    TypeInfo(ITunnelTransmit),
+    TypeInfo(ITunnelAgent),
+    TypeInfo(ITunnelConsole)]);
 
 end.
 

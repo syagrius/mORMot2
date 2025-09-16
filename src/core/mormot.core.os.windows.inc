@@ -3454,8 +3454,9 @@ begin
   inherited Create;
   if Path = '' then
   begin
-    TService.DoLog(sllError,
-      'CreateNewService(''%'',''%'') with no Path', [Name, DisplayName], self);
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllError, 'CreateNewService(''%'',''%'') with no Path',
+        [Name, DisplayName], self);
     exit;
   end;
   if TargetComputer = '' then
@@ -3500,8 +3501,9 @@ begin
   t5.Done;
   if fHandle = 0 then
     RaiseLastError('TServiceController.CreateService:', EService);
-  TService.DoLog(sllInfo, 
-    'CreateService(''%'',''%'',''%'')', [Name, DisplayName, exeName], self);
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllInfo, 'CreateService(''%'',''%'',''%'')',
+      [Name, DisplayName, exeName], self);
 end;
 
 constructor TServiceController.CreateOpenService(
@@ -3557,7 +3559,8 @@ begin
     result := ssNotInstalled
   else
     result := CurrentStateToServiceState(GetStatus.dwCurrentState);
-  TService.DoLog(sllTrace, 'GetState(%)=%', [fName, ToText(result)^], self);
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllTrace, 'GetState(%)=%', [fName, ToText(result)^], self);
 end;
 
 function TServiceController.GetStatus: TServiceStatus;
@@ -4076,7 +4079,7 @@ begin
         end;
       end
       else
-        TService.DoLog(sllLastError, 'GetServicePid(%)', [aServiceName], nil);
+        TService.DoLog(sllLastError, 'GetServicePid(%)', [aServiceName]);
     finally
       CloseServiceHandle(svc);
     end
@@ -4328,10 +4331,12 @@ function CreateProcessW(lpApplicationName: PWideChar; lpCommandLine: PWideChar;
 function GetExitCodeProcess(hProcess: THandle; out lpExitCode: cardinal): BOOL;
   stdcall; external kernel32;
 
-function CreateJobToClose(parentpid: cardinal): THandle;
+function CreateJobToClose(parentpid: cardinal; const ctxt: ShortString;
+   allowSilentBreakaway: boolean): THandle;
 var
   security: TSecurityAttributes;
   limits: TJobObjectExtendedLimitInformation;
+  flags: cardinal;
   jobname: RawUtf8;
 begin
   security.nLength := SizeOf(security);
@@ -4340,28 +4345,38 @@ begin
   _fmt('AutoCloseChild%d', [parentpid], jobname);
   result := CreateJobObjectA(@security, pointer(jobname));
   if result = 0 then
+  begin
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllLastError, '%: CreateJobObjectA(%)', [ctxt, jobname]);
     exit;
+  end;
   FillCharFast(limits, SizeOf(limits), 0);
-  limits.BasicLimitInformation.LimitFlags :=
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE or
-    JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  flags := JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE or JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  if allowSilentBreakaway then // relaxed for children (e.g. ServiceUI.exe)
+    flags := flags or JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  limits.BasicLimitInformation.LimitFlags := flags;
   if SetInformationJobObject(result, ExtendedLimitInformation,
        @limits, SizeOf(limits)) then
-    exit;
+  begin
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllTrace, '%: SetInformationJobObject(%) success',
+        [ctxt, jobname]);
+    exit; // success
+  end;
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllLastError, '%: SetInformationJobObject(%)',
+      [ctxt, jobname]);
   CloseHandle(result); // error initializing the job (too old or too new OS?)
   result := 0;
 end;
 
 function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 begin
-  result := (job <> 0) and
-            AssignProcessToJobObject(job, process);
-  if result then
-    TService.DoLog(sllTrace, 'RunCommand: % AssignProcessToJobObject success',
-      [ctxt], nil)
-  else
-    TService.DoLog(sllDebug, 'RunCommand: % AssignProcessToJobObject failed as %',
-      [ctxt, WinErrorShort(GetLastError)], nil);
+  result := AssignProcessToJobObject(job, process);
+  if not result then
+    TService.DoLog(sllLastError, '%: AssignProcessToJobObject', [ctxt])
+  else if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllTrace, '%: AssignProcessToJobObject success', [ctxt]);
 end;
 
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
@@ -4438,12 +4453,13 @@ var
   created: boolean;
   i, l: PtrInt;
 
-  procedure ReturnLastError(const Api: ShortString);
+  procedure ReturnLastError(const Api: ShortString; ctxt: cardinal);
   var
     err: cardinal;
   begin
     err := GetLastError;
-    TService.DoLog(sllTrace, 'RunCommand: % = %', [Api, WinErrorShort(err)], nil);
+    TService.DoLog(sllDebug, 'RunCommand: % = % (ctxt=%)',
+      [Api, WinErrorShort(err), Int64(ctxt)]);
     result := -err; // returns OS API error as negative number
   end;
 
@@ -4470,7 +4486,7 @@ var
       n := 0;
       if not ReadFile(rd, tmp, pending, n, nil) then
       begin
-        ReturnLastError('ReadFile');
+        ReturnLastError('ReadFile', pending);
         result := true; // abort
         exit;
       end;
@@ -4505,7 +4521,7 @@ var
           break;
         wwfFailed, wwfQuit:
           begin
-            ReturnLastError('RedirectAndWait abort');
+            ReturnLastError('RedirectAndWait abort', processinfo.dwProcessId);
             result := false;
             exit;
           end;
@@ -4532,7 +4548,7 @@ var
         terminated := CancelProcess(processinfo.dwProcessId, {wait=}0) and
                       RedirectAndWait(endtix);
         TService.DoLog(sllTrace, 'RunCommand: CancelProcess(pid=%)=%',
-          [processinfo.dwProcessId, ord(terminated)], nil);
+          [processinfo.dwProcessId, ord(terminated)]);
       end;
       if (ramQuit in ram) and
          not terminated then
@@ -4541,12 +4557,12 @@ var
         terminated := QuitProcess(processinfo.dwProcessId, {wait=}0) and
                       RedirectAndWait(endtix);
         TService.DoLog(sllTrace, 'RunCommand: QuitProcess(%)=%',
-          [processinfo.dwProcessId, ord(terminated)], nil);
+          [processinfo.dwProcessId, ord(terminated)]);
       end;
       if GetExitCodeProcess(processinfo.hProcess, exitcode) then
         result := exitcode
       else
-        ReturnLastError('GetExitCodeProcess(soft)')
+        ReturnLastError('GetExitCodeProcess(soft)', processinfo.dwProcessId)
     end;
     if exitcode <> STILL_ACTIVE then
       exit;
@@ -4554,7 +4570,7 @@ var
     result := 255;
     terminated := TerminateProcess(processinfo.hProcess, result);
     TService.DoLog(sllTrace, 'RunCommand: TerminateProcess(%)=%',
-      [processinfo.dwProcessId, ord(terminated)], nil);
+      [processinfo.dwProcessId, ord(terminated)]);
   end;
 
 begin
@@ -4641,7 +4657,7 @@ begin
   // by default, just behave as a standard Windows process would
   if not (roWinNoProcessDetach in options) then
   begin
-    // RunProcess() option is [] to launch a fully uncoupled process
+    // RunProcess() option is [] to launch a detached console and a new process group
     // RunCommand() and RunRedirect() use RUN_CMD = [roWinNoProcessDetach]
     flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
     exclude(ram, ramCtrlC); // not compatible with detached console or group
@@ -4660,9 +4676,8 @@ begin
   if (not created) and
      (flags and CREATE_BREAKAWAY_FROM_JOB <> 0) then
   begin
-    TService.DoLog(sllTrace,
-      'RunCommand: unsupported CREATE_BREAKAWAY_FROM_JOB = %',
-      [WinErrorShort(GetLastError)], nil);
+    TService.DoLog(sllLastError,
+      'RunCommand: possible unsupported CREATE_BREAKAWAY_FROM_JOB', []);
     flags := flags and (not CREATE_BREAKAWAY_FROM_JOB);
     wcmd := SynUnicode(cmd); // CreateProcesW() modified wcmd content: recreate
     UniqueString(wcmd);
@@ -4674,7 +4689,9 @@ begin
     // setup the newly created process
     if flags and CREATE_BREAKAWAY_FROM_JOB <> 0 then
     begin
-      job := CreateJobToClose(processinfo.dwProcessID);
+      // roWinJobCloseChildren = run the new process in its own Job
+      job := CreateJobToClose(processinfo.dwProcessID, 'CloseChildren',
+        {allowSilentBreakaway:}true);
       if (job <> 0) and
          not AssignJobToProcess(job, processinfo.hProcess, 'CloseChildren') then
       begin
@@ -4715,7 +4732,7 @@ begin
         CloseHandle(job); // caller should make CloseHandle(jobtoclose^)
   end
   else
-    ReturnLastError('CreateProcessW');
+    ReturnLastError('CreateProcessW', flags);
 end;
 
 

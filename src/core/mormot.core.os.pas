@@ -2793,7 +2793,8 @@ type
 
 /// setup Exception interception for the whole process
 // - the first to call this procedure will be elected until the process ending
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+// - returns true on success, false if there is already an handler
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 
 {$endif NOEXCEPTIONINTERCEPT}
 
@@ -3244,7 +3245,7 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 /// creates a directory if not already existing
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is set
-// - you can set NoExpand=true if you now that Directory has already a full path
+// - you can set NoExpand=true if you know that Directory has already a full path
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil;
   NoExpand: boolean = false): TFileName; overload;
@@ -5442,7 +5443,7 @@ type
   public
     /// internal method redirecting to WindowsServiceLog global variable
     class procedure DoLog(Level: TSynLogLevel; Fmt: PUtf8Char;
-      const Args: array of const; Instance: TObject);
+      const Args: array of const; Instance: TObject = nil);
     /// Creates the service
     // - the service is added to the internal registered services
     // - main application must instantiate the TServiceSingle class, then call
@@ -5603,12 +5604,19 @@ function KillProcess(pid: cardinal; waitseconds: integer = 30): boolean;
 /// install a Windows event handler for Ctrl+C pressed on the Console
 function HandleCtrlC(const OnClose: TThreadMethod): boolean;
 
-/// define a Windows Job to close associated processes together
-// - warning: main process should include the CREATE_BREAKAWAY_FROM_JOB flag
+/// define a Windows Job with the flags to close associated processes together
+// - warning: parent process should include the CREATE_BREAKAWAY_FROM_JOB flag
+// - will create a new Job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and
+// JOB_OBJECT_LIMIT_BREAKAWAY_OK
+// - allowSilentBreakaway=true will set JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+// to avoid any unexpected behavior in sensitive child process (which may not
+// include CREATE_BREAKAWAY_FROM_JOB themselves, e.g. ServiceUI.exe)
 // - you should later call CloseHandle() on the returned handle, if not 0 
-function CreateJobToClose(parentpid: cardinal): THandle;
+function CreateJobToClose(parentpid: cardinal; const ctxt: ShortString;
+  allowSilentBreakaway: boolean = false): THandle;
 
 /// associate a process to a Windows Job created by CreateJobToClose()
+// - is called usually just after CreateJobToClose()
 function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 
 {$else}
@@ -5759,9 +5767,12 @@ type
   /// define how RunCommand() and RunRedirect() run their sub-process
   // - roEnvAddExisting is used when the env pairs should be added to the
   // existing system environment variable
-  // - roWinJobCloseChildren will setup a Windows Job to close any child
-  // process(es) when the created process quits
-  // - roWinNoProcessDetach will avoid creating its own console and Windows group
+  // - roWinJobCloseChildren will use the CREATE_BREAKAWAY_FROM_JOB flag and
+  // run CreateJobToClose(allowSilentBreakaway=true) and AssignJobToProcess()
+  // on the new process so that any of its future children would be
+  // synchronized and closed with their father, in a relaxed way
+  // - on Windows, will create its own console and its own execution group, unless
+  // roWinNoProcessDetach is defined - e.g. as RUN_CMD for RunCommand/RunRedirect
   // - roWinNewConsole won't inherit the parent console, but have its own console
   // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
   TRunOptions = set of (
@@ -7971,36 +7982,45 @@ end;
 var
   RawExceptionIntercepted: boolean; // single global Exception interception
 
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 begin
-  _RawLogException := Handler; // e.g. SynLogException() from mormot.core.log
-  if RawExceptionIntercepted or
-     not Assigned(Handler) then
-    exit;
-  RawExceptionIntercepted := true; // intercept once
-  {$ifdef WITH_RAISEPROC}
-  // FPC RTL redirection function
-  if not Assigned(OldRaiseProc) then
-  begin
-    OldRaiseProc := RaiseProc;
-    RaiseProc := @SynRaiseProc;
+  result := false;
+  GlobalLock;
+  try
+    _RawLogException := Handler; // e.g. SynLogException() from mormot.core.log
+    if RawExceptionIntercepted or
+       not Assigned(Handler) then
+      exit;
+    RawExceptionIntercepted := true; // intercept once
+    {$ifdef WITH_RAISEPROC}
+    // FPC RTL redirection function
+    if not Assigned(OldRaiseProc) then
+    begin
+      OldRaiseProc := RaiseProc;
+      RaiseProc := @SynRaiseProc;
+      result := true;
+    end;
+    {$endif WITH_RAISEPROC}
+    {$ifdef WITH_VECTOREXCEPT} // SEH32/SEH64 official API
+    if not AddVectoredExceptionHandlerCalled then
+    begin
+      AddVectoredExceptionHandler(0, @SynLogVectoredHandler);
+      AddVectoredExceptionHandlerCalled := true;
+      result := true;
+    end;
+    {$endif WITH_VECTOREXCEPT}
+    {$ifdef WITH_RTLUNWINDPROC}
+    // Delphi x86 RTL redirection function
+    if not Assigned(OldUnWindProc) then
+    begin
+      OldUnWindProc := RTLUnwindProc;
+      RTLUnwindProc := @SynRtlUnwind;
+      result := true;
+    end;
+    {$endif WITH_RTLUNWINDPROC}
+  finally
+    GlobalUnLock;
   end;
-  {$endif WITH_RAISEPROC}
-  {$ifdef WITH_VECTOREXCEPT} // SEH32/SEH64 official API
-  if not AddVectoredExceptionHandlerCalled then
-  begin
-    AddVectoredExceptionHandler(0, @SynLogVectoredHandler);
-    AddVectoredExceptionHandlerCalled := true;
-  end;
-  {$endif WITH_VECTOREXCEPT}
-  {$ifdef WITH_RTLUNWINDPROC}
-  // Delphi x86 RTL redirection function
-  if not Assigned(OldUnWindProc) then
-  begin
-    OldUnWindProc := RTLUnwindProc;
-    RTLUnwindProc := @SynRtlUnwind;
-  end;
-  {$endif WITH_RTLUNWINDPROC}
 end;
 
 {$endif NOEXCEPTIONINTERCEPT}
