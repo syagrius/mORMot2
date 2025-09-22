@@ -188,7 +188,7 @@ type
     fSendSafe: TMultiLightLock; // protect fHandshake+fThread
     fPort, fRemotePort: TNetPort;
     fOptions: TTunnelOptions;
-    fFlags: set of (fBound, fClosePortNotified);
+    fFlags: set of (fSocketCreated, fClosePortNotified);
     fClosed, fVerboseLog: boolean;
     fThread: TTunnelLocalThread;
     fHandshake: TSynQueue;
@@ -682,7 +682,7 @@ begin
   fStarted := true;
   try
     if (fOwner <> nil) and
-       (fBound in fOwner.fFlags) then
+       (fSocketCreated in fOwner.fFlags) then
     begin
       // newsocket() was done in the main thread: blocking accept() now
       fState := stAccepting;
@@ -983,7 +983,6 @@ begin
     result := addr.Port;
     if Assigned(log) then
       log.Log(sllTrace, 'Open: bound to %', [addr.IPShort(true)], self);
-    include(fFlags, fBound);
   end
   else
   begin
@@ -993,6 +992,7 @@ begin
     if Assigned(log) then
       log.Log(sllTrace, 'Open: connected to %:%', [uri.Server, uri.Port], self);
   end;
+  include(fFlags, fSocketCreated);
   // initial single round trip handshake
   infoaes := nil;
   try
@@ -1498,19 +1498,26 @@ var
   c: TTunnelConsole;
 begin
   result := false;
-  if aInterface <> TypeInfo(ITunnelConsole) then
-    exit;
-  // create a new TTunnelConsole instance (e.g. in sicPerSession mode)
-  c := TTunnelConsole.Create(self, fTransientTimeOutSecs);
-  fConsoleSafe.WriteLock;
-  try
-    PtrArrayAdd(fConsole, c, fConsoleCount);
-  finally
-    fConsoleSafe.WriteUnLock;
-  end;
-  ITunnelConsole(Obj) := c; // resolve as ITunnelConsole
-  fLogClass.Add.Log(sllTrace, 'TryResolve: new %', [c], self);
-  result := true;
+  if aInterface = TypeInfo(ITunnelConsole) then
+  begin
+    // create a new TTunnelConsole instance (e.g. in sicPerSession mode)
+    c := TTunnelConsole.Create(self, fTransientTimeOutSecs);
+    fConsoleSafe.WriteLock;
+    try
+      PtrArrayAdd(fConsole, c, fConsoleCount);
+    finally
+      fConsoleSafe.WriteUnLock;
+    end;
+    ITunnelConsole(Obj) := c; // resolve as new ITunnelConsole
+    fLogClass.Add.Log(sllTrace, 'TryResolve: new %', [c], self);
+    result := true;
+  end
+  else if aInterface = TypeInfo(ITunnelAgent) then
+    if fAgent <> nil then
+    begin
+      ITunnelAgent(Obj) := fAgent; // resolve as shared ITunnelAgent
+      result := true;
+    end;
 end;
 
 function TTunnelRelay.RemoveConsole(aConsole: TTunnelConsole): boolean;
