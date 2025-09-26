@@ -3252,6 +3252,22 @@ type
     // which should be released via a proper Dispose()
     // - returned B is a newly allocated instance of the TClass specified to Init()
     function ToB(A: pointer): pointer; overload;
+    /// compare A and B fields, using the registered properties mapping
+    // - could be useful e.g. for regression tests
+    // - A/B are either TObject instance or @record pointer, depending on Init()
+    function Compare(A, B: pointer; CaseInsensitive: boolean = false): integer;
+    /// fill one A instance fields with zero / '' values
+    // - A is either a TObject instance or @record pointer, depending on Init()
+    procedure ZeroA(A: pointer);
+    /// fill one B instance fields with zero / '' values
+    // - B is either a TObject instance or @record pointer, depending on Init()
+    procedure ZeroB(B: pointer);
+    /// fill one A instance fields with some random values
+    // - A is either a TObject instance or @record pointer, depending on Init()
+    procedure RandomA(A: pointer);
+    /// fill one B instance fields with some random values
+    // - B is either a TObject instance or @record pointer, depending on Init()
+    procedure RandomB(B: pointer);
   end;
 
 
@@ -7110,6 +7126,11 @@ begin
   FastSetStringCP(V^, @tmp[1], ord(tmp[0]), RC.Cache.CodePage);
 end;
 
+procedure _RawJsonRandom(V: PRawUtf8; RC: TRttiCustom);
+begin // just '0' ..'999' as valid random JSON content
+  V^ := SmallUInt32Utf8[Random32(high(SmallUInt32Utf8))];
+end;
+
 procedure _WStringRandom(V: PWideString; RC: TRttiCustom);
 var
   tmp: TShort31; // 7-bit ASCII pseudo-random text
@@ -7169,15 +7190,85 @@ begin
   V^ := 38000 + Int64(SharedRandom.Next) / (maxInt shr 12);
 end;
 
+procedure _UnixTimeRandom(V: PInt64; RC: TRttiCustom);
+begin
+  V^ := 1481187020 + SharedRandom.Next shr 8; // as seconds
+end;
+
+procedure _UnixMSRandom(V: PInt64; RC: TRttiCustom);
+begin
+  V^ := Int64(1481187020000) + Int64(SharedRandom.Next); // as milliseconds
+end;
+
 procedure _SingleRandom(V: PSingle; RC: TRttiCustom);
 begin
   V^ := SharedRandom.NextDouble;
 end;
 
+procedure _PropsRandom(V: PAnsiChar; RC: TRttiCustom);
+var
+  n: integer;
+  o: PtrInt;
+  p: PRttiCustomProp;
+begin // used for ptRecord and ptClass
+  n := RC.PropsCount;
+  if n = 0 then
+    exit;
+  if RC.Kind = rkClass then
+    V := PPointer(V)^; // TObject is stored by reference, supplied as PObject
+  if V = nil then
+    exit;
+  p := pointer(RC.Props.List);
+  repeat
+    o := p^.OffsetSet;
+    if o >= 0 then
+      p^.Value.ValueRandom(V + o); // setters are not supported yet
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+procedure _ArrayRandom(V: PAnsiChar; RC: TRttiCustom);
+var
+  n: integer;
+begin
+  n := RC.Cache.ItemCount;
+  if n <> 0 then
+    if RC.ArrayRtti = nil then
+      SharedRandom.Fill(v, RC.Size)
+    else
+      repeat
+        RC.ArrayRtti.ValueRandom(V);
+        inc(V, RC.Cache.ItemSize);
+        dec(n);
+      until n = 0;
+end;
+
+procedure _DynArrayRandom(V: PPointer; RC: TRttiCustom);
+var
+  n: integer;
+  p: PAnsiChar;
+begin
+  if V^ <> nil then
+    RC.ValueFinalize(V); // reset whole array variable
+  n := SharedRandom.Next and 15; // random length 0..15
+  if n = 0 then
+    exit;
+  p := DynArrayNew(V, n, RC.Cache.ItemSize);
+  if RC.ArrayRtti = nil then
+    SharedRandom.Fill(p, n * RC.Cache.ItemSize)
+  else
+    repeat
+      RC.ArrayRtti.ValueRandom(p);
+      inc(p, RC.Cache.ItemSize);
+      dec(n);
+    until n = 0;
+end;
+
 var
   PT_RANDOM: array[TRttiParserType] of pointer = (
     @_NoRandom,       //  ptNone
-    @_NoRandom,       //  ptArray
+    @_ArrayRandom,    //  ptArray
     @_FillRandom,     //  ptBoolean
     @_FillRandom,     //  ptByte
     @_FillRandom,     //  ptCardinal
@@ -7188,9 +7279,9 @@ var
     @_FillRandom,     //  ptInteger
     @_FillRandom,     //  ptQWord
     @_StringRandom,   //  ptRawByteString
-    @_NoRandom,       //  ptRawJson
+    @_RawJsonRandom,  //  ptRawJson
     @_StringRandom,   //  ptRawUtf8
-    @_NoRandom,       //  ptRecord
+    @_PropsRandom,    //  ptRecord
     @_SingleRandom,   //  ptSingle
     {$ifdef UNICODE}
     @_UStringRandom,
@@ -7215,16 +7306,16 @@ var
     {$else}           //  ptUnicodeString
     @_NoRandom,
     {$endif HASVARUSTRING}
-    @_FillRandom,     //  ptUnixTime
-    @_FillRandom,     //  ptUnixMSTime
+    @_UnixTimeRandom, //  ptUnixTime
+    @_UnixMSRandom,   //  ptUnixMSTime
     @_VariantRandom,  //  ptVariant
     @_WStringRandom,  //  ptWideString
     @_StringRandom,   //  ptWinAnsi
     @_FillRandom,     //  ptWord
     @_FillRandom,     //  ptEnumeration
     @_FillRandom,     //  ptSet
-    @_NoRandom,       //  ptClass
-    @_NoRandom,       //  ptDynArray
+    @_PropsRandom,    //  ptClass
+    @_DynArrayRandom, //  ptDynArray
     @_NoRandom,       //  ptInterface
     @_NoRandom,       //  ptPUtf8Char is read-only
     @_NoRandom);      //  ptCustom
@@ -10527,6 +10618,57 @@ begin
   else
     result := AllocMem(bRtti.Size);
   ToB(A, result);
+end;
+
+function TRttiMap.Compare(A, B: pointer; CaseInsensitive: boolean): integer;
+var
+  n: integer;
+  pa: PPRttiCustomProp;
+  pb: PRttiCustomProp;
+begin
+  pa := pointer(b2a);
+  pb := pointer(bRtti.Props.List); // always <> nil
+  n := bRtti.Props.Count;          // always > 0
+  repeat
+    if pa^ <> nil then
+    begin
+      result := pa^.CompareValue(A, B, pb^, CaseInsensitive);
+      if result <> 0 then
+        exit; // found some difference in this property
+    end;
+    inc(pa);
+    inc(pb);
+    dec(n);
+  until n = 0;
+  result := ComparePointer(A, B);
+end;
+
+procedure TRttiMap.ZeroA(A: pointer);
+begin
+  if aRtti.Kind = rkClass then
+    A := @A; // low-level TRttiCustom methods expect a PObject
+  aRtti.ValueFinalizeAndClear(A); // just use the RTTI
+end;
+
+procedure TRttiMap.ZeroB(B: pointer);
+begin
+  if aRtti.Kind = rkClass then
+    B := @B; // low-level TRttiCustom methods expect a PObject
+  bRtti.ValueFinalizeAndClear(B);
+end;
+
+procedure TRttiMap.RandomA(A: pointer);
+begin
+  if aRtti.Kind = rkClass then
+    A := @A; // low-level TRttiCustom methods expect a PObject
+  aRtti.ValueRandom(A); // just use the RTTI
+end;
+
+procedure TRttiMap.RandomB(B: pointer);
+begin
+  if aRtti.Kind = rkClass then
+    B := @B; // low-level TRttiCustom methods expect a PObject
+  bRtti.ValueRandom(B);
 end;
 
 
