@@ -3650,31 +3650,23 @@ type
       read Store.len;
   end;
 
-/// logical OR of two memory buffers
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] or Source[i];
+/// logical "Dest := Dest OR Source"  of two memory buffers
 procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 
-/// logical XOR of two memory buffers - using SSE2 asm on x86_64
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] xor Source[i];
+/// logical "Dest := Dest XOR Source" of two memory buffers - using SSE2 asm on x86_64
 procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt); overload;
   {$ifndef CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
-/// logical XOR of two memory buffers into a third
-// - will perform on all buffer bytes:
-// ! Dest[i] := Source1[i] xor Source2[i];
+/// logical "Dest := Source1 XOR Source2" of two memory buffers into a third
 procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical XOR of two 128-bit / 16-byte memory buffers
+/// logical "Dest := Dest XOR Source" of two 128-bit / 16-byte memory buffers
 procedure XorMemory(var Dest: THash128Rec;
   {$ifdef FPC}constref{$else}const{$endif} Source: THash128Rec); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// logical AND of two memory buffers
-// - will perform on all buffer bytes:
-// ! Dest[i] := Dest[i] and Source[i];
+/// logical "Dest := Dest AND Source"  of two memory buffers
 procedure AndMemory(Dest, Source: PByteArray; size: PtrInt);
 
 /// returns TRUE if all bytes equal zero
@@ -10072,7 +10064,7 @@ function GetTickCount64: UInt64; cdecl external 'c' name 'mach_absolute_time';
 {$endif OSDDARWIN}
 procedure __Fill256FromOs(out e: THash256Rec);
 begin
-  e.q[0] := GetTickCount64;
+  e.q[0] := GetTickCount64;         // always available in FPC RTL
   crc256c(@e, SizeOf(e.q[0]), e.b); // weak but not void
 end; // mormot.core.os.posix.inc overrides to use OS API - but not /dev/urandom
 {$endif OSWINDOWS}
@@ -10083,7 +10075,7 @@ var
 begin
   _Fill256FromOs(tmp);              // fast 256-bit entropy from OS APIs
   XorMemory(e.r[0], tmp.l);
-  XorMemory(e.r[1], tmp.h);         // on Linux, tmp.h is from getrandom syscall
+  XorMemory(e.r[1], tmp.h);
   e.r[2].L := e.r[2].L xor PtrUInt(@tmp) xor tmp.d3;
   e.r[2].H := e.r[2].H xor PtrUInt(GetCurrentThreadId) xor tmp.d2;
   {$ifdef CPUINTEL}
@@ -10266,7 +10258,7 @@ end;
 
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 var
-  gen: TLecuyer;
+  gen: TLecuyer; // thread-safe local instance
 begin
   if data = '' then
     exit;
@@ -10280,7 +10272,7 @@ end;
 
 procedure LecuyerDiffusion(dest: pointer; destsize: PtrUInt; src: PHash128);
 var
-  gen: TLecuyer;
+  gen: TLecuyer; // thread-safe local instance
 begin
   PHash128(@gen)^ := src^;
   gen.SeedGenerator;

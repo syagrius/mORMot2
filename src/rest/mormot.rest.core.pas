@@ -1037,18 +1037,25 @@ type
     // - consider the much safer SetPassword(TModularCryptFormat) method
     procedure SetPassword(const aPasswordPlain, aHashSalt: RawUtf8;
       aHashRound: integer = 20000); overload;
-    /// set the PasswordHashHexa field using a "Modular Crypt" hash
-    // - with its default parameters, and a random salt
+    /// set the PasswordHashHexa field using "Modular Crypt" SCRAM-like hash
+    // - with its default parameters, and a random salt also stored in this field
+    // - in practice: use mcfBCryptSha256 or mcfSCrypt for login from a mORMot
+    // 2.4 client executable for the safest pattern, including mutual authentication;
+    // you may still consider PasswordPlain/Sha256 or PasswordDigest
+    // from a Web or JavaScript client, or for mORMot 1 client compatibility
     // - the server will send back the actual format (algo and params) expected
-    // for each user during its login handhake, so you could just login with
+    // for each user during its login handshake, so you could just login with
     // TRestClientUri.SetUser() with the plain password and no other info
-    // - in practice: you may still consider PasswordPlain/Sha256 or PasswordDigest
-    // from a Web or JavaScript client, but rather use mcfBCryptSha256 or mcfSCrypt
-    // for login from a mORMot 2 client executable; fallback to PBKDF2 variant
-    // if you need to be compatible with mORMot 1 client (but you need to know
-    // the number of rounds)
+    // - will change the protocol to follow the SCRAM pattern, avoiding MiM/DoS
+    // attacks, and making this value stored on the not server DB irreversible
+    // - will also enable mutual authentication - i.e. the server itself will be
+    // authenticated to the client, unless aMutualAuth is forced to false (may be
+    // needed for weak non-mORMot clients only implementing raw "Modular Crypt"
+    // or if the database can't store the 43 additional chars in this field)
+    // - warning: the LogonName field should have already been set for
+    // aMutualAuth=true since it is used to specialize the MCF hash for this user
     procedure SetPassword(const aPasswordPlain: RawUtf8;
-      aModularCrypt: TModularCryptFormat); overload;
+      aModularCrypt: TModularCryptFormat; aMutualAuth: boolean = true); overload;
     /// set the PasswordHashHexa field as DIGEST-HA0 from plain password content
     // - will use the current LogonName as part of the digest
     // - could be called if you want your user to authenticate from a Web client
@@ -1074,9 +1081,7 @@ type
     // TDigestAuthServer, expecting aHashRound as -ord(TDigestAlgo) - to be
     // used if you want to log from a HTTP client, also from SetPasswordDigest()
     // - aLogonName is only used for aHashRound < 0 = DIGEST-HA0 hashing
-    // - as a safer alternative, use ModularCryptHash() from mormot.crypt.secure
-    // to fill the PasswordHashHexa field - this class method will recognize its
-    // patterns in aPasswordPlain or you could use the SetPassword() overload
+    // - as a safer alternative, use the SetPassword(TModularCryptFormat) overload
     class function ComputeHashedPassword(const aLogonName, aPasswordPlain: RawUtf8;
       const aHashSalt: RawUtf8 = ''; aHashRound: integer = 20000): RawUtf8; virtual;
   published
@@ -1084,24 +1089,34 @@ type
     // - the same identifier can be used only once (this column is marked as
     // unique via a "stored AS_UNIQUE" - i.e. "stored false" - attribute), and
     // therefore indexed in the database (e.g. hashed in TRestStorageInMemory)
+    // - warning: you call re-call SetPassword(aMutualAuth=true) when this
+    // LogonName field is changed, since PasswordHashHexa is bound to its value
     property LogonName: RawUtf8
       index 20 read fLogonName write fLogonName stored AS_UNIQUE;
     /// the User Name, as may be displayed or printed
     property DisplayName: RawUtf8
       index 50 read fDisplayName write fDisplayName;
     /// the encoded hash of the password
-    // - use SetPassword/SetPasswordDigest methods to compute this value
+    // - use SetPassword/SetPasswordDigest methods to compute this value, or
+    // call ScramPersistedKey() overloaded functions for safer SCRAM mutual auth
     // - old default is to store the SHA-256 32 bytes as 64 hexa chars (mORMot 1
     // original algo) - or via PBKDF2 (another mORMot 1 option) or as DIGEST-HA0
     // - as a safer alternative, consider storing ModularCryptHash() hashes from
     // mormot.crypt.secure via the SetPassword(TModularCryptFormat) overload
     // - maximum size (i.e. "index" value) was 64 - but has been upgraded to 192
-    // for DIGEST-HA0 with daSHA512 and the new "Modular" hashes: SHA512-Crypt
-    // and SCrypt lengths are both 122 chars, but safe BCrypt is 60 chars so you
-    // could still use it if you can't easily upgrade the database
+    // for DIGEST-HA0 with daSHA512 and the new "Modular"/SCRAM hashes: default
+    // SetPassword(mcf*,aMutualAuth=true) would require 90-150 chars, but
+    // SetPassword(mcfBCrypt,false) only 60 chars if you can't upgrade the DB
     // - you can set directly your own custom "Modular Crypt" hash - e.g. forcing
     // mcfSCrypt with LogN=20, R=8, P=1 for admin/root login, burning 1.23s and
     // 1GB RAM on client side during the hashing (but not on the server side)
+    // - warning: you should re-call SetPassword(aMutualAuth=true) when this
+    // LogonName field is changed, since PasswordHashHexa is bound to LogonName
+    // - so in this field, you may encounter such values:
+    // $ 0123abc.....ffee = 256-bit hexa of mORMot 1 SHA256('salt'+password)
+    // $ bc01a89.....2b07 = HA0 = Hash(username:realm:password) for DIGEST
+    // $ $mcf$params$checkum = standard "Modular Crypt" hash
+    // $ #mcf$params$scramkeys = SCRAM-like "Modular" hash with mutual auth
     property PasswordHashHexa: RawUtf8
       index 192 read fPasswordHashHexa write fPasswordHashHexa;
     /// the associated access rights of this user
@@ -2130,7 +2145,7 @@ begin // caller checked that (self <> nil) and (Level in fLogLevel)
     exit;
   max := fLogResponseMaxBytes;
   if max < MAX_LOGESCAPE then
-    // safe ouput of the content, with proper escape if needed (e.g. binary)
+    // safe output of the content, with proper escape if needed (e.g. binary)
     fLogFamily.Add.LogEscape(
       Level, '%', [aContext], aContent, aContentLen, self, max)
   else
@@ -3698,7 +3713,7 @@ var
   algo: TDigestAlgo absolute aHashRound;
 begin
   if (aPasswordPlain <> '') and
-     (aPasswordPlain[1] = '$') and
+     (aPasswordPlain[1] in ['$', '#']) and // # for SCRAM-like auth
      (ModularCryptIdentify(aPasswordPlain) in mcfValid) then
   begin
     // already in the expected new and safe "Modular Crypt" format
@@ -3746,10 +3761,16 @@ begin
 end;
 
 procedure TAuthUser.SetPassword(const aPasswordPlain: RawUtf8;
-  aModularCrypt: TModularCryptFormat);
+  aModularCrypt: TModularCryptFormat; aMutualAuth: boolean);
 begin
-  if (self <> nil) and
-     (aModularCrypt in mcfValid) then
+  if (self = nil) or
+     not (aModularCrypt in mcfValid) then
+    exit;
+  if aMutualAuth then
+    // SCRAM-like mutual authentication - stored as irreversible '#....' pattern
+    fPasswordHashHexa := ScramPersistedKey(aModularCrypt, aPasswordPlain, LogonName)
+  else
+    // regular "Modular Crypt" storage - stored as sensitive standard '$...'
     fPasswordHashHexa := ModularCryptHash(aModularCrypt, aPasswordPlain);
 end;
 

@@ -231,7 +231,7 @@ type
     fStaticOrm: TRestOrm;
     fSessionUserName: RawUtf8;
     fCustomErrorMsg: RawUtf8;
-    fTemp: RawUtf8; // used e.g. for XML process
+    fTemp: RawUtf8; // used e.g. for XML process or ScramServerProof() value
     fMicroSecondsStart: Int64;
     fMicroSecondsElapsed: QWord;
     fLog: TSynLog;
@@ -1222,8 +1222,6 @@ type
   // as the cookie secrecy on the client side - even if any replay is avoided
   // - note that such sessions can not be persisted on disk
   TRestServerAuthenticationHttpAbstract = class(TRestServerAuthentication)
-  protected
-    fSignature: TAesSignature;
   public
     /// additional salt/realm parameter used for ComputeHashedPassword()
     HashSalt: RawUtf8;
@@ -1231,7 +1229,7 @@ type
     HashRound: integer;
     /// additional parameter for ComputeHashedPassword() and DIGEST-HA0
     DigestAlgo: TDigestAlgo;
-    /// initialize the authentication method to a specified server
+    /// initialize the RESTful authentication method and its TAesSignature instance
     constructor Create(aServer: TRestServer); override;
     /// will check the caller signature
     // - retrieve the session ID from "Cookie: ModelRoot=..." HTTP header
@@ -1831,6 +1829,7 @@ type
     function GetNoAjaxJson: boolean;
       {$ifdef HASINLINE}inline;{$endif}
     function GetAuthenticationSchemesCount: integer;
+    procedure EnsureAuthenticationBearerHeaderExists;
     function StatusCodeToText(Code: cardinal): PRawUtf8; virtual;
     procedure HandleUriError(Ctxt: TRestServerUriContext; E: Exception);
     /// ensure the thread will be taken into account during process
@@ -2584,6 +2583,12 @@ function ServiceRunningRequest: TRestServerUriContext;
 function CurrentServiceContext: TServiceRunningContext;
 {$endif PUREMORMOT2}
 
+var
+  /// the global "1 shl x" milliseconds resolution for CurrentNonce()
+  // - default 1 shl 18 = 4.3 minutes nonce validity - as in mORMot 1
+  // - you may set e.g. 11 to reduce to a safer/tougher 34 seconds period
+  CurrentNonceResolution: integer = 18;
+
 /// returns a safe HMAC-SHA-256 hexadecimal nonce, changing every 4.3 minutes
 // - as used e.g. by TRestServerAuthenticationDefault.Auth
 // - this function is very fast, caching a cryptographically-level SHA-256 hash
@@ -2969,7 +2974,7 @@ begin
      (Server.fSessions <> nil) and
      not IsRemoteAdministrationExecute then
   begin
-    // some kind of requests may have been marked to by-pass authentication
+    // some requests may have been marked to by-pass authentication
     fSession := CONST_AUTHENTICATION_SESSION_NOT_STARTED;
     if // /auth + /timestamp are e.g. allowed methods without signature
        ((MethodIndex >= 0) and
@@ -4905,15 +4910,18 @@ begin
   fTimeOutShr10 := User.GroupRights.SessionTimeout * (MilliSecsPerMin shr 10);
   fTimeOutTix := tix shr 10 + fTimeOutShr10;
   fAccessRights := User.GroupRights.OrmAccessRights;
-  Make([fID, '+', fPrivateKey], fPrivateSalt);
-  fPrivateSaltHash := crc32(crc32(0, pointer(fPrivateSalt), length(fPrivateSalt)),
-    pointer(fUser.PasswordHashHexa), length(fUser.PasswordHashHexa));
+  Make([fID, '+', fPrivateKey], fPrivateSalt); // 'SessionID+PrivateKey'
+  fPrivateSaltHash := crc32(0, pointer(fPrivateSalt), length(fPrivateSalt));
+  if (fUser.PasswordHashHexa <> '') and // client ignores the SCRAM DB value
+     (fUser.PasswordHashHexa[1] <> '#') then
+    fPrivateSaltHash := crc32(fPrivateSaltHash,
+      pointer(fUser.PasswordHashHexa), length(fUser.PasswordHashHexa));
 end;
 
 constructor TAuthSession.Create(aCtxt: TRestServerUriContext; aUser: TAuthUser);
 var
   gid: TID;
-  rnd: THash256Rec;
+  rnd: THash128;
 begin
   // inherited Create; // not mandatory - should not be overriden
   if (aCtxt = nil) or
@@ -4943,11 +4951,16 @@ begin
         [fUser, fUser.IDValue], self);
   // compute the next Session ID and its associated private key
   fID := InterlockedIncrement(aCtxt.Server.fSessionCounter); // 20-bit number
-  if PInteger(@ServerProcessKdf)^ <> 0 then  // use local thread-safe CSPRNG
-    ServerProcessKdf.Compute(@fID, 8, rnd.b) // 8 > 4 bytes nonce ticks
+  if rsoAuthenticationBearerHeader in aCtxt.Server.Options then
+    // compute a new 'Authentication: Bearer xxx' header for the HTTP client
+    // -> use this genuine bearer as private key, and return "bearer":1
+    fPrivateKey := aCtxt.Server.fAuthenticationBearerHeader.GenerateCookie(fID)
   else
-    Random128(@rnd); // safe (but paranoid) unpredictable fallback
-  BinToHexLower(@rnd, SizeOf(rnd.l), fPrivateKey); // 128-bit is enough
+  begin
+    // manual generation of a private key for URI signing
+    Random128(@rnd); // unpredictable - would be reduced to 32-bit anyway
+    BinToHexLower(@rnd, SizeOf(rnd), fPrivateKey);
+  end;
   ComputeProtectedValues(aCtxt.TickCount64);
   // this session has been successfully created
   if Assigned(aCtxt.fLog) and
@@ -5208,9 +5221,9 @@ var
   body: TDocVariantData;
   vers: string;
 begin
-  body.InitFast(10, dvObject);
+  body.InitFast(12, dvObject);
   if result = '' then
-    body.AddValue('result', Session.ID)
+    body.AddValue('result', Session.ID) // no private key
   else
     body.AddValueText('result', result);
   if data <> '' then
@@ -5218,6 +5231,14 @@ begin
   if fAlgoName <> '' then
     // match e.g. TRestServerAuthenticationSignedUriAlgo
     body.AddValueText('algo', fAlgoName);
+  if Ctxt.fTemp <> '' then
+    // ScramServerProof() transient result
+    body.AddValueText('proof', Ctxt.fTemp);
+  if (rsoAuthenticationBearerHeader in fServer.Options) and
+     (PosExChar('+', result) <> 0) then
+    // TRestClientAuthentication.ClientGetSessionKey would now send an
+    // 'Authentication: Bearer xxx' HTTP header from "result":"sessionid+xxx"
+    body.AddValue('bearer', 1);
   with Session.User do
     body.AddNameValuesToObject([
       'logonid',      IDValue,
@@ -5234,11 +5255,6 @@ begin
       vers := Executable.Version.Main;
     body.AddValue('version', StringToVariant(vers));
   end;
-  if rsoAuthenticationBearerHeader in fServer.Options then
-    // TRestClientAuthentication.ClientGetSessionKey would now send an
-    // 'Authentication: Bearer xxx' HTTP header from "bearer":"xxx"
-    body.AddValueText('bearer',
-      fServer.fAuthenticationBearerHeader.GenerateCookie(Session.ID));
   include(Ctxt.fServiceExecutionOptions, optNoLogOutput); // hide sensitive info
   Ctxt.ReturnsJson(variant(body), HTTP_SUCCESS, false, twJsonEscape, false, header);
 end;
@@ -5278,7 +5294,7 @@ end;
 procedure TRestServerAuthenticationSignedUri.SetAlgorithm(
   value: TRestAuthenticationSignedUriAlgo);
 begin
-  fComputeSignature :=
+  fComputeSignature := // use the method already defined for the client side
     TRestClientAuthenticationSignedUri.GetComputeSignature(value);
   if value = suaCRC32 then
     fAlgoName := ''
@@ -5353,9 +5369,9 @@ var
 begin
   if Tix64 = 0 then
     Tix64 := Ctxt.TickCount64; // works even if Ctxt=nil
-  tix32 := (Tix64 shr 18) + 1; // 4.3 minutes resolution +1 after reboot
+  tix32 := (Tix64 shr CurrentNonceResolution) + 2; // 4.3 min +2 after reboot
   if Previous then
-    dec(tix32);
+    dec(tix32); // +2 above to ensure tix32 > 0
   n := @ServerNonce[Previous];
   ServerNonceSafe.Lock;
   if tix32 <> n^.c[0] then
@@ -5364,7 +5380,7 @@ begin
     if PInteger(@ServerProcessKdf)^ = 0 then
     begin
       // first time used: initialize the HMAC-SHA-256 secret for this process
-      Random128(@h.Lo); // 128-bit security is enough
+      Random128(@h.Lo); // unpredictable 128-bit seed
       ServerProcessKdf.Init(@SystemEntropy, SizeOf(SystemEntropy)); // salt
       ServerProcessKdf.Update(h.Lo);
     end;
@@ -5477,16 +5493,30 @@ end;
 function TRestServerAuthenticationDefault.CheckPassword(
   Ctxt: TRestServerUriContext; User: TAuthUser;
   const aClientNonce, aPassWord: RawUtf8): boolean;
-var
-  salt: RawUtf8;
+
+  function TryOne(previous: boolean): boolean;
+  var
+    nonce: RawUtf8;
+  begin
+    nonce := CurrentNonce(Ctxt, Previous);
+    if User.PasswordHashHexa[1] = '#' then
+    begin
+      // SCRAM-like mutual authentication with irreversible PasswordHashHexa
+      Ctxt.fTemp := ScramServerProof(User.PasswordHashHexa, aPassWord,
+        [fServer.Model.Root, nonce, aClientNonce, User.LogonName]);
+      result := Ctxt.fTemp <> ''; // fTemp consummed by SessionCreateReturns()
+    end
+    else
+      // mORMot 1 weaker authentication (User.PasswordHashHexa is sensitive)
+      result := IsHex(aPassWord, SizeOf(THash256)) and
+                PropNameEquals(aPassWord, Sha256U([fServer.Model.Root, nonce,
+                  aClientNonce, User.LogonName, User.PasswordHashHexa]));
+  end;
+
 begin
-  Join([aClientNonce,  User.LogonName, User.PasswordHashHexa], salt);
-  result := IsHex(aPassWord, SizeOf(THash256)) and
-    (PropNameEquals(aPassWord,
-      Sha256U([fServer.Model.Root, CurrentNonce(Ctxt, {prev=}false), salt])) or
-     // if current nonce failed, tries with previous nonce
-     PropNameEquals(aPassWord,
-       Sha256U([fServer.Model.Root, CurrentNonce(Ctxt, {prev=}true), salt])));
+  result := (User.PasswordHashHexa <> '') and
+            // if current nonce failed, tries with previous nonce
+            (TryOne({previous=}false) or TryOne({previous=}true));
 end;
 
 
@@ -5539,7 +5569,8 @@ end;
 constructor TRestServerAuthenticationHttpAbstract.Create(aServer: TRestServer);
 begin
   inherited Create(aServer);
-  fSignature.Init; // for safe 96-bit digital signature
+  // enable safe 96-bit digital signature shared at TRestServer level
+  aServer.EnsureAuthenticationBearerHeaderExists;
 end;
 
 function TRestServerAuthenticationHttpAbstract.RetrieveSession(
@@ -5548,10 +5579,13 @@ var
   c: PHttpCookie;
 begin
   result := nil;
+  if fServer.AuthenticationBearerHeader = nil then
+    exit; // paranoid
   c := Ctxt.InputCookies^.FindCookie(fServer.Model.Root);
   if c = nil then
     exit; // no cookie
-  Ctxt.fSession := fSignature.ValidateCookie(c^.ValueStart, c^.ValueLen);
+  Ctxt.fSession := fServer.AuthenticationBearerHeader^.
+                     ValidateCookie(c^.ValueStart, c^.ValueLen);
   if Ctxt.fSession <> 0 then
     result := fServer.LockedSessionAccess(Ctxt);
   if result = nil then // invalid cookie should be deleted on client side
@@ -5561,7 +5595,7 @@ end;
 function TRestServerAuthenticationHttpAbstract.ComputeCookieValue(
   aSession: cardinal): RawUtf8;
 begin
-  result := fSignature.GenerateCookie(aSession);
+ result := fServer.AuthenticationBearerHeader^.GenerateCookie(aSession);
 end;
 
 
@@ -5727,14 +5761,15 @@ begin
   InvalidateSecContext(sec);
   try
     try
-      // should be in a single call
-      if not ServerSspiAuth(sec, data, outdata) then
+      // code below raise ESynSspi/EGssApi on authentication error
+      if ServerSspiAuth(sec, data, outdata) then
       begin
+        // CONTINUE flag = need more input from the client: unsupported yet
         Ctxt.AuthenticationFailed(afSessionCreationAborted, SECPKGNAMEAPI);
         exit;
       end;
       outdata := BinToBase64(outdata);
-      // now client is authenticated: identify the user
+      // now client is authenticated in a single roundtrip: identify the user
       ServerSspiAuthUser(sec, usr);
       if sllUserAuth in fServer.fLogLevel then
         fServer.InternalLog('% success for %', [self, usr], sllUserAuth);
@@ -7034,6 +7069,15 @@ begin
   end;
 end;
 
+procedure TRestServer.EnsureAuthenticationBearerHeaderExists;
+begin
+  if fAuthenticationBearerHeader = nil then
+  begin
+    fAuthenticationBearerHeader := AllocMem(SizeOf(TAesSignature));
+    fAuthenticationBearerHeader^.Init;
+  end;
+end;
+
 procedure TRestServer.ComputeRoutes;
 var
   r: TRestRouter;
@@ -7052,11 +7096,7 @@ begin
       exit;
     // adjust the global context for some options
     if rsoAuthenticationBearerHeader in fOptions then
-      if fAuthenticationBearerHeader = nil then
-      begin
-        fAuthenticationBearerHeader := AllocMem(SizeOf(TAesSignature));
-        fAuthenticationBearerHeader^.Init;
-      end;
+      EnsureAuthenticationBearerHeaderExists;
     // actually allocate the main TRestRouter instance
     r := TRestRouter.Create(self);
     // ORM remote access via REST
@@ -7151,11 +7191,11 @@ begin
     if usr <> nil then
       try
         if (usr.PasswordHashHexa <> '') and
-           (usr.PasswordHashHexa[1] = '$') then
+           (usr.PasswordHashHexa[1] in ['$', '#']) then // # for SCRAM-like auth
         begin
           mcf := ModularCryptIdentify(usr.PasswordHashHexa, @modular);
-          Ctxt.Log.Log(sllUserAuth, 'ReturnNonce(%)=%',
-              [UserName, ToText(mcf)^], self);
+          Ctxt.Log.Log(sllUserAuth, 'ReturnNonce(%)=% %',
+              [UserName, ToText(mcf)^, usr.PasswordHashHexa[1]], self);
         end; // plain sha256/pbkdf2/digest hashes won't return any "mcf" field
       finally
         usr.Free;

@@ -157,7 +157,7 @@ type
   PAesFull = ^TAesFull;
   /// AES and XOR encryption object for easy direct memory or stream access
   // - calls internally TAes objet methods, and handle memory and streams for best speed
-  // - a TAesFullHeader is encrypted at the begining, allowing fast Key validation,
+  // - a TAesFullHeader is encrypted at the beginning, allowing fast Key validation,
   // but the resulting stream is not compatible with raw TAes object
   // - will use unsafe direct AES-ECB chain mode, so is considered deprecated
   {$ifdef USERECORDWITHMETHODS}
@@ -432,7 +432,7 @@ const
 // - returns e.g. '$2b$<cost>$<salt><checksum>' for the regular BSD format or
 // '$bcrypt-sha256$v=2,t=2b,r=<cost>$<salt'$ for the passlib extended format
 function BCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
- Cost: byte = 12; HashPos: PInteger = nil; PreSha256: boolean = false): RawUtf8;
+  Cost: byte = 12; HashPos: PInteger = nil; PreSha256: boolean = false): RawUtf8;
 
 /// prepare a BlockFish encryption with a given Salt, UTF-8 Password and Cost
 // - Password is process using the BCrypt "Expensive Key Setup" algorithm

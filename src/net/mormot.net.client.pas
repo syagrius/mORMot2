@@ -263,12 +263,15 @@ type
     ID: THttpPartialID;
     /// the expected full size of this download
     FullSize: Int64;
+    /// the timestamp to be affected to the file, when it is fully downloaded
+    EventualTime: TUnixTime;
     /// the partial file name currently downloaded
     PartFile: TFileName;
-    /// up to 512-bit of raw binary hash, precessed by hash algo byte
-    Digest: THashDigest;
     /// background HTTP requests which are waiting for data on this download
     HttpContext: array of PHttpRequestContext;
+    /// up to 512-bit of raw binary hash, prefixed by THashAlgo identifier
+    // - actual file hash for THttpPeerCache, but URI hash for THttpProxyServer
+    Digest: THashDigest;
   end;
   PHttpPartial = ^THttpPartial;
 
@@ -300,18 +303,23 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// thread-safe register a new partial download and its associated HTTP request
     function Add(const Partial: TFileName; ExpectedFullSize: Int64;
-      const Hash: THashDigest; Http: PHttpRequestContext = nil): THttpPartialID;
+      Hash: PHashDigest = nil; Http: PHttpRequestContext = nil;
+      EventualTime: TUnixTime = 0): THttpPartialID;
     /// search for given partial file name and size, from its hash
     function Find(const Hash: THashDigest; out Size: Int64;
-      aID: PHttpPartialID = nil): TFileName;
+      aID: PHttpPartialID = nil; Http: PHttpRequestContext = nil): TFileName;
     /// search for given partial file name from its ID, returning its file name
     // - caller should eventually run Safe.ReadUnLock
     function FindReadLocked(ID: THttpPartialID): TFileName;
     /// search for a given partial file name
-    function HasFile(const FileName: TFileName): boolean;
+    // - and optionally return the expected final file size, and/or associate
+    // this partial with a given HTTP connection
+    function HasFile(const FileName: TFileName; FileExpectedSize: PInt64 = nil;
+      Http: PHttpRequestContext = nil): boolean;
     /// register a HTTP request to an existing partial
     function Associate(const Hash: THashDigest; Http: PHttpRequestContext): boolean;
     /// fill Dest buffer from up to MaxSize bytes from Ctxt.ProgressiveID
+    // - this method is one of the two called from THttpServerSocketGeneric
     function ProcessBody(var Ctxt: THttpRequestContext;
       var Dest: TRawByteStringBuffer; MaxSize: PtrInt): THttpRequestProcessBody;
     /// notify a partial file name change, when download is complete
@@ -324,11 +332,68 @@ type
     // - returns the number of removed HTTP requests
     function Abort(ID: THttpPartialID): integer;
     /// unregister a HTTP request to a given partial
-    // - called when the request is finished e.g. via
-    // THttpServerSocketGeneric.DoProgressiveRequestFree private method
+    // - this method is one of the two called from THttpServerSocketGeneric,
+    // when the request is finished
     procedure Remove(Sender: PHttpRequestContext);
   end;
 
+  /// exception raised by THttpCacheFiles process
+  EHttpCacheFiles = class(ESynException);
+
+  /// store the metadata of one cached file, from its hash, as 32 bytes
+  // - used by THttpCacheFiles to delete deprecated cache entries
+  THttpCached = packed record
+    /// file hash, truncated to 160-bit, i.e. 20 bytes
+    // - 160-bit ensure no collision, even when truncated from SHA-256/512
+    // - may be e.g. from the real file content hash (for PeerCache), or 160-bit
+    // of the SHA-256 hashed URI (for THttpProxyServer)
+    Hash: THash160;
+    /// the first time this file was written - i.e. creation time for a cache
+    FirstAccess: TUnixTimeMinimal;
+    /// the last time this file was accessed - used to delete deprecated files
+    LastAccess: TUnixTimeMinimal;
+    /// a few (4) bytes to reach 32 bytes per entry
+    Padding: array[1 .. 32 - SizeOf(THash160) - SizeOf(TUnixTimeMinimal) * 2] of byte;
+  end;
+  /// point to one cached file metadata
+  PHttpCached = ^THttpCached;
+  /// store several cached file metadata
+  THttpCachedArray = array of THttpCached;
+
+  /// efficient on-disk storage of some file metadata
+  // - files are identified and searched by their binary hash
+  // - file is stored as 4KB pages on disk, as continuous set of THttpCached
+  // 32-bytes raw binary, so reserve 128 entries per page
+  THttpCacheFiles = class(TObjectOSLightLock)
+  protected
+    fCount: integer;
+    fItems: THttpCachedArray;
+    fFile: TFileStreamEx;
+    fFileName: TFileName;
+    procedure FileUpdateEntry(p: PHttpCached; ndx: PtrInt);
+  public
+    /// initialize this instance
+    // - will open the file on disk for real-time efficient update
+    // - if aFileName = '', all process will be done in memory
+    constructor Create(const aFileName: TFileName); reintroduce;
+    /// finalize the storage
+    destructor Destroy; override;
+    /// update (or add) a file entry LastAccess, identified from its hash
+    // - to be called when a cached file is accessed and served
+    procedure Touch(const hash: THashDigest; len: PtrInt);
+    /// explictly remove a file entry, identified from its hash
+    // - to be called e.g. after FileDelete()
+    function Remove(const hash: THashDigest; len: PtrInt): boolean;
+    /// the file name of the actual storage on disk
+    property FileName: TFileName
+      read fFileName;
+    /// raw access to the internal metadata storage, in range Items[0..Count-1]
+    property Items: THttpCachedArray
+      read fItems;
+    /// how many entries are currently stored in Items[]
+    property Count: integer
+      read fCount;
+  end;
 
 type
   THttpClientSocket = class;
@@ -640,7 +705,7 @@ type
     // ACCEPT-ENCODING: header was already registered
     // - you can specify a minimal size (in bytes) before which the content won't
     // be compressed (1024 by default, corresponding to a MTU of 1500 bytes)
-    // - the first registered algorithm will be the prefered one for compression
+    // - the first registered algorithm will be the preferred one for compression
     // within each priority level (the lower aPriority first)
     function RegisterCompress(aFunction: THttpSocketCompress;
       aCompressMinSize: integer = 1024; aPriority: integer = 10): boolean;
@@ -745,7 +810,7 @@ type
     /// the associated process name, to be set and used by the external context
     property ProcessName: RawUtf8
       read fProcessName write fProcessName;
-    /// optional begining position of a request
+    /// optional beginning position of a request
     // - is reset once the Request has been sent
     property RangeStart: Int64
       read fRangeStart write fRangeStart;
@@ -1070,7 +1135,7 @@ type
     // ACCEPT-ENCODING: header was already registered
     // - you can specify a minimal size (in bytes) below which the content won't
     // be compressed (1024 by default, corresponding to a MTU of 1500 bytes)
-    // - the first registered algorithm will be the prefered one for compression
+    // - the first registered algorithm will be the preferred one for compression
     // within each priority level (the lower aPriority first)
     function RegisterCompress(aFunction: THttpSocketCompress;
       aCompressMinSize: integer = 1024; aPriority: integer = 10): boolean;
@@ -2256,8 +2321,17 @@ begin
   OnLog(sllTrace, '% used=%/%', [txt, fUsed, length(fDownload)], self);
 end;
 
+procedure RawAssociate(http: PHttpRequestContext; partial: PHttpPartial);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if http = nil then
+    exit;
+  http^.ProgressiveID := partial^.ID;
+  PtrArrayAdd(partial^.HttpContext, http);
+end;
+
 function THttpPartials.Add(const Partial: TFileName; ExpectedFullSize: Int64;
-  const Hash: THashDigest; Http: PHttpRequestContext): THttpPartialID;
+  Hash: PHashDigest; Http: PHttpRequestContext; EventualTime: TUnixTime): THttpPartialID;
 var
   n: PtrInt;
   p: PHttpPartial;
@@ -2269,25 +2343,27 @@ begin
   Safe.WriteLock;
   try
     inc(fLastID);
-    inc(fUsed);
     result := fLastID; // returns 1,2,3... THttpPartialID (process specific)
+    inc(fUsed);
     p := FromID(0); // try to reuse an empty slot
     if p = nil then
     begin
       n := length(fDownload);
-      SetLength(fDownload, n + 1); // need a new slot
+      SetLength(fDownload, n + 1); // need a new slot (seldom called)
       p := @fDownload[n];
+    end
+    else
+    begin
+      p^.HttpContext := nil; // force reset
+      FillCharFast(p^.Digest, SizeOf(p^.Digest), 0); // clean but not mandatory
     end;
     p^.ID := result;
-    p^.Digest := Hash;
     p^.FullSize := ExpectedFullSize;
+    p^.EventualTime := EventualTime;
     p^.PartFile := Partial;
-    p^.HttpContext := nil;
-    if Http <> nil then
-    begin
-      PtrArrayAdd(p^.HttpContext, Http);
-      Http^.ProgressiveID := p^.ID;
-    end;
+    if Hash <> nil then
+      MoveFast(Hash^, p^.Digest, HASH_SIZE[Hash^.Algo] + 1);
+    RawAssociate(Http, p);
   finally
     Safe.WriteUnLock;
   end;
@@ -2295,7 +2371,7 @@ begin
 end;
 
 function THttpPartials.Find(const Hash: THashDigest; out Size: Int64;
-  aID: PHttpPartialID): TFileName;
+  aID: PHttpPartialID; Http: PHttpRequestContext): TFileName;
 var
   p: PHttpPartial;
 begin
@@ -2314,6 +2390,7 @@ begin
     result := p^.PartFile;
     if aID <> nil then
       aID^ := p^.ID;
+    RawAssociate(Http, p);
   finally
     Safe.ReadUnLock;
   end;
@@ -2337,7 +2414,10 @@ begin
   end;
 end;
 
-function THttpPartials.HasFile(const FileName: TFileName): boolean;
+function THttpPartials.HasFile(const FileName: TFileName;
+  FileExpectedSize: PInt64; Http: PHttpRequestContext): boolean;
+var
+  p: PHttpPartial;
 begin
   result := false;
   if IsVoid or
@@ -2345,7 +2425,13 @@ begin
     exit;
   Safe.ReadLock;
   try
-    result := FromFile(FileName) <> nil;
+    p := FromFile(FileName);
+    if p = nil then
+      exit;
+    result := true;
+    if FileExpectedSize <> nil then
+      FileExpectedSize^ := p^.FullSize;
+    RawAssociate(Http, p);
   finally
     Safe.ReadUnLock; // keep ReadLock if a file name was found
   end;
@@ -2364,9 +2450,8 @@ begin
     p := FromHash(Hash);
     if p = nil then
       exit;
-    PtrArrayAdd(p^.HttpContext, Http);
-    Http^.ProgressiveID := p^.ID;
     result := true;
+    RawAssociate(Http, p);
   finally
     Safe.WriteUnLock;
   end;
@@ -2431,6 +2516,7 @@ begin
   p^.ID := 0; // reuse this slot at next Add()
   p^.PartFile := '';
   p^.HttpContext := nil;
+  p^.EventualTime := 0;
   dec(fUsed);
   if (fUsed = 0) and
      (length(fDownload) > 16) then
@@ -2517,25 +2603,206 @@ end;
 procedure THttpPartials.Remove(Sender: PHttpRequestContext);
 var
   p: PHttpPartial;
+  err: TShort23;
 begin
   // nominal case, when the partial retrieval has eventually successed
   if IsVoid or
      (Sender = nil) or
      (Sender.ProgressiveID = 0) then
     exit;
+  err[0] := #0;
   Safe.WriteLock;
   try
     p := FromID(Sender.ProgressiveID);
     if p <> nil then
     begin
+      if p^.EventualTime <> 0 then // e.g. for THttpProxyServer
+        if FileSetDateFromUnixUtc(p^.PartFile, p^.EventualTime) then
+          err := ' FileSetDate'
+        else
+          err := ' FileSetDate failed';
       PtrArrayDelete(p^.HttpContext, Sender);
       if p^.HttpContext = nil then
-        ReleaseSlot(p);
+        ReleaseSlot(p); // release this partial for the last http usage
     end;
   finally
     Safe.WriteUnLock;
   end;
-  DoLog('Remove(%)=%', [Sender.ProgressiveID, (p <> nil)]);
+  DoLog('Remove(%)=%%', [Sender.ProgressiveID, (p <> nil), err]);
+end;
+
+
+{ THttpCacheFiles }
+
+const
+  CACHED_PERPAGE = SizeOf(TBuffer4K) div SizeOf(THttpCached); // = 128
+
+constructor THttpCacheFiles.Create(const aFileName: TFileName);
+var
+  size: Int64;
+  n: PtrInt;
+  p: PHttpCached;
+begin
+  inherited Create; // TOSLightLock.Init
+  if aFileName = '' then
+    exit;
+  // load the metadata from disk - keep the file open in exclusive mode
+  fFile := TFileStreamEx.CreateWrite(aFileName); // open or create
+  size := fFile.Size;
+  if size = 0 then
+    exit;
+  n := size div SizeOf(THttpCached);
+  if n * SizeOf(THttpCached) <> size then
+  begin
+    FreeAndNil(fFile);
+    EHttpCacheFiles.RaiseUtf8('%.Create: unexpected % file size = %',
+      [self, aFileName, size]);
+  end;
+  fFileName := aFileName;
+  SetLength(fItems, n);
+  fFile.ReadBuffer(pointer(fItems)^, size);
+  p := pointer(fItems);
+  repeat
+    if p^.LastAccess <> 0 then
+      inc(fCount);
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+destructor THttpCacheFiles.Destroy;
+begin
+  fFile.Free;
+  inherited Destroy; // TOSLightLock.Done
+end;
+
+procedure HashNormalize(const hash: THashDigest; len: PtrInt; var norm: THash160);
+var
+  pad: PtrInt;
+begin
+  if len = 0 then
+    len := HASH_SIZE[hash.Algo];
+  len := MinPtrInt(SizeOf(norm), len); // from THttpPeerCache
+  MoveFast(hash.Bin, norm, len);
+  pad := SizeOf(norm) - len;
+  if pad <> 0 then
+    FillCharFast(norm[len], pad, 0); // normalized padding
+end;
+
+procedure THttpCacheFiles.FileUpdateEntry(p: PHttpCached; ndx: PtrInt);
+begin
+  if fFile = nil then
+    exit;
+  fFile.Seek(ndx * SizeOf(p^), soFromBeginning);
+  fFile.WriteBuffer(p^, SizeOf(p^));
+end;
+
+function CacheEqual(a, b: PIntegerArray): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := false;
+  if (a[0] <> b[0]) or
+     (a[1] <> b[1]) or
+     (a[2] <> b[2]) or
+     (a[3] <> b[3]) or
+     (a[4] <> b[4]) then
+    exit;
+  result := true;
+end;
+
+procedure THttpCacheFiles.Touch(const hash: THashDigest; len: PtrInt);
+var
+  now: TUnixTimeMinimal;
+  max, ndx, void: PtrInt;
+  h: THash160;
+  p: PHttpCached;
+begin
+  HashNormalize(hash, len, h);
+  now := UnixTimeMinimalUtc; // outside of the lock
+  fSafe.Lock;
+  try
+    // quickly update existing entry, and identify any void slot
+    max := fCount;
+    void := -1;
+    p := pointer(fItems);
+    for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do
+    begin
+      if p^.LastAccess = 0 then
+      begin
+        void := ndx;
+        if max = 0 then
+          break;
+      end
+      else if CacheEqual(@h, @p^.Hash) then
+      begin
+        if now = p^.LastAccess then
+          exit;
+        p^.LastAccess := now;
+        FileUpdateEntry(p, ndx); // write on disk
+        exit;
+      end
+      else
+        dec(max);
+      inc(p);
+    end;
+    // first time seen: use a new entry
+    if void >= 0 then
+    begin
+      // we can use a void slot
+      p := @fItems[void];
+      p^.Hash := h;
+      p^.FirstAccess := now;
+      p^.LastAccess := now;
+      FileUpdateEntry(p, void);
+    end
+    else
+    begin
+      // we need to create a new page
+      ndx := fCount;
+      if ndx <> length(fItems) then
+        EHttpCacheFiles.RaiseUtf8('%.Touch: count=% capacity=%',
+          [self, ndx, length(fItems)]); // paranoid
+      SetLength(fItems, ndx + CACHED_PERPAGE); // allocate zeroed 4KB
+      p := @fItems[ndx];
+      p^.Hash := h;
+      p^.FirstAccess := now;
+      p^.LastAccess := now;
+      // FileUpdateEntry() but for a full 4KB page
+      fFile.Seek(ndx * SizeOf(p^), soFromBeginning);
+      fFile.WriteBuffer(p^, CACHED_PERPAGE * SizeOf(p^));
+    end;
+    inc(fCount);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+function THttpCacheFiles.Remove(const hash: THashDigest; len: PtrInt): boolean;
+var
+  ndx: PtrInt;
+  p: PHttpCached;
+  h: THash160;
+begin
+  HashNormalize(hash, len, h);
+  fSafe.Lock;
+  try
+    p := pointer(fItems);
+    if p <> nil then
+      for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do
+        if CacheEqual(@h, @p^.Hash) then
+        begin
+          FillZero(THash256(p^));
+          FileUpdateEntry(p, ndx);
+          result := true;
+          dec(fCount);
+          exit;
+        end
+        else
+          inc(p);
+  finally
+    fSafe.UnLock;
+  end;
+  result := false;
 end;
 
 
@@ -2986,7 +3253,8 @@ begin
         exit;
       end;
       // retrieve all HTTP headers
-      GetHeader(hroHeadersUnfiltered in Http.Options);
+      GetHeader((hroHeadersUnfiltered in Http.Options) or
+                IsHead(ctxt.Method));
       if (rfHttp10 in Http.ResponseFlags) and // implicit keepalive in HTTP/1.1
          not (hfConnectionKeepAlive in Http.HeaderFlags) then
         include(Http.HeaderFlags, hfConnectionClose);
@@ -3469,10 +3737,11 @@ begin
   if not Assigned(params.Hasher) then
     params.Hasher := TStreamRedirect; // no hash by default
   if FileExists(result) then
-    if not DeleteFile(result) or
-       FileExists(result) then
-      EHttpSocket.RaiseUtf8(
-        '%.WGet: impossible to delete deprecated %', [self, result]);
+    if not DeleteFile(result) then
+      EHttpSocket.RaiseUtf8('%.WGet: impossible to delete deprecated % [%]',
+        [self, result, OsErrorShort])
+    else if FileExists(result) then
+      EHttpSocket.RaiseUtf8('%.WGet: Delete(%) failed', [self, result]);
   part := result + '.part';
   size := FileSize(part);
   RequestClear; // reset Range from any previous failed request
@@ -3557,8 +3826,8 @@ begin
     // valid .part file can now be converted into the result file
     if FileExists(part) then // if not already done in Alternate.OnDownloaded()
       if not RenameFile(part, result) then
-        EHttpSocket.RaiseUtf8(
-          '%.WGet: impossible to rename % as %', [self, part, result]);
+        EHttpSocket.RaiseUtf8('%.WGet: impossible to rename % as % [%]',
+          [self, part, result, OsErrorShort]);
     // set part='' to notify fully downloaded into result file name
     part := '';
   finally
@@ -5149,6 +5418,7 @@ begin
   begin
     Close;
     fHttp := THttpClientSocket.OpenOptions(Server, fConnectOptions); // connect
+    fHttp.Http.Options := [hroHeadersUnfiltered]; // least astonishment
   end;
 end;
 
@@ -5379,14 +5649,15 @@ begin
   begin
     two := [];
     if jcoPayloadWithoutVoid in fOptions then
-      two := [twoIgnoreDefaultInRecord];
+      include(two, twoIgnoreDefaultInRecord);
     if jcoPayloadDateTimeWithZ in fOptions then
       include(two, twoDateTimeWithZ);
     SaveJson(Payload^, PayloadInfo, two, b);
   end;
   if Assigned(fOnLog) then
-    fOnLog(sllServiceCall, FMT_REQ[((jcoLogFullRequest in fOptions) or
-      (length(b) < 1024))], [Method, Action, b], self);
+    fOnLog(sllServiceCall,
+      FMT_REQ[((jcoLogFullRequest in fOptions) or (length(b) < 1024))],
+      [Method, Action, b], self);
   if Assigned(fOnBefore) then
     fOnBefore(self, Method, Action, b);
   j := nil;

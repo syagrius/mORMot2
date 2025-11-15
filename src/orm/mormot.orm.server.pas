@@ -528,7 +528,7 @@ type
     procedure OnError(E: Exception);
     procedure DoLog;
   public
-    /// intialize the TRestBatch server-side processing
+    /// initialize the TRestBatch server-side processing
     constructor Create(aRest: TRestOrmServer; aTable: TOrmClass;
       var aData: RawUtf8; aExpectedResultsCount: integer); reintroduce;
     /// execute the TRestBatch server-side processing
@@ -2426,6 +2426,21 @@ begin
 end;
 
 procedure TRestOrmServerBatchSend.ParseAndExecute;
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      if fRunningBatchRest <> nil then
+        fRunningBatchRest.InternalBatchStop;
+    finally
+      if fAcquiredExecutionWrite in fFlags then
+        fOrm.Owner.AcquireExecution[execOrmWrite].Safe.UnLock;
+      if Assigned(fLog) and
+         (LOG_TRACEERROR[fErrors <> 0] in fLog.Instance.Family.Level) then
+        DoLog;
+    end;
+  end;
+
 begin
   fLog := fOrm.LogClass.Enter('EngineBatchSend % inlen=%',
     [fTable, length(fData)], self);
@@ -2460,16 +2475,7 @@ begin
         AutomaticCommit;
     finally
       // send pending rows, and release Safe.Lock
-      try
-        if fRunningBatchRest <> nil then
-          fRunningBatchRest.InternalBatchStop;
-      finally
-        if fAcquiredExecutionWrite in fFlags then
-          fOrm.Owner.AcquireExecution[execOrmWrite].Safe.UnLock;
-        if Assigned(fLog) and
-           (LOG_TRACEERROR[fErrors <> 0] in fLog.Instance.Family.Level) then
-          DoLog;
-      end;
+      HandleCleanup;
     end;
   except
     on E: Exception do

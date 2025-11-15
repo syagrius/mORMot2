@@ -44,10 +44,15 @@ const
   /// '"' + UTF-8 encoded \uFFF1 special code to mark ISO-8601 SQLDATE in JSON
   JSON_SQLDATE_MAGIC_QUOTE_C = ord('"') + cardinal(JSON_SQLDATE_MAGIC_C) shl 8;
 
-/// Date/Time conversion from ISO-8601
+/// Date/Time conversion from ISO-8601 text into a TDateTime value
 // - handle 'YYYYMMDDThhmmss' and 'YYYY-MM-DD hh:mm:ss' format
 // - will also recognize '.sss' milliseconds suffix, if any
 function Iso8601ToDateTime(const S: RawByteString): TDateTime; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// Time conversion from ISO-8601 text into a TTime value
+// - handle 'hhmmss' and 'hh:mm:ss' format, with optional '.sss' milliseconds suffix
+function Iso8601ToTime(const S: RawByteString): TTime;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// Date/Time conversion from ISO-8601
@@ -61,7 +66,7 @@ function Iso8601ToDateTimePUtf8Char(P: PUtf8Char; L: integer = 0): TDateTime;
 /// Date/Time conversion from ISO-8601
 // - handle 'YYYYMMDDThhmmss' and 'YYYY-MM-DD hh:mm:ss' format, with potentially
 // shorten versions has handled by the ISO-8601 standard (e.g. 'YYYY')
-// - will also recognize '.sss' milliseconds suffix, if any
+// - also recognize '.sss' milliseconds suffix or 'Thhmmss' or 'hh:mm:ss' input
 // - any ending/trailing single quote will be removed
 // - if L is left to default 0, it will be computed from StrLen(P)
 procedure Iso8601ToDateTimePUtf8CharVar(P: PUtf8Char; L: integer;
@@ -601,7 +606,7 @@ function TryEncodeTime(Hour, Min, Sec, MSec: cardinal; out Time: TDateTime): boo
   {$ifdef HASINLINE} inline; {$endif}
 
 /// our own faster version of the corresponding RTL function
-// - returns 0 if TryEncodeDate/TryEncodeTime failed
+// - returns 0 if TryEncodeDate() failed but just ignore TryEncodeTime() failure
 function EncodeDateTime(Year, Month, Day, Hour, Min, Sec, MSec: cardinal): TDateTime;
 
 /// our own faster version of the corresponding RTL function
@@ -688,7 +693,7 @@ function HttpDateNowUtc(Tix64: Int64 = 0): THttpDateNowUtc;
 
 /// returns the a specified UTC timestamp in HTTP-like format
 // - e.g. as 'Tue, 15 Nov 1994 12:45:26 GMT'
-function UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime): TShort31;
+procedure UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime; var Text: TShort31);
 
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
@@ -747,6 +752,11 @@ const
 /// returns UnixTimeUtc - UNIXTIME_MINIMAL so has no "Year 2038" overflow issue
 function UnixTimeMinimalUtc: TUnixTimeMinimal;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// compare one TUnixTime (seconds) value against one TUnixMSTime (milliseconds) value
+function UnixTimeEqualsMS(const secs: TUnixTime; const millisecs: TUnixMSTime;
+  const deltamillisecs: Int64 = 1000): boolean;
+  {$ifdef CPU64}inline;{$endif}
 
 /// convert a second-based c-encoded time as TDateTime
 //  - i.e. number of seconds elapsed since Unix epoch 1/1/1970 into TDateTime
@@ -829,6 +839,7 @@ procedure UnixTimeOrDoubleToDateTime(P: PUtf8Char; Len: PtrInt; var V: TDateTime
 /// convert some text encoded as a number into a TDateTime
 // - will recognize double/COM flots or TUnixTime/TUnixMSTime 64-bit integers
 function UnixTimeAnyToDateTime(const Text: RawUtf8): TDateTime;
+  {$ifdef FPC} inline; {$endif}
 
 
 { ************ TTimeLog efficient 64-bit custom date/time encoding }
@@ -1166,6 +1177,14 @@ begin
   result := tmp;
 end;
 
+function Iso8601ToTime(const S: RawByteString): TTime;
+var
+  tmp: TDateTime; // circumvent FPC limitation
+begin
+  Iso8601ToTimePUtf8CharVar(pointer(S), length(S), tmp);
+  result := tmp;
+end;
+
 procedure Iso8601ToDateTimePUtf8CharVar(P: PUtf8Char; L: integer;
   var result: TDateTime);
 var
@@ -1177,7 +1196,8 @@ var
   {$else}
   tab: PByteArray; // faster on PIC, ARM and x86_64
   {$endif CPUX86NOTPIC}
-// expect 'YYYYMMDDThhmmss[.sss]' format but handle also 'YYYY-MM-DDThh:mm:ss[.sss]'
+// expect 'YYYYMMDDThhmmss[.sss]' format but handle also
+// 'YYYY-MM-DDThh:mm:ss[.sss]' or plain '[T]hh:mm:ss[.sss]'
 begin
   PInt64(@result)^ := 0;
   if P = nil then
@@ -1195,17 +1215,22 @@ begin
     if L < 4 then
       exit;
   end;
-  if P[0] = 'T' then
+  if P[0] = 'T' then // 'Thhmmss[.sss]'
   begin
-    dec(P, 8);
+    dec(P, 8); // hhmmss at P[9..] position
     inc(L, 8);
+  end
+  else if P[2] = ':' then // 'hh:mm:ss[.sss]'
+  begin
+    dec(P, 9); // hh:mm:ss at P[9..] position
+    inc(L, 9);
   end
   else
   begin
     {$ifndef CPUX86NOTPIC}
     tab := @ConvertHexToBin;
     {$endif CPUX86NOTPIC}
-    b := tab[ord(P[0])]; // first digit
+    b := tab[ord(P[0])]; // first YYYY digit
     if b > 9 then
       exit
     else
@@ -1315,7 +1340,7 @@ var
 begin
   if (P = nil) or
      not Iso8601ToDatePUtf8Char(P, L, y, m, d) or
-     not TryEncodeDate(y, m, d, result) then
+     not mormot.core.datetime.TryEncodeDate(y, m, d, PDateTime(@result)^) then
   PInt64(@result)^ := 0;
 end;
 
@@ -1345,8 +1370,11 @@ begin
 end;
 
 function Iso8601ToTimePUtf8Char(P: PUtf8Char; L: integer): TDateTime;
+var
+  tmp: TDateTime; // for FPC
 begin
-  Iso8601ToTimePUtf8CharVar(P, L, result);
+  Iso8601ToTimePUtf8CharVar(P, L, tmp);
+  result := tmp;
 end;
 
 procedure Iso8601ToTimePUtf8CharVar(P: PUtf8Char; L: integer;
@@ -1372,6 +1400,11 @@ begin
     L := StrLen(P);
   if L < 6 then
     exit; // we need 'hhmmss' at least
+  if P[0] = 'T' then
+  begin
+    inc(P); // 'Thhmmss' -> 'hhmmss'
+    dec(L);
+  end;
   H := ord(P[0]) * 10 + ord(P[1]) - (48 + 480);
   if P[2] = ':' then
   begin
@@ -1439,8 +1472,11 @@ begin
 end;
 
 function IntervalTextToDateTime(Text: PUtf8Char): TDateTime;
+var
+  tmp: TDateTime; // for FPC
 begin
-  IntervalTextToDateTimeVar(Text, result);
+  IntervalTextToDateTimeVar(Text, tmp);
+  result := tmp;
 end;
 
 procedure IntervalTextToDateTimeVar(Text: PUtf8Char;
@@ -2036,13 +2072,14 @@ end;
 
 function EncodeDateTime(Year, Month, Day, Hour, Min, Sec, MSec: cardinal): TDateTime;
 var
-  time: TDateTime;
+  date, time: TDateTime;
 begin
-  if TryEncodeDate(Year, Month, Day, result) and
-     TryEncodeTime(Hour, Min, Sec, MSec, time) then
-    result := result + time
-  else
-    result := 0;
+  result := 0;
+  if mormot.core.datetime.TryEncodeDate(Year, Month, Day, date) then
+    if mormot.core.datetime.TryEncodeTime(Hour, Min, Sec, MSec, time) then
+      result := date + time
+    else
+      result := date;
 end;
 
 
@@ -2137,8 +2174,12 @@ begin
 end;
 
 function TSynDate.ToDate: TDate;
+var
+  tmp: TDateTime; // for FPC
 begin
-  if not mormot.core.datetime.TryEncodeDate(Year, Month, Day, PDateTime(@result)^) then
+  if mormot.core.datetime.TryEncodeDate(Year, Month, Day, tmp) then
+    result := tmp
+  else
     result := 0;
 end;
 
@@ -2205,6 +2246,7 @@ end;
 function TSynSystemTime.EncodeForTimeChange(const aYear: word): TDateTime;
 var
   dow, d: word;
+  t: TDateTime;
 begin
   if DayOfWeek = 0 then
     dow := 7 // Delphi/FPC Sunday = 7
@@ -2224,7 +2266,8 @@ begin
     dec(d);
   end;
   // finally add the time when change is due
-  result := result + EncodeTime(Hour, Minute, Second, MilliSecond);
+  if TryEncodeTime(Hour, Minute, Second, MilliSecond, t) then
+    result := result + t;
 end;
 
 procedure TSynSystemTime.Clear;
@@ -2472,7 +2515,8 @@ begin
       dec(zone, TimeZoneLocalBias);
     dt := ToDateTime - zone div MinsPerDay;
     v := abs(zone mod MinsPerDay);
-    t := EncodeTime(v div 60, v mod 60, 0, 0);
+    if not TryEncodeTime(v div 60, v mod 60, 0, 0, t) then
+      exit;
     if zone < 0 then
       dt := dt + t
     else
@@ -2679,11 +2723,9 @@ function TSynSystemTime.ToDateTime: TDateTime;
 var
   time: TDateTime;
 begin
-  if mormot.core.datetime.TryEncodeDate(Year, Month, Day, result) then
-    if mormot.core.datetime.TryEncodeTime(Hour, Minute, Second, MilliSecond, time) then
-      result := result + time
-    else
-      result := 0
+  if mormot.core.datetime.TryEncodeDate(Year, Month, Day, result) and
+     mormot.core.datetime.TryEncodeTime(Hour, Minute, Second, MilliSecond, time) then
+    result := result + time
   else
     result := 0;
 end;
@@ -2987,16 +3029,16 @@ begin
   end;
 end;
 
-function UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime): TShort31;
+procedure UnixMSTimeUtcToHttpDate(UnixMSTime: TUnixMSTime; var Text: TShort31);
 var
   T: TSynSystemTime;
 begin
   if UnixMSTime <= 0 then
-    result[0] := #0
+    Text[0] := #0
   else
   begin
     T.FromUnixMsTime(UnixMSTime);
-    T.ToHttpDateShort(result);
+    T.ToHttpDateShort(Text);
   end;
 end;
 
@@ -3049,10 +3091,11 @@ function FileHttp304NotModified(Size: Int64; Time: TUnixMSTime;
   InHeaders: PUtf8Char; var OutHeaders: RawUtf8): boolean;
 var
   etag: TShort23;
+  date: TShort31;
   h: PUtf8Char;
   l: PtrInt;
 begin
-  Int64ToHttpEtag((Size shl 16) xor (Time shr 9), Etag); // 512ms resolution
+  Int64ToHttpEtag((Size shl 16) xor (Time shr 9), etag); // 512ms resolution
   if InHeaders <> nil then
   begin
     result := true; // return true as HTTP_NOTMODIFIED (304) status code
@@ -3061,9 +3104,12 @@ begin
        IdemPropName(etag, h, l) then
       exit;
     h := FindNameValuePointer(InHeaders, 'IF-MODIFIED-SINCE: ', l);
-    if (h <> nil) and
-       IdemPropName(UnixMSTimeUtcToHttpDate(Time), h, l) then
-      exit;
+    if h <> nil then
+    begin
+      UnixMSTimeUtcToHttpDate(Time, date);
+      if IdemPropName(date, h, l) then
+        exit;
+    end;
   end;
   AppendLine(OutHeaders, ['Etag: ', etag]);
   result := false;
@@ -3096,6 +3142,12 @@ end;
 function UnixTimeMinimalUtc: TUnixTimeMinimal;
 begin
   result := UnixTimeUtc - UNIXTIME_MINIMAL;
+end;
+
+function UnixTimeEqualsMS(const secs: TUnixTime; const millisecs: TUnixMSTime;
+  const deltamillisecs: Int64): boolean;
+begin // allow ] -1 .. +1 [ second rounding difference
+  result := abs(secs * MilliSecsPerSec - millisecs) < deltamillisecs;
 end;
 
 function UnixTimeToDateTime(const UnixTime: TUnixTime): TDateTime;
@@ -3209,8 +3261,11 @@ begin
 end;
 
 function UnixTimeAnyToDateTime(const Text: RawUtf8): TDateTime;
+var
+  tmp: TDateTime;
 begin
-  UnixTimeOrDoubleToDateTime(pointer(Text), length(Text), result);
+  UnixTimeOrDoubleToDateTime(pointer(Text), length(Text), tmp);
+  result := tmp;
 end;
 
 
@@ -3324,18 +3379,19 @@ end;
 function TTimeLogBits.ToTime: TTime;
 var
   lo: PtrUInt;
+  tmp: TDateTime; // for FPC
 begin
   {$ifdef CPU64}
   lo := Value;
   {$else}
   lo := PCardinal(@Value)^;
   {$endif CPU64}
-  if lo and (1 shl SHR_DD - 1) = 0 then
-    result := 0
+  if (lo and (1 shl SHR_DD - 1) <> 0) and
+     mormot.core.datetime.TryEncodeTime((lo shr SHR_H) and AND_H,
+        (lo shr SHR_M) and AND_M, lo and AND_S, 0, tmp) then
+    result := tmp
   else
-    result := EncodeTime((lo shr SHR_H) and AND_H,
-                         (lo shr SHR_M) and AND_M,
-                         lo and AND_S, 0);
+    result := 0;
 end;
 
 function TTimeLogBits.ToDate: TDate;
@@ -3737,10 +3793,14 @@ begin
   AddDateTime(@dt, 'T', QuoteChar, WithMS, {dateandtime=}true);
 end;
 
+const
+  TIME_00: array[0 .. 9] of AnsiChar = 'T00:00:00Z';
+
 procedure TTextDateWriter.AddDateTime(Value: PDateTime; FirstChar: AnsiChar;
   QuoteChar: AnsiChar; WithMS: boolean; AlwaysDateAndTime: boolean);
 var
   T: TSynSystemTime;
+  d: double; // avoid EBusError on arm32
 begin
   if (PInt64(Value)^ = 0) and
      (QuoteChar = #0) then
@@ -3752,24 +3812,31 @@ begin
   if PInt64(Value)^ <> 0 then
   begin
     inc(B);
+    d := unaligned(Value^);
     if AlwaysDateAndTime or
-       (trunc(Value^) <> 0) then
+       (trunc(d) <> 0) then
     begin
-      T.FromDate(Value^);
-      B := DateToIso8601PChar(B, true, T.Year, T.Month, T.Day);
+      T.FromDate(d);
+      B := DateToIso8601PChar(B, {exp=}true, T.Year, T.Month, T.Day);
     end;
     if AlwaysDateAndTime or
-       (frac(Value^) <> 0) then
+       (frac(d) <> 0) then
     begin
-      T.FromTime(Value^);
-      B := TimeToIso8601PChar(B, true, T.Hour, T.Minute, T.Second,
+      T.FromTime(d);
+      B := TimeToIso8601PChar(B, {exp=}true, T.Hour, T.Minute, T.Second,
         T.MilliSecond, FirstChar, WithMS);
       if twoDateTimeWithZ in fCustomOptions then
-        AddDirect('Z');
+        B^ := 'Z'
+      else
+        dec(B);
     end
     else if twoDateTimeWithZ in fCustomOptions then
-      AddShort('00:00:00Z'); // FireFox e.g. requires always some time part
-    dec(B);
+    begin
+      MoveFast(TIME_00, B^, 10);
+      inc(B, 9); // FireFox e.g. requires always some time part
+    end
+    else
+      dec(B);
   end;
   if QuoteChar <> #0 then
     AddDirect(QuoteChar);

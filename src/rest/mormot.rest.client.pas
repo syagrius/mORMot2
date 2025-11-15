@@ -78,7 +78,8 @@ type
   // - passHashed means that the password is already hashed as in
   // TAuthUser.PasswordHashHexa i.e. Sha256('salt'+Value)
   // - passKerberosSpn indicates that the password is the Kerberos SPN domain
-  // - passModularCrypt is used internally together with TModularCryptFormat
+  // - passModularCrypt is used internally together with TModularCryptFormat to
+  // ask the server for the per-user "Modular Crypt" / SCRAM expected format
   TRestClientSetUserPassword = (
     passClear,
     passHashed,
@@ -87,7 +88,7 @@ type
 
   /// algorithms known by TRestClientAuthenticationSignedUri and
   // TRestServerAuthenticationSignedUri to digitaly compute the
-  // session_signature parameter value for a given URI
+  // 32-bit session_signature parameter value for a given URI
   // - by default, suaCRC32 will compute fast but not cryptographically secure
   // ! crc32(crc32(privatesalt, timestamp, 8), url, urllen)
   // - suaCRC32C and suaXXHASH are similar non-cryptographic alternatives
@@ -97,10 +98,10 @@ type
   // security, by calling e.g.
   // ! (aServer.AuthenticationRegister(TRestClientAuthenticationDefault) as
   // !   TRestServerAuthenticationDefault).Algorithm := suaMD5;
-  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be slower, and may provide
-  // additional level of trust, depending on your requirements: note that
-  // since the hash is reduced to 32-bit resolution, those may not provide
-  // higher security than suaMD5 or suaSHA1
+  // - since the hash result is reduced to only 32-bit resolution, suaSHA1,
+  // suaSHA256, suaSHA512 or suaSHA3 are likely to not provide much higher
+  // security than suaMD5 or suaSHA1 - consider rsoAuthenticationBearerHeader
+  // as a cryptographic safe (and complementary) alternative to URI signing
   // - note that SynCrossPlatformRest clients only implements suaCRC32 yet
   TRestAuthenticationSignedUriAlgo = (
     suaCRC32,
@@ -114,7 +115,7 @@ type
 
   /// function prototype for TRestClientAuthenticationSignedUri and
   // TRestServerAuthenticationSignedUri computation of the session_signature
-  // parameter value
+  // 32-bit parameter value
   TOnRestAuthenticationSignedUriComputeSignature = function(
     privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal of object;
 
@@ -332,12 +333,19 @@ type
     // for internal use
     Authentication: TRestClientAuthenticationClass;
     IDHexa8: RawUtf8; // fSession.ID in hexadecimal
-    PrivateKey: cardinal;
+    ScramServerProof: RawUtf8;
     Data: RawByteString;
     LastTick64: Int64;
+    PrivateKey: cardinal;
   {$ifdef HASINLINE}
   public
   {$endif HASINLINE}
+    /// the current session ID as set after a successful SetUser() method call
+    // - equals 0 (CONST_AUTHENTICATION_SESSION_NOT_STARTED) if the session
+    // is not started yet - i.e. if SetUser() call failed
+    // - equals 1 (CONST_AUTHENTICATION_NOT_USED) if authentication mode
+    // is not enabled - i.e. after a fresh Create() without SetUser() call
+    ID: cardinal;
     /// the current user as set by SetUser() method
     // - contains nil if no User is currently authenticated
     // - once authenticated, a TAuthUser instance is set, with its ID,
@@ -345,12 +353,6 @@ type
     // TAuthGroup ID casted as a pointer) properties - you can retrieve any
     // optional binary data associated with this user via RetrieveBlobFields()
     User: TAuthUser;
-    /// the current session ID as set after a successful SetUser() method call
-    // - equals 0 (CONST_AUTHENTICATION_SESSION_NOT_STARTED) if the session
-    // is not started yet - i.e. if SetUser() call failed
-    // - equals 1 (CONST_AUTHENTICATION_NOT_USED) if authentication mode
-    // is not enabled - i.e. after a fresh Create() without SetUser() call
-    ID: cardinal;
     /// access to the low-level HTTP header used for authentication
     // - you can force here your own header, e.g. a JWT as authentication bearer
     // or as in TRestClientAuthenticationHttpAbstract.ClientSetUserHttpOnlyUser
@@ -578,7 +580,7 @@ type
     fMaximumAuthentificationRetry: integer;
     fRetryOnceOnTimeout: boolean;
     fServiceRoutingSupports: TRestClientSideInvoke;
-    fInternalState: set of (isDestroying, isInAuth, isClientError);
+    fInternalState: set of (isDestroying, isInAuth, isClientError, needsBearer);
     fLastErrorCode: integer;
     fLastErrorMessage: RawUtf8;
     fLastErrorException: ExceptClass;
@@ -1227,7 +1229,7 @@ end;
 { TRestClientAuthentication }
 
 const
-  AUTH_N: array[0..10] of PUtf8Char = (
+  AUTH_N: array[0..11] of PUtf8Char = (
     'result',        // 0
     'data',          // 1
     'server',        // 2
@@ -1238,7 +1240,8 @@ const
     'logongroup',    // 7
     'timeout',       // 8
     'algo',          // 9
-    'bearer');       // 10
+    'bearer',        // 10
+    'proof');        // 11
 
 class function TRestClientAuthentication.ClientGetSessionKey(
   Sender: TRestClientUri; User: TAuthUser;
@@ -1269,12 +1272,14 @@ begin
   if Sender.fSession.ServerTimeout <= 0 then
     Sender.fSession.ServerTimeout := 60; // default 1 hour if not suppplied
   Sender.fSession.IDHexa8 := '';
-  if values[10].Text <> nil then
-    // from rsoAuthenticationBearerHeader in Server.Options
-    Make(['Authorization: Bearer ', values[10].Text], Sender.fSession.HttpHeader);
+  if values[10].ToBoolean then
+    // "bearer":1 from rsoAuthenticationBearerHeader in Server.Options
+    include(Sender.fInternalState, needsBearer);
+  if values[11].Text <> nil then
+    Sender.fSession.ScramServerProof := values[11].ToUtf8;
   if values[9].Text <> nil then
   begin
-    // specific TRestClientAuthenticationSignedUri algorithm
+    // decode TRestClientAuthenticationSignedUri "algo"
     a := GetEnumNameValueTrimmed(TypeInfo(TRestAuthenticationSignedUriAlgo),
       values[9].Text, values[9].Len);
     if a >= 0 then
@@ -1285,7 +1290,7 @@ begin
   begin
     cookie := FindNameValue(pointer(hdr), 'SET-COOKIE: ');
     if cookie = nil then
-      exit; // use the default suaCRC32 algorithm by default
+      exit; // use the default suaCRC32 algorithm as fallback
     cookie := GotoNextNotSpace(cookie);
     if IdemPChar(cookie, '__SECURE-') then
       inc(cookie, 9); // e.g. if rsoCookieSecure is in Server.Options
@@ -1339,16 +1344,21 @@ end;
 class function TRestClientAuthenticationDefault.ClientComputeSessionKey(
   Sender: TRestClientUri; User: TAuthUser): RawUtf8;
 var
-  resp, mcfhash, servernonce, clientnonce: RawUtf8;
-  rnd: THash128;
+  resp, mcfhash, servernonce, clientnonce, proof: RawUtf8;
+  clientsign: THash256;
+  rnd: THash128 absolute clientsign;
   values: array[0..1] of TValuePUtf8Char;
 begin
-  result := '';
+  result := ''; // error
   if User.LogonName = '' then
     exit;
+  // compute the 160-bit client nonce (needed by ScramClientProof)
+  Random128(@rnd); // unpredictable
+  Join([CardinalToHex(OSVersionInt32), '_', BinToHexLower(@rnd, SizeOf(rnd))],
+    clientnonce);
   // try "mcf" for servers with "Modular Crypt" support
   if (User.PasswordHashHexa <> '') and
-     (User.Data = 'mcf') then // passModularCrypt flag with clear password
+     (User.Data = 'mcf') then // passModularCrypt flag with clear/plain password
   begin
     User.Data := '';
     Sender.CallBackGet('auth', ['username', User.LogonName, 'mcf', 1], resp);
@@ -1360,24 +1370,43 @@ begin
     if values[1].Text <> nil then // this user got a mcf specific format
       mcfhash := ModularCryptHash(values[1].ToUtf8, User.PasswordHashHexa);
     if mcfhash <> '' then
-      User.PasswordHashHexa := mcfhash
+      if values[1].Text^ = '$' then
+        // no mutual auth - regular mORMot 1 hashing
+        User.PasswordHashHexa := mcfhash
+      else
+        // SCRAM-like mutual authentication with irreversible proofs
+        proof := ScramClientProof(mcfhash, User.LogonName, clientsign,
+          // match ScramServerProof() msg parameters
+          [Sender.fModel.Root, servernonce, clientnonce, User.LogonName])
     else
       User.SetPassword(User.PasswordHashHexa, ''); // fallback to old hash
   end
   else
-    // regular authentication
+    // regular authentication with User.PasswordHashHexa = hashed value
     servernonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
   if servernonce = '' then
     exit;
   // compute and return a proof, challenged against client and server nonces
-  Random128(@rnd); // unpredictable
-  Join([CardinalToHex(OSVersionInt32), '_', BinToHexLower(@rnd, SizeOf(rnd))],
-    clientnonce); // 160-bit nonce
+  if proof = '' then
+    // regular mORMot 1 authentication via simple hexadecimal hashing
+    proof := Sha256U([Sender.fModel.Root, servernonce, clientnonce,
+      User.LogonName, User.PasswordHashHexa]);
   result := ClientGetSessionKey(Sender, User, [
     'username',    User.LogonName,
-    'password',    Sha256U([Sender.fModel.Root, servernonce, clientnonce,
-                            User.LogonName, User.PasswordHashHexa]),
+    'password',    proof,
     'clientnonce', clientnonce]);
+  // now result <> '' contains 'id-privatekey' on authentication success
+  if (values[1].Text <> nil) and
+     (values[1].Text^ = '#') then
+    // authenticate the SCRAM server from the returned proof
+    if result = '' then
+      User.PasswordHashHexa := ''
+    else if ScramClientServerAuth(mcfhash, User.LogonName,
+              Sender.fSession.ScramServerProof, clientsign) then
+      // success: fSession.PrivateKey computed without the server DB key
+      User.PasswordHashHexa := '#'
+    else
+      result := ''; // error
 end;
 
 
@@ -1417,100 +1446,58 @@ begin
   result := xxHash32(privatesalt, timestamp, 8) xor xxHash32(privatesalt, url, urllen);
 end;
 
-class function TRestClientAuthenticationSignedUri.ComputeSignatureMd5(
+function ComputeSignatureAlgo(algo: THashAlgo;
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
 var
-  digest: THash128Rec;
-  MD5: TMd5;
-  i: PtrInt;
+  digest: THash512Rec;
+  hasher: TSynHasher;
+  by32, i: PtrInt;
 begin
-  MD5.Init;
-  MD5.Update(privatesalt, 4);
-  MD5.Update(timestamp^, 8);
-  MD5.Update(url^, urllen);
-  MD5.Final(digest.b);
+  hasher.Init(algo);
+  hasher.Update(@privatesalt, 4);
+  hasher.Update(timestamp, 8);
+  hasher.Update(url, urllen);
+  by32 := hasher.Final(digest) shr 2;
   result := digest.c[0];
-  for i := 1 to high(digest.c) do
+  for i := 1 to by32 - 1 do
     // we may have used the first 32-bit of the digest, but cascaded xor is fine
     result := result xor digest.c[i];
+end;
+
+class function TRestClientAuthenticationSignedUri.ComputeSignatureMd5(
+  privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
+begin
+  result := ComputeSignatureAlgo(hfMD5, privatesalt, timestamp, url, urllen);
 end;
 
 class function TRestClientAuthenticationSignedUri.ComputeSignatureSha1(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
-var
-  digest: array[0..(SizeOf(TSha1Digest) div 4) - 1] of cardinal;
-  SHA1: TSha1; // use Intel/AMD SHA-1 HW opcodes if available
-  i: PtrInt;
 begin
-  SHA1.Init;
-  SHA1.Update(@privatesalt, 4);
-  SHA1.Update(timestamp, 8);
-  SHA1.Update(url, urllen);
-  SHA1.Final(TSha1Digest(digest));
-  result := digest[0];
-  for i := 1 to high(digest) do
-    // we may have used the first 32-bit of the digest, but cascaded xor is fine
-    result := result xor digest[i];
+  result := ComputeSignatureAlgo(hfSHA1, privatesalt, timestamp, url, urllen);
 end;
 
 class function TRestClientAuthenticationSignedUri.ComputeSignatureSha256(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
-var
-  digest: THash256Rec;
-  SHA256: TSha256; // use Intel/AMD SHA-1 HW opcodes if available
-  i: PtrInt;
 begin
-  SHA256.Init;
-  SHA256.Update(@privatesalt, 4);
-  SHA256.Update(timestamp, 8);
-  SHA256.Update(url, urllen);
-  SHA256.Final(digest.b);
-  result := digest.c[0];
-  for i := 1 to high(digest.c) do
-    // we may have used the first 32-bit of the digest, but cascaded xor is fine
-    result := result xor digest.c[i];
+  result := ComputeSignatureAlgo(hfSHA256, privatesalt, timestamp, url, urllen);
 end;
 
 class function TRestClientAuthenticationSignedUri.ComputeSignatureSha512(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
-var
-  digest: THash512Rec;
-  SHA512: TSha512;
-  i: PtrInt;
 begin
-  SHA512.Init;
-  SHA512.Update(@privatesalt, 4);
-  SHA512.Update(timestamp, 8);
-  SHA512.Update(url, urllen);
-  SHA512.Final(digest.b);
-  result := digest.c[0];
-  for i := 1 to high(digest.c) do
-    // we may have used the first 32-bit of the digest, but cascaded xor is fine
-    result := result xor digest.c[i];
+  result := ComputeSignatureAlgo(hfSHA512, privatesalt, timestamp, url, urllen);
 end;
 
 class function TRestClientAuthenticationSignedUri.ComputeSignatureSha3(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
-var
-  digest: THash256Rec;
-  Sha3: TSha3;
-  i: PtrInt;
 begin
-  Sha3.Init(SHA3_256);
-  Sha3.Update(@privatesalt, 4);
-  Sha3.Update(timestamp, 8);
-  Sha3.Update(url, urllen);
-  Sha3.Final(@digest.b);
-  result := digest.c[0];
-  for i := 1 to high(digest.c) do
-    // we may have used the first 32-bit of the digest, but cascaded xor is fine
-    result := result xor digest.c[i];
+  result := ComputeSignatureAlgo(hfSHA3_256, privatesalt, timestamp, url, urllen);
 end;
 
 class function TRestClientAuthenticationSignedUri.GetComputeSignature(
   algo: TRestAuthenticationSignedUriAlgo): TOnRestAuthenticationSignedUriComputeSignature;
 begin
-  // FPC doesn't allow to use constants for procedure of object
+  // FPC doesn't allow to use constants for procedure of object (even class methods)
   case algo of
     suaCRC32C:
       result := ComputeSignatureCrc32c;
@@ -2158,15 +2145,16 @@ var
   period: integer;
 begin
   result := false;
-  fSession.ID := GetCardinal(pointer(aSessionKey));
+  fSession.ID := GetCardinal(pointer(aSessionKey)); // 'ID+secret128'
   if fSession.ID = 0 then
     exit;
   if fSession.IDHexa8 = '' then // may have been retrieved from 'SetCookie:'
   begin
     fSession.IDHexa8 := CardinalToHexLower(fSession.ID);
-    fSession.PrivateKey := crc32(crc32(0,
-      pointer(aSessionKey), length(aSessionKey)),
-      pointer(aUser.PasswordHashHexa), length(aUser.PasswordHashHexa));
+    fSession.PrivateKey := crc32(0, pointer(aSessionKey), length(aSessionKey));
+    if aUser.PasswordHashHexa <> '#' then // ignore the SCRAM DB value
+      fSession.PrivateKey := crc32(fSession.PrivateKey,
+        pointer(aUser.PasswordHashHexa), length(aUser.PasswordHashHexa));
   end;
   fSession.User := aUser;
   fSession.Authentication := aAuth;
@@ -2180,6 +2168,10 @@ begin
       period := 25 * 60;
     SetSessionHeartbeatSeconds(period);
   end;
+  if (needsBearer in fInternalState) and
+     (PosExChar('+', aSessionKey) <> 0) then
+    Join(['Authorization: Bearer ', SplitRight(aSessionKey, '+')],
+      fSession.HttpHeader);
   result := true;
 end;
 
@@ -2300,6 +2292,18 @@ destructor TRestClientUri.Destroy;
 var
   t, i: PtrInt;
   tounlock: TIDDynArray; // need a private local copy
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      InternalClose; // e.g. websockets calls OnWebSocketsClosed to unregister
+    finally
+      inherited Destroy; // fModel.Free if owned by this TRest instance
+      FreeAndNilSafe(fBackgroundThread); // should be done after fServices.Free
+      fOnIdle := nil;
+    end;
+  end;
+
 begin
   include(fInternalState, isDestroying);
   if SynLogFileFreeing then // may be owned by a TSynLogFamily
@@ -2327,13 +2331,7 @@ begin
       ServerRemoteLogStop;
     end;
     FreeAndNilSafe(fSession.User);
-    try
-      InternalClose; // e.g. websockets calls OnWebSocketsClosed to unregister
-    finally
-      inherited Destroy; // fModel.Free if owned by this TRest instance
-      FreeAndNilSafe(fBackgroundThread); // should be done after fServices.Free
-      fOnIdle := nil;
-    end;
+    HandleCleanup;
   end;
 end;
 

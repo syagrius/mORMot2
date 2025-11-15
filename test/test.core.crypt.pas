@@ -1786,7 +1786,7 @@ const
 
 var
   buf: RawByteString;
-  u, pw, nfo, exp: RawUtf8;
+  u, pw, nfo, nfo2, exp, db, proof: RawUtf8;
   iv: Int64;
   P: PAnsiChar;
   unalign: PtrInt;
@@ -1795,10 +1795,11 @@ var
   logN, blocksize, parallel, r,
   exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
   exp641, exp642: QWord;
-  hasher: TSynHasher;
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
   mcf, mcf2: TModularCryptFormat;
+  clientsig: THash256;
+  hasher: TSynHasher;
   timer: TPrecisionTimer;
 begin
   // validate THashAlgo and TSignAlgo recognition
@@ -2020,12 +2021,25 @@ begin
   Check(ModularCryptVerify(u, exp, [mcfMd5Crypt, mcfSha512Crypt]) = mcfUnknown);
   Check(ModularCryptVerify(u, exp, [], {maxrounds=}3) = mcfInvalid);
   u[200] := 'b'; // BCrypt truncates the password at 72 bytes long
-  Check(ModularCryptVerify(u, exp) = mcfBCrypt);
+  Check(ModularCryptVerify(u, exp) = mcfBCrypt, 'truncate72');
   u[10] := 'b';
-  Check(ModularCryptVerify(u, exp) = mcfInvalid);
+  Check(ModularCryptVerify(u, exp) = mcfInvalid, 'passwd');
   exp := '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2';
   Check(ModularCryptVerify('password', exp) = mcfBCryptSha256);
   Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // cross-platform validate SCRAM-MCF with fixed reference content
+  pw := ScramPersistedKey(exp, 'user');
+  CheckEqual(pw, '#bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$knkUgRsX' +
+    'J0GLVysC4CKT18496Xv5ivqxyMUq5kba3VL0bucxogXVaUUnyhgVK9GmWCkrjL-KbDWrFUDfvLOv0Q');
+  FillZero(clientsig);
+  Check(IsZero(clientsig));
+  proof := ScramClientProof(exp, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+  Check(not IsZero(clientsig));
+  CheckEqual(proof, 'HtI7ThnH1VYYSDcrorMdg8nSGwVQm_uOMnim3a31WD8');
+  proof := ScramServerProof(pw, proof, ['root', 'user', 'cn', 'sn']);
+  CheckEqual(proof, 'fj_E-R1orj7jvv84CGF-ejICOpauk2ZAqtr8nDUn-Ec');
+  Check(ScramClientServerAuth(exp, 'user', proof, clientsig), 'ScramClientServerAuthRef');
+  Check(IsZero(clientsig));
   // pure pascal and OpenSSL SCrypt implementation
   {$ifdef USE_OPENSSL}
   if OpenSslIsAvailable then
@@ -2081,9 +2095,30 @@ begin
       Check(nfo <> '');
       Check(StartWithExact(u, nfo));
       Check(ModularCryptIdentify(nfo) = mcf);
-      CheckEqual(u, ModularCryptHash(nfo, pw)); // simulate client side re-hash
+      CheckEqual(u, ModularCryptHash(nfo, pw), 'simulate client side re-hash');
       if u <> '' then // avoid GPF
       begin
+        // validate SCRAM-like mutual authentication using MCF hashes
+        Check(u[1] = '$');
+        db := ScramPersistedKey(u, 'user');
+        Check(db <> '', 'ScramPersistedKey');
+        Check(db[1] = '#');
+        Check(ModularCryptIdentify(db, @nfo2) = mcf);
+        Check(nfo2[1] = '#');
+        nfo2[1] := '$';
+        CheckEqual(nfo, nfo2);
+        Check(u[1] = '$');
+        Check(IsZero(clientsig));
+        proof := ScramClientProof(u, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+        Check(not IsZero(clientsig));
+        Check(proof <> '', 'ScramClientProof');
+        Check(ScramServerProof(db, proof, ['root', 'user', 'cn', 'so']) = '');
+        proof := ScramServerProof(db, proof, ['root', 'user', 'cn', 'sn']);
+        Check(proof <> '', 'ScramServerProof');
+        Check(ScramClientServerAuth(u, 'user', proof, clientsig), 'ScramClientServerAuth');
+        Check(IsZero(clientsig));
+        Check(not ScramClientServerAuth(u, 'user', proof, clientsig), 'clientsig=0');
+        Check(IsZero(clientsig));
         dec(PByteArray(u)[length(u) - 5]);
         Check(ModularCryptVerify(pw, u) = mcfInvalid);
       end;
@@ -2309,6 +2344,14 @@ begin
   CheckEqual(Base32ToBin('MZXW6YTBOI======'), 'foobar');
   CheckEqual(Base32ToBin('MZXW6YTB1'), '');
   CheckEqual(Base32ToBin('MZXW6YTB========'), '');
+  CheckEqual(Base32ToBin('my======'), 'f');
+  CheckEqual(Base32ToBin('mzxq===='), 'fo');
+  CheckEqual(Base32ToBin('mzxw6==='), 'foo');
+  CheckEqual(Base32ToBin('mzxw6yq='), 'foob');
+  CheckEqual(Base32ToBin('mzxw6ytb'), 'fooba');
+  CheckEqual(Base32ToBin('mzxw6ytboi======'), 'foobar');
+  CheckEqual(Base32ToBin('mzxw6ytb1'), '');
+  CheckEqual(Base32ToBin('mzxw6ytb========'), '');
   tmp := '';
   for i := 1 to 1982 do
   begin

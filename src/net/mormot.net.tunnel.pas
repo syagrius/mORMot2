@@ -309,7 +309,7 @@ function ToText(opt: TTunnelOptions): ShortString; overload;
 
 /// extract the 32-bit session trailer from a ITunnelTransmit.TunnelSend() frame
 function FrameSession(const Frame: RawByteString): TTunnelSession;
-  {$ifdef FPC} inline; {$endif}
+  {$ifdef HASINLINE} inline; {$endif}
 
 const
   toEncrypted = [toEcdhe, toEncrypt];
@@ -351,6 +351,7 @@ type
     fCount: integer;
     fInfoCacheTix32: cardinal;
     fInfoCache: TVariantDynArray;
+    function LockedExists(aSession: TTunnelSession): boolean;
   public
     /// append one ITunnelTransmit callback to the list
     function Add(aSession: TTunnelSession;
@@ -382,16 +383,30 @@ type
 type
   /// abstract parent to ITunnelAgent/ITunnelConsole service endpoints
   // - with shared methods to validate or cancel a two-phase startup
+  // - here "agent" is a simple TTunnelLocal application opening a localhost
+  // port, for transmitting some information (e.g. a VNC server) to a remote
+  // "console" with its own TTunnelLocal redirected port (e.g. a VNC viewer)
   // - the steps of a TTunnelRelay session are therefore:
   // 1) TTunnelLocalClient/TTunnelLocalServer.Create as ITunnelTransmit callbacks
-  // 2) ITunnelConsole.TunnelPrepare() to retrieve a session;
-  // 3) ITunnelAgent.TunnelPrepare() with this session;
+  // 2) ITunnelConsole/ITunnelAgent.TunnelPrepare() to retrieve a session ID;
+  // 3) ITunnelAgent/ITunnelConsole.TunnelAccept() with this session ID;
   // 4) TTunnelLocal.Open() on the console and agent sides to start tunnelling
-  // on a localhost TCP port;
+  // on a localhost TCP port (as server or client);
   // 5a) ITunnelOpen.TunnelCommit or TunnelRollback against Open() result or
-  // 5b) after a timeout, missing TunnelCommit/TunnelRollback would delete any
-  // unfinished TunnelPrepare from an internal transient/pending list
+  // 5b) after a timeout, the relay would delete any TunnelPrepare missing
+  // proper TunnelAccept or TunnelCommit/TunnelRollback from its internal list
   ITunnelOpen = interface(ITunnelTransmit)
+    /// initiate a new relay process as a two-phase commit from this end
+    // - caller should call this method, then TTunnelLocal.Open() on its side,
+    // and once the handshake is OK or KO, call TunnelCommit or TunnelRollback
+    function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+    /// accept a new relay process as a two-phase commit from this end
+    // - the relay was initiated by TunnelPrepare on the other end, and the
+    // returned  session should be specified to this method
+    // - caller should call this method, then TTunnelLocal.Open() on its side,
+    // and once the handshake is OK or KO, call TunnelCommit or TunnelRollback
+    function TunnelAccept(aSession: TTunnelSession;
+      const callback: ITunnelTransmit): boolean;
     /// finalize a relay process startup after Open() success
     // - now ITunnelTransmit.TunnelSend will redirect frames from both sides
     function TunnelCommit(aSession: TTunnelSession): boolean;
@@ -401,47 +416,38 @@ type
   end;
 
   /// service endpoint called by the consoles on the Relay Server
-  // - here the "console" initiate the relay process, and ask for a Session
-  // to which an "agent" will connect via the ITunnelAgent simple endpoint
-  // - also maps ITunnelTransmit to send remote frames, and is likely to be
-  // implemented as sicPerSession over our SOA WebSockets
+  // - ITunnelAgent/ITunnelConsole.TunnelPrepare() initiates the relay process,
+  // and the corresponding ITunnelConsole/ITunnelAgent.TunnelAccept() method
+  // setups the connection on the other end
+  // - this service also supplies ITunnelTransmit to send remote frames, and is
+  // likely to be implemented as sicPerSession over our SOA WebSockets
   // - ITunnelTransmit.TunnelInfo will be implemented and return information
   // about all associated sessions
   // - when the interface is released, will cancel all corresponding sessions
   ITunnelConsole = interface(ITunnelOpen)
     ['{9453C229-9D4A-4F93-B5B3-E4A05E28267F}']
-    /// could be used to define a TDocVariant object about this console
-    // - will be completed with "agents":[] array with each associated agents
+    /// could be used to define a TDocVariant state object about this console
+    // - ITunnelConsole.TunnelInfo will include this value, and will be
+    // completed with "agents":[] array with each associated agent
     procedure TunnelSetInfo(const info: variant);
-    /// initiate a new relay process as a two-phase commit from the console
-    // - caller should call this method, then TTunnelLocal.Open() on its side,
-    // and once the handhake is ok or ko, call TunnelCommit or TunnelRollback
-    function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
   end;
 
   /// service endpoint called by the agents on the Relay Server
-  // - here "agent" is a simple TTunnelLocal application opening a localhost
-  // port, for transmitting some information (e.g. a VNC server) to a remote
-  // "console" with its own TTunnelLocal redirected port (e.g. a VNC viewer)
-  // - just maps a ITunnelTransmit, and is likely to be implemented as sicShared
-  // over our SOA WebSockets
+  // - ITunnelAgent/ITunnelConsole.TunnelPrepare() initiates the relay process,
+  // and the corresponding ITunnelConsole/ITunnelAgent.TunnelAccept() method
+  // setups the connection on the other end
+  // - this service also supplies ITunnelTransmit to send remote frames, and is
+  // likely to be implemented as sicShared over our SOA WebSockets
   ITunnelAgent = interface(ITunnelOpen)
     ['{B3B39C9F-43AA-4EA0-A88E-662401755AD0}']
-    /// initiate a new relay process as a two-phase commit from the agent
-    // - caller should call this method, then TTunnelLocal.Open() on its side,
-    // and once the handhake is ok or ko, call TunnelCommit or TunnelRollback
-    // - the relay is initiated by ITunnelConsole.TunnelPrepare, and the
-    // returned session should be specified to this command
-    function TunnelPrepare(aSession: TTunnelSession;
-      const callback: ITunnelTransmit): boolean;
   end;
 
   TTunnelRelay = class;
 
   /// abstract parent of TTunnelConsole/TTunnelAgent
   // - maintain a list of working tunnels for ITunnelTransmit.TunnelSend() relay
-  // - maintain also a list of transient/pending sessions, to be purged after
-  // a timeout if TunnelCommit/TunnelRollback() has not been called soon enough
+  // - maintain also a list of transient/pending sessions, to be purged after a
+  // timeout on missing TunnelAccept() or TunnelCommit/TunnelRollback() calls
   TTunnelOpen = class(TInterfacedObjectRWLightLocked)
   protected
     fOwner: TTunnelRelay;
@@ -456,7 +462,7 @@ type
     function AddTransient(aSession: TTunnelSession;
       const callback: ITunnelTransmit): boolean;
     function RemoveTransient(aSession: TTunnelSession): boolean;
-    procedure DeleteTransient(ndx: PtrInt);
+    function DeleteTransient(ndx: PtrInt): boolean;
     // ITunnelOpen methods
     function TunnelCommit(aSession: TTunnelSession): boolean;
     function TunnelRollback(aSession: TTunnelSession): boolean;
@@ -485,6 +491,8 @@ type
     // ITunnelConsole methods
     procedure TunnelSetInfo(const info: variant);
     function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+    function TunnelAccept(aSession: TTunnelSession;
+      const callback: ITunnelTransmit): boolean;
     function TunnelInfo: variant;
     procedure TunnelSend(const Frame: RawByteString);
   public
@@ -499,7 +507,8 @@ type
   TTunnelAgent = class(TTunnelOpen, ITunnelAgent)
   protected
     // ITunnelAgent methods
-    function TunnelPrepare(aSession: TTunnelSession;
+    function TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+    function TunnelAccept(aSession: TTunnelSession;
       const callback: ITunnelTransmit): boolean;
     function TunnelInfo: variant;
     procedure TunnelSend(const Frame: RawByteString);
@@ -519,6 +528,8 @@ type
     fAgentInstance: ITunnelAgent;
     function HasConsolePrepared(aSession: TTunnelSession): boolean;
     function LockedFindConsole(aSession: TTunnelSession): TTunnelConsole;
+    function PrepareNewSession(aEndPoint: TTunnelOpen;
+      const callback: ITunnelTransmit): TTunnelSession;
     // search for matching fConsole[].TunnelSend
     procedure ConsoleTunnelSend(const Frame: RawByteString);
     // TInterfaceResolver method to resolve ITunnelConsole instances
@@ -574,7 +585,7 @@ function FrameSession(const Frame: RawByteString): TTunnelSession;
 var
   l: PtrInt;
 begin
-  l := length(Frame) - TRAIL_SIZE;
+  l := length(Frame) - SizeOf(TTunnelSession); // - TRAIL_SIZE
   if l >= 0 then
     result := PTunnelSession(@PByteArray(Frame)[l])^
   else
@@ -1238,6 +1249,11 @@ end;
 
 { TTunnelList }
 
+function TTunnelList.LockedExists(aSession: TTunnelSession): boolean;
+begin
+  result := IntegerScanExists(pointer(fSession), fCount, aSession);
+end;
+
 function TTunnelList.Exists(aSession: TTunnelSession): boolean;
 begin
   fSafe.ReadLock;
@@ -1475,6 +1491,45 @@ begin
   result := nil;
 end;
 
+function TTunnelRelay.PrepareNewSession(aEndPoint: TTunnelOpen;
+  const callback: ITunnelTransmit): TTunnelSession;
+var
+  n: integer;
+begin
+  result := 0;
+  if (self = nil) or
+     (fAgent = nil) or
+     (aEndPoint = nil) or
+     (callback = nil) then
+    exit;
+  fConsoleSafe.WriteLock; // make all TunnelPrepare() calls thread-safe
+  try
+    // 1. generate a new random session number
+    fAgent.fList.Safe.WriteLock;
+    try
+      for n := 1 to 50 do // never loop forever
+      begin
+        repeat
+          result := Random32 shr 4; // a random session seems the best option
+        until result <> 0;
+        if not fAgent.fList.LockedExists(result) then // not in agents list
+          if LockedFindConsole(result) = nil then     // not in consoles list
+            break;
+        result := 0; // very unlikely with 28-bit range - but try up to 50 times
+        fLogClass.Add.Log(sllDebug, 'TunnelPrepare: collision #%', [n], self);
+      end;
+    finally
+      fAgent.fList.Safe.WriteUnLock; // avoid AddTransient() lock from TTunnelAgent
+    end;
+    // 2. add to the corresponding endpoint transient list
+    if result <> 0 then
+      if not aEndPoint.AddTransient(result, callback) then
+        result := 0; // unexpected failure
+  finally
+    fConsoleSafe.WriteUnLock;
+  end;
+end;
+
 procedure TTunnelRelay.ConsoleTunnelSend(const Frame: RawByteString);
 var
   s: TTunnelSession;
@@ -1637,6 +1692,7 @@ var
   gctxt: TShort16;
 begin
   gctxt[0] := #0;
+  // add this session to the main list
   result := fList.Add(aSession, callback);
   try
     if not result then
@@ -1661,7 +1717,9 @@ begin
       for i := n - 1 downto 0 do
         if cardinal(fSessionTix[i]) + fTimeOutSecs < tix32 then
         begin
-          fList.Delete(fSession[i]);
+          if not fList.Delete(fSession[i]) then
+            fLogClass.Add.Log(sllTrace,
+              'AddTransient(): deprecated Delete(%) failed', [i], self);
           DeleteTransient(i);
           inc(gc);
         end;
@@ -1683,10 +1741,8 @@ begin
   fSafe.WriteLock;
   try
     ndx := IntegerScanIndex(pointer(fSession), fSessionCount, aSession);
-    if ndx < 0 then
-      exit;
-    DeleteTransient(ndx);
-    result := true;
+    if ndx >= 0 then
+      result := DeleteTransient(ndx);
   finally
     fSafe.WriteUnLock;
     fLogClass.Add.Log(sllTrace, 'RemoveTransient(%)=% count=%',
@@ -1694,10 +1750,14 @@ begin
   end;
 end;
 
-procedure TTunnelOpen.DeleteTransient(ndx: PtrInt);
+function TTunnelOpen.DeleteTransient(ndx: PtrInt): boolean;
 begin
+  result := false;
+  if PtrUInt(ndx) >= PtrUInt(fSessionCount) then
+    exit; // paranoid
   DeleteInteger(fSession, fSessionCount, ndx);
   UnmanagedDynArrayDelete(fSessionTix, fSessionCount, ndx, SizeOf(cardinal));
+  result := true;
 end;
 
 function TTunnelOpen.TunnelCommit(aSession: TTunnelSession): boolean;
@@ -1729,31 +1789,15 @@ begin
 end;
 
 function TTunnelConsole.TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
-var
-  n: integer;
 begin
-  result := 0;
-  if (fOwner = nil) or
-     (fOwner.fAgent = nil) or
-     (callback = nil) then
-    exit;
-  fOwner.fConsoleSafe.WriteLock;
-  try
-    for n := 1 to 50 do // never loop forever
-    begin
-      result := Random31Not0; // a random session seems the best option
-      if not fList.Exists(result) then                 // not in this console
-        if fOwner.LockedFindConsole(result) = nil then // not in main list
-          break;
-      result := 0; // very unlikely with 31-bit range - but try up to 50 times
-      fLogClass.Add.Log(sllDebug, 'TunnelPrepare random collision', self);
-    end;
-    if result <> 0 then
-      if not AddTransient(result, callback) then
-        result := 0; // unexpected failure
-  finally
-    fOwner.fConsoleSafe.WriteUnLock;
-  end;
+  result := fOwner.PrepareNewSession({endpoint=}self, callback);
+end;
+
+function TTunnelConsole.TunnelAccept(aSession: TTunnelSession;
+  const callback: ITunnelTransmit): boolean;
+begin
+  result := fOwner.fAgent.HasTransient(aSession) and
+            AddTransient(aSession, callback);
 end;
 
 function TTunnelConsole.TunnelInfo: variant;
@@ -1785,11 +1829,16 @@ end;
 
 { TTunnelAgent }
 
-function TTunnelAgent.TunnelPrepare(aSession: TTunnelSession;
+function TTunnelAgent.TunnelAccept(aSession: TTunnelSession;
   const callback: ITunnelTransmit): boolean;
 begin
   result := fOwner.HasConsolePrepared(aSession) and
             AddTransient(aSession, callback);
+end;
+
+function TTunnelAgent.TunnelPrepare(const callback: ITunnelTransmit): TTunnelSession;
+begin
+  result := fOwner.PrepareNewSession({endpoint=}self, callback);
 end;
 
 function TTunnelAgent.TunnelInfo: variant;

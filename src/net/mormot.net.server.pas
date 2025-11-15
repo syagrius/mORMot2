@@ -123,12 +123,14 @@ type
     ToUri: RawUtf8;
     /// [pos1,len1,valndx1,pos2,len2,valndx2,...] trios from ToUri content
     ToUriPosLen: TIntegerDynArray;
-    /// the size of all ToUriPosLen[] static content
-    ToUriStaticLen: integer;
+    /// the HTTP error code for a Rewrite() with an integer ToUri (e.g. '404')
+    ToUriErrorStatus: word;
     /// the URI method to be used after ToUri rewrite
     ToUriMethod: TUriRouterMethod;
-    /// the HTTP error code for a Rewrite() with an integer ToUri (e.g. '404')
-    ToUriErrorStatus: {$ifdef CPU32} word {$else} cardinal {$endif};
+    /// some internal flags corresponding to this URI rewrite definition
+    ToUriFlags: set of (tufHasParameters);
+    /// the size of all ToUriPosLen[] static content
+    ToUriStaticLen: cardinal;
     /// the callback registered by Run() for this URI
     Execute: TOnHttpServerRequest;
     /// an additional pointer value, assigned to Ctxt.RouteOpaque of Execute()
@@ -396,6 +398,8 @@ type
       CompressGz, MaxSizeAtOnce: integer): PRawByteStringBuffer;
     /// just a wrapper around fErrorMessage := FormatString()
     procedure SetErrorMessage(const Fmt: RawUtf8; const Args: array of const);
+    /// append a "Repr-Digest:" HTTP header to the request output
+    procedure SetOutReprDigest(const Hash: THashDigest);
     /// serialize a given value as JSON into OutContent and OutContentType fields
     // - this function returns HTTP_SUCCESS
     function SetOutJson(Value: pointer; TypeInfo: PRttiInfo): cardinal; overload;
@@ -447,7 +451,7 @@ type
   // - hsoNoXPoweredHeader excludes 'X-Powered-By: mORMot 2 synopse.info' header
   // - hsoCreateSuspended won't start the server thread immediately
   // - hsoLogVerbose could be used to debug a server in production
-  // - hsoIncludeDateHeader will let all answers include a Date: ... HTTP header
+  // - hsoIncludeDateHeader will always include a "Date: ..." HTTP header
   // - hsoEnableTls enables TLS support for THttpServer socket server, using
   // Windows SChannel API or OpenSSL - call WaitStarted() to set the certificates
   // - hsoBan40xIP will reject any IP for a few seconds after a 4xx error code
@@ -467,7 +471,9 @@ type
   // per-minute metrics logging via an associated THttpServerGeneric.Analyzer
   // - hsoContentTypeNoGuess will disable content-type detection from small
   // content buffers via GetMimeContentTypeFromBuffer()
-  // - hsoRejectBotUserAgent identifis and reject Bots via IsHttpUserAgentBot()
+  // - hsoRejectBotUserAgent identifies and rejects Bots via IsHttpUserAgentBot()
+  // - hsoTextError will return a small and non-verbose UTF-8 text in case of
+  // HTTP errors, instead of the default human-friendly HTML page
   THttpServerOption = (
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
@@ -487,7 +493,8 @@ type
     hsoTelemetryCsv,
     hsoTelemetryJson,
     hsoContentTypeNoGuess,
-    hsoRejectBotUserAgent);
+    hsoRejectBotUserAgent,
+    hsoTextError);
 
   /// how a THttpServerGeneric class is expected to process incoming requests
   THttpServerOptions = set of THttpServerOption;
@@ -521,6 +528,7 @@ type
     fRouterClass: TRadixTreeNodeClass;
     fLogger: THttpLogger;
     fAnalyzer: THttpAnalyzer;
+    fOnIdle: TOnPollSocketsIdle;
     function GetApiVersion: RawUtf8; virtual; abstract;
     procedure SetRouterClass(aRouter: TRadixTreeNodeClass);
     procedure SetServerName(const aName: RawUtf8); virtual;
@@ -631,7 +639,7 @@ type
     // or custom (synlz) protocols
     // - you can specify a minimal size (in bytes) before which the content won't
     // be compressed (1024 by default, corresponding to a MTU of 1500 bytes)
-    // - the first registered algorithm will be the prefered one for compression
+    // - the first registered algorithm will be the preferred one for compression
     // within each priority level (the lower aPriority first)
     procedure RegisterCompress(aFunction: THttpSocketCompress;
       aCompressMinSize: integer = 1024; aPriority: integer = 10); virtual;
@@ -704,6 +712,10 @@ type
     // - see also NginxSendFileFrom() method
     property OnSendFile: TOnHttpServerSendFile
       read fOnSendFile write fOnSendFile;
+    /// this callback would be called on idle state, typically every few seconds
+    // - any implementation should not be blocking for long
+    property OnIdle: TOnPollSocketsIdle
+      read fOnIdle write fOnIdle;
     /// defines request/response internal queue length
     // - default value if 1000, which sounds fine for most use cases
     // - for THttpApiServer, will return 0 if the system does not support HTTP
@@ -1527,7 +1539,7 @@ type
   PHttpPeerCacheMessageEncoded = ^THttpPeerCacheMessageEncoded;
 
   /// each THttpPeerCacheSettings.Options item
-  // - pcoCacheTempSubFolders will create 16 sub-folders (from first 0-9/a-z
+  // - pcoCacheTempSubFolders will create 16 sub-folders (from first 0-9/a-f
   // hash nibble) within CacheTempPath to reduce filesystem fragmentation
   // - pcoCacheTempNoCheckSize will ignore checking CacheTempMaxMB ratio on disk
   // - pcoUseFirstResponse will accept the first positive response, and don't
@@ -1579,11 +1591,11 @@ type
     fOptions: THttpPeerCacheOptions;
     fLimitMBPerSec, fLimitClientCount,
     fBroadcastTimeoutMS, fBroadcastMaxResponses, fBroadCastDirectMinBytes,
-    fTryAllPeersCount, fHttpTimeoutMS, fRejectInstablePeersMin,
+    fTryAllPeersCount, fHttpTimeoutMS, fRejectInstablePeersMin: integer;
     fCacheTempMaxMB, fCacheTempMaxMin,
     fCacheTempMinBytes, fCachePermMinBytes: integer;
-    fInterfaceName, fUuid: RawUtf8;
     fCacheTempPath, fCachePermPath: TFileName;
+    fInterfaceName, fUuid: RawUtf8;
   public
     /// set the default settings
     // - i.e. Port=8099, LimitMBPerSec=10, LimitClientCount=32,
@@ -1708,6 +1720,7 @@ type
       read fCachePermMinBytes  write fCachePermMinBytes;
     /// allow to customize the UUID used to identify this node
     // - instead of the default GetComputerUuid() from SMBios
+    // - should be a valid UUID/GUID text as recognized by RawUtf8ToGuid()
     property Uuid: RawUtf8
       read fUuid write fUuid;
   end;
@@ -1872,6 +1885,8 @@ type
   TOnHttpPeerCacheDirectOptions = function(var aUri: TUri; var aHeader: RawUtf8;
     var aOptions: THttpRequestExtendedOptions): integer of object;
 
+  EHttpServerCache = class(ESynException);
+
   /// implement a local peer-to-peer download cache via UDP and TCP
   // - UDP broadcasting is used for local peers discovery
   // - TCP is bound to a local THttpServer/THttpAsyncServer content delivery
@@ -2027,13 +2042,18 @@ procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: ShortString);
 
 /// hash an URL and the "Etag:" or "Last-Modified:" headers
 // - could be used to identify a HTTP resource as a binary hash on a given server
+// - aHeaders could be supplied as nil so that only the URI resource is hashed
 // - returns 0 if aUrl/aHeaders have not enough information
 // - returns the number of hash bytes written to aDigest.Bin
 function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
   aHeaders: PUtf8Char; out aDigest: THashDigest): integer;
 
-/// get the content full length, from "Content-Length:" or "Content-Range:"
-function HttpRequestLength(aHeaders: PUtf8Char; out Len: PtrInt): PUtf8Char;
+/// hash an URL and the "Etag:" or "Last-Modified:" headers into 32 ascii chars
+// - you could set any custom aDiglen in 5/10/15/20/25/30 set
+// - aHeaders could be supplied as nil so that only the URI resource is hashed
+// - using SHA-256 and lowercase Base-32 encoding, so perfect for a file name
+function HttpRequestHashBase32(const aUri: TUri; aHeaders: PUtf8Char = nil;
+  aDiglen: integer = 20; aDig: PHashDigest = nil): RawUtf8;
 
 
 {$ifdef USEWININET}
@@ -2784,18 +2804,24 @@ end;
 procedure TUriTreeNode.RewriteUri(Ctxt: THttpServerRequestAbstract);
 var
   n: TDALen;
-  len: integer;
+  len, paramslen: integer;
   t, v: PIntegerArray;
   p: PUtf8Char;
   new: pointer; // fast temporary RawUtf8
 begin
   // compute length of the new URI with injected values
+  if THttpServerRequest(Ctxt).fRouteName = nil then
+    exit; // paranoid
   t := pointer(Data.ToUriPosLen); // [pos1,len1,valndx1,...] trio rules
   n := PDALen(PAnsiChar(t) - _DALEN)^ + _DAOFF;
   v := pointer(THttpServerRequest(Ctxt).fRouteValuePosLen); // [pos,len] pairs
   if v = nil then
      exit; // paranoid
-  len := Data.ToUriStaticLen;
+  paramslen := 0;
+  p := THttpServerRequest(Ctxt).fUrlParamPos; // filled during parsing
+  if p <> nil then
+    paramslen := StrLen(p);
+  len := integer(Data.ToUriStaticLen) + paramslen;
   repeat
     if t[2] >= 0 then            // t[2]=valndx in v=fRouteValuePosLen[]
       inc(len, v[t[2] * 2 + 1]); // add value length
@@ -2822,8 +2848,13 @@ begin
     t := @t[3];
     dec(n, 3)
   until n = 0;
+  if paramslen <> 0 then // append original parameters
+  begin
+    MoveFast(THttpServerRequest(Ctxt).fUrlParamPos^, p^, paramslen);
+    if tufHasParameters in Data.ToUriFlags then
+      p^ := '&'; // there are already some parameters in the rewrite
+  end;
   FastAssignNew(THttpServerRequest(Ctxt).fUrl, new); // replace
-  //if p - new <> len then raise EUriRouter.Create('??');
 end;
 
 
@@ -2912,6 +2943,7 @@ begin
       n.Data.ToUri := toU;
       n.Data.ToUriPosLen := nil; // store [pos1,len1,valndx1,...] trios
       n.Data.ToUriStaticLen := 0;
+      n.Data.ToUriFlags := [];
       n.Data.ToUriErrorStatus := Utf8ToInteger(toU, 200, 599, 0);
       if n.Data.ToUriErrorStatus = 0 then // a true URI, not an HTTP error code
       begin
@@ -2920,6 +2952,8 @@ begin
         if u = nil then
           EUriRouter.RaiseUtf8('No ToUri in %.Setup(''%'')',
             [self, aFromUri]);
+        if PosExChar('?', toU) <> 0 then
+          include(n.Data.ToUriFlags, tufHasParameters);
         if PosExChar('<', toU) <> 0 then // n.Data.ToUriPosLen=nil to use ToUri
           repeat
             pos := u - pointer(toU);
@@ -3078,15 +3112,17 @@ var
   m: TUriRouterMethod;
   t: TUriTree;
   found: TUriTreeNode;
+  req: THttpServerRequest absolute Ctxt;
 begin
   result := 0; // nothing to process
   if (self = nil) or
-     (Ctxt = nil) or
-     (Ctxt.Url = '') or
-     not UriMethod(Ctxt.Method, m) then
+     (req = nil) or
+     (req.Url = '') or
+     not UriMethod(req.Method, m) then
     exit;
-  THttpServerRequest(Ctxt).fRouteName := nil; // paranoid: if called w/o Prepare
-  THttpServerRequest(Ctxt).fRouteNode := nil;
+  req.fRouteName := nil; // paranoid: if called w/o Prepare
+  req.fRouteNode := nil;
+  req.fUrlParamPos := nil;
   t := fTree[m];
   if t = nil then
     exit; // this method has no registration yet
@@ -3097,7 +3133,7 @@ begin
   begin
   {$endif HASFASTTRYFINALLY}
     // fast recursive parsing - may return nil, but never raises exception
-    found := pointer(TUriTreeNode(t.fRoot).Lookup(pointer(Ctxt.Url), Ctxt));
+    found := pointer(TUriTreeNode(t.fRoot).Lookup(pointer(req.Url), req));
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -3108,20 +3144,23 @@ begin
     if Assigned(found.Data.Execute) then
     begin
       // request is implemented via a method
-      THttpServerRequest(Ctxt).fRouteNode := found;
-      result := found.Data.Execute(Ctxt);
+      req.fRouteNode := found;
+      result := found.Data.Execute(req);
     end
     else if found.Data.ToUri <> '' then
     begin
       // request is not implemented here, but the Url should be rewritten
       if m <> found.Data.ToUriMethod then
-        Ctxt.Method := URIROUTERMETHOD[found.Data.ToUriMethod];
-      if found.Data.ToUriErrorStatus <> 0 then
-        result := found.Data.ToUriErrorStatus // redirect to an error code
-      else if found.Data.ToUriPosLen = nil then
-        Ctxt.Url := found.Data.ToUri    // only static -> just replace URI
-      else
-        found.RewriteUri(Ctxt);         // compute new URI with injected values
+        req.Method := URIROUTERMETHOD[found.Data.ToUriMethod];
+      result := found.Data.ToUriErrorStatus; // redirect to an error code
+      if result = 0 then
+        if found.Data.ToUriPosLen = nil then // only static: just replace URI
+          if req.fUrlParamPos = nil then
+            req.Url := found.Data.ToUri
+          else
+            Make([found.Data.ToUri, req.UrlParamPos], req.fUrl) // append params
+        else
+          found.RewriteUri(req); // compute new URI with injected values
     end;
 end;
 
@@ -3259,17 +3298,25 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
   end;
 
   procedure ProcessErrorMessage;
+  var
+    txt: PRawUtf8;
   begin
+    FastAssignNew(fOutCustomHeaders);
+    txt := fServer.StatusCodeToText(fRespStatus);
+    if hsoTextError in fServer.Options then // fast and good enough
+    begin
+      Make([fRespStatus, ' ', txt^, ': ', fErrorMessage], RawUtf8(fOutContent));
+      fOutContentType := TEXT_CONTENT_TYPE;
+      exit;
+    end;
     HtmlEscapeString(fErrorMessage, fOutContentType, hfAnyWhere); // safety
     FormatUtf8(
       '<!DOCTYPE html><html><body style="font-family:verdana">' +
-      '<h1>% Server Error %</h1><hr>' +
-      '<p>HTTP % %</p><p>%</p><small>%</small></body></html>',
-      [fServer.ServerName, fRespStatus, fRespStatus,
-       fServer.StatusCodeToText(fRespStatus)^, fOutContentType, XPOWEREDVALUE],
-      RawUtf8(fOutContent));
-    fOutCustomHeaders := '';
-    fOutContentType := HTML_CONTENT_TYPE; // body = HTML message to display
+      '<h1>% Server Error %</h1>' +
+      '<p><b>HTTP % %:</b> %</p><hr><small><i>% on %</i></small></body></html>',
+      [fServer.ServerName, fRespStatus, fRespStatus, txt^, fOutContentType,
+       XPOWEREDVALUE, OS_TEXT], RawUtf8(fOutContent));
+    fOutContentType := HTML_CONTENT_TYPE; // body = human friendly HTML message
   end;
 
 var
@@ -3333,6 +3380,12 @@ procedure THttpServerRequest.SetErrorMessage(const Fmt: RawUtf8;
   const Args: array of const);
 begin
   FormatString(Fmt, Args, fErrorMessage);
+end;
+
+procedure THttpServerRequest.SetOutReprDigest(const Hash: THashDigest);
+begin // implement e.g. pcoHttpReprDigest option
+  SetOutCustomHeader(['Repr-Digest: ', HASH_TXT_LOWER[Hash.Algo],
+    '=:', BinToBase64Short(@Hash.Bin, HASH_SIZE[Hash.Algo]), ':']);
 end;
 
 function THttpServerRequest.TempJsonWriter(
@@ -4246,7 +4299,8 @@ begin
            (cod <> HTTP_ASYNCRESPONSE) and
            not StatusCodeIsSuccess(cod) then
         begin
-          Ctxt.fErrorMessage := 'Wrong route';
+          if Ctxt.ErrorMessage = '' then
+            Ctxt.ErrorMessage := 'Wrong route'; // if no OnRequest()
           IncStat(grRejected);
         end;
         Ctxt.RespStatus := cod;
@@ -4641,13 +4695,15 @@ begin
           {$endif OSPOSIX}
           InvalidateSecContext(ctx);
           try
+            // code below raise ESynSspi/EGssApi on authentication error
             if ServerSspiAuth(ctx, bin, bout) then
-            begin
-              ServerSspiAuthUser(ctx, user);
-              Http.ResponseHeaders := BinToBase64(bout,
-                SECPKGNAMEHTTPWWWAUTHENTICATE, #13#10, {magic=}false);
-              result := asrMatch;
-            end;
+              // CONTINUE flag = need more input from the client: unsupported
+              exit;
+            // now client is authenticated in a single roundtrip: identify user
+            ServerSspiAuthUser(ctx, user);
+            Http.ResponseHeaders := BinToBase64(bout,
+              SECPKGNAMEHTTPWWWAUTHENTICATE, #13#10, {magic=}false);
+            result := asrMatch;
           finally
             FreeSecContext(ctx);
           end;
@@ -4658,7 +4714,7 @@ begin
     if result = asrMatch then
       Http.BearerToken := user; // see THttpServerRequestAbstract.Prepare
   except
-    on E: Exception do
+    on E: Exception do // e.g. ESynSspi/EGssApi on authentication error
     begin
       fLogClass.Add.Log(sllTrace, 'Authorization: % from %', [PClass(E)^, auth], self);
       result := asrRejected; // any processing error should silently fail the auth
@@ -4818,9 +4874,11 @@ begin // is called at most every second, but maybe up to 5 seconds delay
   if Assigned(fOnAcceptIdle) then
     fOnAcceptIdle(self, tix64); // e.g. TAcmeLetsEncryptServer.OnAcceptIdle
   if Assigned(fLogger) then
-    fLogger.OnIdle(tix64) // flush log file(s) on idle server
+    fLogger.OnIdle(tix64)      // flush log file(s) on idle server
   else if Assigned(fAnalyzer) then
-    fAnalyzer.OnIdle(tix64); // consolidate telemetry if needed
+    fAnalyzer.OnIdle(tix64);   // consolidate telemetry if needed
+  if Assigned(fOnIdle) then
+    fOnIdle(self, tix64);      // custom callback
   if Assigned(fBanned) and
      (fBanned.Count <> 0) then
   begin
@@ -5568,6 +5626,26 @@ procedure THttpServerResp.Execute;
     {$endif SYNCRTDEBUGLOW}
   end;
 
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      if fServer <> nil then
+        try
+          fServer.OnDisconnect;
+          if Assigned(fOnThreadTerminate) then
+            fOnThreadTerminate(self);
+        finally
+          fServer.fInternalHttpServerRespList.Remove(self);
+          fServer := nil;
+          fOnThreadTerminate := nil;
+        end;
+    finally
+      FreeAndNilSafe(fServerSock);
+      // if Destroy happens before fServerSock.GetRequest() in Execute below
+      fClientSock.ShutdownAndClose({rdwr=}false);
+    end;
+  end;
+
 var
   netsock: TNetSocket;
 begin
@@ -5596,22 +5674,7 @@ begin
           HandleRequestsProcess; // process further kept alive requests
       end;
     finally
-      try
-        if fServer <> nil then
-          try
-            fServer.OnDisconnect;
-            if Assigned(fOnThreadTerminate) then
-              fOnThreadTerminate(self);
-          finally
-            fServer.fInternalHttpServerRespList.Remove(self);
-            fServer := nil;
-            fOnThreadTerminate := nil;
-          end;
-      finally
-        FreeAndNilSafe(fServerSock);
-        // if Destroy happens before fServerSock.GetRequest() in Execute below
-        fClientSock.ShutdownAndClose({rdwr=}false);
-      end;
+      HandleCleanup;
     end;
   except
     on Exception do
@@ -6509,7 +6572,7 @@ begin
     fLog := TSynLog;
   fLog.EnterLocal(ilog, 'Create threads=% %', [aHttpServerThreadCount, aLogClass], self);
   fFilesSafe.Init;
-  // intialize the cryptographic state in inherited THttpPeerCrypt.Create
+  // initialize the cryptographic state in inherited THttpPeerCrypt.Create
   if (fSettings = nil) or
      (fSettings.Uuid = '') then // allow UUID customization
     GetComputerUuid(fUuid)
@@ -6767,7 +6830,7 @@ begin
   result := (Params.Hash <> '') and
             (Params.Hasher <> nil) and
             Params.Hasher.InheritsFrom(TStreamRedirectSynHasher) and
-       TStreamRedirectSynHasher(Params.Hasher).GetHashDigest(Params.Hash, Hash);
+       TStreamRedirectSynHasherClass(Params.Hasher).GetHashDigest(Params.Hash, Hash);
 end;
 
 function THttpPeerCache.CachedFileName(const aParams: THttpClientSocketWGet;
@@ -7156,6 +7219,35 @@ var
   local: TFileName;
   localsize, sourcesize, tot, start, stop: Int64;
   localok, istemp: boolean;
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      if ToRename <> '' then
+      begin
+        // optional rename *.partial to final WGet() file name
+        if RenameFile(Partial, ToRename) then
+        begin
+          Params.SetStep(wgsAlternateRename, [ToRename]);
+          if not localok then
+            // if we can't use the cached local file, switch to renamed file
+            // - it will work as long as it can (usually just fine)
+            if fPartials.DoneLocked(Partial, ToRename) then
+              PartialID := 0;
+        end
+        else
+          Params.SetStep(wgsAlternateFailedRename, [Partial, ' as ', ToRename]);
+      end;
+      if localok then
+        fPartials.DoneLocked(Partial, local)
+      else if (PartialID <> 0) and
+              (sourcesize <> 0) then
+          fPartials.DoneLocked(PartialID);
+    finally
+      fPartials.Safe.WriteUnLock;
+    end;
+  end;
+
 begin
   // avoid GPF at shutdown or in case of unexpected method call
   if (fSettings = nil) or
@@ -7231,30 +7323,7 @@ begin
       Partial, local, MicroSecToString(stop - start)], self);
   finally
     fPartials.Safe.WriteLock; // safely move file without background access
-    try
-      if ToRename <> '' then
-      begin
-        // optional rename *.partial to final WGet() file name
-        if RenameFile(Partial, ToRename) then
-        begin
-          Params.SetStep(wgsAlternateRename, [ToRename]);
-          if not localok then
-            // if we can't use the cached local file, switch to renamed file
-            // - it will work as long as it can (usually just fine)
-            if fPartials.DoneLocked(Partial, ToRename) then
-              PartialID := 0;
-        end
-        else
-          Params.SetStep(wgsAlternateFailedRename, [Partial, ' as ', ToRename]);
-      end;
-      if localok then
-        fPartials.DoneLocked(Partial, local)
-      else if (PartialID <> 0) and
-              (sourcesize <> 0) then
-          fPartials.DoneLocked(PartialID);
-    finally
-      fPartials.Safe.WriteUnLock;
-    end;
+    HandleCleanup;
     if (PartialID <> 0) and
        (sourcesize = 0) then
       OnDownloadingFailed(PartialID); // clearly something went wrong
@@ -7287,7 +7356,7 @@ begin
      TooSmallFile(Params, ExpectedFullSize, 'OnDownloading') then
     result := 0
   else
-    result := fPartials.Add(Partial, ExpectedFullSize, h, {http=}nil);
+    result := fPartials.Add(Partial, ExpectedFullSize, @h, {http=}nil);
 end;
 
 function THttpPeerCache.PartialFileName(const aMessage: THttpPeerCacheMessage;
@@ -7429,7 +7498,7 @@ function THttpPeerCache.DirectFileName(Ctxt: THttpServerRequestAbstract;
   const aMessage: THttpPeerCacheMessage; aHttp: PHttpRequestContext;
   out aFileName: TFileName; out aSize: Int64; const aParams: RawUtf8): integer;
 var
-  cs:  THttpClientSocketPeerCache;
+  cs: THttpClientSocketPeerCache;
   err, ip: RawUtf8;
   i: PtrInt;
   localsize: Int64;
@@ -7507,7 +7576,7 @@ begin
           TFileStreamEx.Create(aFileName, fmCreate or fmShareRead));
         // mimics THttpPeerCache.OnDownloading() for progressive mode
         cs.DestFileName := aFileName;
-        cs.PartialID := fPartials.Add(aFileName, aSize, aMessage.Hash, aHttp);
+        cs.PartialID := fPartials.Add(aFileName, aSize, @aMessage.Hash, aHttp);
       finally
         fFilesSafe.UnLock;
       end;
@@ -7617,12 +7686,6 @@ begin
   end;
 end;
 
-procedure AddReprDigest(Ctxt: THttpServerRequestAbstract; const Hash: THashDigest);
-begin // implement pcoHttpReprDigest option
-  Ctxt.SetOutCustomHeader(['Repr-Digest: ', HASH_TXT_LOWER[Hash.Algo],
-    '=:', BinToBase64Short(@Hash.Bin, HASH_SIZE[Hash.Algo]), ':']);
-end;
-
 function THttpPeerCache.DirectFileNameHead(Ctxt: THttpServerRequestAbstract;
   const aHash: THashDigest; const aParams: RawUtf8): cardinal;
 var
@@ -7634,7 +7697,7 @@ begin
       // direct HEAD to the remote server, with no redirection
       result := DirectConnectAndHead(self, Ctxt, {redir=}0, aParams, cs);
       if pcoHttpReprDigest in fSettings.Options then
-        AddReprDigest(Ctxt, aHash);
+        (Ctxt as THttpServerRequest).SetOutReprDigest(aHash);
     finally
       cs.Free;
     end;
@@ -7659,7 +7722,6 @@ function THttpPeerCache.OnRequest(Ctxt: THttpServerRequestAbstract): cardinal;
 var
   msg: THttpPeerCacheMessage;
   fn: TFileName;
-  http: PHttpRequestContext;
   progsize: Int64; // expected progressive file size, to be supplied as header
   err: TOnRequestError;
   errtxt, opt: RawUtf8;
@@ -7670,7 +7732,6 @@ begin
     exit;
   // retrieve context - already checked by OnBeforeBody
   err := oreOK;
-  http := (Ctxt as THttpServerRequest).fHttp;
   if Check(BearerDecode(Ctxt.AuthBearer, pcfRequest, msg, @opt), 'OnRequest', msg) then
   try
     // resource will always be identified by decoded bearer hash
@@ -7689,7 +7750,7 @@ begin
         else
         begin
           // remote HEAD + GET new partial file in a background thread
-          result := DirectFileName(Ctxt, msg, http, fn, progsize, opt);
+          result := DirectFileName(Ctxt, msg, Ctxt.ConnectionHttp, fn, progsize, opt);
           if result <> HTTP_SUCCESS then
           begin
             err := oreDirectRemoteUriFailed;
@@ -7700,7 +7761,7 @@ begin
       begin
         // try first from PartialFileName() then LocalFileName()
         if fPartials <> nil then // check partial first (local may not be finished)
-          result := PartialFileName(msg, http, @fn, @progsize);
+          result := PartialFileName(msg, Ctxt.ConnectionHttp, @fn, @progsize);
         if result <> HTTP_SUCCESS then
           result := LocalFileName(msg, [lfnSetDate], @fn, nil);
       end;
@@ -7728,7 +7789,7 @@ begin
       if progsize <> 0 then // append header for rfProgressiveStatic mode
         Ctxt.SetOutCustomHeader([STATICFILE_PROGSIZE + ' ', progsize]);
       if pcoHttpReprDigest in fSettings.Options then
-        AddReprDigest(Ctxt, msg.Hash);
+        THttpServerRequest(Ctxt).SetOutReprDigest(msg.Hash);
     end;
   finally
     if err <> oreOK then
@@ -7737,7 +7798,7 @@ begin
       Ctxt.OutContent := Join([StatusCodeToErrorMsg(result), ' - ', errtxt]);
     fLog.Add.Log(sllDebug, 'OnRequest=% % % % fn=% progsiz=% progid=% %',
       [result, Ctxt.Method, Ctxt.RemoteIP, Ctxt.Url, fn, progsize,
-       http^.ProgressiveID, errtxt], self);
+       Ctxt.ConnectionHttp^.ProgressiveID, errtxt], self);
   end;
 end;
 
@@ -7784,42 +7845,16 @@ begin
   AppendShortUuid(msg.Uuid, result);
 end;
 
-function HttpRequestLength(aHeaders: PUtf8Char; out Len: PtrInt): PUtf8Char;
-var
-  s: PtrInt;
-begin
-  result := FindNameValuePointer(aHeaders, 'CONTENT-RANGE: ', Len);
-  if result = nil then // no range
-    result := FindNameValuePointer(aHeaders, 'CONTENT-LENGTH: ', Len)
-  else
-  begin // content-range: bytes 100-199/3083 -> extract 3083
-    s := Len;
-    while true do
-      case result[s - 1] of
-        '/':
-          break;
-        '0' .. '9':
-          dec(s);
-      else
-        result := nil;
-        exit;
-      end;
-    inc(result, s);
-    dec(Len, s);
-  end;
-end;
-
 function HttpRequestHash(aAlgo: THashAlgo; const aUri: TUri;
   aHeaders: PUtf8Char; out aDigest: THashDigest): integer;
 var
   hasher: TSynHasher;
   h: PUtf8Char;
-  l: PtrInt;
+  hl: PtrInt; // not integer
 begin
   result := 0;
+  aDigest.Algo := aAlgo;
   if (aUri.Server = '') or
-     (aUri.Address = '') or
-     (aHeaders = nil) or
      not hasher.Init(aAlgo) then
     exit;
   hasher.Update(HTTPS_TEXT[aUri.Https]); // hash normalized URI
@@ -7828,26 +7863,41 @@ begin
   hasher.Update(@aAlgo, 1);
   hasher.Update(aUri.Port);
   hasher.Update(@aAlgo, 1);
-  hasher.Update(aUri.Address);
-  hasher.Update(@aAlgo, 1);
-  h := FindNameValuePointer(aHeaders, 'ETAG: ', l); // ETAG + URI are genuine
-  if h = nil then
+  hasher.Update(pointer(aUri.Address), UriTruncAnchorLen(aUri.Address));
+  if aHeaders <> nil then
   begin
-    // fallback to file date and full size
-    h := FindNameValuePointer(aHeaders, 'LAST-MODIFIED: ', l);
+    hasher.Update(@aAlgo, 1);
+    h := FindNameValuePointer(aHeaders, 'ETAG: ', hl); // ETAG + URI are genuine
     if h = nil then
-      exit;
-    hasher.Update(h, l);
-    h := HttpRequestLength(aHeaders, l);
-    if h = nil then
-      exit;
+    begin
+      // fallback to file date and full size
+      h := FindNameValuePointer(aHeaders, 'LAST-MODIFIED: ', hl);
+      if h = nil then
+        exit;
+      hasher.Update(h, hl);
+      h := HttpRequestLength(aHeaders, @hl);
+      if h = nil then
+        exit;
+    end;
+    hasher.Update(h, hl);
   end;
-  hasher.Update(h, l);
   result := hasher.Final(aDigest.Bin);
-  aDigest.Algo := aAlgo;
 end;
 
-
+function HttpRequestHashBase32(const aUri: TUri; aHeaders: PUtf8Char;
+  aDiglen: integer; aDig: PHashDigest): RawUtf8;
+var
+  dig: THashDigest;
+begin
+  result := '';
+  if (aDigLen = 0) or // e.g. default aDigLen=20 bytes=160-bit as 32 chars
+     (aDigLen mod 5 <> 0) or
+     (HttpRequestHash(hfSHA256, aUri, aHeaders, dig) < aDiglen) then
+    exit;
+  result := BinToBase32(@dig.Bin, aDiglen, {lower=}true);
+  if aDig <> nil then
+    MoveFast(dig, aDig^, SizeOf(TSha256Digest) + 1);
+end;
 
 {$ifdef USEWININET}
 

@@ -77,6 +77,9 @@ const
 type
   TSqlDBOleDBConnection = class;
 
+  /// meta-class of all OleDB connection properties classes
+  TSqlDBOleDBConnectionPropertiesClass = class of TSqlDBOleDBConnectionProperties;
+
   TSqlDBOleDBOnCustomError = function(Connection: TSqlDBOleDBConnection;
     ErrorRecords: IErrorRecords; RecordNum: cardinal): boolean of object;
 
@@ -208,7 +211,7 @@ type
   {$endif CPU64}
   TSqlDBOleDBStatementParam = record
     /// storage used for BLOB (ftBlob) values
-    // - will be refered as DBTYPE_BYREF when sent as OleDB parameters, to
+    // - will be referred as DBTYPE_BYREF when sent as OleDB parameters, to
     // avoid unnecessary memory copy
     VBlob: RawByteString;
     /// storage used for TEXT (ftUtf8) values
@@ -539,7 +542,6 @@ type
     // - will handle Microsoft SQL Server error messages (if any)
     function MSOnCustomError(Connection: TSqlDBOleDBConnection;
       ErrorRecords: IErrorRecords; RecordNum: cardinal): boolean;
-  public
   end;
 
   /// OleDB connection properties to Microsoft SQL Server 2005, via
@@ -1034,11 +1036,11 @@ begin
       ftCurrency:
         result := Curr64ToString(V^.Int64);
       ftDate:
-        result := Ansi7ToString(DateTimeToIso8601Text(V^.Double));
+        Ansi7ToString(DateTimeToIso8601Text(V^.Double), result);
       ftUtf8:
         result := RawUnicodeToString(ColPtr(C, V), V^.Length shr 1);
       ftBlob:
-        result := Ansi7ToString(BinToBase64WithMagic(ColPtr(C, V), V^.Length));
+        Ansi7ToString(BinToBase64WithMagic(ColPtr(C, V), V^.Length), result);
     end;
 end;
 
@@ -1177,7 +1179,7 @@ begin
       ftCurrency:
         Value := PCurrency(@VInt64)^;
       ftDate:
-        Value := PDateTime(@VInt64)^;
+        Value := unaligned(PDateTime(@VInt64)^);
       ftUtf8:
         Value := VText; // returned as WideString/OleStr variant
       ftBlob:

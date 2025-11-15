@@ -31,60 +31,47 @@ implementation
 
 procedure Main;
 var
-  F: TSearchRec;
-  fn: TFileName;
+  cmd: TExecutableCommandLine;
+  logger: TSynLogFamily;
   console, verbose: boolean;
   settingsfolder, folder: TFileName;
-  url: RawUtf8;
+  url, proxy: RawUtf8;
   settings: THttpProxyServerSettings;
-  one: THttpProxyUrl;
   server: THttpProxyServer;
 begin
   settings := THttpProxyServerSettings.Create;
   try
     // command line switches
-    with Executable.Command do
+    cmd := Executable.Command;
+    console := cmd.Option('&console',    'debug output to the console');
+    verbose := cmd.Option('log&verbose', 'enable verbose log');
+    silent  := cmd.Option('silent', 'no output to the console');
+    settingsfolder := cmd.ParamS('&settings', '#folder where *.json are located',
+      Executable.ProgramFilePath + 'sites-enabled');
+    folder := cmd.ParamS('&folder', 'a local #foldername to serve');
+    proxy := cmd.Param('pro&xy', 'a remote #uri to cache');
+    url := cmd.Param('&url', 'the root #uri to serve this folder/proxy');
+    SetObjectFromExecutableCommandLine(settings.Server, '', ' for HTTP/HTTPS');
+    SetObjectFromExecutableCommandLine(settings.Server.Log, 'Log', ' for EnableLogging');
+    {$ifdef USE_OPENSSL}
+    OpenSslDefaultPath := cmd.ParamS('LibSsl', 'OpenSSL libraries #path');
+    if OpenSslInitialize then
+      RegisterOpenSsl;
+    {$endif USE_OPENSSL}
+    if cmd.ConsoleHelpFailed(
+      'mORMot 2.' + SYNOPSE_FRAMEWORK_BRANCH + ' HTTP/HTTPS File Server') then
     begin
-      console := Option('&console',    'debug output to the console');
-      verbose := Option('log&verbose', 'enable verbose log');
-      silent  := Option('silent', 'no output to the console');
-      settingsfolder := ParamS('&settings', '#folder where *.json are located',
-        Executable.ProgramFilePath + 'sites-enabled');
-      folder := ParamS('&folder', 'a local #foldername to serve');
-      url := Param('&url', 'a root #uri to serve this folder');
-      SetObjectFromExecutableCommandLine(settings.Server, '', ' for HTTP/HTTPS');
-      SetObjectFromExecutableCommandLine(settings.Server.Log, 'Log', ' for EnableLogging');
-      {$ifdef USE_OPENSSL}
-      OpenSslDefaultPath := ParamS('LibSsl', 'OpenSSL libraries #path');
-      if OpenSslInitialize then
-        RegisterOpenSsl;
-      {$endif USE_OPENSSL}
-      if ConsoleHelpFailed('mORMot HTTP/HTTPS File Server') then
-      begin
-        ExitCode := 1;
-        exit;
-      end;
+      ExitCode := 1;
+      exit;
     end;
     // load local *.json files with URI
-    if (settingsfolder <> '') and
-       (FindFirst(MakePath([settingsfolder, '*.json']), faAnyFile - faDirectory, F) = 0) then
-    begin
-      repeat
-        if SearchRecValidFile(F) then
-        begin
-          fn := Executable.ProgramFilePath + F.Name;
-          one := THttpProxyUrl.Create;
-          if JsonFileToObject(fn, one, nil, JSONPARSER_TOLERANTOPTIONS) then
-            settings.AddUrl(one)
-          else
-            one.Free;
-        end;
-      until FindNext(F) <> 0;
-      FindClose(F);
-    end;
+    if settingsfolder <> '' then
+      settings.AddFromFiles(settingsfolder);
     // ensure we have something to serve (maybe from command line)
     if folder <> '' then
       settings.AddFolder(folder, url);
+    if proxy <> '' then
+      settings.AddProxy(proxy, url);
     if settings.Url = nil then
     begin
       ConsoleWrite('No folder to serve'#10, ccLightRed);
@@ -95,22 +82,22 @@ begin
     // setup the TSynLog context
     if console or
        verbose then
-      with TSynLog.Family do
+    begin
+      logger := TSynLog.Family;
+      if verbose then
       begin
-        if verbose then
-        begin
-          Level := LOG_VERBOSE;
-          settings.Server.Options := settings.Server.Options + [psoLogVerbose];
-        end
-        else
-          Level := [sllWarning] + LOG_FILTER[lfErrors];
-        if console and
-           not silent then
-          EchoToConsole := Level;
-        PerThreadLog := ptIdentifiedInOneFile;
-        HighResolutionTimestamp := true;
-        AutoFlushTimeOut := 1;
-      end;
+        logger.Level := LOG_VERBOSE;
+        settings.Server.Options := settings.Server.Options + [psoLogVerbose];
+      end
+      else
+        logger.Level := [sllWarning] + LOG_FILTER[lfErrors];
+      if console and
+         not silent then
+        logger.EchoToConsole := logger.Level;
+      logger.PerThreadLog := ptIdentifiedInOneFile;
+      logger.HighResolutionTimestamp := true;
+      logger.AutoFlushTimeOut := 1;
+    end;
     // run the server
     server := THttpProxyServer.Create(settings);
     try

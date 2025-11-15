@@ -2031,7 +2031,7 @@ begin
     if do_syscall(syscall_nr_getrandom, TSysParam(buf), len, 0) = len then
     begin
       if len >= SizeOf(SystemEntropy.LiveFeed) then
-        crcblock(@SystemEntropy.LiveFeed, buf); // shuffle live state
+        crcblock(@SystemEntropy.LiveFeed, buf); // quickly shuffle live state
       result := true; // "man getrandom" states to read up to 256 bytes per call
     end
     else
@@ -3437,7 +3437,7 @@ begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt); // should have changed in-between
   DefaultHasher128(@e.h3, @rt, SizeOf(rt));
   {$ifdef HASGETRANDOM}
-  // eventually XOR with getrandom syscall if available
+  // eventually XOR with 512-bit getrandom syscall if available
   if LinuxGetRandom(@tmp, SizeOf(e)) then
     XorMemory(@e, @tmp, SizeOf(e))
   else
@@ -3631,8 +3631,12 @@ procedure __Fill256FromOs(out e: THash256Rec);
 var
   si: TSysInfo;  // Linuxism, but properly emulated by thit unit on Mac/BSD
 begin
-  // - no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
-  // - is called once at startup from mormot.core.data
+  {$ifdef HASGETRANDOM}
+  // try to get whole 256-bit from OS crypto-PRNG in 1 syscall
+  if LinuxGetRandom(@e, SizeOf(e)) then
+    exit;
+  {$endif HASGETRANDOM}
+  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
   {$ifdef OSDARWIN} // OSX has no clock_gettime() API
   e.d0 := mach_absolute_time   * 2654435761;
   e.d1 := mach_continuous_time * 3266489917;
@@ -3640,11 +3644,7 @@ begin
   if SizeOf(timespec) <= SizeOf(e) then // paranoid (max 128-bit) -> no-op
     clock_gettime(CLOCK_MONOTONIC_FAST, @e); // fast VDSO call
   {$endif OSDARWIN}
-  crcblock(@e.l, @SystemEntropy.Startup); // 128-bit entropy over nanoseconds
-  {$ifdef OSLINUX}
-  if LinuxGetRandom(@e.h, SizeOf(e.h)) then // 128-bit crypto-PRNG in 1 syscall
-    exit;
-  {$endif OSLINUX}
+  crcblock(@e.l, @SystemEntropy.LiveFeed); // obfuscate
   RetrieveSysInfo(si); // at least uptime + cpu load + free mem on all OS
   DefaultHasher128(@e.h, @si, SizeOf(si)); // maybe AesNiHash128
   {$ifndef CPUINTEL}
@@ -3652,7 +3652,7 @@ begin
     crcblocks(@SystemEntropy.LiveFeed, @e, 2) // put something here
   else
   {$endif CPUINTEL}
-    crcblock(@e.h, @SystemEntropy.LiveFeed);  // obfuscate
+    crcblock(@e.h, @SystemEntropy.Startup);  // obfuscate
 end;
 
 const
@@ -3674,10 +3674,10 @@ begin
     exit;
   // retrieve up to MAXFROMOS=256 bytes max
   rd := MinPtrInt(Len, MAXFROMOS);
-  {$ifdef OSLINUX} // a single syscall to rule them all on Linux
+  {$ifdef HASGETRANDOM} // a single syscall to rule them all on Linux
   result := LinuxGetRandom(Buffer, rd);
   if not result then
-  {$endif OSLINUX}
+  {$endif HASGETRANDOM}
   begin
     dev := 0;
     if not (fNoURandom in _F0) then
@@ -5185,7 +5185,7 @@ begin
   else
     CpuInfoText := _fmt('%d x %s %s (' + CPU_ARCH_TEXT + ')',
       [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
-  // intialize supported APIs
+  // initialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
   _Fill256FromOs    := @__Fill256FromOs;
   {$ifdef OSLINUX}

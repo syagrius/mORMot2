@@ -736,7 +736,7 @@ type
     function GetCurrentThreadFlag(ti: TSynLogThreadInfoFlag): boolean;
     procedure SetCurrentThreadFlag(ti: TSynLogThreadInfoFlag; value: boolean);
   public
-    /// intialize for a TSynLog class family
+    /// initialize for a TSynLog class family
     // - add it in the global SynLogFileFamily[] list
     constructor Create(aSynLog: TSynLogClass);
     /// close any console echo, and release associated memory
@@ -1153,7 +1153,7 @@ type
     function ConsoleEcho(Sender: TEchoWriter; Level: TSynLogLevel;
       const Text: RawUtf8): boolean; virtual;
   public
-    /// intialize for a TSynLog class instance
+    /// initialize for a TSynLog class instance
     // - WARNING: not to be called directly! Use TSynLog.Enter or TSynLog.Add
     // class functions instead
     constructor Create(aFamily: TSynLogFamily = nil); virtual;
@@ -2357,8 +2357,8 @@ const
   DW_LNE_SET_ADDRESS = 2;
   DW_LNE_DEFINE_FILE = 3;
 
-  DW_TAG_class_type = 2;      // map object pascal class or object
-  DW_TAG_structure_type = 19; // map object pascal record
+  DW_TAG_class_type = 2;      // map Object Pascal class or object
+  DW_TAG_structure_type = 19; // map Object Pascal record
   DW_TAG_subprogram = 46;     // map object function or method
 
   DW_AT_name = $3;
@@ -4023,7 +4023,7 @@ begin
         end;
     end;
   until Terminated;
-  // Terminated is set: eventually display delayed console ouput
+  // Terminated is set: eventually display delayed console output
   try
     FlushConsole;
   except
@@ -5505,14 +5505,14 @@ begin
     if pendingDisableRemoteLogLeave in fPendingFlags then
     begin
       GlobalThreadLock.UnLock;
-      ESynLogException.RaiseUtf8('Nested %.DisableRotemoteLog', [self]);
+      ESynLogException.RaiseUtf8('Nested %.DisableRemoteLog', [self]);
     end;
     include(fPendingFlags, pendingDisableRemoteLogLeave);
   end
   else
   begin
     if not (pendingDisableRemoteLogLeave in fPendingFlags) then
-      ESynLogException.RaiseUtf8('Missing %.DisableRotemoteLog(true)', [self]);
+      ESynLogException.RaiseUtf8('Missing %.DisableRemoteLog(true)', [self]);
     // DisableRemoteLog(false) -> add to events, and quit the global mutex
     exclude(fPendingFlags, pendingDisableRemoteLogLeave);
     fWriterEcho.EchoAdd(fFamily.fEchoRemoteEvent);
@@ -5857,7 +5857,7 @@ var
 begin
   fWriter.AddDirect(' ', '"');
   GetErrorShortVar(Error, msg);
-  fWriter.AddOnSameLine(@msg[0], ord(msg[0]));
+  fWriter.AddOnSameLine(@msg[1], ord(msg[0]));
   fWriter.AddDirect('"', ' ', '(');
   fWriter.AddU(Error);
   fWriter.AddDirect(')', ' ');
@@ -6936,36 +6936,33 @@ end;
 
 function TSynLogFile.EventDateTime(aIndex: integer): TDateTime;
 var
-  Timestamp: Int64;
+  hires: Int64;
   P: PUtf8Char;
-  Y, M, D, HH, MM, SS, MS: cardinal;
+  Y, M, D, HH, MM, SS, MS4: cardinal;
   hex2bin: PByteArray;
 begin
+  result := 0;
   if cardinal(aIndex) >= cardinal(fCount) then
-    result := 0
-  else if fFreq = 0 then
+    exit;
+  P := fLines[aIndex];
+  if fFreq = 0 then
   begin
-    P := fLines[aIndex];
     hex2bin := @ConvertHexToBin;
-    if Char4ToWord(P, Y, hex2bin) or
-       Char2ToByte(P + 4, M, hex2bin) or
-       Char2ToByte(P + 6, D, hex2bin) or
-       Char2ToByte(P + 9, HH, hex2bin) or
-       Char2ToByte(P + 11, MM, hex2bin) or
-       Char2ToByte(P + 13, SS, hex2bin) or
-       Char2ToByte(P + 15, MS, hex2bin) then
+    if Char4ToWord(P,      Y,   hex2bin) or
+       Char2ToByte(P + 4,  M,   hex2bin) or
+       Char2ToByte(P + 6,  D,   hex2bin) or
+       Char2ToByte(P + 9,  HH,  hex2bin) or
+       Char2ToByte(P + 11, MM,  hex2bin) or
+       Char2ToByte(P + 13, SS,  hex2bin) or
+       Char2ToByte(P + 15, MS4, hex2bin) then
       // not exact YYYYMMDD hhmmsszz layout -> try plain ISO-8601
       Iso8601ToDateTimePUtf8CharVar(P, 17, result)
-    else if TryEncodeDate(Y, M, D, result) then
-      // MS shl 4 = 16 ms resolution in TTextWriter.AddCurrentLogTime()
-      result := result + EncodeTime(HH, MM, SS, MS shl 4)
     else
-      result := 0;
+      // MS4 shl 4 = 16 ms resolution in TTextWriter.AddCurrentLogTime()
+      result := EncodeDateTime(Y, M, D, HH, MM, SS, MS4 shl 4);
   end
-  else if HexDisplayToBin(fLines[aIndex], @Timestamp, SizeOf(Timestamp)) then
-    result := fStartDateTime + (Timestamp / fFreqPerDay)
-  else
-    result := 0;
+  else if HexDisplayToBin(PAnsiChar(P), @hires, SizeOf(hires)) then
+    result := fStartDateTime + (hires / fFreqPerDay);
 end;
 
 procedure TSynLogFile.CleanLevels;

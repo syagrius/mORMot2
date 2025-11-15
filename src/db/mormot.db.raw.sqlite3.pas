@@ -3202,7 +3202,7 @@ type
     // - content is pointed to by the Value and which is Value_bytes bytes long
     // - set DestroyPtr as SQLITE_STATIC (nil) for static binding
     // - set DestroyPtr to SQLITE_TRANSIENT (-1) for SQLite to make its own private
-    // copy of the data (this is the prefered way in our Framework)
+    // copy of the data (this is the preferred way in our Framework)
     // - set DestroyPtr to @sqlite3InternalFree if Value must be released via FreeMem()
     // or to @sqlite3InternalFreeObject if Value must be released via a Free method
     result_blob: procedure(Context: TSqlite3FunctionContext;
@@ -3222,7 +3222,7 @@ type
     // Value parameter are taken as the application-defined function result
     // - set DestroyPtr as SQLITE_STATIC (nil) for static binding
     // - set DestroyPtr to SQLITE_TRANSIENT (-1) for SQLite to make its own private
-    // copy of the data (this is the prefered way in our Framework)
+    // copy of the data (this is the preferred way in our Framework)
     // - set DestroyPtr to @sqlite3InternalFree if Value must be released via FreeMem()
     // or to @sqlite3InternalFreeObject if Value must be released via a Free method
     result_text: procedure(Context: TSqlite3FunctionContext;
@@ -3304,7 +3304,7 @@ type
     // in the input string, excluding the null terminator
     // - set DestroyPtr as SQLITE_STATIC (nil) for static binding
     // - set DestroyPtr to SQLITE_TRANSIENT (-1) for SQLite to make its own private
-    // copy of the data (this is the prefered way in our Framework)
+    // copy of the data (this is the preferred way in our Framework)
     // - set DestroyPtr to @sqlite3InternalFree if Value must be released via FreeMem()
     // - note that the official SQLite3 documentation could lead into misunderstanding:
     // Text_bytes must EXCLUDE the null terminator, otherwise a #0 is appended to
@@ -3321,7 +3321,7 @@ type
     // - Buf_bytes contains the number of bytes in Buf
     // - set DestroyPtr as SQLITE_STATIC (nil) for static binding
     // - set DestroyPtr to SQLITE_TRANSIENT (-1) for SQLite to make its own private
-    // copy of the data (this is the prefered way in our Framework)
+    // copy of the data (this is the preferred way in our Framework)
     // - set DestroyPtr to @sqlite3InternalFree if Value must be released via FreeMem()
     bind_blob: function(S: TSqlite3Statement;
       Param: integer; Buf: pointer; Buf_bytes: integer;
@@ -4489,7 +4489,7 @@ type
     // - Close is always called internally
     // - returns TRUE on success, and raise no ESqlite3Exception on error, but returns FALSE
     function ExecuteNoException(aDB: TSqlite3DB; const aSql: RawUtf8): boolean;
-    /// Execute a SQL statement which return integers from the aSql UTF-8 encoded string
+    /// Execute a SQL statement to return integers from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get (at least) one field/column result of INTEGER
     // - return result as a dynamic array of Int64 in aValues[]
@@ -4498,7 +4498,7 @@ type
     // - raise an ESqlite3Exception on any error
     function Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
       var aValues: TInt64DynArray): integer; overload;
-    /// Execute a SQL statement which return one integer from the aSql UTF-8 encoded string
+    /// Execute a SQL statement to return one integer from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get (at least) one field/column result of INTEGER
     // - return result as an unique Int64 in aValue
@@ -4506,14 +4506,14 @@ type
     // - raise an ESqlite3Exception on any error
     procedure Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
       out aValue: Int64); overload;
-    /// Execute a SQL statement which return one TEXT value from the aSql UTF-8 encoded string
+    /// Execute a SQL statement to return one TEXT value from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get (at least) one field/column result of TEXT
     // - Close is always called internally
     // - raise an ESqlite3Exception on any error
     procedure Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
       out aValue: RawUtf8); overload;
-    /// Execute a SQL statement which return TEXT from the aSql UTF-8 encoded string
+    /// Execute a SQL statement to return TEXT from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get (at least) one field/column result of TEXT
     // - return result as a dynamic array of RawUtf8 in aValues[]
@@ -4522,7 +4522,7 @@ type
     // - raise an ESqlite3Exception on any error
     function Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
       var aValues: TRawUtf8DynArray): integer; overload;
-    /// Execute one SQL statement which return the results in JSON format
+    /// Execute one SQL statement to fill a TStream in JSON format
     // - JSON format is more compact than XML and well supported
     // - Execute the first statement in aSql
     // - if SQL is '', the statement should have been prepared, reset and bound
@@ -4541,10 +4541,10 @@ type
     // TOrmTableDB) - so will work for sftBlob, sftBlobDynArray and sftBlobRecord
     // - by default, won't write more than 512MB of JSON, to avoid OutOfMemory
     // - returns the number of data rows added to JSON (excluding the headers)
-    function Execute(aDB: TSqlite3DB; const aSql: RawUtf8; Json: TStream;
+    function ExecuteStream(aDB: TSqlite3DB; const aSql: RawUtf8; Json: TStream;
       Expand: boolean = false; MaxMemory: PtrInt = 512 shl 20;
-      Options: TTextWriterOptions = []): PtrInt; overload;
-    /// Execute one SQL statement which return the results in JSON format
+      Options: TTextWriterOptions = []): PtrInt;
+    /// Execute one SQL statement to return the results in JSON format
     // - use internally Execute() above with a TRawByteStringStream, and return
     // UTF-8 encoded JSON according to Expand format
     // - if aSql is '', the statement should have been prepared, reset and bound
@@ -4559,7 +4559,7 @@ type
     /// Execute one SQL statement step into a JSON object
     // - has less overhead than ExecuteJson() for a single row of data
     function ExecuteStepJson(aDB: TSqlite3DB; W: TJsonWriter): boolean;
-    /// Execute one SQL statement which return the results as a TDocVariant array
+    /// Execute one SQL statement to return the results as a TDocVariant array
     // - if aSql is '', the statement should have been prepared, reset and bound
     // if necessary - if aSql <> '' then the statement would be closed internally
     // - if any error occurs, ESqlite3Exception is catched and a null variant
@@ -4634,7 +4634,7 @@ type
       BindStatic: boolean = false);
     /// bind a RTL string to a parameter
     // - with versions prior to Delphi 2009, you may loose some content here:
-    // Bind(Param: integer; Value: RawUtf8) is the prefered method
+    // Bind(Param: integer; Value: RawUtf8) is the preferred method
     // - the leftmost SQL parameter has an index of 1, but ?NNN may override it
     // - raise an ESqlite3Exception on any error
     procedure BindS(Param: integer; const Value: string);
@@ -4785,7 +4785,7 @@ type
     /// the associated SQLite3 database instance
     // - any direct access to this cache list should be protected via DB.Lock
     DB: TSqlite3DB;
-    /// intialize the cache
+    /// initialize the cache
     procedure Init(aDB: TSqlite3DB);
     /// add or retrieve a generic SQL (with ? parameters) statement from cache
     function Prepare(const GenericSql: RawUtf8; WasPrepared: PBoolean = nil;
@@ -5044,7 +5044,7 @@ type
     // - can be prepared with TransactionBegin()
     // - raise an ESqlite3Exception on any error
     procedure Execute(const aSql: RawUtf8); overload;
-    /// Execute one SQL statement which return integers from the aSql UTF-8 encoded string
+    /// Execute one SQL statement to return integers from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get a one field/column result of INTEGER
     // - return result as a dynamic array of Int64 in aValues[]
@@ -5060,13 +5060,13 @@ type
     // - raise an ESqlite3Exception on any error
     function Execute(const aSql: RawUtf8;
       var aValues: TRawUtf8DynArray): integer; overload;
-    /// Execute one SQL statement which returns one integer from the aSql UTF-8 encoded string
+    /// Execute one SQL statement to return one integer from the aSql UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get a one field/column result of INTEGER in aValue
     // - raise an ESqlite3Exception on any error
     procedure Execute(const aSql: RawUtf8;
       out aValue: Int64; NoLog: boolean = false); overload;
-    /// Execute one SQL statement which returns one UTF-8 encoded string value
+    /// Execute one SQL statement to return one UTF-8 encoded string value
     // - Execute the first statement in aSql
     // - this statement must get a one field/column result of TEXT in aValue
     // - raise an ESqlite3Exception on any error
@@ -5076,12 +5076,12 @@ type
     // - can be prepared with TransactionBegin()
     // - raise no Exception on error, but returns FALSE in such case
     function ExecuteNoException(const aSql: RawUtf8): boolean;
-    /// Seamless execution of a SQL statement which returns one integer
+    /// Seamless execution of a SQL statement to return one integer
     // - Execute the first statement in aSql
     // - this statement must get a one field/column result of INTEGER
     // - returns 0 on any error
     function ExecuteNoExceptionInt64(const aSql: RawUtf8): Int64;
-    /// Seamless execution of a SQL statement which returns one UTF-8 encoded string
+    /// Seamless execution of a SQL statement to return one UTF-8 encoded string
     // - Execute the first statement in aSql
     // - this statement must get a one field/column result of TEXT
     // - returns '' on any error
@@ -5572,7 +5572,7 @@ const
   // - could appear with (TAlgoCompress.AlgoID-1) increment for other algorithms
   SQLITE3_MAGIC = $ABA5A5AB;
 
-  /// the "magic" 16 bytes header stored at the begining of every SQLite3 file
+  /// the "magic" 16 bytes header stored at the beginning of every SQLite3 file
   SQLITE_FILE_HEADER: array[0 .. 15] of AnsiChar = 'SQLite format 3';
 
 var
@@ -8196,7 +8196,7 @@ begin
   end;
 end;
 
-function TSqlRequest.Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
+function TSqlRequest.ExecuteStream(aDB: TSqlite3DB; const aSql: RawUtf8;
   Json: TStream; Expand: boolean; MaxMemory: PtrInt;
   Options: TTextWriterOptions): PtrInt;
 // expand=true: [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
@@ -8250,12 +8250,9 @@ begin
     end;
     W.EndJsonObject(0, result);
   finally
-    try
-      if aSql <> '' then
-        Close; // always release statement (if not prepared and closed by caller)
-    finally
-      W.Free;
-    end;
+    if aSql <> '' then
+      Close; // always release statement (if not prepared and closed by caller)
+    W.Free;  // note: Close above won't raise any exception
   end;
 end;
 
@@ -8305,7 +8302,7 @@ begin
   try
     try
       // create JSON data in Stream
-      RowCount := Execute(aDB, aSql, Stream, Expand, MaxMemory, Options);
+      RowCount := ExecuteStream(aDB, aSql, Stream, Expand, MaxMemory, Options);
       if aResultCount <> nil then
         aResultCount^ := RowCount;
       result := Stream.DataString;
@@ -8890,7 +8887,7 @@ function TSqlDataBaseSQLFunction.CreateFunction(DB: TSqlite3DB): integer;
 begin
   if self <> nil then
     result := sqlite3.create_function(DB, pointer(fSqlName),
-      FunctionParametersCount, SQLITE_UTF8, self, fInternalFunction, nil, nil)
+      fFunctionParametersCount, SQLITE_UTF8, self, fInternalFunction, nil, nil)
   else
     result := SQLITE_ERROR;
 end;

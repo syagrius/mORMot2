@@ -1351,6 +1351,8 @@ type
     // - the deleted element is finalized if necessary
     // - this method will recognize T*ObjArray types and free all instances
     function Delete(aIndex: PtrInt): boolean;
+    /// move one item from one position to another in the dynamic array
+    function Move(OldIndex, NewIndex: PtrInt): boolean;
     /// search for an element inside the dynamic array using RTTI
     // - return the index found (0..Count-1), or -1 if Item was not found
     // - will search for all properties content of Item: TList.IndexOf()
@@ -1628,8 +1630,8 @@ type
     // TStringDynArray, TWideStringDynArray, TSynUnicodeDynArray,
     // TTimeLogDynArray and TDateTimeDynArray as JSON array - or any customized
     // Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer format
-    // - or any other kind of array as Base64 encoded binary stream precessed
-    // via JSON_BASE64_MAGIC_C (UTF-8 encoded \uFFF0 special code)
+    // - or any other kind of array as Base64 encoded binary stream prefixed
+    // by JSON_BASE64_MAGIC_C (UTF-8 encoded \uFFF0 special code)
     // - typical handled content could be
     // ! '[1,2,3,4]' or '["\uFFF0base64encodedbinary"]'
     // - return a pointer at the end of the data read from P, nil in case
@@ -7321,8 +7323,7 @@ end;
 
 procedure TDynArray.Insert(Index: PtrInt; const Item);
 var
-  n: PtrInt;
-  s: PtrUInt;
+  n, s: PtrUInt;
   P: PAnsiChar;
 begin
   if fValue = nil then
@@ -7330,17 +7331,18 @@ begin
   n := GetCount;
   SetCount(n + 1);
   s := fInfo.Cache.ItemSize;
-  if PtrUInt(Index) < PtrUInt(n) then
+  P := PAnsiChar(fValue^);
+  if PtrUInt(Index) < n then
   begin
     // reserve space for the new item
-    P := PAnsiChar(fValue^) + PtrUInt(Index) * s;
-    MoveFast(P[0], P[s], PtrUInt(n - Index) * s);
+    inc(P, PtrUInt(Index) * s);
+    MoveFast(P[0], P[s], (n - PtrUInt(Index)) * s);
     if rcfArrayItemManaged in fInfo.Flags then // avoid GPF in ItemCopy() below
       FillCharFast(P^, s, 0);
   end
   else
-    // Index>=Count -> add at the end
-    P := PAnsiChar(fValue^) + PtrUInt(n) * s;
+    // Index>=Count (or Index<0) -> add at the end
+    inc(P, n * s);
   ItemCopy(@Item, P);
 end;
 
@@ -7391,6 +7393,25 @@ begin
   wassorted := fSorted;
   SetCount(n); // won't reallocate
   fSorted := wassorted; // deletion won't change the order
+  result := true;
+end;
+
+function TDynArray.Move(OldIndex, NewIndex: PtrInt): boolean;
+var
+  siz: PtrUInt;
+  temp: TBuffer1K; // local copy of the moved item
+begin
+  result := OldIndex = NewIndex;
+  siz := fInfo.Cache.ItemSize;
+  if result or
+     (fValue = nil) or
+     (siz > SizeOf(temp)) then // too big an item (paranoid)
+    exit;
+  MoveFast(PAnsiChar(fValue^)[PtrUInt(OldIndex) * siz], temp, siz);
+  if not Delete(OldIndex) then
+    exit; // out of range OldIndex - Insert(NewIndex<0) would append at the end
+  Insert(NewIndex, temp); // move in two steps: not the fastest, but working
+  fSorted := false; // we did change the order
   result := true;
 end;
 

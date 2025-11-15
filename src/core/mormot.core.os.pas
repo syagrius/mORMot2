@@ -342,6 +342,13 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
 function IsLocalHost(Host: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// returns length(Address) if there is no ?parameter nor #anchor in the URI
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+
+/// returns length(Address) if there is no ?#anchor in the URI
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+
 
 { ****************** Gather Operating System Information }
 
@@ -702,7 +709,7 @@ var
   // 'Windows 10 64bit 22H2 (10.0.19045.4046)' or 'macOS 13 Ventura (Darwin 22.3.0)' or
   // 'Ubuntu 16.04.5 LTS - Linux 3.13.0 110 generic#157 Ubuntu SMP Mon Feb 20 11:55:25 UTC 2017'
   OSVersionText: RawUtf8;
-  /// some addition system information as text, e.g. 'Wine 1.1.5'
+  /// some addition system information as text, e.g. 'Wine 1.1.5' or 'Prism'
   // - also always appended to OSVersionText high-level description
   // - use if PosEx('Wine', OSVersionInfoEx) > 0 then to check for Wine presence
   OSVersionInfoEx: RawUtf8;
@@ -836,7 +843,7 @@ procedure OsErrorShort(Code: cardinal; Dest: PShortString; NoInt: boolean = fals
 /// return the error code number, and its regular constant on the current OS
 // - redirect to WinErrorShort/LinuxErrorShort/BsdErrorShort() functions
 // - e.g. OsErrorShort(5) = '5 ERROR_ACCESS_DENIED' on Windows or '5 EIO' on POSIX
-function OsErrorShort(Code: cardinal; NoInt: boolean = false): TShort47; overload;
+function OsErrorShort(Code: cardinal = 0; NoInt: boolean = false): TShort47; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// append the error code number, and its regular constant on the current OS
@@ -2889,17 +2896,17 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean; overload;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest, Source: TFileName): boolean; overload;
 
 /// copy the date of one file from a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
 
 /// set the file date/time from a supplied UTC TUnixTime value
@@ -6033,6 +6040,34 @@ begin
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
 end;
 
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('?')); // exclude ?arguments
+  if result < 0 then
+    result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
 function {%H-}_RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
 begin
   raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
@@ -6512,6 +6547,8 @@ end;
 
 function OsErrorShort(Code: cardinal; NoInt: boolean): TShort47;
 begin
+  if Code = 0 then
+    Code := GetLastError;
   OsErrorShort(Code, @result, NoInt); // redirect to Win/Linux/BsdErrorShort()
 end;
 
@@ -8281,7 +8318,7 @@ begin
     GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
     pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
     inc(PAnsiChar(result), pad);            // Delphi Win32 only needs padding
-    PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
+    PAnsiChar(result)[-1] := AnsiChar(pad); // store the padding in p[-1]
   end;
   if FillWith <> nil then
     MoveFast(FillWith^, result^, Size);
@@ -8297,7 +8334,7 @@ begin
     _FreeLargeMem(p, Size);                 // munmap or VirtualFree
     exit;
   end;
-  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
+  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust p[-1]=1..16 padding bytes
   FreeMem(p);
 end;
 
@@ -8596,9 +8633,6 @@ var
   function LoadOne(lib: TFileName; current: PtrInt): boolean;
   var
     j: PtrInt;
-    {$ifdef OSWINDOWS}
-    cwd: TFileName;
-    {$endif OSWINDOWS}
   begin
     // check library name
     result := false;
@@ -8631,16 +8665,18 @@ var
     try
       if nwd <> '' then
       begin
-        GlobalLock; // SetCurrentDir() is for the whole process not the thread
-        cwd := GetCurrentDir;
-        SetCurrentDir(nwd);
-        lib := ExtractFileName(lib); // seems more stable that way
+        GlobalLock; // SetDllDirectoryW() is for the whole process not thread
+        if not LibrarySetDirectory(nwd) then // as documented on microsoft.com
+        begin
+          GlobalUnLock;
+          nwd := '';
+        end;
       end;
       fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box
     finally
       if nwd <> '' then
       begin
-        SetCurrentDir(cwd{%H-});
+        SetDllDirectoryW(nil); // revert to default
         GlobalUnLock;
       end;
     end;
