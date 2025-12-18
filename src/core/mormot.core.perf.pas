@@ -4330,6 +4330,7 @@ var
   GetSmbiosInfoChecked, RegisteredSmbiosInfoJson: boolean;
 
 const
+  // our custom records/arrays serialization via RTTI using one-char identifiers
   _TSmbiosBios = 'n,v,b,s,r,f:RawUtf8 c:TSmbiosBiosFlags';
   _TSmbiosSystem = 'm,p,v,s,u,k,f:RawUtf8 w:TSmbiosSystemWakeup';
   _TSmbiosBoard = 'm,p,v,s,a,l:RawUtf8 f:TSmbiosBoardFeatures t:TSmbiosBoardType';
@@ -4444,53 +4445,59 @@ end;
 
 procedure MergeSmbiosInfo(const basic: TSmbiosBasicInfos; var info: TSmbiosInfo);
 begin
-  MergeOne(basic[sbiBiosVendor], info.Bios.VendorName);
-  MergeOne(basic[sbiBiosVersion], info.Bios.Version);
-  MergeOne(basic[sbiBiosDate], info.Bios.BuildDate);
-  MergeOne(basic[sbiBiosRelease], info.Bios.Release);
+  MergeOne(basic[sbiBiosVendor],   info.Bios.VendorName);
+  MergeOne(basic[sbiBiosVersion],  info.Bios.Version);
+  MergeOne(basic[sbiBiosDate],     info.Bios.BuildDate);
+  MergeOne(basic[sbiBiosRelease],  info.Bios.Release);
   MergeOne(basic[sbiBiosFirmware], info.Bios.Firmware);
   MergeOne(basic[sbiManufacturer], info.System.Manufacturer);
-  MergeOne(basic[sbiProductName], info.System.ProductName);
-  MergeOne(basic[sbiVersion], info.System.Version);
-  MergeOne(basic[sbiSerial], info.System.Serial);
-  MergeOne(basic[sbiUuid], info.System.Uuid);
-  MergeOne(basic[sbiSku], info.System.Sku);
-  MergeOne(basic[sbiFamily], info.System.Family);
+  MergeOne(basic[sbiProductName],  info.System.ProductName);
+  MergeOne(basic[sbiVersion],      info.System.Version);
+  MergeOne(basic[sbiSerial],       info.System.Serial);
+  MergeOne(basic[sbiUuid],         info.System.Uuid);
+  MergeOne(basic[sbiSku],          info.System.Sku);
+  MergeOne(basic[sbiFamily],       info.System.Family);
   if info.Board = nil then
   begin
     SetLength(info.Board, 1);
     with info.Board[0] do
     begin
       MergeOne(basic[sbiBoardManufacturer], Manufacturer);
-      MergeOne(basic[sbiBoardProductName], Product);
-      MergeOne(basic[sbiBoardVersion], Version);
-      MergeOne(basic[sbiBoardSerial], Serial);
-      MergeOne(basic[sbiBoardAssetTag], AssetTag);
-      MergeOne(basic[sbiBoardLocation], Location);
+      MergeOne(basic[sbiBoardProductName],  Product);
+      MergeOne(basic[sbiBoardVersion],      Version);
+      MergeOne(basic[sbiBoardSerial],       Serial);
+      MergeOne(basic[sbiBoardAssetTag],     AssetTag);
+      MergeOne(basic[sbiBoardLocation],     Location);
     end;
   end;
-  if info.Processor = nil then
+  if (info.Processor = nil) and
+     ((basic[sbiCpuAssetTag] <> '') or
+      (basic[sbiCpuManufacturer] <> '') or
+      (basic[sbiCpuPartNumber] <> '')) then
   begin
     SetLength(info.Processor, 1);
     with info.Processor[0] do
     begin
-      MergeOne(basic[sbiCpuAssetTag], AssetTag);
+      MergeOne(basic[sbiCpuAssetTag],     AssetTag);
       MergeOne(basic[sbiCpuManufacturer], Manufacturer);
-      MergeOne(basic[sbiCpuPartNumber], PartNumber);
-      MergeOne(basic[sbiCpuSerial], Serial);
-      MergeOne(basic[sbiCpuVersion], Version);
+      MergeOne(basic[sbiCpuPartNumber],   PartNumber);
+      MergeOne(basic[sbiCpuSerial],       Serial);
+      MergeOne(basic[sbiCpuVersion],      Version);
     end;
   end;
-  if info.Battery = nil then
+  if (info.Battery = nil) and
+     ((basic[sbiBatteryName] <> '') or
+      (basic[sbiBatteryManufacturer] <> '') or
+      (basic[sbiBatteryChemistry] <> '')) then
   begin
     SetLength(info.Battery, 1);
     with info.Battery[0] do
     begin
-      MergeOne(basic[sbiBatteryChemistry], Chemistry);
-      MergeOne(basic[sbiBatteryLocation], Location);
+      MergeOne(basic[sbiBatteryChemistry],    Chemistry);
+      MergeOne(basic[sbiBatteryLocation],     Location);
       MergeOne(basic[sbiBatteryManufacturer], Manufacturer);
-      MergeOne(basic[sbiBatteryName], Name);
-      MergeOne(basic[sbiBatteryVersion], Version);
+      MergeOne(basic[sbiBatteryName],         Name);
+      MergeOne(basic[sbiBatteryVersion],      Version);
     end;
   end;
   if (info.Oem = nil) and
@@ -4545,7 +4552,7 @@ var
   n, cap: cardinal;
   q: QWord;
   len, trimright, i, c: PtrInt;
-  lines: array[byte] of PRawUtf8; // efficient string decoding
+  lines: array of PRawUtf8; // efficient string decoding
   // linked in 2nd pass:
   cache: array of TSmbiosCache;
   mem: array of TSmbiosMemory;
@@ -4561,7 +4568,7 @@ begin
   if s = nil then
     exit;
   // first pass will fill the main info structures
-  FillCharFast(lines, SizeOf(lines), 0);
+  SetLength(lines, 255);
   repeat
     if (s[0] = 127) or // type (127=EOT)
        (s[1] < 4) then // length
@@ -4611,11 +4618,11 @@ begin
           SetLength(info.Board, length(info.Board) + 1);
           with info.Board[high(info.Board)] do
           begin
-            lines[s[4]] := @Manufacturer;
-            lines[s[5]] := @Product;
-            lines[s[6]] := @Version;
-            lines[s[7]] := @Serial;
-            lines[s[8]] := @AssetTag;
+            lines[s[4]]  := @Manufacturer;
+            lines[s[5]]  := @Product;
+            lines[s[6]]  := @Version;
+            lines[s[7]]  := @Serial;
+            lines[s[8]]  := @AssetTag;
             lines[s[10]] := @Location;
             Features := TSmbiosBoardFeatures(s[9]);
             BoardType := TSmbiosBoardType(s[$0D]);
@@ -4643,6 +4650,7 @@ begin
                 OEM := PCardinal(@s[$0d])^;
                 Height := s[$11];
                 PowerCords := s[$12];
+                // Contained Elements (n,m) not yet supported
               end;
             end;
           end;
@@ -4654,8 +4662,8 @@ begin
           SetLength(info.Processor, i + 1);
           with info.Processor[i] do
           begin
-            lines[s[4]] := @SocketDesignation;
-            lines[s[7]] := @Manufacturer;
+            lines[s[4]]   := @SocketDesignation;
+            lines[s[7]]   := @Manufacturer;
             lines[s[$10]] := @Version;
             if s[1] >= $22 then // 2.3+
             begin
@@ -4678,12 +4686,12 @@ begin
               n := n and 127;
               FormatUtf8('%.%V', [n div 10, n mod 10], Voltage);
             end;
-            ExtClock := PWord(@s[$12])^;
-            MaxSpeed := PWord(@s[$14])^;
+            ExtClock  := PWord(@s[$12])^;
+            MaxSpeed  := PWord(@s[$14])^;
             BootSpeed := PWord(@s[$16])^;
-            Status := TSmbiosProcessorStatus(s[$18] and 7);
+            Status    := TSmbiosProcessorStatus(s[$18] and 7);
             Populated := s[$18] and 64 <> 0;
-            Upgrade := TSmbiosProcessorUpgrade(s[$19]);
+            Upgrade   := TSmbiosProcessorUpgrade(s[$19]);
             if s[1] >= $1e then // 2.1+
             begin
               with proc[high(proc)] do
@@ -4694,7 +4702,7 @@ begin
               end;
               if s[1] >= $26 then // 2.5+
               begin
-                CoreCount := s[$23];
+                CoreCount   := s[$23];
                 CoreEnabled := s[$24];
                 Threadcount := s[$25];
                 Flags := TSmbiosProcessorFlags(PWord(@s[$26])^);
@@ -4703,7 +4711,7 @@ begin
                   Family := PWord(@s[$28])^;
                   if s[1] >= $2f then // 3.0+
                   begin
-                    CoreCount := PWord(@s[$2a])^;
+                    CoreCount   := PWord(@s[$2a])^;
                     CoreEnabled := PWord(@s[$2c])^;
                     Threadcount := PWord(@s[$2e])^;
                     if s[1] >= $31 then // 3.6+
@@ -4742,9 +4750,9 @@ begin
             PWord(@SuportedSram)^ := PWord(@s[$0b])^;
             if s[1] >= $12 then // 2.1+
             begin
-              Speed := s[$0f];
-              Ecc := TSmbiosCacheEcc(s[$10]);
-              CacheType := TSmbiosCacheType(s[$11]);
+              Speed         := s[$0f];
+              Ecc           := TSmbiosCacheEcc(s[$10]);
+              CacheType     := TSmbiosCacheType(s[$11]);
               Associativity := TSmbiosCacheAssociativity(s[$12]);
             end;
           end;
@@ -4756,12 +4764,12 @@ begin
           begin
             if s[5] <> byte(sctNone) then
             begin
-              lines[s[4]] := @InternalName;
+              lines[s[4]]  := @InternalName;
               InternalType := TSmbiosConnectorType(s[5]);
             end;
             if s[7] <> byte(sctNone) then
             begin
-              lines[s[6]] := @ExternalName;
+              lines[s[6]]  := @ExternalName;
               ExternalType := TSmbiosConnectorType(s[7]);
             end;
             PortType := TSmbiosConnectorPort(s[8]);
@@ -4773,8 +4781,8 @@ begin
           with info.Slot[high(info.Slot)] do
           begin
             lines[s[4]] := @Designation;
-            SlotType := TSmbiosSlotType(s[5]);
-            Width := TSmbiosSlotWidth(s[6]);
+            SlotType    := TSmbiosSlotType(s[5]);
+            Width       := TSmbiosSlotWidth(s[6]);
           end;
         end;
       11, // OEM Strings (type 11) and
@@ -4836,7 +4844,7 @@ begin
           with mem[i] do
           begin
             TotalWidth := PWord(@s[8])^;
-            DataWidth := PWord(@s[$0a])^;;
+            DataWidth  := PWord(@s[$0a])^;;
             n := PWord(@s[$0c])^;
             if n <> $ffff then
             begin
@@ -4847,11 +4855,11 @@ begin
                 q := q shl 10;
               KBU(q, Size);
             end;
-            FormFactor := TSmbiosMemoryFormFactor(s[$0e]);
+            FormFactor    := TSmbiosMemoryFormFactor(s[$0e]);
             lines[s[$10]] := @Locator;
             lines[s[$11]] := @Bank;
-            MemoryType := TSmbiosMemoryType(s[$12]);
-            Details := TSmbiosMemoryDetails(PWord(@s[$13])^);
+            MemoryType    := TSmbiosMemoryType(s[$12]);
+            Details       := TSmbiosMemoryDetails(PWord(@s[$13])^);
             if s[1] >= $1A then // 2.3+
             begin
               MtPerSec := PWord(@s[$15])^;
@@ -4886,43 +4894,41 @@ begin
           end;
         end;
       22: // Portable Battery (type 22)
+        if s[1] >= $0f then // 2.1+
         begin
           SetLength(info.Battery, length(info.Battery) + 1);
           with info.Battery[high(info.Battery)] do
           begin
-            if s[1] >= $0f then // 2.1+
+            lines[s[4]] := @Location;
+            lines[s[5]] := @Manufacturer;
+            lines[s[7]] := @Serial;
+            lines[s[8]] := @Name;
+            n := PWord(@s[$0c])^; // in mV
+            FormatUtf8('%.% V', [n div 1000, (n mod 1000) div 100], Voltage);
+            lines[s[$0e]] := @Version;
+            cap := PWord(@s[$0a])^; // in mW/H
+            if s[1] >= $15 then // 2.2+
             begin
-              lines[s[4]] := @Location;
-              lines[s[5]] := @Manufacturer;
-              lines[s[7]] := @Serial;
-              lines[s[8]] := @Name;
-              n := PWord(@s[$0c])^; // in mV
-              FormatUtf8('%.% V', [n div 1000, (n mod 1000) div 100], Voltage);
-              lines[s[$0e]] := @Version;
-              cap := PWord(@s[$0a])^; // in mW/H
-              if s[1] >= $15 then // 2.2+
-              begin
-                n := PWord(@s[$12])^;
-                FormatUtf8('%/%/%', [ // mm/dd/yyyy as in info.Bios.BuildDate
-                  UInt2DigitsToShortFast((n shr 5) and 15),
-                  UInt2DigitsToShortFast(n and 31),
-                  1980 + n shr 9], ManufactureDate);
-                lines[s[$14]] := @Chemistry;
-                if s[$15] > 1 then
-                  cap := cap * s[$15]; // Design Capacity Multiplier
-              end;
-              FormatUtf8('%.% W/H',
-                [cap div 1000, (cap mod 1000) div 100], Capacity);
+              n := PWord(@s[$12])^;
+              FormatUtf8('%/%/%', [ // mm/dd/yyyy as in info.Bios.BuildDate
+                UInt2DigitsToShortFast((n shr 5) and 15),
+                UInt2DigitsToShortFast(n and 31),
+                1980 + n shr 9], ManufactureDate);
+              lines[s[$14]] := @Chemistry;
+              if s[$15] > 1 then
+                cap := cap * s[$15]; // Design Capacity Multiplier
             end;
+            FormatUtf8('%.% W/H',
+              [cap div 1000, (cap mod 1000) div 100], Capacity);
           end;
         end;
       24: // Hardware Security (Type 24)
         with info.Security do
         begin
-          FrontPanelReset := TSmbiosSecurityStatus(s[4] and 3);
+          FrontPanelReset       := TSmbiosSecurityStatus(s[4] and 3);
           AdministratorPassword := TSmbiosSecurityStatus((s[4] shr 2) and 3);
-          KeyboardPassword := TSmbiosSecurityStatus((s[4] shr 4) and 3);
-          PoweronPassword := TSmbiosSecurityStatus((s[4] shr 6) and 3);
+          KeyboardPassword      := TSmbiosSecurityStatus((s[4] shr 4) and 3);
+          PoweronPassword       := TSmbiosSecurityStatus((s[4] shr 6) and 3);
         end;
     end;
     s := @s[s[1]]; // go to string table

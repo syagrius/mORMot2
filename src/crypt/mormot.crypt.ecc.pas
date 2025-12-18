@@ -1232,6 +1232,9 @@ function PemDerRawToEcc(const pem: RawUtf8; out priv: TEccPrivateKey): boolean; 
 /// parse ECC public key in raw, PEM or DER format into its binary raw buffer
 function PemDerRawToEcc(const pem: RawUtf8; out pub: TEccPublicKey): boolean; overload;
 
+/// parse ECC public from "x","y" fields of a "kty":"EC", "crv":"P-256" JWK
+function JwkToEcc(const Json: RawUtf8; out PublicKey: TEccPublicKey): boolean;
+
 /// cipher a raw ECC secp256r1 private key buffer into some binary
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
 // - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyDecrypt()
@@ -2306,6 +2309,27 @@ begin
       sig := PEccSignature(der)^
     else
       exit; // accept signature in raw, PEM or DER format
+  result := true;
+end;
+
+function JwkToEcc(const Json: RawUtf8; out PublicKey: TEccPublicKey): boolean;
+var
+  jwk: TDocVariantData;
+  x, y: RawUtf8;
+  xy, key: THash512Rec;
+begin
+  result := false;
+  if not jwk.InitJson(Json, JSON_FAST) or
+     (jwk.CompareText('kty', 'EC') <> 0) or
+     (jwk.CompareText('crv', 'P-256') <> 0) or
+     not jwk.GetAsRawUtf8('x', x) or
+     not jwk.GetAsRawUtf8('y', y) or
+     not Base64uriToBin(x, @xy.Lo, SizeOf(xy.Lo)) or
+     not Base64uriToBin(y, @xy.Hi, SizeOf(xy.Hi)) then
+    exit;
+  _bswap256(@key.Lo, @xy.Lo);
+  _bswap256(@key.Hi, @xy.Hi);
+  Ecc256r1Compress(TEccPublicKeyUncompressed(key), PublicKey);
   result := true;
 end;
 
@@ -4028,7 +4052,7 @@ begin
   fSafe.WriteLock;
   try
     if GetBySerial(cert.Signed.Serial) = nil then
-      result := ObjArrayAdd(fItems, cert);
+      result := PtrArrayAdd(fItems, cert);
   finally
     fSafe.WriteUnLock;
   end;
@@ -4495,7 +4519,7 @@ begin
   try
     for i := 0 to high(fItems) do
       if not (IsValid(fItems[i]) in ECC_VALIDSIGN) then
-        ObjArrayAdd(result, fItems[i]);
+        PtrArrayAdd(result, fItems[i]);
   finally
     fSafe.ReadUnLock;
   end;
@@ -4522,7 +4546,7 @@ begin
     try
       if auth.FromFile(files[i]) then
       begin
-        ObjArrayAdd(fItems, auth);
+        PtrArrayAdd(fItems, auth);
         auth := nil;
       end
       else
@@ -5525,16 +5549,19 @@ begin
   case Algorithm of
     // we only support secp256r1/prime256v1 kind of elliptic curve by now
     ckaEcc256:
-      // try raw uncompressed format, as stored in a X509 certificate
-      if Ecc256r1CompressAsn1(PublicKeySaved, fEccPub) or
-         // try regular ASN1_SEQ format in PEM or DER
-         PemDerRawToEcc(PublicKeySaved, fEccPub) then
       begin
-        fEcc := TEcc256r1Verify.Create(fEccPub); // OpenSSL or our pascal code
-        fKeyAlgo := Algorithm;
-        fSubjectPublicKey := PublicKeySaved;
-        result := true;
-      end;
+        // try raw uncompressed format, as stored in a X509 certificate
+        if Ecc256r1CompressAsn1(PublicKeySaved, fEccPub) then
+          fSubjectPublicKey := PublicKeySaved
+        else if // try regular ASN1_SEQ format in PEM or DER
+                not PemDerRawToEcc(PublicKeySaved, fEccPub) and
+                // try "kty":"EC", "crv":"P-256" kind of JWK
+                not JwkToEcc(PublicKeySaved, fEccPub) then
+            exit;
+      fEcc := TEcc256r1Verify.Create(fEccPub); // OpenSSL or our pascal code
+      fKeyAlgo := Algorithm;
+      result := true;
+    end;
   else
     ECrypt.RaiseUtf8('%.Create: unsupported %', [self, ToText(fKeyAlgo)^]);
   end;
@@ -5569,13 +5596,16 @@ begin
   if self <> nil then
     case fKeyAlgo of
       ckaEcc256:
-        // for ECC, returns the x,y uncompressed coordinates from stored ASN.1
-        if Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
         begin
+          // try to extract the x,y already uncompressed coordinates from ASN.1
+          if (fSubjectPublicKey = '') or
+             not Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
+            // need to uncompress into x,y coordinates for JWK
+            Ecc256r1Uncompress(fEccPub, k);
           pointer(x) := FastNewString(ECC_BYTES);;
           pointer(y) := FastNewString(ECC_BYTES);;
-          bswap256(@PHash512Rec(@k)^.Lo, pointer(x));
-          bswap256(@PHash512Rec(@k)^.Hi, pointer(y));
+          _bswap256(pointer(x), @PHash512Rec(@k)^.Lo);
+          _bswap256(pointer(y), @PHash512Rec(@k)^.Hi);
           result := true;
         end;
     end;

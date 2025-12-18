@@ -819,6 +819,8 @@ type
   TModularCryptFormats = set of TModularCryptFormat;
 
 const
+  SIGN_SIZE: array[TSignAlgo] of byte = (
+    20, 32, 48, 64, 28, 32, 48, 64, 32, 64, 28);
   /// the standard text of a TSignAlgo
   SIGNER_TXT: array[TSignAlgo] of RawUtf8 = (
     'SHA-1',    'SHA-256',  'SHA-384',  'SHA-512', 'SHA3-224', 'SHA3-256',
@@ -828,6 +830,9 @@ const
   SIGNER_DEFAULT_ALGO = saSha3S128;
   /// which ModularCryptIdentify/ModularCryptVerify() results are correct
   mcfValid = [mcfMd5Crypt .. high(TModularCryptFormat)];
+  /// the maximum number of PBKDF2 rounds which may trigger a DoS attack
+  // - 5 millions = 1–5 seconds with SHA-NI is noticeable to be painful
+  MAX_PBKDF2_ROUNDS = 5000000;
 var
   /// default number of rounds for PBKDF2 "Modular Crypt" functions
   // - numbers adjusted on 2025, and align with OWASP Password Storage Cheat
@@ -885,13 +890,20 @@ type
     function Final: RawUtf8; overload;
     /// returns the raw computed digital signature
     // - SignatureSize bytes will be written: use Signature.Lo/h0/b3/b accessors
-    procedure Final(aSignature: PHash512Rec; aNoInit: boolean = false); overload;
+    function Final(aSignature: PHash512Rec; aNoInit: boolean = false): integer; overload;
     /// one-step digital signature of a buffer as lowercase hexadecimal string
     function Full(aAlgo: TSignAlgo; const aSecret: RawUtf8;
       aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// one-step digital signature of a buffer with PBKDF2 derivation
     function Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aBuffer: pointer; aLen: integer): RawUtf8; overload;
+    /// one-step binary digital signature of a buffer with PBKDF2 derivation
+    function Full(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: PtrInt;
+      const aMessage: RawByteString; aHmac: PHash512Rec): integer; overload;
+    /// one-step hash computation of a buffer as a binary buffer
+    // - returns the written aDigest size in bytes
+    function Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
+      out aDigest: THash512Rec): integer;
     /// convenient wrapper to perform PBKDF2 safe iterative key derivation
     function Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec;
@@ -1189,7 +1201,49 @@ function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
   HashPos: PInteger = nil; Api: TSCriptRaw = nil): RawUtf8;
 
 
-{ SCRAM-like Client/Server mutual authentication using ModularCryptHash() }
+{ Official SCRAM Client/Server mutual authentication }
+
+type
+  /// RFC 5802/7677 SCRAM client, as used e.g. by MongoDB
+  // - can optionally implement SCRAM-MCF as Key Derivation Function, as
+  // defined by draft-bouchez-kitten-scram-mcf-01 upcoming RFC proposal
+  TScramClient = class
+  protected
+    fClientNonce, fAuthMessage, fServerProof, fLastError: RawUtf8;
+    fAlgo: TSignAlgo;
+    fSize: byte;
+    fMcfSupport: boolean;
+    fSigner: TSynSigner;
+  public
+    /// initialize the SCRAM client protocol
+    // - with an associated Hash function, typically saSha1, saSha256 or saSha512
+    // - you can also enable the SCRAM-MCF extension support
+    constructor Create(aAlgo: TSignAlgo; aMcfSupport: boolean = false); reintroduce;
+    /// finalize this instannce, and release all sensitive internal buffers
+    destructor Destroy; override;
+    /// generate a client nonce, and return the first client step
+    // - returns e.g. 'n,,n=user,r=...' or 'n,,n=user,r=...,f=y'
+    function ComputeFirstMessage(const User: RawUtf8; out Mechanism: RawUtf8;
+      const TestForceNonce: RawUtf8 = ''): RawUtf8;
+    /// compute the second and final client step
+    // - ServerResponse is e.g. 'r=...,s=...,i=4096' or 'r=...,f=...'
+    // - returns e.g. 'c=biws,r=...,p=...'
+    function ComputeFinalMessage(const ServerResponse, Password: RawUtf8): RawUtf8;
+    /// check the server proof to complete mutual authentication
+    function CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
+    /// human-readable information about any failed ComputeFinalMessage() = ''
+    // or CheckFinalResponse() = false
+    property LastError: RawUtf8
+      read fLastError;
+    /// the size, in bytes, of the internal hash algorithm e.g. 32 for SHA-256
+    property Size: byte
+      read fSize;
+    /// true if this client supports our SCRAM-MCF extension
+    property McfSupport: boolean
+      read fMcfSupport write fMcfSupport;
+  end;
+
+{ our own SCRAM-MCF client/server pattern, using ModularCryptHash() }
 
 /// compute the SCRAM challenge to be stored on DB for a given "Modular Crypt" hash
 // - the value is bound to the User logon, so that it can't be reassigned to
@@ -1227,8 +1281,8 @@ procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
   result: PHash512Rec);
 
 /// compute the PBKDF2 derivation of a password using HMAC over any hash function
-procedure Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count: integer; result: PHash512Rec); overload;
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count: integer; digest: PHash512Rec): integer; overload;
 
 /// compute the PBKDF2 derivation of a password using HMAC over any hash function
 // - this overloaded function will return any size of the derived password
@@ -2150,8 +2204,8 @@ type
   ICryptPublicKey = interface
     /// unserialize a public key content
     // - this instance should be void, i.e. just created with no prior Load
-    // - will first try from X.509 SubjectPublicKey raw binary, then the main
-    // known PEM or DER usual serialization formats
+    // - will first try the main PEM or DER usual serialization formats, then
+    // from X.509 SubjectPublicKey raw binary, then as JWK format (RSA/EC)
     function Load(Algorithm: TCryptKeyAlgo;
       const PublicKeySaved: RawByteString): boolean;
     /// verify the RSA or ECC signature of a memory buffer
@@ -3353,6 +3407,9 @@ function IsCN(const Rdn: RawUtf8): boolean;
 /// fast case-insensitive check of the 'DER' fake RDNidentifier
 function IsDer(const Rdn: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// compute the minimum JWK output from raw binary parameters
+function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
 
 /// main resolver of the randomness generators
 // - a shared TCryptRandom instance is returned: caller should NOT free it
@@ -5165,11 +5222,141 @@ begin
 end;
 
 
+{ TScramClient }
+
+constructor TScramClient.Create(aAlgo: TSignAlgo; aMcfSupport: boolean);
+begin
+  fAlgo := aAlgo;
+  fSize := SIGN_SIZE[aAlgo];
+  fMcfSupport := aMcfSupport;
+end;
+
+destructor TScramClient.Destroy;
+begin
+  FillZero(fAuthMessage);
+  FillZero(fServerProof);
+  inherited Destroy;
+end;
+
+function TScramClient.ComputeFirstMessage(const User: RawUtf8;
+  out Mechanism: RawUtf8; const TestForceNonce: RawUtf8): RawUtf8;
+var
+  usr: RawUtf8;
+begin
+  Join(['SCRAM-', SIGNER_TXT[fAlgo]], Mechanism);
+  if TestForceNonce <> '' then
+    fClientNonce := TestForceNonce // used against reference vectors
+  else
+  begin
+    Random128(@fSigner); // unpredictable - use fSigner as transient storage
+    fClientNonce := BinToBase64(@fSigner, SizeOf(THash128));
+  end;
+  usr := StringReplaceAll(User, ['=', '=3D', ',', '=2C']);
+  FormatUtf8('n=%,r=%', [usr, fClientNonce], fAuthMessage);
+  if fMcfSupport then
+    Append(fAuthMessage, ',f=y');
+  Join(['n,,', fAuthMessage], result);
+end;
+
+function TScramClient.ComputeFinalMessage(
+  const ServerResponse, Password: RawUtf8): RawUtf8;
+var
+  resp: TDocVariantData;
+  fullnonce, s, i, mcf, key, msg: RawUtf8;
+  salt: RawByteString;
+  iterations: integer;
+  salted, client, stored, server: THash512Rec;
+begin
+  // decode input parameters
+  result := '';
+  fServerProof := '';
+  if (fAuthMessage = '') or
+     (fClientNonce = '') then
+  begin
+    fLastError := 'out of order ComputeFinalMessage() usage';
+    exit;
+  end;
+  iterations := 0;
+  fLastError := 'invalid Server initial response';
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if not resp.GetAsRawUtf8('r', fullnonce) or
+     not StartWithExact(fullnonce, fClientNonce) then
+    exit;
+  if fMcfSupport and
+     resp.GetAsRawUtf8('f', mcf) then // SCRAM-MCF extension
+  begin
+    if fAlgo = saSha1 then
+      exit; // this weak algo is rejected by the draft RFC
+    mcf := ModularCryptHash(Base64ToBin(mcf), Password); // ignore i=..,s=..
+    if mcf = '' then
+      exit; // unsupported Modular Crypt algorithm or invalid prefix
+  end
+  else if not resp.GetAsRawUtf8('s', s) or
+          not Base64ToBin(pointer(s), length(s), salt) or
+          not resp.GetAsRawUtf8('i', i) or
+          not ToInteger(i, iterations) or
+          (iterations <= 0) or
+          (iterations > MAX_PBKDF2_ROUNDS) then // avoid DoS attacks
+    // invalid s=... and i=... standard SCRAM parameters
+    exit;
+  // hash password according to server expectations and compute client signature
+  Join(['c=biws,r=', fullnonce], key);
+  Join([fAuthMessage, ',', ServerResponse, ',', key], msg);
+  if mcf = '' then
+  begin
+    fSigner.Pbkdf2(fAlgo, Password, salt, iterations, @salted);
+    fSigner.Full(fAlgo, @salted, fSize, 'Client Key', @client);
+    fSigner.Full(fAlgo, @salted, fSize, 'Server Key', @server);
+    FillZero(salted, fSize);
+  end
+  else
+  begin
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Client Key', @client);
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Server Key', @server);
+    FillZero(mcf);
+  end;
+  // compute client and server proofs
+  fSigner.Hash(fAlgo, @client, fSize, stored);
+  fSigner.Full(fAlgo, @stored, fSize, msg, @stored);
+  XorMemory(@client, @stored, fSize);
+  Join([key, ',p=', BinToBase64(@client, fSize)], result); // client proof
+  fSigner.Full(fAlgo, @server, fSize, msg, @server);
+  fServerProof := BinToBase64(@server, fSize);             // server proof
+  fLastError := '';
+  FillZero(key);
+  FillZero(client, fSize);
+  FillZero(stored, fSize);
+  FillZero(server, fSize);
+end;
+
+function TScramClient.CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
+var
+  resp: TDocVariantData;
+  proof: RawUtf8;
+begin
+  result := false;
+  if fServerProof = '' then
+  begin
+    fLastError := 'out of order CheckFinalResponse() usage';
+    exit;
+  end;
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if resp.GetAsRawUtf8('v', proof) then
+    if proof = fServerProof then
+    begin
+      fLastError := '';
+      result := true;
+    end
+    else
+      fLastError := 'invalid Server proof'
+  else
+    fLastError := 'invalid Server last response';
+end;
+
+
 { TSynSigner }
 
 const
-  SIGN_SIZE: array[TSignAlgo] of byte = (
-    20, 32, 48, 64, 28, 32, 48, 64, 32, 64, 28);
   BLOCK_SIZE: array[TSignAlgo] of byte = (
     15, 15, 31, 31, 0, 0, 0, 0, 0, 0, 15);
 
@@ -5239,9 +5426,9 @@ begin
   fHasher.UpdateBigEndian(aValue);
 end;
 
-procedure TSynSigner.Final(aSignature: PHash512Rec; aNoInit: boolean);
+function TSynSigner.Final(aSignature: PHash512Rec; aNoInit: boolean): integer;
 begin
-  fHasher.Final(aSignature^);
+  result := fHasher.Final(aSignature^);
   if fBlockMax = 0 then
     exit; // SHA-3 needs no HMAC
   fHasher.Update(@fStep7data, fBlockSize);
@@ -5273,6 +5460,20 @@ begin
   Init(aAlgo, aSecret, aSalt, aSecretPbkdf2Round);
   Update(aBuffer, aLen);
   result := Final;
+end;
+
+function TSynSigner.Full(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: PtrInt;
+  const aMessage: RawByteString; aHmac: PHash512Rec): integer;
+begin
+  Init(aAlgo, aSecret, aSecretLen);
+  Update(aMessage);
+  result := Final(aHMac);
+end;
+
+function TSynSigner.Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
+  out aDigest: THash512Rec): integer;
+begin
+  result := fHasher.Full(SIGN_HASH[fAlgo], aBuffer, aLen, aDigest);
 end;
 
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
@@ -5421,7 +5622,9 @@ begin
      not (aAlgo in [low(MCF_SIGN) .. high(MCF_SIGN)]) then
     exit;
   if aRounds = 0 then
-    aRounds := MCF_ROUNDS[aAlgo]; // use default of each algorithm
+    aRounds := MCF_ROUNDS[aAlgo] // use default of each algorithm
+  else if aRounds > MAX_PBKDF2_ROUNDS then
+    exit; // avoid naive DoS attacks
   if aSaltSize = 0 then
     aSaltSize := 16;
   if HASH64_DEC[#255] = 0 then // check the last byte for thread-safe init
@@ -5665,12 +5868,12 @@ begin
   signer.Final(result);
 end;
 
-procedure Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count: integer; result: PHash512Rec);
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count: integer; digest: PHash512Rec): integer;
 var
   signer: TSynSigner;
 begin
-  signer.Pbkdf2(algo, password, salt, count, result);
+  result := signer.Pbkdf2(algo, password, salt, count, digest);
 end;
 
 function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
@@ -9043,24 +9246,11 @@ end;
 function TCryptCert.JwkCompute: RawUtf8;
 var
   x, y: RawByteString;
-  bx, by: RawUtf8;
-  caa: TCryptAsymAlgo;
 begin
-  // retrieve raw public key parameters
+  // retrieve raw public key parameters and export as JWT
   result := '';
-  if not GetKeyParams(x, y) then
-    exit;
-  bx := BinToBase64uri(x);
-  by := BinToBase64uri(y);
-  // parameters are ordered lexicographically, as expected for thumbprints
-  caa := AsymAlgo;
-  if caa in CAA_ECC then
-    // for ECC, GetKeyParams() returned the x,y coordinates
-    FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
-                  [CAA_CRV[caa], bx, by], result)
-  else
-    // for RSA, x was set to the Exponent (e), and y to the Modulus (n)
-    FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
+  if GetKeyParams(x, y) then
+    result := SaveAsJwk(AsymAlgo, x, y);
 end;
 
 function TCryptCert.SharedSecret(const pub: ICryptCert): RawByteString;
@@ -9785,6 +9975,27 @@ begin
   result := (length(Rdn) = 3) and
             (PCardinal(Rdn)^ and $dfdfdf =
                ord('D') + ord('E') shl 8 + ord('R') shl 16);
+end;
+
+function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
+var
+  bx, by: RawUtf8;
+begin
+  result := '';
+  if (x = '') or
+     (y = '') or
+     (algo in [caaEdDSA]) then // EDSA not yet supported (single "x" parameter)
+    exit;
+  bx := BinToBase64uri(x);
+  by := BinToBase64uri(y);
+  // parameters are ordered lexicographically, as expected for thumbprints
+  if algo in CAA_ECC then
+    // for ECC, GetKeyParams() returned the x,y coordinates
+    FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
+                  [CAA_CRV[algo], bx, by], result)
+  else
+    // for RSA, x was set to the Exponent (e), and y to the Modulus (n)
+    FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
 end;
 
 

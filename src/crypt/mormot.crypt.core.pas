@@ -361,7 +361,8 @@ type
     function EncryptInit(const Key; KeySize: cardinal): boolean;
     /// Initialize AES context for cipher, using CSPRNG as transient key source
     // - used e.g. by TAesSignature or Random128() for their initialization
-    procedure EncryptInitRandom(Bits: integer = 128);
+    // - Bits=0 will instantiate AES-128 or AES-256 if HasHWAes is available
+    procedure EncryptInitRandom(Bits: integer = 0);
     /// encrypt an AES data block into another data block
     // - this method is thread-safe, unless you call EncryptInit/DecryptInit
     procedure Encrypt(const BI: TAesBlock; var BO: TAesBlock); overload;
@@ -1725,6 +1726,7 @@ type
     /// computes a random ASCII password
     // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
     // excluding ;,= to allow direct use in CSV content
+    // - won't return the letters O and I to avoid confusion with digits 0 and 1
     function RandomPassword(Len: integer): SpiUtf8;
     /// validate or generate a random Salt with custom Base64-URI encoding
     // - as used e.g. by the "Modular Crypt" process
@@ -3674,9 +3676,9 @@ begin
   rnd128safe.Lock; // ensure thread safe with minimal contention
   aes := @rnd128gen;
   if PPtrUInt(aes)^ = 0 then
-    PAes(aes)^.EncryptInitRandom;   // initialize AES-128 once at startup
-  iv^ := aes^.iv.b;
-  inc(aes^.iv.Lo);                  // AES-CTR with little endian 64-bit counter
+    PAes(aes)^.EncryptInitRandom;   // initialize AES-128 (or AES-256 if HW AES)
+  iv^ := aes^.iv.b;                 // AES-CTR with little endian 64-bit counter
+  inc(aes^.iv.Lo);                  // overflow after 268,435,456 TB of output
   if iv2 <> nil then
   begin
     iv2^ := aes^.iv.b;              // additional 128-bit
@@ -4120,16 +4122,18 @@ end;
 
 procedure TAes.EncryptInitRandom(Bits: integer);
 var
-  rnd: THash256Rec;
+  rnd: THash256;
 begin // note: we can't use Random128() here to avoid endless recursion
+  if Bits = 0 then
+    Bits := 128 shl ord(HasHWAes); // AES-128 or AES-256
   {$ifdef OSLINUX}
   if (MainAesPrng <> nil) or
      not LinuxGetRandom(@rnd, Bits shr 3) then // 128/256-bit in 1 syscall
   {$endif OSLINUX}
-    TAesPrng.Main.FillRandom(rnd.b);   // 256-bit from our CSPRNG (if available)
+    TAesPrng.Main.FillRandom(rnd);     // 256-bit from our CSPRNG (if available)
   EncryptInit(rnd, Bits);              // transient AES-128/256 secret
   FillZero(TAesContext(Context).iv.b); // as per NIST SP 800-90A
-  FillZero(rnd.b);                     // anti-forensic
+  FillZero(rnd);                       // anti-forensic
 end;
 
 function TAes.DecryptInitFrom(const Encryption: TAes; const Key;
@@ -5107,7 +5111,8 @@ end;
 
 procedure TAesSignature.Init;
 begin // AES-256 is 40% slower but twice stronger against Quantum attacks
-  fEngine.EncryptInitRandom(128 shl ord(HasHWAes)); // AES-128 or AES-256
+  fEngine.EncryptInitRandom;           // random AES-128 key (AES-256 if HW AES)
+  Random128(@TAesContext(fEngine).iv); // another random source to obfuscate
 end;
 
 procedure TAesSignature.Generate(aValue: cardinal; aSignature: PHash128Rec);
@@ -5119,7 +5124,7 @@ begin // 32-bit lower = masked session, 96-bit upper = digital signature
     ESynCrypto.RaiseU('Unexpected TAesSignature.Generate(0)');
   aValue := aValue xor aes.iv.c0; // masked/obfuscated session ID
   aSignature^.c0 := aValue;
-  aSignature^.c1 := aes.iv.c1;    // aes.iv is a transient hidden CSPRNG secret
+  aSignature^.c1 := aes.iv.c1;    // aes.iv is a transient hidden secret
   aSignature^.H  := aes.iv.H;
   aes.DoBlock(aes, aSignature^, aSignature^); // fast and thread-safe
   aSignature^.c0 := aValue;
@@ -5224,11 +5229,14 @@ end;
 
 constructor TAesAbstract.CreateTemp(aKeySize: cardinal);
 var
-  tmp: THash256;
+  tmp: THash256Rec;
 begin
-  TAesPrng.Main.FillRandom(tmp); // 256-bit from CSPRNG
+  if MainAesPrng <> nil then
+    MainAesPrng.FillRandom(tmp.b)   // 256-bit from our CSPRNG (if available)
+  else
+    Random128(@tmp.l, @tmp.h);      // 256-bit of unpredictable random
   Create(tmp, aKeySize);
-  FillZero(tmp);
+  FillZero(tmp, aKeySize shr 3);
 end;
 
 {$ifndef PUREMORMOT2}

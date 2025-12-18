@@ -347,7 +347,8 @@ type
     /// check if the socket is not closed nor broken
     // - i.e. check if it is likely to be accept Send() and Recv() calls
     // - calls WaitFor(neRead) then Recv() to check e.g. WSACONNRESET on Windows
-    function Available(loerr: system.PInteger = nil): boolean;
+    // - set nowait=true to avoid WaitFor() and just call Recv(MSG_PEEK)
+    function Available(loerr: system.PInteger = nil; nowait: boolean = false): boolean;
     /// call shutdown() on this socket - may be used to simulate a disconnection
     procedure RawShutdown;
     /// finalize a socket, calling Close after shutdown() if needed
@@ -400,6 +401,9 @@ function NetLastErrorMsg(AnotherNonFatal: integer = NO_ERROR): ShortString;
 
 /// internal low-level function using known operating system error
 function NetErrorFromSystem(SystemError, AnotherNonFatal: integer): TNetResult;
+
+/// just a wrapper around ToText(NetErrorFromSystem(SystemError)) + SystemError
+function NetErrorText(SystemError: integer): TShort47;
 
 /// create a new Socket connected or bound to a given ip:port
 function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
@@ -754,9 +758,9 @@ function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 function GetLocalMacAddress(const Remote: RawUtf8; var Mac: TMacAddress): boolean;
 
 /// get the local IP address used to reach a computer, from its IP Address
-// - will create a SOCK_DGRAM socket over the supplied IP, and check
-// the local socket address created
-function GetLocalIpAddress(const Remote: RawUtf8): RawUtf8;
+// - will create a SOCK_DGRAM socket with the supplied IP over DNS, HTTP, HTTPS,
+// NTP and discard (9) ports, then check the local socket address created
+function GetLocalIpAddress(const Remote: RawUtf8 = '8.8.8.8'): RawUtf8;
 
 /// retrieve all DNS (Domain Name Servers) addresses known by the Operating System
 // - on POSIX, return "nameserver" from /etc/resolv.conf unless usePosixEnv is set
@@ -2330,6 +2334,21 @@ begin
   end;
 end;
 
+function NetErrorText(SystemError: integer): TShort47;
+begin
+  result := _NR[NetErrorFromSystem(SystemError, NO_ERROR)];
+  if SystemError = NO_ERROR then
+    exit;
+  AppendShortChar(' ', @result);
+  {$ifdef OSWINDOWS}
+  if SystemError < 0 then
+    AppendShortIntHex(SystemError, result)
+  else
+  {$else}
+  AppendShortCardinal(SystemError, result);
+  {$endif OSWINDOWS}
+end;
+
 function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetResult;
 var
   err: integer;
@@ -2342,11 +2361,9 @@ end;
 
 function NetLastErrorMsg(AnotherNonFatal: integer): ShortString;
 var
-  nr: TNetResult;
   err: integer;
 begin
-  nr := NetLastError(AnotherNonFatal, @err);
-  result := _NR[nr];
+  result := _NR[NetLastError(AnotherNonFatal, @err)];
   if err <> 0 then
     OsErrorAppend(err, result, ' ');
 end;
@@ -3448,13 +3465,18 @@ begin
   result := nrClosed;
 end;
 
-function TNetSocketWrap.Available(loerr: system.PInteger): boolean;
+function TNetSocketWrap.Available(loerr: system.PInteger; nowait: boolean): boolean;
 var
   events: TNetEvents;
   dummy: integer;
 begin
   result := true;
-  events := WaitFor(0, [neRead, neError], loerr); // select() or poll()
+  if loerr <> nil then
+    loerr^ := 0;
+  if nowait then
+    events := [neRead] // just MSG_PEEK
+  else
+    events := WaitFor(0, [neRead, neError], loerr); // select() or poll()
   if events = [] then
     exit; // the socket seems stable with no pending input
   if neRead in events then
@@ -4069,18 +4091,30 @@ function GetLocalIpAddress(const Remote: RawUtf8): RawUtf8;
 var
   addr: TNetAddr;
   sock: TNetSocket;
+  i: PtrInt;
+const
+  PORTS: array[0..4] of RawUtf8 = ( // connect() may fail on firewall/cap policy
+    '53', '80', '443', '123', '9'); // DNS, HTTP, HTTPS, NTP, discard
 begin
   result := '';
-  if addr.SetFrom(Remote, '9', nlUdp) <> nrOk then // 9 is discard port
-    exit;
-  sock := addr.NewSocket(nlUdp);
-  if sock <> nil then
-    try
-      if (connect(sock.Socket, @addr, addr.Size) = NO_ERROR) and
-         (sock.GetName(addr) = nrOk) then
-        addr.IP(result);
-    finally
-      sock.Close;
+  for i := 0 to high(PORTS) do
+    if addr.SetFrom(Remote, PORTS[i], nlUdp) = nrOk then
+    begin
+      sock := addr.NewSocket(nlUdp);
+      if sock <> nil then
+      try
+        if (connect(sock.Socket, @addr, addr.Size) = NO_ERROR) and
+           {$ifdef OSWINDOWS}
+           (send(sock.Socket, nil, 0, 0) = 0) and // for Windows < 10.1809
+           {$endif OSWINDOWS}
+           (sock.GetName(addr) = nrOk) then
+        begin
+          addr.IP(result);
+          exit;
+        end;
+      finally
+        sock.Close;
+      end;
     end;
 end;
 
@@ -5761,7 +5795,9 @@ procedure TCrtSocket.DoRaise(const msg: string; const args: array of const;
 begin
   if exc = nil then
     exc := ENetSock;
-  raise exc.Create(msg, self, args, error, errnumber);
+  raise exc.Create(msg, self, args, error, errnumber)
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
 end;
 
 procedure TCrtSocket.DoRaise(const msg: string);

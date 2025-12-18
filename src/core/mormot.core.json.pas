@@ -2669,10 +2669,12 @@ type
   // - fsoDisableSaveIfNeeded will disable SaveIfNeeded method process
   // - fsoReadIni will disable JSON loading, and expect INI file format
   // - fsoWriteIni will force SaveIfNeeded to use the INI layout
+  // - fsoNoEnumsComment will customize SaveIfNeeded output
   TSynJsonFileSettingsOption = (
     fsoDisableSaveIfNeeded,
     fsoReadIni,
-    fsoWriteIni);
+    fsoWriteIni,
+    fsoNoEnumsComment);
   TSynJsonFileSettingsOptions = set of TSynJsonFileSettingsOption;
 
   /// abstract parent class able to store settings as JSON file
@@ -2683,10 +2685,13 @@ type
     fFileName: TFileName;
     fLoadedAsIni: boolean;
     fSettingsOptions: TSynJsonFileSettingsOptions;
+    fIniOptions: TIniFeatures;
     fInitialFileHash: cardinal;
     // could be overriden to validate the content coherency and/or clean fields
     function AfterLoad: boolean; virtual;
   public
+    /// initialize this instance and all its published fields
+    constructor Create; override;
     /// read existing settings from a JSON content
     // - if the input is no JSON object, then a .INI structure is tried
     function LoadFromJson(const aJson: RawUtf8;
@@ -2706,6 +2711,9 @@ type
     /// allow to customize the storing process
     property SettingsOptions: TSynJsonFileSettingsOptions
       read fSettingsOptions write fSettingsOptions;
+    /// allow to customize fsoReadIni/fsoWriteIni storing process
+    property IniOptions: TIniFeatures
+      read fIniOptions write fIniOptions;
     /// can be used to compare two instances original file content
     // - will use DefaultHasher, so hash could change after process restart
     property InitialFileHash: cardinal
@@ -4315,7 +4323,7 @@ function JsonObjectItem(P: PUtf8Char; PropName: PUtf8Char; PropNameLen: PtrInt;
   PropNameFound: PRawUtf8): PUtf8Char;
 var
   name: ShortString; // no memory allocation nor P^ modification
-  PropNameUpper: TByteToAnsiChar;
+  up: TByteToAnsiChar;
   parser: TJsonGotoEndParser;
 begin
   if P <> nil then
@@ -4325,7 +4333,7 @@ begin
     begin
       if PropName[PropNameLen - 1] = '*' then
       begin
-        UpperCopy255Buf(PropNameUpper{%H-}, PropName, PropNameLen - 1)^ := #0;
+        UpperCopy255Buf(@up, PropName, PropNameLen - 1)^ := #0;
         PropNameLen := 0; // mark 'PropName*' search
       end;
       if P^ = '{' then
@@ -4344,7 +4352,7 @@ begin
           if PropNameLen = 0 then // 'PropName*'
           begin
             name[ord(name[0]) + 1] := #0; // make ASCIIZ
-            if IdemPChar(@name[1], PropNameUpper) then
+            if IdemPChar(@name[1], up) then
             begin
               if PropNameFound <> nil then
                 FastSetString(PropNameFound^, @name[1], ord(name[0]));
@@ -4772,15 +4780,14 @@ procedure QuotedStrJson(P: PUtf8Char; PLen: PtrInt; var result: RawUtf8;
 var
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
   Lp, Ls: PtrInt;
-  D: PUtf8Char;
+  d, s: PUtf8Char;
 begin
   if ((P = nil) or
       (PLen <= 0)) and
      (aPrefix = '') and
      (aSuffix = '') then
     result := '""'
-  else if (pointer(result) = pointer(P)) or
-          NeedsJsonEscape(P, PLen) then
+  else if NeedsJsonEscape(P, PLen) then
     // use TJsonWriter.AddJsonEscape() for proper JSON escape
     with TJsonWriter.CreateOwnedStream(temp) do
     try
@@ -4799,18 +4806,20 @@ begin
     // direct allocation if no JSON escape is needed
     Lp := length(aPrefix);
     Ls := length(aSuffix);
-    D := FastSetString(result, PLen + Lp + Ls + 2);
+    s := FastNewString(PLen + Lp + Ls + 2, CP_UTF8); // pointer(result) may = P
+    d := s;
     if Lp > 0 then
     begin
-      MoveFast(pointer(aPrefix)^, D^, Lp);
-      inc(D, Lp);
+      MoveFast(pointer(aPrefix)^, d^, Lp);
+      inc(d, Lp);
     end;
-    D^ := '"';
-    MoveFast(P^, D[1], PLen);
-    inc(D, PLen);
-    D[1] := '"';
+    d^ := '"';
+    MoveFast(P^, d[1], PLen);
+    inc(d, PLen);
+    d[1] := '"';
     if Ls > 0 then
-      MoveFast(pointer(aSuffix)^, D[2], Ls);
+      MoveFast(pointer(aSuffix)^, d[2], Ls);
+    FastAssignNew(result, s);
   end;
 end;
 
@@ -6346,7 +6355,7 @@ utf8: case Escape of // inlined Add(PUtf8Char(P), Len, Escape);
         twJsonEscape:
           AddJsonEscape(PUtf8Char(P), 0); // faster with no Len
         twOnSameLine:
-          AddOnSameLine(PUtf8Char(P), 0); // faster with no Len
+          AddOnSameLine(PUtf8Char(P));    // faster with no Len
       end;
     CP_RAWBYTESTRING:
       if not IsBase64(P, Len) and
@@ -6469,31 +6478,31 @@ var
   start: PUtf8Char;
 begin
   if Format <> nil then
-  repeat
-    start := Format;
     repeat
-      if (Format^ = #0) or
-         (Format^ = '%') then
-        break;
+      start := Format;
+      repeat
+        if (Format^ = #0) or
+           (Format^ = '%') then
+          break;
+        inc(Format);
+      until false;
+      AddNoJsonEscape(start, Format - start);
+      if Format^ = #0 then
+        exit;
+      // add next value as text instead of Format^='%' placeholder
       inc(Format);
+      if ValuesCount <= 0 then
+        continue; // missing value will display nothing
+      if (Escape = twNone) or
+         (byte(Values^.VType) in vtNotString) then
+        AddVarRec(Values)
+      else
+        AddVarRec(Values, Escape, WriteObjectOptions);
+      if Format^ = #0 then
+        exit;
+      inc(Values);
+      dec(ValuesCount);
     until false;
-    AddNoJsonEscape(start, Format - start);
-    if Format^ = #0 then
-      exit;
-    // add next value as text instead of Format^='%' placeholder
-    inc(Format);
-    if ValuesCount <= 0 then
-      continue; // missing value will display nothing
-    if (Escape = twNone) or
-       (byte(Values^.VType) in vtNotString) then
-      AddVarRec(Values)
-    else
-      AddVarRec(Values, Escape, WriteObjectOptions);
-    if Format^ = #0 then
-      exit;
-    inc(Values);
-    dec(ValuesCount);
-  until false;
 end;
 
 procedure TJsonWriter.AddCsvUtf8(const Values: array of RawUtf8);
@@ -12312,6 +12321,12 @@ end;
 
 { TSynJsonFileSettings }
 
+constructor TSynJsonFileSettings.Create;
+begin
+  inherited Create;
+  fIniOptions := [ifClassSection, ifClassValue, ifMultiLineSections, ifArraySection];
+end;
+
 function TSynJsonFileSettings.AfterLoad: boolean;
 begin
   result := true; // success
@@ -12329,7 +12344,7 @@ begin
     result := JsonSettingsToObject(aJson, self);
   if not result then
   begin
-    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat]);
+    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat], 0, fIniOptions);
     if result then
     begin
       fSectionName := aSectionName;
@@ -12364,16 +12379,20 @@ end;
 function TSynJsonFileSettings.SaveIfNeeded: boolean;
 var
   saved: RawUtf8;
+  opt: TTextWriterWriteObjectOptions;
 begin
   result := false;
   if (self = nil) or
      (fFileName = '') or
      (fsoDisableSaveIfNeeded in fSettingsOptions) then
     exit;
+  opt := SETTINGS_WRITEOPTIONS;
+  if fsoNoEnumsComment in fSettingsOptions then
+    exclude(opt, woHumanReadableEnumSetAsComment);
   if fsoWriteIni in fSettingsOptions then
-    saved := ObjectToIni(self, fSectionName)
+    saved := ObjectToIni(self, fSectionName, opt, 0, fIniOptions)
   else
-    saved := ObjectToJson(self, SETTINGS_WRITEOPTIONS);
+    saved := ObjectToJson(self, opt);
   if saved = fInitialJsonContent then
     exit;
   result := FileFromString(saved, fFileName);

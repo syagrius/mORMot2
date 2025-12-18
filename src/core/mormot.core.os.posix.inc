@@ -1527,16 +1527,33 @@ begin
             not FpS_ISDIR(st.st_mode);
 end;
 
+var
+  PosixProgramInfo: dl_info; // set at startup
+
+procedure GetDlInfoName(var dlinfo: dl_info; var result: TFileName);
+begin
+  FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
+  if (result <> '') and
+     (result[1] <> '/') then
+    result := ExpandFileName(string(result));
+end;
+
 function GetExecutableName(aAddress: pointer): TFileName;
 var
   dlinfo: dl_info;
 begin
   FillCharFast(dlinfo, sizeof(dlinfo), 0);
   dladdr(aAddress, @dlinfo);
-  FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
-  if (result <> '') and
-     (result[1] <> '/') then
-    result := ExpandFileName(string(result));
+  GetDlInfoName(dlinfo, result);
+end;
+
+function IsMainExecutable(aAddress: pointer): boolean;
+var
+  dlinfo: dl_info;
+begin
+  FillCharFast(dlinfo, sizeof(dlinfo), 0);
+  dladdr(aAddress, @dlinfo);
+  result := (dlinfo.dli_fbase = PosixProgramInfo.dli_fbase);
 end;
 
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
@@ -4391,20 +4408,18 @@ begin
     if pid > 0 then
       if (fpkill(pid, 0) = 0) or
          not DeleteFile(pidfilename) then
-        raise EOSException.CreateFmt(
-          '%s.CommandLine Fork failed: %s is already forked as pid=%d',
-          [ClassNameShort(daemon)^, Executable.ProgramName, PtrInt(pid)]);
+        EOSException.RaiseFmt(daemon,
+          'CommandLine Fork failed: %s is already forked as pid=%d',
+          [Executable.ProgramName, PtrInt(pid)]);
     pid := fpFork;
     if pid < 0 then
-      raise EOSException.CreateFmt(
-        '%s.CommandLine Fork failed', [ClassNameShort(daemon)^]);
+      EOSException.RaiseFmt(daemon, 'CommandLine Fork failed', []);
     if pid > 0 then  // main program - just terminate
       exit;
     // clean forked instance
     sid := fpSetSID;
     if sid < 0 then // new session (process group) created?
-      raise EOSException.CreateFmt(
-        '%s.CommandLine SetSID failed', [ClassNameShort(daemon)^]);
+      EOSException.RaiseFmt(daemon, 'CommandLine SetSID failed', []);
     CleanAfterFork;
     // create local .[Executable.ProgramName].pid file
     pid := fpgetpid;

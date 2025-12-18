@@ -47,6 +47,7 @@ uses
   mormot.core.text,
   mormot.core.buffers,
   mormot.core.datetime,
+  mormot.core.variants,
   mormot.lib.openssl11,
   mormot.crypt.core,
   mormot.crypt.ecc256r1,
@@ -448,6 +449,28 @@ procedure OpenSslGenerateKeys(EvpType, BitsOrCurve: integer;
 procedure OpenSslGenerateBinaryKeys(EvpType, BitsOrCurve: integer;
   out PrivateKey, PublicKey: RawByteString; const PrivateKeyPassWord: SpiUtf8 = '');
 
+/// load a public key from its raw binary parameters, e.g. from JWK fields
+// - if EvpType is EVP_PKEY_RSA or EVP_PKEY_RSA_PSS BitsOrCurve is the number of
+// bits of the key
+// - if EvpType is EVP_PKEY_EC, BitsOrCurve is the Elliptic curve NID (e.g.
+// - for ECC, returns the x,y coordinates
+// - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
+// - caller should make result.Free once done with the result
+function OpenSslLoadPublicKeyFromParams(EvpType, BitsOrCurve: integer;
+  const X, Y: RawByteString): PEVP_PKEY; overload;
+
+/// load a public key from its raw binary parameters, e.g. from JWK fields
+// - for ECC, returns the x,y coordinates
+// - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
+// - caller should make result.Free once done with the result
+function OpenSslLoadPublicKeyFromParams(algo: TCryptKeyAlgo;
+  const x, y: RawByteString): PEVP_PKEY; overload;
+
+/// load a RSA or ECC public key from JWK JSON content
+// - caller should make result.Free once done with the result
+// - if algo is ckaNone, the proper algorithm will be guessed from "kty" (+"crv")
+function OpenSslLoadPublicKeyFromJwk(const jwk: RawUtf8; algo: TCryptKeyAlgo = ckaNone): PEVP_PKEY;
+
 {
 /// compute the (e.g. ECDH) shared secret from a public/private keys inverted pair
 function OpenSslSharedSecret(EvpType, BitsOrCurve: integer;
@@ -793,8 +816,7 @@ begin
   EOpenSslCrypto.CheckAvailable(PClass(Owner)^, 'Create');
   Cipher := EVP_get_cipherbyname(aCipherName);
   if Cipher = nil then
-    raise EOpenSslCrypto.CreateFmt('%s.Create: unknown ''%s'' cipher',
-      [ClassNameShort(Owner)^, aCipherName]);
+    EOpenSslCrypto.RaiseFmt(Owner, 'Create: unknown ''%s'' cipher', [aCipherName]);
 end;
 
 procedure TAesOsl.Done;
@@ -1113,7 +1135,7 @@ begin
     if fXof then
       fDigestSize := hashSize // custom size in XOF mode
     else
-      raise EOpenSslHash.CreateFmt('TOpenSslHash.Create: Unexpected HashSize=' +
+      EOpenSslHash.RaiseFmt(self, 'Create: Unexpected HashSize=' +
         '%d to a non-XOF hash function', [HashSize]);
 end;
 
@@ -1138,8 +1160,7 @@ begin
   result := EVP_MD_CTX_size(fCtx);
   if Dest = nil then
     if result > SizeOf(fDigestValue) then
-      raise EOpenSslHash.CreateFmt(
-        'TOpenSslHash.Digest(nil): size=%d overflow', [result])
+      EOpenSslHash.RaiseFmt(self, 'Digest(nil): size=%d overflow', [result])
     else
       Dest := @fDigestValue;
   if fXof then
@@ -1197,7 +1218,7 @@ procedure TOpenSslHmac.Init(md: PEVP_MD; Key: pointer; KeyLength: cardinal);
 begin
   EOpenSslHash.CheckAvailable(PClass(self)^, 'Create');
   if md = nil then
-    raise EOpenSslHash.Create('TOpenSslHmac.Create: Unknown algorithm');
+    EOpenSslHash.RaiseFmt(self, 'Create: Unknown algorithm', []);
   fDigestSize := EVP_MD_size(md);
   fCtx := HMAC_CTX_new;
   if Key = nil then // Key=null for OpenSSL means "reuse previous"
@@ -1296,13 +1317,13 @@ begin
       else
         result := EVP_get_digestbyname(pointer(Algorithm));
       if result = nil then
-        raise EOpenSslHash.CreateFmt(
+        EOpenSslHash.RaiseFmt(nil,
           '%s: unknown [%s] algorithm', [Caller, Algorithm]);
     end;
 end;
 
 var
-  _HashAlgoMd: array[THashAlgo] of PEVP_MD;
+  _HashAlgoMd: array[THashAlgo]      of PEVP_MD;
   _AsymAlgoMd: array[TCryptAsymAlgo] of PEVP_MD;
 
 const
@@ -1499,7 +1520,7 @@ var
 begin
   keys := OpenSslGenerateKeys(EvpType, BitsOrCurve);
   if keys = nil then
-    raise EOpenSslHash.CreateFmt(
+    EOpenSslHash.RaiseFmt(nil,
       'OpenSslGenerateKeys(%d,%d) failed', [EvpType, BitsOrCurve]);
   keys.ToPem(PrivateKey, PublicKey, PrivateKeyPassWord);
   keys.Free;
@@ -1512,11 +1533,170 @@ var
 begin
   keys := OpenSslGenerateKeys(EvpType, BitsOrCurve);
   if keys = nil then
-    raise EOpenSslHash.CreateFmt(
+    EOpenSslHash.RaiseFmt(nil,
       'OpenSslGenerateBinaryKeys(%d,%d) failed', [EvpType, BitsOrCurve]);
   PrivateKey := keys.PrivateToDer(PrivateKeyPassWord);
   PublicKey := keys.PublicToDer;
   keys.Free;
+end;
+
+function OpenSslLoadPublicKeyFromParams(EvpType, BitsOrCurve: integer;
+  const X, Y: RawByteString): PEVP_PKEY;
+var
+  bx, by: PBIGNUM;
+  rsa: PRSA;
+  ec: PEC_KEY;
+  g: PEC_GROUP;
+  p: PEC_POINT;
+begin
+  result := nil;
+  if (X = '') or
+     (Y = '') then
+    exit;
+  EOpenSslAsymmetric.CheckAvailable(nil, 'OpenSslLoadPublicKeyFromParams');
+  case EvpType of
+    EVP_PKEY_RSA,
+    EVP_PKEY_RSA_PSS:
+      begin
+        rsa := RSA_new;
+        if rsa = nil then
+          exit;
+        bx := BN_bin2bn(pointer(X), length(X), nil); // x = Exponent (e)
+        by := BN_bin2bn(pointer(Y), length(Y), nil); // y = Modulus (n)
+        if (bx <> nil) and
+           (by <> nil) and
+           (RSA_set0_key(rsa, by, bx, nil) = OPENSSLSUCCESS) then
+        begin
+          result := EVP_PKEY_new;
+          if result <> nil then
+            if EVP_PKEY_assign_RSA(result, rsa) = OPENSSLSUCCESS then
+              exit; // bx/by/rsa are owned by result from now on
+        end;
+        bx.Free;
+        by.Free;
+        RSA_free(rsa);
+      end;
+    EVP_PKEY_EC:
+      begin
+        g := EC_GROUP_new_by_curve_name(BitsOrCurve);
+        if g = nil then
+          exit;
+        ec := EC_KEY_new;
+        if (ec <> nil) and
+           (EC_KEY_set_group(ec, g) = OPENSSLSUCCESS) then
+        begin
+          p := EC_POINT_new(g);
+          if p <> nil then
+          begin
+            bx := BN_bin2bn(pointer(X), length(X), nil);
+            by := BN_bin2bn(pointer(Y), length(Y), nil);
+            if (bx <> nil) and
+               (by <> nil) then
+              if (EC_POINT_set_affine_coordinates(g, p, bx, by, nil) = OPENSSLSUCCESS) and
+                 (EC_KEY_set_public_key(ec, p) = OPENSSLSUCCESS) then
+              begin
+                result := EVP_PKEY_new;
+                if result <> nil then
+                  if EVP_PKEY_assign_EC_KEY(result, ec) = OPENSSLSUCCESS then
+                    ec := nil // result EVP_PKEY will own ec
+                  else
+                  begin
+                    result.Free;
+                    result := nil;
+                  end;
+              end; // else writeln(OpenSSL_error(ERR_get_error));
+            bx.Free;
+            by.Free;
+            EC_POINT_free(p);
+          end;
+        end; // EVP_PKEY_ED25519 only needs "x"
+        if ec <> nil then
+          EC_KEY_free(ec);
+        EC_GROUP_free(g);
+      end;
+  end;
+end;
+
+const
+  CKA_EVPTYPE: array[TCryptKeyAlgo] of integer = (
+    0,                  // ckaNone
+    EVP_PKEY_RSA,       // ckaRsa
+    EVP_PKEY_RSA_PSS,   // ckaRsaPss
+    EVP_PKEY_EC,        // ckaEcc256
+    EVP_PKEY_EC,        // ckaEcc384
+    EVP_PKEY_EC,        // ckaEcc512
+    EVP_PKEY_EC,        // ckaEcc256k
+    EVP_PKEY_ED25519);  // ckaEdDSA
+
+  CKA_BITSORCURVE: array[TCryptKeyAlgo] of integer = (
+    0,                            // ckaNone
+    RSA_DEFAULT_GENERATION_BITS,  // ckaRsa
+    RSA_DEFAULT_GENERATION_BITS,  // ckaRsaPss
+    NID_X9_62_prime256v1,         // ckaEcc256
+    NID_secp384r1,                // ckaEcc384
+    NID_secp521r1,                // ckaEcc512
+    NID_secp256k1,                // ckaEcc256k
+    0);                           // ckaEdDSA
+
+  CKA_JWK: array[ckaEcc256 .. ckaEcc256k] of RawUtf8 = (
+    'P-256',        // ckaEcc256
+    'P-384',        // ckaEcc384
+    'P-521',        // ckaEcc512
+    'secp256k1');   // ckaEcc256k
+    // 'Ed25519');  // ckaEdDSA is not yet supported nor tested
+
+function OpenSslLoadPublicKeyFromParams(algo: TCryptKeyAlgo;
+  const x, y: RawByteString): PEVP_PKEY;
+begin
+  result := OpenSslLoadPublicKeyFromParams(
+    CKA_EVPTYPE[algo], CKA_BITSORCURVE[algo], x, y);
+end;
+
+function OpenSslLoadPublicKeyFromJwk(const jwk: RawUtf8; algo: TCryptKeyAlgo): PEVP_PKEY;
+var
+  v: TDocVariantData;
+  kty, crv, x, y: RawUtf8;
+  bx, by: RawByteString;
+  i: PtrInt;
+  a: TCryptKeyAlgo;
+begin
+  result := nil;
+  if not v.InitJson(jwk, JSON_FAST) or
+     not v.GetAsRawUtf8('kty', kty) then
+    exit;
+  if kty = 'RSA' then
+  begin
+    if algo = ckaNone then
+      algo := ckaRsa // ckaRsaPss is ignored below anyway
+    else if not (algo in CKA_RSA) then
+      exit;
+    if not v.GetAsRawUtf8('e', x) or   // x = Exponent (e)
+       not v.GetAsRawUtf8('n', y) then // y = Modulus (n)
+      exit;
+  end else if kty = 'EC' then
+  begin
+    if not v.GetAsRawUtf8('crv', crv) or
+       (crv = '') or
+       not v.GetAsRawUtf8('x', x) or
+       not v.GetAsRawUtf8('y', y) then
+      exit;
+    i := FindRawUtf8(CKA_JWK, crv);
+    if i < 0 then
+      exit;
+    a := TCryptKeyAlgo(i + ord(low(CKA_JWK)));
+    if algo = ckaNone then
+      algo := a
+    else if algo <> a then
+      exit;
+  end
+  else
+    exit;
+  if (x = '') or
+     (y = '') or
+     not Base64uriToBin(pointer(x), length(x), bx) or
+     not Base64uriToBin(pointer(y), length(y), by) then
+    exit;
+  result := OpenSslLoadPublicKeyFromParams(algo, bx, by);
 end;
 
 {
@@ -1733,10 +1913,11 @@ constructor TEcc256r1VerifyOsl.Create(const pub: TEccPublicKey);
 begin
   inherited Create(pub);
   EOpenSslAsymmetric.CheckAvailable(PClass(self)^, 'Create');
-  if not NewPrime256v1Key(fKey) or
-     not PublicKeyToPoint(pub, fPoint) or
-     (EC_KEY_set_public_key(fKey, fPoint) <> OPENSSLSUCCESS) then
-    raise EOpenSslAsymmetric.CreateFmt('%s.Create failed', [ClassNameShort(self)^]);
+  if NewPrime256v1Key(fKey) and
+     PublicKeyToPoint(pub, fPoint) then
+    EOpenSslAsymmetric.Check(self, 'Create', EC_KEY_set_public_key(fKey, fPoint))
+  else
+    EOpenSslAsymmetric.CheckFailed(self, 'Create');
 end;
 
 destructor TEcc256r1VerifyOsl.Destroy;
@@ -1771,8 +1952,7 @@ constructor TJwtOpenSsl.Create(const aJwtAlgorithm, aHashAlgorithm: RawUtf8;
 begin
   EOpenSsl.CheckAvailable(PClass(self)^, 'Create');
   if not OpenSslSupports(aGenEvpType) then
-    raise EOpenSsl.CreateFmt('%s.Create: unsupported %s',
-      [ClassNameShort(self)^, aJwtAlgorithm]);
+    EOpenSsl.RaiseFmt(self, 'Create: unsupported %s', [aJwtAlgorithm]);
   fAlgoMd := OpenSslGetMdByName(aHashAlgorithm, 'TJwtOpenSsl.Create');
   fHashAlgorithm := aHashAlgorithm;
   fGenEvpType := aGenEvpType;
@@ -2034,9 +2214,11 @@ begin
      (PublicKeySaved = '') or
      (fPubKey <> nil) then
     exit;
-  fPubKey := LoadPublicKey(X509PubKeyToDer(Algorithm, PublicKeySaved));
+  fPubKey := LoadPublicKey(X509PubKeyToDer(Algorithm, PublicKeySaved)); // DER/PEM
   if fPubKey = nil then
     fPubKey := LoadPublicKey(PublicKeySaved); // try full PKCS format
+  if fPubKey = nil then
+    fPubKey := OpenSslLoadPublicKeyFromJwk(PublicKeySaved, Algorithm); // JWK
   if fPubKey = nil then
     exit;
   fKeyAlgo := Algorithm;
@@ -2053,12 +2235,14 @@ end;
 function TCryptPublicKeyOpenSsl.GetParams(out x, y: RawByteString): boolean;
 begin
   result := true;
-  if fKeyAlgo in CKA_ECC then
-    fPubKey.EccGetPubKeyUncompressed(x, y)
-  else if fKeyAlgo in CKA_RSA then
-    fPubKey.RsaGetPubKey(x, y)
+  case fKeyAlgo of
+    ckaEcc256, ckaEcc384, ckaEcc512, ckaEcc256k:
+      fPubKey.EccGetPubKeyUncompressed(x, y);
+    ckaRsa, ckaRsaPss:
+      fPubKey.RsaGetPubKey(x, y);
   else
-    result := false;
+    result := false; // ckaEdDSA is unsupported (yet)
+  end;
 end;
 
 function TCryptPublicKeyOpenSsl.Seal(const Message: RawByteString;
@@ -3002,11 +3186,17 @@ begin
 end;
 
 function TCryptCertOpenSsl.GetKeyParams(out x, y: RawByteString): boolean;
+var
+  a: TCryptAsymAlgo;
 begin
   result := true;
-  if AsymAlgo in CAA_ECC then
-    fPrivKey.EccGetPubKeyUncompressed(x, y)
-  else if AsymAlgo in CAA_RSA then
+  a := AsymAlgo;
+  if a in CAA_ECC then
+    if a = caaEdDSA then
+      result := false // unsupported (yet)
+    else
+      fPrivKey.EccGetPubKeyUncompressed(x, y)
+  else if a in CAA_RSA then
     fPrivKey.RsaGetPubKey({e=}x, {n=}y)
   else
     result := false;
@@ -3228,8 +3418,7 @@ begin
     exit;
   r := FromReason(Reason);
   if r = CRL_REASON_NONE then
-    raise EOpenSslCert.CreateFmt(
-      'TCryptStoreOpenSsl.Revoke: unsupported %s', [ToText(Reason)^]);
+    EOpenSslCert.RaiseFmt(self, 'Revoke: unsupported %s', [ToText(Reason)^]);
   c := fStore.MainCrlAcquired;
   if c <> nil then
     try

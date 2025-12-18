@@ -106,8 +106,8 @@ type
   public
     /// the compression algorithms currently registered
     Algo: THttpSocketCompressRecDynArray;
-    /// the 'Accept-Encoding:' header value corresponding to Algo[]
-    AcceptEncoding: RawUtf8;
+    /// the 'Accept-Encoding:' client header value corresponding to Algo[]
+    AcceptEncodingClient: RawUtf8;
     /// enable a give compression function for a HTTP link
     // - returns the newly added record in the Compress.Algo[] list
     // - returns nil if this algorithm was already defined, updating existing
@@ -3070,7 +3070,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeValue(P, UpperName, Value, @P) then
         exit;
@@ -3085,7 +3086,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeCardinal(P, UpperName, Value, @P) then
         exit;
@@ -3100,7 +3102,8 @@ begin
   if P <> nil then
   begin
     result := true;
-    inc(P);
+    if P^ = '?' then
+      inc(P);
     repeat
       if UrlDecodeInt64(P, UpperName, Value, @P) then
         exit;
@@ -3207,10 +3210,10 @@ begin
   result^.Func := @CompFunction;
   result^.CompressMinSize := CompMinSize;
   result^.Priority := (CompPriority shl 14) or n; // by CompPriority, then call order
-  if AcceptEncoding = '' then
-    Join(['Accept-Encoding: ', name], AcceptEncoding)
+  if AcceptEncodingClient = '' then
+    Join(['Accept-Encoding: ', name], AcceptEncodingClient)
   else
-    Append(AcceptEncoding, ',', name);
+    Append(AcceptEncodingClient, ',', name); // transmit algos as CSV
   DynArray(TypeInfo(THttpSocketCompressRecDynArray), Algo).Sort(ByPriority);
 end;
 
@@ -3652,7 +3655,7 @@ end;
 
 var
   _GETVAR, _POSTVAR, _HEADVAR: RawUtf8;
-const
+const // inlined IsHead() function
   _HEAD32 = ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
 
 function THttpRequestContext.ParseCommand: boolean;
@@ -3991,20 +3994,20 @@ function THttpRequestContext.CompressContentAndFinalizeHead(
 var
   date: TShort31;
 begin
-  // same logic than THttpSocket.CompressDataAndWriteHeaders below
-  if (integer(CompressAcceptHeader) <> 0) and
-     (CompressList <> nil) and
-     (ContentStream = nil) then // no stream compression (yet)
-    ContentEncoding := CompressList^.CompressContent(
-                         CompressAcceptHeader, ContentType, Content);
   // DoRequest will use Head buffer by default (and send the body separated)
   result := @Head;
   // handle response body with optional range support
   if (rfAcceptRange in ResponseFlags) and
       not (hhAcceptRangeBytes in HeadCustom) then
     result^.AppendShort('Accept-Ranges: bytes'#13#10);
-  if ContentStream = nil then
+  if ContentStream = nil then // <> nil e.g. for rfProgressiveStatic
   begin
+    // same logic than THttpSocket.CompressDataAndWriteHeaders below
+    if (integer(CompressAcceptHeader) <> 0) and
+       (CompressList <> nil) and
+       (Content <> '') then // no stream compression (yet)
+      ContentEncoding := CompressList^.CompressContent(
+                           CompressAcceptHeader, ContentType, Content);
     fContentPos := pointer(Content); // for ProcessBody below
     ContentLength := length(Content);
     if rfWantRange in ResponseFlags then
@@ -4063,13 +4066,6 @@ begin
   begin
     if rfHttp10 in ResponseFlags then // implicit with HTTP/1.1
       result^.AppendShort('Connection: Keep-Alive'#13#10);
-    if (CompressList <> nil) and
-       (CompressList^.AcceptEncoding <> '') and
-       not (hhAcceptEncoding in HeadCustom) then
-    begin
-      result^.Append(CompressList^.AcceptEncoding);
-      result^.AppendCRLF;
-    end;
     result^.AppendCRLF; // end with a void line
   end;
   // try to send both headers and body in a single socket syscall
@@ -4803,7 +4799,6 @@ begin
     AppendLine(fOutCustomHeaders, [STATICFILE_PROGSIZE + ' ', ExpectedFileSize]);
 end;
 
-
 function THttpServerRequestAbstract.SetOutContent(const Content: RawByteString;
   Handle304NotModified: boolean; const ContentType: RawUtf8;
   CacheControlMaxAgeSec: integer): cardinal;
@@ -5394,11 +5389,11 @@ begin
   // caller made fWriterHostSafe.Lock
   fWriterHostMain := THttpLoggerWriter.Create(self, '',
     {error=}false, fSettings.DefaultRotate, fSettings.DefaultRotateFiles);
-  ObjArrayAdd(fWriterHost, fWriterHostMain);
+  PtrArrayAdd(fWriterHost, fWriterHostMain);
   // DefineHost() filters '!' so error.log has a fake name for debugging
   fWriterHostError := THttpLoggerWriter.Create(self, '!error.log!',
     {error=}true, fSettings.DefaultRotate, fSettings.DefaultRotateFiles);
-  ObjArrayAdd(fWriterHost, fWriterHostError);
+  PtrArrayAdd(fWriterHost, fWriterHostError);
 end;
 
 function THttpLogger.GetWriter(Tix32: cardinal;
@@ -5518,7 +5513,7 @@ begin
     if aRotateFiles < 0 then
       aRotateFiles := fSettings.DefaultRotateFiles;
     w := THttpLoggerWriter.Create(self, h, {err=}false, aRotate, aRotateFiles);
-    ObjArrayAdd(fWriterHost, w);
+    PtrArrayAdd(fWriterHost, w);
     include(fFlags, ffHadDefineHost);
   finally
     fWriterHostSafe.UnLock;
@@ -6508,7 +6503,7 @@ constructor THttpAnalyzerPersistAbstract.CreateOwned(aOwner: THttpAnalyzer);
 begin
   Create(''); // Rotate.FileName will be set in OnSave() from fOwner.DestFolder
   fRotate.Trigger := hrtDaily;
-  ObjArrayAdd(aOwner.fPersisters, self);
+  PtrArrayAdd(aOwner.fPersisters, self);
   fOnContinue := aOwner.fOnSave;
   aOwner.fOnSave := OnSave;
   fOwner := aOwner;

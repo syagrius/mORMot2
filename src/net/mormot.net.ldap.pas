@@ -92,30 +92,42 @@ type
   TCldapDomainFlags = set of TCldapDomainFlag;
 
   /// the domain information returned by CldapGetDomainInfo(
+  {$ifdef USERECORDWITHMETHODS}
   TCldapDomainInfo = record
+  {$else}
+  TCldapDomainInfo = object
+  {$endif USERECORDWITHMETHODS}
+  public
     RawLogonType, RawFlags, NTVersion: cardinal;
     LogonType: TCldapDomainLogonType;
     Flags: TCldapDomainFlags;
     Guid: TGuid;
     Forest, Domain, HostName, NetbiosDomain, NetbiosHostname: RawUtf8;
     Unk, User, IP, ServerSite, ClientSite: RawUtf8;
+    /// return most domain information fields as high-level TDocVariant object
+    function ToVariant: variant;
   end;
+  /// pointer to domain information as returned by CldapGetDomainInfo()
+  PCldapDomainInfo = ^TCldapDomainInfo;
 
 /// send a CLDAP NetLogon message to a LDAP server over UDP to retrieve all
 // information of the domain
 function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
   const DomainName, LdapServerAddress: RawUtf8;
-  const LdapServerPort: RawUtf8 = LDAP_PORT): boolean;
+  const LdapServerPort: RawUtf8 = ''): boolean;
 
 /// retrieve the LDAP 'server:port' corresponding of a given AD Domain Name
 // - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
 // TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
 // - this is the safest approach for a client, safer than CldapBroadcast()
-// or CldapSortHosts() / DnsLdapControlersSorted()
+// or CldapSortHosts() / DnsLdapControllersSorted()
+// - if Info is set, it will call a CLDAP NetLogon message to each random LDAP
+// server over UDP, to ensure the returned one is actually available
 // - as used with default lccCldap option for TLdapClient.Connect with a
 // ForcedDomainName
 function CldapGetLdapController(const DomainName: RawUtf8;
-  const NameServer: RawUtf8 = ''; TimeOutMS: integer = 500): RawUtf8;
+  const NameServer: RawUtf8 = ''; TimeOutMS: integer = 500;
+  Info: PCldapDomainInfo = nil): RawUtf8;
 
 /// retrieve the LDAP 'server:port' corresponding to the running computer
 // - will send CLDAP NetLogon messages to the known LDAP server(s) to retrieve
@@ -123,28 +135,44 @@ function CldapGetLdapController(const DomainName: RawUtf8;
 // - if no NameServer is supplied, will use GetDnsAddresses - note that NameServer
 // is expected to be an IPv4 address, maybe prefixed as 'tcp@1.2.3.4' to force TCP
 // - this is the safest approach for a client, safer than CldapBroadcast()
-// or CldapSortHosts() / DnsLdapControlersSorted()
+// or CldapSortHosts() / DnsLdapControllersSorted()
+// - if Info is set, it will call a CLDAP NetLogon message to each random LDAP
+// server over UDP, to ensure the returned one is actually available
 // - as used with default lccCldap option for TLdapClient.Connect with no
 // ForcedDomainName
 function CldapMyLdapController(const NameServer: RawUtf8 = '';
   UsePosixEnv: boolean = false; DomainName: PRawUtf8 = nil;
-  TimeOutMS: integer = 500): RawUtf8;
+  TimeOutMS: integer = 500; Info: PCldapDomainInfo = nil): RawUtf8;
 
 /// retrieve the default LDAP 'server:port'
 // - if ForcedDomainName global variable is set, calls CldapGetLdapController()
 // - otherwise, calls CldapMyLdapController()
 // - can optionally return the associated Domain Name and Service Principal Name
+// - if Info is set, it will call a CLDAP NetLogon message to each random LDAP
+// server over UDP, to ensure the returned controller is actually available
 // - as used by TLdapClient.Connect in lccCldap discover mode
-function CldapGetDefaultLdapController(
-  DistinguishedName: PRawUtf8 = nil; SPN: PRawUtf8 = nil): RawUtf8;
+function CldapGetDefaultLdapController(DistinguishedName: PRawUtf8 = nil;
+  SPN: PRawUtf8 = nil; Info: PCldapDomainInfo = nil; TimeOutMS: integer = 500): RawUtf8;
 
-/// pickup the preferred LDAP 'server:port' of a set of LDAP servers
-// - will send CLDAP NetLogon messages to the LdapServers to retrieve
-// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
-// - if no site is defined, fallback to the first known LDAP server
+/// pickup a preferred LDAP 'server:port' of a set of LDAP servers
+// - will send CLDAP NetLogon messages to the LdapServers[] to retrieve
+// TCldapDomainInfo.ClientSite then request the DNS for the LDAP(s) of this site,
+// then pickout a random LDAP server from this site
+// - if no site is defined, fallback to the a random LDAP server
 // - as used by CldapGetLdapController() and CldapMyLdapController()
+// - if Info is set, it will call a CLDAP NetLogon message to each random LDAP
+// server over UDP, to ensure the returned one is actually available
 function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
-  const DomainName, NameServer: RawUtf8; TimeOutMS: integer = 500): RawUtf8;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer = 500;
+  Info: PCldapDomainInfo = nil): RawUtf8;
+
+/// return all preferred LDAP 'server:port' of a set of LDAP servers
+// - will send CLDAP NetLogon messages to the LdapServers[] to retrieve
+// TCldapDomainInfo.ClientSite then request the DNS for the LDAP of this site
+// - if no site is defined, returns LdapServers[] itself
+// - as used by CldapGetBestLdapController(), which takes a random from result
+function CldapGetBestLdapControllers(const LdapServers: TRawUtf8DynArray;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer): TRawUtf8DynArray;
 
 type
   /// define one result for a server identified by CldapBroadcast()
@@ -188,7 +216,7 @@ function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer = 100;
   const Address: RawUtf8 = cBroadcast; const Port: RawUtf8 = LDAP_PORT): integer;
 
 /// sort some LDAP host names using CLDAP over UDP
-// - expects Hosts in 'host:port' format, as returned by DnsLdapControlers,
+// - expects Hosts in 'host:port' format, as returned by DnsLdapControllers,
 // e.g. ['dc-one.mycorp.com:389', 'dc-two.mycorp.com:389']
 // - hosts not available over UDP within MinimalUdpCount or the TimeoutMS period,
 // are put at the end of the list because they may still be reachable via TCP
@@ -196,12 +224,12 @@ function CldapBroadcast(var Servers: TCldapServers; TimeOutMS: integer = 100;
 procedure CldapSortHosts(var Hosts: TRawUtf8DynArray;
   TimeoutMS, MinimalUdpCount: integer);
 
-/// retrieve the LDAP controlers sorted by UDP response time
-// - just a wrapper around DnsLdapControlers() and CldapSortHosts()
+/// retrieve the LDAP controllers sorted by UDP response time
+// - just a wrapper around DnsLdapControllers() and CldapSortHosts()
 // - won't sort by UDP response time if UdpFirstDelayMS = 0
 // - used e.g. by TLdapClient.Connect() with the lccClosest option
 // - a safer approach may be to use CldapGetLdapController/CldapMyLdapController
-function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
+function DnsLdapControllersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
   const NameServer: RawUtf8 = ''; UsePosixEnv: boolean = false;
   DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
 
@@ -1858,7 +1886,7 @@ type
       read GetTargetUri write SetTargetUri;
   published
     /// target server IP (or symbolic name)
-    // - default is '' but if not set, Connect will call DnsLdapControlers()
+    // - default is '' but if not set, Connect will call DnsLdapControllers()
     // from mormot.net.dns to retrieve the current value from the system
     // - after connect, will contain the actual server name
     // - typical value is 'dc-one.mycorp.com'
@@ -2024,7 +2052,7 @@ type
     /// try to connect to LDAP server at socket level
     // - without any authentication: consider using Bind/BindSaslKerberos instead
     // - if no TargetHost/TargetPort/FullTls has been set, will try the OS
-    // DnsLdapControlers() hosts (from mormot.net.dns) following DiscoverMode
+    // DnsLdapControllers() hosts (from mormot.net.dns) following DiscoverMode
     // - do nothing if was already connected
     function Connect(DiscoverMode: TLdapClientConnect = [lccCldap, lccTlsFirst];
       DelayMS: integer = 500): boolean;
@@ -2113,7 +2141,7 @@ type
     /// authenticate a client to the directory server using Kerberos
     // - if no Settings.UserName/Password has been set, will try current logged user
     // - uses GSSAPI and mormot.lib.gssapi/sspi to perform a safe authentication
-    // - if no SPN is supplied, derivate one from Connect's DnsLdapControlers()
+    // - if no SPN is supplied, derivate one from Connect's DnsLdapControllers()
     // - can optionally return the KerberosUser which made the authentication
     function BindSaslKerberos(const AuthIdentify: RawUtf8 = '';
       KerberosUser: PRawUtf8 = nil): boolean;
@@ -2757,7 +2785,28 @@ type
 
 implementation
 
+
 { **************** CLDAP Client Functions }
+
+function TCldapDomainInfo.ToVariant: variant;
+begin
+  VarClear(result);
+  TDocVariantData(result).InitObject([
+    'nt_version',       NTVersion,
+    'logon_type',       GetEnumNameTrimed(TypeInfo(TCldapDomainLogonType), ord(LogonType)),
+    'flags',            GetSetName(TypeInfo(TCldapDomainFlags), Flags, {trimmed=}true),
+    'guid',             GuidToRawUtf8(Guid),
+    'forest',           Forest,
+    'domain',           Domain,
+    'host_name',        HostName,
+    'netbios_domain',   NetbiosDomain,
+    'netbios_hostname', NetbiosHostname,
+    'unk',              Unk,
+    'user',             User,
+    'ip',               IP,
+    'server_site',      ServerSite,
+    'client_site',      ClientSite]);
+end;
 
 const
   NTVER: RawUtf8 = '\06\00\00\00'; // RawLdapTranslateFilter() does UnescapeHex()
@@ -2767,7 +2816,7 @@ function CldapGetDomainInfo(var Info: TCldapDomainInfo; TimeOutMS: integer;
 var
   id, len: integer;
   i: PtrInt;
-  filter, v: RawUtf8;
+  srv, port, filter, v: RawUtf8;
   req, response: RawByteString;
   addr, resp: TNetAddr;
   sock: TNetSocket;
@@ -2775,7 +2824,13 @@ var
 begin
   RecordZero(@Info, TypeInfo(TCldapDomainInfo));
   result := false;
-  if addr.SetFrom(LdapServerAddress, LdapServerPort, nlUdp) <> nrOk then
+  srv := LdapServerAddress;
+  port := LdapServerPort;
+  if port = '' then
+    Split(LdapServerAddress, ':', srv, port);
+  if port = '' then
+    port := LDAP_PORT;
+  if addr.SetFrom(srv, port, nlUdp) <> nrOk then
     exit;
   sock := addr.NewSocket(nlUdp);
   if sock <> nil then
@@ -2823,13 +2878,12 @@ begin
   end;
 end;
 
-function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
-  const DomainName, NameServer: RawUtf8; TimeOutMS: integer): RawUtf8;
+function CldapGetBestLdapControllers(const LdapServers: TRawUtf8DynArray;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer): TRawUtf8DynArray;
 var
   i: PtrInt;
   h, p, n: RawUtf8;
   info: TCldapDomainInfo;
-  res: TRawUtf8DynArray;
 begin
   for i := 0 to length(LdapServers) - 1 do
   begin
@@ -2838,53 +2892,69 @@ begin
        (info.ClientSite <> '') then
     begin
       FormatUtf8('_ldap._tcp.%._sites.%', [info.ClientSite, DomainName], n);
-      res := DnsServices(n, NameServer);
-      if res <> nil then
-      begin
-        result := res[Random32(length(res))]; // return a matching site
-        exit;
-      end;
+      result := DnsServices(n, NameServer);
+      if result <> nil then
+        exit; // we found some controllers assigned to our specific site
     end;
   end;
-  if LdapServers <> nil then // if no site is defined, use one of the servers
-    result := LdapServers[Random32(length(LdapServers))]
-  else
+  result := LdapServers; // if no site is defined, return all the servers
+end;
+
+function CldapGetBestLdapController(const LdapServers: TRawUtf8DynArray;
+  const DomainName, NameServer: RawUtf8; TimeOutMS: integer;
+  Info: PCldapDomainInfo): RawUtf8;
+var
+  res: TRawUtf8DynArray;
+  i: PtrInt;
+begin
+  res := CldapGetBestLdapControllers(LdapServers, DomainName, NameServer, TimeOutMS);
+  repeat
     result := '';
+    if res = nil then
+      exit; // no server to return
+    i := Random32(length(res));
+    result := res[i];
+    if (Info = nil) or
+       CldapGetDomainInfo(Info^, TimeOutMS, DomainName, result) then
+      exit; // we found a valid server
+    DeleteRawUtf8(res, i);
+  until false;
 end;
 
 function CldapGetLdapController(const DomainName, NameServer: RawUtf8;
-  TimeOutMS: integer): RawUtf8;
+  TimeOutMS: integer; Info: PCldapDomainInfo): RawUtf8;
 var
   ldap: TRawUtf8DynArray;
 begin
   ldap := DnsLdapServices(DomainName, NameServer);
-  result := CldapGetBestLdapController(ldap, DomainName, NameServer, TimeOutMS);
+  result := CldapGetBestLdapController(ldap, DomainName, NameServer, TimeOutMS, Info);
 end;
 
 function CldapMyLdapController(const NameServer: RawUtf8; UsePosixEnv: boolean;
-  DomainName: PRawUtf8; TimeOutMS: integer): RawUtf8;
+  DomainName: PRawUtf8; TimeOutMS: integer; Info: PCldapDomainInfo): RawUtf8;
 var
   ldap: TRawUtf8DynArray;
   dn: RawUtf8;
 begin
-  ldap := DnsLdapControlers(NameServer, UsePosixEnv, @dn);
-  result := CldapGetBestLdapController(ldap, dn, NameServer, TimeOutMS);
+  ldap := DnsLdapControllers(NameServer, UsePosixEnv, @dn);
+  result := CldapGetBestLdapController(ldap, dn, NameServer, TimeOutMS, Info);
   if (result <> '') and
      (DomainName <> nil) then
     DomainName^ := dn;
 end;
 
-function CldapGetDefaultLdapController(DistinguishedName, Spn: PRawUtf8): RawUtF8;
+function CldapGetDefaultLdapController(DistinguishedName, Spn: PRawUtf8;
+  Info: PCldapDomainInfo; TimeOutMS: integer): RawUtf8;
 var
   domain: RawUtf8;
 begin
   if ForcedDomainName <> '' then
   begin
     domain := ForcedDomainName;
-    result := CldapGetLdapController(ForcedDomainName, '', 500);
+    result := CldapGetLdapController(ForcedDomainName, '', TimeOutMS, Info);
   end
   else
-    result := CldapMyLdapController('', false, @domain);
+    result := CldapMyLdapController('', false, @domain, TimeOutMS, Info);
   if result = '' then
     exit;
   if DistinguishedName <> nil then
@@ -3048,11 +3118,11 @@ begin
   Hosts := sorted;
 end;
 
-function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
+function DnsLdapControllersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
   const NameServer: RawUtf8; UsePosixEnv: boolean;
   DomainName: PRawUtf8): TRawUtf8DynArray;
 begin
-  result := DnsLdapControlers(NameServer, UsePosixEnv, DomainName);
+  result := DnsLdapControllers(NameServer, UsePosixEnv, DomainName);
   if UdpFirstDelayMS > 0 then
     CldapSortHosts(result, UdpFirstDelayMS, MinimalUdpCount);
 end;
@@ -5817,6 +5887,7 @@ var
   dc: TRawUtf8DynArray;
   h, p: RawUtf8;
   i: PtrInt;
+  nfo: TCldapDomainInfo;
   log: ISynLog;
 begin
   result := fSock <> nil;
@@ -5834,21 +5905,26 @@ begin
     end
     else
     begin
-      // try all LDAP servers from OS list
+      // try all LDAP servers from OS list with optional CLDAP/DNS discovery
       if ForcedDomainName = '' then
         ForcedDomainName := fSettings.KerberosDN; // may be pre-set
       if lccCldap in DiscoverMode then
       begin
-        h := CldapGetDefaultLdapController(
-          @fSettings.fKerberosDN, @fSettings.fKerberosSpn);
+        h := CldapGetDefaultLdapController(@fSettings.fKerberosDN,
+          @fSettings.fKerberosSpn, @nfo, DelayMS);
         if h <> '' then
+        begin
           AddRawUtf8(dc, h);
+          if Assigned(log) then
+            log.Log(sllTrace, 'Connect(lccCldap): default to %',
+              [nfo.ToVariant], self);
+        end;
       end;
       if dc = nil then
       begin
         if not (lccClosest in DiscoverMode) then
           DelayMS := 0; // disable CldapSortHosts()
-        dc := DnsLdapControlersSorted(
+        dc := DnsLdapControllersSorted(
           DelayMS, {MinimalUdpCount=}0, '', false, @fSettings.fKerberosDN);
       end;
       if dc = nil then
@@ -5866,7 +5942,7 @@ begin
   for i := 0 to high(dc) do
     try
       Split(dc[i], ':', h, p);
-      if fSettings.TargetHost = '' then // not from DnsLdapControlers
+      if fSettings.TargetHost = '' then // not from DnsLdapControllers
       begin
         if (lccTlsFirst in DiscoverMode) and
            HasOpenSsl and // SChannel seems to have troubles with LDAP TLS

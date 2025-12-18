@@ -1364,7 +1364,8 @@ type
     function ConsoleHelpFailed(const exedescription: RawUtf8 = ''): boolean;
     /// fill the stored arguments and options from executable parameters
     // - called e.g. at unit inialization to set Executable.CommandLine variable
-    // - you can execute it again e.g. to customize the switches characters
+    // - you can execute it again e.g. to customize the switches characters -
+    // but to be done at startup, before any Option() or Param() methods
     function Parse(const DescriptionLineFeed: RawUtf8 = CRLF;
       const ShortSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '-' {$endif};
       const LongSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '--' {$endif}): boolean;
@@ -1547,6 +1548,10 @@ var
 /// try to retrieve the file name of the executable/library holding a function
 // - calls dladdr() on POSIX, or GetModuleFileName() on Windows
 function GetExecutableName(aAddress: pointer): TFileName;
+
+/// check if a function address is known within the main executable module
+// - calls dladdr() on POSIX, or GetModuleHandleEx() on Windows
+function IsMainExecutable(aAddress: pointer): boolean;
 
 var
   /// retrieve the MAC addresses of all hardware network adapters
@@ -3746,6 +3751,7 @@ function ConsoleReadBody: RawByteString;
 {$ifdef OSWINDOWS}
 
 /// low-level access to the keyboard state of a given key
+// - will consume all pending console events until this key is pressed (or not)
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
 type
@@ -5277,7 +5283,7 @@ var
   WindowsServiceLog: TSynLogProc;
 
 type
-  /// TServiceControler class is intended to create a new Windows Service instance
+  /// TServiceController class is intended to create a new Windows Service instance
   // or to maintain (that is start, stop, pause, resume...) an existing Service
   // - to provide the service itself, use the TService class
   TServiceController = class
@@ -5487,10 +5493,10 @@ type
     /// this is the main method, in which the Service should implement its run
     procedure Execute; virtual;
 
-    /// Number of arguments passed to the service by the service controler
+    /// Number of arguments passed to the service by the service controller
     property ArgCount: integer
       read GetArgCount;
-    /// List of arguments passed to the service by the service controler
+    /// List of arguments passed to the service by the service controller
     // - Idx is in range 0..ArgCount - 1
     property Args[Idx: integer]: RawUtf8
       read GetArgs;
@@ -8196,8 +8202,7 @@ constructor TSynMemoryStreamMapped.Create(aFile: THandle;
   aCustomSize: PtrUInt; aCustomOffset: Int64);
 begin
   if not fMap.Map(aFile, aCustomSize, aCustomOffset) then
-    raise EOSException.CreateFmt('%s.Create(%s) mapping error',
-      [ClassNameShort(self)^, fFileName]);
+    EOSException.RaiseFmt(self, 'Create(%s) mapping error', [fFileName]);
   inherited Create(fMap.fBuf, fMap.fBufSize);
 end;
 
@@ -8940,7 +8945,8 @@ begin
     dt := FileAgeToDateTime(ProgramFileName);
     {$else}
     dt := 0;
-    ProgramFileName := GetExecutableName(@InitializeProcessInfo);
+    dladdr(@InitializeProcessInfo, @PosixProgramInfo);
+    GetDlInfoName(PosixProgramInfo, ProgramFileName);
     if ProgramFileName <> '' then
     begin
       dt := FileAgeToDateTime(ProgramFileName);
@@ -8949,6 +8955,7 @@ begin
     end;
     if ProgramFileName = '' then
       ProgramFileName := ExpandFileName(ParamStr(0));
+    crcblock(@SystemEntropy.Startup, @PosixProgramInfo); // won't hurt
     {$endif OSWINDOWS}
     ProgramFilePath := ExtractFilePath(ProgramFileName);
     if IsLibrary then
@@ -9529,6 +9536,9 @@ begin
     for i := 0 to n - 1 do
       fRawParams[i] := RawUtf8(ParamStr(i + 1));
   end;
+  Finalize(fNames);
+  Finalize(fValues);
+  Finalize(fRetrieved);
   n := length(fRawParams);
   if n = 0 then
   begin

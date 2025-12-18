@@ -577,11 +577,12 @@ type
     // - if AlsoTrimLowerCase is TRUE, and EnumName does not start with
     // lowercases 'a'..'z', they will be ignored: e.g. GetEnumNameValue('Warning')
     // will find sllWarning item
+    // - will also accept JSON '"string"' as input as if it were 'string'
     // - return -1 if not found, or if RTTI's MinValue is not 0
-    function GetEnumNameValue(Value: PUtf8Char; ValueLen: integer;
+    function GetEnumNameValue(Value: PUtf8Char; ValueLen: PtrInt;
       AlsoTrimLowerCase: boolean = true): integer; overload;
     /// get the corresponding enumeration ordinal value, from its trimmed name
-    function GetEnumNameValueTrimmed(Value: PUtf8Char; ValueLen: integer;
+    function GetEnumNameValueTrimmed(Value: PUtf8Char; ValueLen: PtrInt;
       CaseSensitive: boolean): integer;
     /// get the corresponding enumeration name, without the first lowercase chars
     // (otDone -> 'Done')
@@ -847,7 +848,7 @@ type
     function RttiOrd: TRttiOrd;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for ordinal types, get the 64-bit integer value from text
-    // - supports integer numbers but also enums and sets as CSV text
+    // - supports integer numbers but also enums and sets as CSV/JSON text
     function OrdFromText(const Text: RawUtf8; out Value: Int64): boolean;
     /// return TRUE if the property is an unsigned 64-bit field (QWord/UInt64)
     function IsQWord: boolean;
@@ -1742,7 +1743,8 @@ procedure SetNamesValue(SetNames: PShortString; MinValue, MaxValue: integer;
 
 /// helper to parse some CSV values into a set, returned as 64-bit
 // - CSV could be separated by any non identifier char, e.g. ',' ';' or '|'
-// - see also GetSetNameValue() in mormot.core.json.pas for parsing a JSON array
+// - would also properly parse a JSON array like ["one","two"] - see also
+// GetSetNameValue() in mormot.core.json.pas for parsing only a JSON array
 function GetSetCsvValue(aTypeInfo: PRttiInfo; Csv: PUtf8Char): QWord;
 
 /// helper to retrieve all (translated) caption texts of an enumerate
@@ -3779,24 +3781,32 @@ begin
   result := GetEnumNameValue(Value, StrLen(Value));
 end;
 
-function TRttiEnumType.GetEnumNameValue(Value: PUtf8Char; ValueLen: integer;
+function TRttiEnumType.GetEnumNameValue(Value: PUtf8Char; ValueLen: PtrInt;
   AlsoTrimLowerCase: boolean): integer;
 begin
-  if (@self <> nil) and
-     (Value <> nil) and
-     (ValueLen > 0) and
-     (MinValue = 0) then
+  result := -1;
+  if (@self = nil) or
+     (Value = nil) or
+     (ValueLen <= 0) or
+     (MinValue <> 0) then
+    exit;
+  if Value^ = '"' then // support JSON "string" as input
   begin
-    result := FindShortStringListExact(NameList, MaxValue, Value, ValueLen);
-    if (result < 0) and
-       AlsoTrimLowerCase then
-      result := FindShortStringListTrimLowerCase(NameList, MaxValue, Value, ValueLen);
-  end
-  else
-    result := -1;
+    inc(Value);
+    dec(ValueLen);
+    if (ValueLen > 0) and
+       (Value[ValueLen - 1] = '"') then
+      dec(ValueLen);
+    if ValueLen = 0 then
+      exit;
+  end;
+  result := FindShortStringListExact(NameList, MaxValue, Value, ValueLen);
+  if (result < 0) and
+     AlsoTrimLowerCase then
+    result := FindShortStringListTrimLowerCase(NameList, MaxValue, Value, ValueLen);
 end;
 
-function TRttiEnumType.GetEnumNameValueTrimmed(Value: PUtf8Char; ValueLen: integer;
+function TRttiEnumType.GetEnumNameValueTrimmed(Value: PUtf8Char; ValueLen: PtrInt;
   CaseSensitive: boolean): integer;
 begin
   if (@self <> nil) and
@@ -3905,11 +3915,18 @@ var
   j, max: PtrInt;
   PS: PShortString;
 begin
-  W.Add('[');
+  if QuoteChar <> #0 then
+    W.Add('[');
   if FullSetsAsStar and
      (MinValue = 0) and
      GetAllBits(Value, MaxValue + 1) then
-    W.AddDirect('"', '*', '"')
+  begin
+    if QuoteChar <> #0 then
+      W.AddDirect(QuoteChar);
+    W.AddDirect('*');
+    if QuoteChar <> #0 then
+      W.AddDirect(QuoteChar);
+  end
   else
   begin
     PS := NameList;
@@ -3935,7 +3952,10 @@ begin
       inc(PByte(PS), ord(PS^[0]) + 1); // next item
     end;
   end;
-  W.CancelLastComma(']');
+  if QuoteChar <> #0 then
+    W.CancelLastComma(']')
+  else
+    W.CancelLastComma;
 end;
 
 function TRttiEnumType.GetSetNameJsonArray(Value: cardinal; SepChar: AnsiChar;
@@ -4024,17 +4044,25 @@ begin // caller should have verified that Kind in rkOrdinalTypes
   if ToInt64(Text, Value) or // ordinal field from number
      (IsBoolean and  // also FPC rkBool
       GetInt64Bool(pointer(Text), Value)) then // boolean from true/false/yes/no
-  else if Text= '' then
+  else if Text = '' then
     exit
-  else if Kind = rkEnumeration then // enumerate field from text
-  begin
-    Value := GetEnumNameValue(@self, Text, {trimlowcase=}true);
-    if Value < 0 then
-      exit; // not a text enum
-  end else if Kind = rkSet then
-    Value := GetSetCsvValue(@self, pointer(Text))
   else
-    exit;
+    case Kind of
+      rkEnumeration: // enumerate field from text/"text"
+        begin
+          Value := GetEnumNameValue(@self, Text, {trimlowcase=}true);
+          if Value < 0 then
+            exit; // not a text enum
+        end;
+      rkSet: // CSV or JSON array
+        Value := GetSetCsvValue(@self, pointer(Text));
+      rkInt64 {$ifdef FPC} , rkQWord {$endif}: // JSON "hexa64" input
+        if (Text[1] <> '"') or
+           not HexDisplayToInt64(PAnsiChar(pointer(Text)) + 1, Value) then
+          exit;
+    else
+      exit;
+    end;
   result := true;
 end;
 
@@ -4587,7 +4615,7 @@ begin
     exit;
   k := TypeInfo^.Kind;
   if k in rkOrdinalTypes then
-    if TypeInfo^.OrdFromText(Value, v) then
+    if TypeInfo^.OrdFromText(Value, v) then // integer but also enum/set idents
       SetInt64Value(Instance, v)
     else
       exit
@@ -5759,7 +5787,7 @@ begin
   for i := 0 to high(nested) do
     with nested[i]^ do
       if TypeInfo^.InheritsFrom(PropClassType) then
-        ObjArrayAdd(result, GetObjProp(Instance));
+        PtrArrayAdd(result, GetObjProp(Instance));
 end;
 
 function ClassFieldPropInstanceMatchingClass(
@@ -6365,6 +6393,15 @@ begin
      (aTypeInfo^.SetEnumType(names, min, max) <> nil) and
      (Csv <> nil) then
   repeat
+    while not (tcIdentifier in TEXT_CHARS[Csv^]) do
+      case Csv^ of
+        #0:
+          exit;
+        '*':
+          break;
+      else
+        inc(Csv); // ignore e.g. ',' ';' '|' or leading/trailing '"' '[' ']'
+      end;
     start := Csv;
     if Csv^ = '*' then
       inc(Csv)
@@ -6372,11 +6409,6 @@ begin
       while tcIdentifier in TEXT_CHARS[Csv^] do
         inc(Csv);
     SetNamesValue(names, min, max, start, Csv - start, result);
-    while not (tcIdentifier in TEXT_CHARS[Csv^]) do
-      if Csv^ = #0 then
-        exit
-      else
-        inc(Csv); // ignore e.g. ',' ';' or '|'
   until false;
 end;
 
@@ -9723,7 +9755,7 @@ begin
       nested.SetPropsFromText(P, ee, NoRegister); // before NoRttiSetAndRegister()
       nested.NoRttiSetAndRegister(ptRecord, '', NoRegister);
       if NoRegister then
-        ObjArrayAdd(Rtti.fOwnedRtti, nested);
+        PtrArrayAdd(Rtti.fOwnedRtti, nested);
       if pt = ptRecord then
         // rec: record .. end  or  rec: { ... }
         c := nested
@@ -9741,7 +9773,7 @@ begin
       c.fArrayRtti := ac; // before NoRttiSetAndRegister()
       c.NoRttiSetAndRegister(ptDynArray, typname, NoRegister);
       if NoRegister then
-        ObjArrayAdd(Rtti.fOwnedRtti, c);
+        PtrArrayAdd(Rtti.fOwnedRtti, c);
     end;
     // set type for all prop[]
     for i := 0 to propcount - 1 do
@@ -9824,7 +9856,7 @@ begin
       result := FindPrivateSlot(PClass(aObject)^, result); // search again
     if result = nil then
     begin
-      ObjArrayAdd(fPrivateSlots, aObject);
+      PtrArrayAdd(fPrivateSlots, aObject);
       result := aObject;
     end
     else

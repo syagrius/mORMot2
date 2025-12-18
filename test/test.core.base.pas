@@ -885,6 +885,8 @@ var
   Content, S, N, V: RawUtf8;
   Si, Ni, Vi, i, j: integer;
   P: PUtf8Char;
+const
+  VUP: array[0..3] of PAnsiChar = ('VALUE', 'value', 'value2', nil);
 begin
   Content := '';
   for i := 1 to 1000 do
@@ -912,6 +914,27 @@ begin
     exit;
   S := StringFromFile(WorkDir + 'test2.ini');
   Check(S = Content, WorkDir + 'test2.ini');
+  Content := 'name=value'#13#10' name2= value2 '#13#10 +
+             ' name 3  =  value3 '#13#10' name4: value 4 '#13#10;
+  CheckEqual(FindIniNameValueU(Content, 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU(Content, 'NAME2='), 'value2');
+  CheckEqual(FindIniNameValueU(Content, 'NAME3='), '');
+  CheckEqual(FindIniNameValueU(Content, 'NAME 3='), 'value3');
+  CheckEqual(FindIniNameValueU(Content, 'NAME4='), 'value 4');
+  CheckEqual(FindIniNameValueU(Content, 'NAME4:'), 'value 4');
+  Check(ExistsIniName(pointer(Content), 'NAME='), 'exist1');
+  Check(ExistsIniName(pointer(Content), 'NAME2='), 'exist2');
+  Check(not ExistsIniName(pointer(Content), 'NAME 3='), 'exist2');
+  Check(ExistsIniNameValue(pointer(Content), 'NAME=', @VUP));
+  Check(ExistsIniNameValue(pointer(Content), 'NAME2=', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME3=', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME 3=', @VUP));
+  Check(ExistsIniNameValue(pointer(Content), 'NAME 3  =', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME  3  =', @VUP));
+  CheckEqual(FindIniNameValueU('name=value', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('name = value', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('toto='#10'name = value ', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('toto='#10'name = ', 'NAME='), '');
   Content := 'abc'#13#10'def'#10'ghijkl'#13'1234567890';
   P := pointer(Content);
   Check(GetNextLine(P, P) = 'abc');

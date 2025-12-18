@@ -27,10 +27,11 @@ uses
   mormot.core.base,
   mormot.core.os,
   mormot.core.os.security,
-  mormot.core.rtti,
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers,
+  mormot.core.rtti,
+  mormot.core.variants,
   mormot.crypt.core,
   mormot.crypt.secure;
   
@@ -407,6 +408,8 @@ type
     /// unserialize a public key from binary PKCS#1 DER format
     // - will try and fallback to a ASN1_SEQ, as stored in a X509 certificate
     function FromDer(const der: TCertDer): boolean;
+    /// unserialize a public key from JSON "n" and "e" fields of a "kty":"RSA" JWK
+    function FromJwk(const Json: RawUtf8): boolean;
   end;
 
   /// store a RSA private key
@@ -524,6 +527,8 @@ type
     function LoadFromPublicKeyPem(const Pem: TCertPem): boolean;
     /// load a public key from an hexadecimal E and M fields concatenation
     procedure LoadFromPublicKeyHexa(const Hexa: RawUtf8);
+    /// load a public key from "n" and "e" fields of a "kty":"RSA" JWK
+    function LoadFromPublicKeyJwk(const Json: RawUtf8): boolean;
     /// load a private key from a decoded TRsaPrivateKey record
     procedure LoadFromPrivateKey(const PrivateKey: TRsaPrivateKey);
     /// load a private key from PKCS#1 or PKCS#8 DER format
@@ -2260,6 +2265,19 @@ begin
               AsnNextBigInt(pos, der, Exponent);
 end;
 
+function TRsaPublicKey.FromJwk(const Json: RawUtf8): boolean;
+var
+  jwk: TDocVariantData;
+  n, e: RawUtf8;
+begin
+  result := jwk.InitJson(Json, JSON_FAST) and
+            (jwk.CompareText('kty', 'RSA') = 0) and
+            jwk.GetAsRawUtf8('n', n) and
+            jwk.GetAsRawUtf8('e', e) and
+            Base64uriToBin(pointer(n), length(n), Modulus) and
+            Base64uriToBin(pointer(e), length(e), Exponent);
+end;
+
 
 { TRsaPrivateKey }
 
@@ -2608,6 +2626,19 @@ procedure TRsa.LoadFromPublicKey(const PublicKey: TRsaPublicKey);
 begin
   LoadFromPublicKeyBinary(pointer(PublicKey.Modulus), pointer(PublicKey.Exponent),
     length(PublicKey.Modulus), length(PublicKey.Exponent));
+end;
+
+function TRsa.LoadFromPublicKeyJwk(const Json: RawUtf8): boolean;
+var
+  key: TRsaPublicKey;
+begin
+  result := key.FromJwk(Json);
+  if result then
+    try
+      LoadFromPublicKey(key);
+    except
+      result := false;
+    end;
 end;
 
 procedure TRsa.LoadFromPrivateKey(const PrivateKey: TRsaPrivateKey);
@@ -3336,7 +3367,8 @@ begin
     exit; // invalid or unsupported
   rsa := fRsaClass.Create;
   try
-    if not rsa.LoadFromPublicKeyPem(pub) then // handle PEM or DER
+    if not rsa.LoadFromPublicKeyPem(pub) and  // handle PEM or DER
+       not rsa.LoadFromPublicKeyJwk(pub) then // handle JWT JSON
       exit;
     FillZero(digest.b);
     hasher.Full(msg, msglen, digest);
@@ -3368,7 +3400,8 @@ begin
     ckaRsaPss:
       begin
         fRsa := CKA_TO_RSA[Algorithm].Create;
-        if fRsa.LoadFromPublicKeyPem(PublicKeySaved) then
+        if fRsa.LoadFromPublicKeyPem(PublicKeySaved) or   // PEM or DER
+           fRsa.LoadFromPublicKeyJwk(PublicKeySaved) then // JWT JSON
         begin
           fKeyAlgo := Algorithm;
           result := true;

@@ -1012,13 +1012,23 @@ var
   hm: HMODULE;
 begin
   result := '';
-  FillcharFast(tmp, SizeOf(tmp), 0);
   hm := 0;
   if not GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
     exit;
+  FillcharFast(tmp, SizeOf(tmp), 0);
   GetModuleFileNameW(hm, tmp, SizeOf(tmp));
   Win32PWideCharToFileName(tmp, result);
+end;
+
+function IsMainExecutable(aAddress: pointer): boolean;
+var
+  hm: HMODULE;
+begin
+  hm := 0;
+  result := GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
+              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) and
+            (hm = HINSTANCE);
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -2637,28 +2647,24 @@ end;
 
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 var
-  events, read: DWord;
+  read: DWord;
   rec: TInputRecord;
   h: THandle;
 begin
   result := false;
   h := GetStdHandle(STD_INPUT_HANDLE);
-  events := 0;
-  GetNumberOfConsoleInputEvents(h, events);
-  if events <> 0 then
-  begin
-    PeekConsoleInput(h, rec, 1, read);
-    if read <> 0 then
-      if rec.EventType = KEY_EVENT then
-        if rec.Event.KeyEvent.bKeyDown and
-           ((ExpectedKey = 0) or
-            (rec.Event.KeyEvent.wVirtualKeyCode = ExpectedKey)) then
-          result := true
-        else
-          FlushConsoleInputBuffer(h)
-      else
-        FlushConsoleInputBuffer(h);
-  end;
+  repeat
+    read := 0;
+    if not PeekConsoleInput(h, rec, 1, read) or
+       (read = 0) then
+      exit;
+    ReadConsoleInput(h, rec, 1, read); // consume the event
+    if rec.EventType = KEY_EVENT then
+      if rec.Event.KeyEvent.bKeyDown and
+         ((ExpectedKey = 0) or
+          (rec.Event.KeyEvent.wVirtualKeyCode = ExpectedKey)) then
+        result := true;
+  until result; // keep draining the queue if the key was not pressed
 end;
 
 type
@@ -4236,7 +4242,7 @@ end;
 var
   OnHandleCtrlC: TThreadMethod;
 
-function ConsoleCtrlHandler(typ : DWord) : BOOL; stdcall;
+function ConsoleCtrlHandler(typ: DWord): BOOL; stdcall;
 begin
   result := false;
   if Assigned(OnHandleCtrlC) then
@@ -4896,7 +4902,8 @@ begin
   IsWow64Process2 := LibraryResolve(h, 'IsWow64Process2'); // Windows 10+
   process := 0;
   machine := IMAGE_FILE_MACHINE_UNKNOWN; // default = not under WOW64
-  IsWow64Emulation := Assigned(IsWow64Process2) and
+  IsWow64Emulation :=
+    Assigned(IsWow64Process2) and
     IsWow64Process2(GetCurrentProcess, process, machine) and
     {$ifdef CPUINTEL} not {$endif} // detecting PRISM is enough by now
     ((machine = IMAGE_FILE_MACHINE_I386) or
