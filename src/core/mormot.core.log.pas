@@ -7543,7 +7543,7 @@ begin
          (fLogProcStackCount[thread] > 0) then
       begin
         // 00.020.006
-        MS := DecodeMicroSec(PByte(LineEnd - 10));
+        MS := DecodeMicroSec(PByteArray(LineEnd - 10));
         if MS >= 0 then
         begin
           dec(fLogProcStackCount[thread]);
