@@ -8833,6 +8833,12 @@ begin
   FN := WorkDir + 'void.zip';
   FillCharFast(minim, SizeOf(minim), 0);
   minim.signature := $06054b50; // = PK#5#6 .zip file header - all other = 0
+  if not IsDebuggerPresent then
+  begin
+    TSynLog.Family.ExceptionIgnoreCurrentThread := true;
+    Check(not ZipTest(Executable.ProgramFileName), 'exe is no zip');
+    TSynLog.Family.ExceptionIgnoreCurrentThread := false;
+  end;
   Check(FileFromBuffer(@minim, SizeOf(minim), fn));
   try
     with TZipRead.Create(FN) do
