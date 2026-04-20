@@ -765,8 +765,6 @@ type
     procedure Add3(Value: cardinal);
     /// append an integer Value as fixed-length 4 digits text with comma
     procedure Add4(Value: PtrUInt);
-    /// append a time period, specified in micro seconds, in 00.000.000 TSynLog format
-    procedure AddMicroSec(MicroSec: cardinal);
     /// append an array of RawUtf8 as CSV
     procedure AddCsvStrings(const Values: array of RawUtf8; const Sep: RawUtf8 = ',';
       HighValues: PtrInt = -1; Reverse: boolean = false); overload;
@@ -5030,47 +5028,6 @@ begin
     YearToPChar(Value, B + 1);
   inc(B, 5);
   B^ := ',';
-end;
-
-function Value3Digits(V: cardinal; P: PUtf8Char; W: PWordArray): cardinal;
-  {$ifdef HASINLINE}inline;{$endif}
-begin
-  result := V div 100;
-  PWord(P + 1)^ := W[V - result * 100];
-  V := result;
-  result := result div 10;
-  P^ := AnsiChar(V - result * 10 + 48);
-end;
-
-procedure TTextWriter.AddMicroSec(MicroSec: cardinal);
-var
-  W: PWordArray;
-  P: PUtf8Char;
-begin // append in 00.000.000 TSynLog format
-  if B >= BEnd then
-    FlushToStream;
-  P := B + 1;
-  W := @TwoDigitLookupW;
-  MicroSec := Value3Digits(MicroSec, P + 7, W);
-  if MicroSec = 0 then // most common case < 1ms
-  begin
-    PCardinal(P)^     := ord('0') + ord('0') shl 8 + ord('.') shl 16;
-    PCardinal(P + 3)^ := ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('.') shl 24;
-  end
-  else
-  begin
-    MicroSec := Value3Digits(MicroSec, P + 3, W);
-    if MicroSec = 0 then
-      MicroSec := $3030
-    else if MicroSec > 99 then
-      MicroSec := $3939
-    else
-      MicroSec := W[MicroSec];
-    PWord(P)^ := MicroSec;
-    P[2] := '.';
-    P[6] := '.';
-  end;
-  B := P + 9;
 end;
 
 procedure TTextWriter.AddCsvStrings(const Values: array of RawUtf8;

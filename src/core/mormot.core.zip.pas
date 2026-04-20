@@ -2453,12 +2453,12 @@ begin
   RawUnicodeToString(@utf16, len, string(filename));
 end;
 
-function FindZipStart(P: PCardinal; Last: PtrInt = 0): PtrInt;
+function FindZipStart(P: pointer; Last: PtrInt = 0): PtrInt;
 begin
   for result := 0 to Last do
   begin
     // we need to check more than the signature because of false positives
-    case P^ + 1 of
+    case PCardinal(P)^ + 1 of
       FIRSTHEADER_SIGNATURE_INC:
         with PLocalFileHeader(P)^.fileInfo do
           if (ToByte(neededVersion) in [10, 20, 45]) and
@@ -2806,7 +2806,7 @@ begin
     end
     else
       read := WorkingMem; // we already have the whole file content in P^
-    i := FindZipStart(pointer(P), read - SizeOf(TLocalFileHeader));
+    i := FindZipStart(P, read - SizeOf(TLocalFileHeader));
     if i >= 0 then
     begin
       fSourceOffset := ZipStartOffset + Qword(i);
