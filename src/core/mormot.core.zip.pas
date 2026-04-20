@@ -2826,7 +2826,8 @@ begin
         exit;
       end;
     inc(ZipStartOffset, WorkingMem - SizeOf(TLocalFileHeader)); // search next
-  until read = WorkingMem;
+  until (Size = WorkingMem) or
+        (QWord(read) <> WorkingMem);
   // if we reached here, we found no ZIP marker anywhere
   ESynZip.RaiseUtf8('%.Create: No ZIP header found in % %',
     [self, KBNoSpace(Size), fFileName]);
