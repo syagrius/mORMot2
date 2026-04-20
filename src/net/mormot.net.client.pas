@@ -3310,21 +3310,13 @@ begin
             end;
           end;
         cspNoData:
-          if SockConnected then // getpeername()=nrOK
+          // timeout may happen not because the server took its time, but
+          // because the network is down: sadly, the socket is still reported
+          // as OK - SockConnected=true - by the OS (on both Windows and POSIX)
           begin
-            // timeout may happen not because the server took its time, but
-            // because the network is down: sadly, the socket is still reported
-            // as OK by the OS (on both Windows and POSIX)
-            AppendLine(fRequestContext, ['NoData ms=', Timeout]);
-            // -> no need to retry
-            ctxt.Status := HTTP_TIMEOUT;
-            // -> close the socket, since this HTTP request is clearly aborted
             include(Http.HeaderFlags, hfConnectionClose);
-            exit;
-          end
-          else
-          begin
-            DoRetry('NoData waiting %ms for headers', [TimeOut]);
+            DoRetry('NoData waiting %ms for headers with peer=%',
+              [TimeOut, SockConnected]); // always retry
             exit;
           end;
       else // cspSocketError, cspSocketClosed
