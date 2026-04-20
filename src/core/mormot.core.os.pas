@@ -187,7 +187,7 @@ const
   /// a fake response code, generated for client side panic failure/exception
   // - for it is the number of a man, and that number is 666
   HTTP_CLIENTERROR = 666;
-  /// a fake response code, usedfor internal THttpAsyncServer asynchronous process
+  /// a fake response code, used for internal THttpAsyncServer asynchronous process
   HTTP_ASYNCRESPONSE = 777;
 
   /// the successful HTTP response codes after a GET request

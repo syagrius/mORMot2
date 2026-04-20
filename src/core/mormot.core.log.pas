@@ -6925,7 +6925,7 @@ end;
 
 function TSynLogFile.LineContains(const aUpperSearch: RawUtf8;
   aIndex: integer): boolean;
-begin
+begin // overriden to take fLineTextOffset into account
   if (self = nil) or
      (cardinal(aIndex) >= cardinal(fCount)) or
      (aUpperSearch = '') then
@@ -6982,7 +6982,7 @@ begin
   for i := 0 to fCount - 1 do
   begin
     sll := fLevels[i];
-    if sll = sllNone then // just ignore any recognized line
+    if sll = sllNone then // just ignore any unrecognized line
       continue;
     fLevels[n] := sll;
     fLines[n]  := fLines[i];
