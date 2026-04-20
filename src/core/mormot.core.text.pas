@@ -542,7 +542,7 @@ type
   // - note: mORMot 1.18 TTextWriter.RegisterCustomJSONSerializerFromText()
   // are moved into Rtti.RegisterFromText() as other RTTI-related methods
   TTextWriter = class
-  protected
+  protected // check TLocalWriter if you add some new fields to this base class
     fDest: pointer; // may be a TStream, a PShortString or a RawUtf8
     fOnFlushToStream: TOnTextWriterFlush;
     fTempBuf: PUtf8Char;
