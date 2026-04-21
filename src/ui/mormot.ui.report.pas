@@ -43,7 +43,7 @@ end;
 // slower but smoother (need the GDI+ library, best with version 1.1)
 
 {.$define USEPDFPRINTER}
-// do not use the Synopse PDF engine, in Delphi code, but a doPdf virtual printer
+// do not use the Synopse PDF engine, in Delphi code, but (do)Pdf virtual printer
 
 {$define USE_UNISCRIBE}
 // the same conditional as in mormot.ui.pdf
@@ -724,7 +724,7 @@ type
     /// export the current report as PDF in a specified stream
     // - uses internal PDF code, from Synopse PDF engine (handle bookmarks,
     // outline and twin bitmaps) - in this case, a file name can be set
-    function ExportPdfStream(aDest: TStream): boolean;
+    function ExportPdfStream(aDest: TStream; aRaiseException: boolean = false): boolean;
     {$endif USEPDFPRINTER}
     /// show a form with the preview, allowing the user to browse pages and
     // print the report
@@ -5206,13 +5206,14 @@ begin
 end;
 
 {$ifndef USEPDFPRINTER}
-function TGdiPages.ExportPdfStream(aDest: TStream): boolean;
+function TGdiPages.ExportPdfStream(aDest: TStream; aRaiseException: boolean): boolean;
 var
   PDF: TPdfDocument;
   BackgroundImage: TPdfImage;
   page: TPdfPage;
   i: integer;
 begin
+  result := false;
   try
     PDF := TPdfDocument.Create(UseOutlines, 0, ExportPdfLevel,
       TPdfEncryption.New(ExportPdfEncryptionLevel,
@@ -5252,14 +5253,15 @@ begin
         with Pages[i] do
         begin
         // this loop will do all the magic :)
-          PDF.DefaultPageWidth := PdfCoord(25.4 * SizePx.X / fPrinterPxPerInch.x);
+          PDF.DefaultPageWidth  := PdfCoord(25.4 * SizePx.X / fPrinterPxPerInch.x);
           PDF.DefaultPageHeight := PdfCoord(25.4 * SizePx.Y / fPrinterPxPerInch.y);
           page := PDF.AddPage;
           if BackgroundImage <> nil then
             PDF.Canvas.DrawXObject(0, 0, page.PageWidth, page.PageHeight,
               'BackgroundImage');
-          RenderMetaFile(PDF.Canvas, GetMetaFileForPage(i), Screen.PixelsPerInch
-            / fPrinterPxPerInch.x, Screen.PixelsPerInch / fPrinterPxPerInch.y);
+          RenderMetaFile(PDF.Canvas, GetMetaFileForPage(i),
+            Screen.PixelsPerInch / fPrinterPxPerInch.x,
+            Screen.PixelsPerInch / fPrinterPxPerInch.y);
           PDF.SaveToStreamDirectPageFlush;
         end;
       PDF.SaveToStreamDirectEnd;
@@ -5268,7 +5270,8 @@ begin
     end;
     result := true;
   except
-    result := false;
+    if aRaiseException then
+      raise;
   end;
 end;
 {$endif USEPDFPRINTER}
