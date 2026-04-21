@@ -3501,7 +3501,7 @@ begin
 {$else}
   fExportPdfUseFontFallBack := true;
   fExportPdfEncryptionPermissions := PDF_PERMISSION_ALL;
-  fExportPdfEncryptionOwnerPassword := 'mORMot ' + SYNOPSE_FRAMEWORK_VERSION;
+  fExportPdfEncryptionOwnerPassword := 'SynopsePDFEngine'; // documented default
 {$endif USEPDFPRINTER}
   GetPrinterParams; // necessary, but will also be updated in BeginDoc()
   fCanvas := nil;
