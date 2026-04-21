@@ -1,0 +1,81 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Petstore",
+    "version": "1.0.0",
+    "description": "A minimal Petstore-style API for YAML/JSON equivalence testing."
+  },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "List pets",
+        "operationId": "listPets",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Pet" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a pet",
+        "operationId": "createPet",
+        "responses": {
+          "201": { "description": "Created" }
+        }
+      }
+    },
+    "/pets/{id}": {
+      "get": {
+        "summary": "Get one pet by id",
+        "operationId": "getPet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Pet" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Pet": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id":   { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "tag":  { "type": "string" }
+        }
+      }
+    }
+  }
+}
