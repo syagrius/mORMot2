@@ -5065,57 +5065,59 @@ begin
   if Assigned(GetLogicalProcessorInformation) and
      not GetLogicalProcessorInformation(nil, siz) and
      (GetLastError = ERROR_INSUFFICIENT_BUFFER) then
-  repeat
-    n := siz div SizeOf(proc[0]);
-    if n > 2048 then
-      break;
-    SetLength(proc, n);
-    if not GetLogicalProcessorInformation(pointer(proc), siz) then
-      break;
-    pi := pointer(proc);
-    repeat
-      case pi^.Relationship of
-        RelationProcessorCore:
-          inc(CpuCores);
-        RelationProcessorPackage: // physical processor socket
-          AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), integer(CpuSockets),
-            pi^.ProcessorMask);
-        RelationCache:            // raw cache information
-          if pi^.Cache.CacheType in [CacheUnified, CacheData] then
-            if (pi^.Cache.Level >= low(CpuCache)) and
-               (pi^.Cache.Level <= high(CpuCache)) then
-              with CpuCache[pi^.Cache.Level] do
-                if (Count = 0) or
-                   (pi^.Cache.CacheType <> CacheUnified) then
-                begin
-                  inc(Count);
-                  Size := pi^.Cache.Size;
-                  LineSize := pi^.Cache.LineSize;
-                end;
-      end;
-      inc(pi);
-      dec(n);
-    until n = 0;
-    for i := high(CpuCache) downto low(CpuCache) do
+  begin
+    n := siz div SizeOf(pi^);
+    if (n <= 2048) and
+       (DWord(n) * SizeOf(pi^) = siz) then
     begin
-      CpuCacheSize := CpuCache[i].Size;
-      if CpuCacheSize <> 0 then // append the biggest level Cache size
+      SetLength(proc, n);
+      if GetLogicalProcessorInformation(pointer(proc), siz) then
       begin
-        cpu := _fmt('%s [%s]', [cpu, KBNoSpace(CpuCacheSize)]);
-        break;
+        pi := pointer(proc);
+        repeat
+          case pi^.Relationship of
+            RelationProcessorCore:
+              inc(CpuCores);
+            RelationProcessorPackage: // physical processor socket
+              AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), integer(CpuSockets),
+                pi^.ProcessorMask);
+            RelationCache:            // raw cache information
+              if pi^.Cache.CacheType in [CacheUnified, CacheData] then
+                if (pi^.Cache.Level >= low(CpuCache)) and
+                   (pi^.Cache.Level <= high(CpuCache)) then
+                  with CpuCache[pi^.Cache.Level] do
+                    if (Count = 0) or
+                       (pi^.Cache.CacheType <> CacheUnified) then
+                    begin
+                      inc(Count);
+                      Size := pi^.Cache.Size;
+                      LineSize := pi^.Cache.LineSize;
+                    end;
+          end;
+          inc(pi);
+          dec(n);
+        until n = 0;
+        for i := high(CpuCache) downto low(CpuCache) do
+        begin
+          CpuCacheSize := CpuCache[i].Size;
+          if CpuCacheSize = 0 then // append the highest level Cache size
+            continue;
+          cpu := _fmt('%s [%s]', [cpu, KBNoSpace(CpuCacheSize)]);
+          break;
+        end;
+        for i := low(CpuCache) to high(CpuCache) do
+          with CpuCache[i] do
+            if Count <> 0 then
+              if Count = 1 then
+                CpuCacheText := _fmt('%s L%d=%s ',
+                  [CpuCacheText, i, KBNoSpace(Size)])
+              else
+                CpuCacheText := _fmt('%s L%d=%d*%s ',
+                  [CpuCacheText, i, Count, KBNoSpace(Size)]);
+        TrimSelf(CpuCacheText);
       end;
     end;
-    for i := low(CpuCache) to high(CpuCache) do
-      with CpuCache[i] do
-        if Count <> 0 then
-          if Count = 1 then
-            CpuCacheText :=
-              _fmt('%s L%d=%s ', [CpuCacheText, i, KBNoSpace(Size)])
-          else
-            CpuCacheText :=
-              _fmt('%s L%d=%d*%s ', [CpuCacheText, i, Count, KBNoSpace(Size)]);
-    TrimSelf(CpuCacheText);
-  until true;
+  end;
   CpuThreads := SystemInfo.dwNumberOfProcessors;
   if CpuSockets = 0 then
     CpuSockets := 1; // e.g. on XP prior to SP3
