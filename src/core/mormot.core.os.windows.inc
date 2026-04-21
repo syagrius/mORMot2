@@ -4764,7 +4764,7 @@ type
     CacheInstruction,
     CacheData,
     CacheTrace);
-  TSystemCacheDescriptor = packed record
+  TSystemCacheDescriptor = record
     Level: byte;
     Associativity: byte;
     LineSize: Word;
