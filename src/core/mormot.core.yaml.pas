@@ -241,7 +241,8 @@ const
 var
   p: PUtf8Char;
   neg: boolean;
-  n, hexDigits: integer;
+  n: integer;
+  b: byte;
   u, prev: QWord;
 begin
   result := false;
@@ -258,44 +259,32 @@ begin
   end;
   if n = 0 then
     exit;
-  // hex (YAML 1.2 core schema: 0x[0-9a-fA-F]+)
   if (n > 2) and
      (p^ = '0') and
      ((p + 1)^ in ['x', 'X']) then
   begin
+    // hex (YAML 1.2 core schema: 0x[0-9a-fA-F]+)
     inc(p, 2);
     dec(n, 2);
-    if n > 16 then // > 64-bit
+    if (n = 0) or
+       (n > 16) then // > 64-bit
       exit;
     u := 0;
-    hexDigits := 0;
     while n > 0 do
     begin
-      case p^ of
-        '0'..'9': u := (u shl 4) or QWord(ord(p^) - ord('0'));
-        'a'..'f': u := (u shl 4) or QWord(ord(p^) - ord('a') + 10);
-        'A'..'F': u := (u shl 4) or QWord(ord(p^) - ord('A') + 10);
-      else
+      b := ConvertHexToBin[p^];
+      if b = 255 then
         exit;
-      end;
-      inc(hexDigits);
+      u := (u shl 4) or b;
       inc(p);
       dec(n);
     end;
-    if hexDigits = 0 then
-      exit;
-    if neg and (u > MAX_ABS_NEG) then exit;
-    if (not neg) and (u > MAX_POS) then exit;
-    if neg then
-      V := -Int64(u)
-    else
-      V := Int64(u);
-    result := true;
-    exit;
-  end;
-  // octal 0o... (YAML 1.2)
-  if (n > 2) and (p^ = '0') and ((p + 1)^ = 'o') then
+  end
+  else if (n > 2) and
+          (p^ = '0') and
+          ((p + 1)^ = 'o') then
   begin
+    // octal 0o... (YAML 1.2)
     inc(p, 2);
     dec(n, 2);
     if n > 22 then
@@ -312,36 +301,33 @@ begin
       inc(p);
       dec(n);
     end;
-    if neg and (u > MAX_ABS_NEG) then exit;
-    if (not neg) and (u > MAX_POS) then exit;
-    if neg then
-      V := -Int64(u)
-    else
-      V := Int64(u);
-    result := true;
-    exit;
-  end;
-  // decimal
-  if n > 20 then
-    exit;
-  u := 0;
-  while n > 0 do
-  begin
-    if not (p^ in ['0'..'9']) then
-      exit;
-    prev := u;
-    u := u * 10 + QWord(ord(p^) - ord('0'));
-    if u < prev then
-      exit; // overflow
-    inc(p);
-    dec(n);
-  end;
-  if neg and (u > MAX_ABS_NEG) then exit;
-  if (not neg) and (u > MAX_POS) then exit;
-  if neg then
-    V := -Int64(u)
+  end
   else
-    V := Int64(u);
+  begin
+    // decimal
+    if n > 20 then
+      exit;
+    u := 0;
+    while n > 0 do
+    begin
+      if not (p^ in ['0'..'9']) then
+        exit;
+      prev := u;
+      u := u * 10 + QWord(ord(p^) - ord('0'));
+      if u < prev then
+        exit; // overflow
+      inc(p);
+      dec(n);
+    end;
+  end;
+  if neg and
+     (u > MAX_ABS_NEG) then
+    exit;
+  if (not neg) and
+     (u > MAX_POS) then exit;
+  if neg then
+    u := -u;
+  V := u;
   result := true;
 end;
 
