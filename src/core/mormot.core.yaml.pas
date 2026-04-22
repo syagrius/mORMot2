@@ -221,16 +221,20 @@ end;
 
 function IsYamlNull(const S: RawUtf8): boolean;
 begin
-  result := (S = '') or (S = '~') or (S = 'null') or
-            (S = 'Null') or (S = 'NULL');
+  // YAML 1.2 core schema: null has three case-insensitive spellings,
+  // the '~' shortcut, or the empty string
+  result := (S = '') or
+            (S = '~') or
+            IdemPropNameU(S, 'null');
 end;
 
 function IsYamlBool(const S: RawUtf8; out V: boolean): boolean;
 begin
+  // YAML 1.2 core schema accepts any case for the boolean literal
   result := true;
-  if (S = 'true') or (S = 'True') or (S = 'TRUE') then
+  if IdemPropNameU(S, 'true') then
     V := true
-  else if (S = 'false') or (S = 'False') or (S = 'FALSE') then
+  else if IdemPropNameU(S, 'false') then
     V := false
   else
     result := false;
@@ -1880,8 +1884,8 @@ begin
   Doc.Clear;
   src := Yaml;
   // strip UTF-8 BOM regardless of source (file or in-memory) for consistency
-  if (length(src) >= 3) and (src[1] = #$EF) and
-     (src[2] = #$BB) and (src[3] = #$BF) then
+  if (length(src) >= 3) and
+     (PCardinal(pointer(src))^ and $00ffffff = BOM_UTF8) then
     delete(src, 1, 3);
   if Options = [] then
     opt := JSON_FAST_FLOAT + [dvoInternNames]
@@ -2012,8 +2016,8 @@ begin
   begin
     if IsYamlNull(S) then
       needsQuote := true
-    else if (S = 'true') or (S = 'True') or (S = 'TRUE') or
-            (S = 'false') or (S = 'False') or (S = 'FALSE') then
+    else if IdemPropNameU(S, 'true') or
+            IdemPropNameU(S, 'false') then
       needsQuote := true
     else if IsYamlFloat(S) then
       needsQuote := true
