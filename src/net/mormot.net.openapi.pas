@@ -2414,7 +2414,7 @@ end;
 procedure TOpenApiParser.ParseYaml(const aYaml: RawUtf8);
 begin
   Clear;
-  if not YamlToVariant(aYaml, fSpecs.Data, JSON_FAST + [dvoInternNames]) then
+  if not YamlToVariant_OpenApi(aYaml, fSpecs.Data) then
     EOpenApi.RaiseUtf8('%.ParseYaml: invalid YAML payload', [self]);
   ParseSpecs;
 end;
@@ -2433,7 +2433,7 @@ var
   ext: TFileName;
 begin
   Clear;
-  ext := LowerCase(ExtractFileExt(aSpecFile));
+  ext := SysUtils.LowerCase(ExtractFileExt(aSpecFile));
   if (ext = '.yaml') or (ext = '.yml') then
   begin
     if not YamlFileToVariant(aSpecFile, fSpecs.Data,
