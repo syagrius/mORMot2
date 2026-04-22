@@ -2565,7 +2565,8 @@ end;
 
 function GetDiskPartitions: TDiskPartitions;
 var
-  drives, drive, m, n: integer;
+  drives, m: DWord;
+  drive, n: integer;
   fn: TFileName;
   volume: SynUnicode;
   av, fr, tot: QWord;
@@ -2574,11 +2575,11 @@ begin
   result := nil;
   n := 0;
   fn := '#:';
-  drives := GetLogicalDrives;
-  m := 1 shl 2; // bit 2 = drive C
+  drives := GetLogicalDrives and not 3; // ignore A: and B: floppies
+  m := 1 shl 2; // bit 2 = drive 3 = C:
   for drive := 3 to 26 do
   begin
-    // retrieve partitions mounted as C..Z drives
+    // retrieve partitions mounted as C: .. Z: drives
     if drives and m <> 0 then
     begin
       fn[1] := char(64 + drive);
@@ -2592,8 +2593,11 @@ begin
         volume := '';
         inc(n);
       end;
+      drives := drives and not m;
+      if drives = 0 then
+        exit; // no more drives
     end;
-    m := m shl 1;
+    m := m shl 1; // next drive from C: to Z:
   end;
 end;
 
