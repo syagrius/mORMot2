@@ -10800,12 +10800,12 @@ begin
     ERMSB_MIN_SIZE_FWD := 4096; // "on 32-bit strings have to be at least 4KB"
     // backward rep movsd has no ERMS optimization so degrades performance
   {$endif WITH_ERMS}
-  {$endif HASNOSSE2}
   if cfSSE2 in CpuFeatures then
   begin
     StrLen  := @StrLenSSE2;
     StrLenW := @StrLenWSSE2;
   end;
+  {$endif HASNOSSE2}
   {$endif ASMX86NOTPIC}
 end;
 
