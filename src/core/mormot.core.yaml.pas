@@ -63,12 +63,12 @@ type
 // - raises EYamlException on unsupported constructs or syntactic errors
 // - Options defaults to mormot.net.openapi-compatible values when empty
 function YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
-  Options: TDocVariantOptions = []): boolean;
+  Options: TDocVariantOptions = JSON_FAST_FLOAT): boolean;
 
 /// parse a YAML file into a TDocVariantData
 // - file is expected to be UTF-8 (BOM tolerated); see YamlToVariant
 function YamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
-  Options: TDocVariantOptions = []): boolean;
+  Options: TDocVariantOptions = JSON_FAST_FLOAT): boolean;
 
 /// serialize a TDocVariant as YAML 1.2 UTF-8 text
 // - result is block-style by default; ywoFlowCompact switches leaf containers
@@ -82,8 +82,8 @@ procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
 
 /// convert YAML 1.2 UTF-8 text directly into a JSON RawUtf8
 // - convenience wrapper around the internal parser's JSON buffer, useful for
-//   pipelines that feed further JSON-based processing (e.g. RTTI settings,
-//   JsonToObject, LoadJson) without going through TDocVariantData
+// pipelines that feed further JSON-based processing (e.g. RTTI settings,
+// JsonToObject, LoadJson) without going through TDocVariantData
 // - returns '' on parse failure (inspect EYamlException for details)
 function YamlToJson(const Yaml: RawUtf8): RawUtf8;
 
@@ -97,9 +97,9 @@ function JsonToYaml(const Json: RawUtf8;
 var
   /// maximum YAML nesting depth before the parser raises EYamlException
   // - default 512 is ample for real-world OpenAPI specs; raise for
-  //   pathologically deep inputs
+  // pathologically deep inputs
   // - converts would-be EStackOverflow into a clean EYamlException with
-  //   line info; guards both block and flow recursive descent
+  // line info; guards both block and flow recursive descent
   YamlMaxDepth: integer = 512;
 
 
@@ -110,80 +110,72 @@ implementation
 
 type
   TYamlLine = record
-    Indent: integer; // count of leading space characters
+    Indent: integer;  // count of leading space characters
     Content: RawUtf8; // trimmed of leading spaces and trailing \r
-    Raw: RawUtf8; // original line with trailing \r stripped
+    Raw: RawUtf8;     // original line with trailing \r stripped
   end;
   TYamlLines = array of TYamlLine;
 
-function CountLeadingSpaces(const S: RawUtf8): integer;
-var
-  p: PUtf8Char;
-  n: integer;
+function CountLeadingSpaces(p: PUtf8Char): PtrInt;
 begin
-  p := pointer(S);
-  n := length(S);
   result := 0;
-  while (result < n) and (p[result] = ' ') do
-    inc(result);
+  if p <> nil then
+    while p[result] = ' ' do
+      inc(result);
 end;
 
 // split Yaml into lines with indent metadata
 // - accepts both LF and CRLF terminators; trailing \r is stripped
 procedure SplitYamlLines(const Yaml: RawUtf8; out Lines: TYamlLines);
 var
-  p, lineStart, eol, stop: PUtf8Char;
-  idx, len: PtrInt;
-  raw: RawUtf8;
+  p, lineStart, stop: PUtf8Char;
+  n, len: PtrInt;
   current: ^TYamlLine;
 begin
   p := pointer(Yaml);
   if p = nil then
     exit;
-  idx := 0;
+  n := 0;
   stop := p + length(Yaml);
   lineStart := p;
   while p <= stop do
   begin
-    if (p = stop) or (p^ = #10) then
+    if (p = stop) or
+       (p^ = #10) then
     begin
-      eol := p;
-      // strip trailing \r if present
-      if (eol > lineStart) and ((eol - 1)^ = #13) then
-        FastSetString(raw, lineStart, eol - 1 - lineStart)
-      else
-        FastSetString(raw, lineStart, eol - lineStart);
-      if idx >= length(Lines) then
-        SetLength(Lines, NextGrow(idx));
-      current := @Lines[idx];
-      current^.Raw := raw;
-      current^.Indent := CountLeadingSpaces(raw);
-      len := length(raw) - current^.Indent;
-      // also right-trim trailing spaces from Content
-      while (len > 0) and (raw[current^.Indent + len] = ' ') do
+      if n >= length(Lines) then
+        SetLength(Lines, NextGrow(n));
+      current := @Lines[n];
+      len := p - lineStart;
+      if (len > 0) and
+         (p[-1] = #13) then
+        dec(len); // strip trailing \r if present
+      FastSetString(current^.Raw, lineStart, len);
+      current^.Indent := CountLeadingSpaces(pointer(current^.Raw));
+      while (len > 0) and
+            (lineStart[len - 1] = ' ') do
         dec(len);
-      FastSetString(current^.Content,
-        @PByteArray(pointer(raw))[current^.Indent], len);
-      inc(idx);
+      current^.Content := copy(current^.Raw,
+        current^.Indent + 1, len - current^.Indent);
+      inc(n);
       if p = stop then
         break;
       lineStart := p + 1;
     end;
     inc(p);
   end;
-  if length(Lines) <> idx then
-    SetLength(Lines, idx);
+  if length(Lines) <> n then
+    SetLength(Lines, n);
 end;
 
 // strip an unquoted trailing "# ..." comment from a scalar fragment
 // - accounts for single/double quoted spans where # is literal
-function StripLineComment(const S: RawUtf8): RawUtf8;
+procedure StripLineComment(var S: RawUtf8);
 var
   p, stop: PUtf8Char;
   inSingle, inDouble: boolean;
   cut: PtrInt;
 begin
-  result := S;
   if S = '' then
     exit;
   p := pointer(S);
@@ -202,7 +194,8 @@ begin
           inDouble := not inDouble;
       '#':
         if not inSingle and not inDouble then
-          if (p = pointer(S)) or ((p - 1)^ in [' ', #9]) then
+          if (p = pointer(S)) or
+             ((p - 1)^ in [' ', #9]) then
           begin
             cut := p - PUtf8Char(pointer(S));
             break;
@@ -210,13 +203,12 @@ begin
     end;
     inc(p);
   end;
-  if cut >= 0 then
-  begin
-    SetLength(result, cut);
-    // right-trim leftover whitespace
-    while (length(result) > 0) and (result[length(result)] in [' ', #9]) do
-      SetLength(result, length(result) - 1);
-  end;
+  if cut < 0 then
+    exit;
+  while (cut > 0) and
+        (p[cut - 1] <= ' ') do
+    dec(cut);
+  SetLength(S, cut);
 end;
 
 function IsYamlNull(const S: RawUtf8): boolean;
@@ -267,7 +259,9 @@ begin
   if n = 0 then
     exit;
   // hex (YAML 1.2 core schema: 0x[0-9a-fA-F]+)
-  if (n > 2) and (p^ = '0') and ((p + 1)^ in ['x', 'X']) then
+  if (n > 2) and
+     (p^ = '0') and
+     ((p + 1)^ in ['x', 'X']) then
   begin
     inc(p, 2);
     dec(n, 2);
@@ -856,7 +850,8 @@ var
   bval: boolean;
   ival: Int64;
 begin
-  s := TrimYamlRight(StripLineComment(Frag));
+  s := Frag;
+  StripLineComment(s);
   s := TrimYamlLeft(s);
   if s = '' then
   begin
