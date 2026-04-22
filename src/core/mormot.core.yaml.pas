@@ -1927,14 +1927,14 @@ type
   private
     fOut: TJsonWriter;
     fOptions: TYamlWriterOptions;
-    procedure WriteValue(const v: variant; Indent: integer);
-    procedure WriteBlockMap(const dv: TDocVariantData; Indent: integer);
-    procedure WriteBlockSeq(const dv: TDocVariantData; Indent: integer);
+    procedure WriteValue(const v: variant; Indent: PtrInt);
+    procedure WriteBlockMap(const dv: TDocVariantData; Indent: PtrInt);
+    procedure WriteBlockSeq(const dv: TDocVariantData; Indent: PtrInt);
     procedure WriteFlow(const dv: TDocVariantData);
     procedure WriteScalar(const v: variant);
     procedure WriteYamlKey(const K: RawUtf8);
     procedure WriteYamlString(const S: RawUtf8);
-    procedure WriteIndent(N: integer);
+    procedure WriteIndent(N: PtrInt);
     function IsSimpleLeaf(const dv: TDocVariantData): boolean;
   public
     constructor Create(Options: TYamlWriterOptions);
@@ -1955,12 +1955,10 @@ begin
   inherited Destroy;
 end;
 
-procedure TVariantToYaml.WriteIndent(N: integer);
-var
-  i: integer;
+procedure TVariantToYaml.WriteIndent(N: PtrInt);
 begin
-  for i := 1 to N do
-    fOut.Add(' ');
+  // use AddChars: single buffer-checked call replaces a per-space Add() loop
+  fOut.AddChars(' ', N);
 end;
 
 function TVariantToYaml.IsSimpleLeaf(const dv: TDocVariantData): boolean;
@@ -2108,7 +2106,7 @@ end;
 
 procedure TVariantToYaml.WriteFlow(const dv: TDocVariantData);
 var
-  i: integer;
+  i: PtrInt;
 begin
   if dv.Kind = dvObject then
   begin
@@ -2136,9 +2134,9 @@ begin
   end;
 end;
 
-procedure TVariantToYaml.WriteBlockMap(const dv: TDocVariantData; Indent: integer);
+procedure TVariantToYaml.WriteBlockMap(const dv: TDocVariantData; Indent: PtrInt);
 var
-  i: integer;
+  i: PtrInt;
   cd: PDocVariantData;
 begin
   if dv.Count = 0 then
@@ -2168,9 +2166,9 @@ begin
   end;
 end;
 
-procedure TVariantToYaml.WriteBlockSeq(const dv: TDocVariantData; Indent: integer);
+procedure TVariantToYaml.WriteBlockSeq(const dv: TDocVariantData; Indent: PtrInt);
 var
-  i: integer;
+  i: PtrInt;
   cd: PDocVariantData;
 begin
   if dv.Count = 0 then
@@ -2206,7 +2204,7 @@ begin
   end;
 end;
 
-procedure TVariantToYaml.WriteValue(const v: variant; Indent: integer);
+procedure TVariantToYaml.WriteValue(const v: variant; Indent: PtrInt);
 var
   cd: PDocVariantData;
 begin
