@@ -132,20 +132,15 @@ end;
 // - accepts both LF and CRLF terminators; trailing \r is stripped
 procedure SplitYamlLines(const Yaml: RawUtf8; out Lines: TYamlLines);
 var
-  p, lineStart, eol: PUtf8Char;
-  stop: PUtf8Char;
-  idx, len: integer;
+  p, lineStart, eol, stop: PUtf8Char;
+  idx, len: PtrInt;
   raw: RawUtf8;
+  current: ^TYamlLine;
 begin
-  Lines := nil;
-  SetLength(Lines, 16);
-  idx := 0;
   p := pointer(Yaml);
   if p = nil then
-  begin
-    Lines := nil;
     exit;
-  end;
+  idx := 0;
   stop := p + length(Yaml);
   lineStart := p;
   while p <= stop do
@@ -159,15 +154,16 @@ begin
       else
         FastSetString(raw, lineStart, eol - lineStart);
       if idx >= length(Lines) then
-        SetLength(Lines, length(Lines) * 2);
-      Lines[idx].Raw := raw;
-      Lines[idx].Indent := CountLeadingSpaces(raw);
-      len := length(raw) - Lines[idx].Indent;
+        SetLength(Lines, NextGrow(idx));
+      current := @Lines[idx];
+      current^.Raw := raw;
+      current^.Indent := CountLeadingSpaces(raw);
+      len := length(raw) - current^.Indent;
       // also right-trim trailing spaces from Content
-      while (len > 0) and (raw[Lines[idx].Indent + len] = ' ') do
+      while (len > 0) and (raw[current^.Indent + len] = ' ') do
         dec(len);
-      FastSetString(Lines[idx].Content,
-        pointer(PtrUInt(pointer(raw)) + PtrUInt(Lines[idx].Indent)), len);
+      FastSetString(current^.Content,
+        @PByteArray(pointer(raw))[current^.Indent], len);
       inc(idx);
       if p = stop then
         break;
@@ -175,7 +171,8 @@ begin
     end;
     inc(p);
   end;
-  SetLength(Lines, idx);
+  if length(Lines) <> idx then
+    SetLength(Lines, idx);
 end;
 
 // strip an unquoted trailing "# ..." comment from a scalar fragment
@@ -420,7 +417,6 @@ var
   p, stop: PUtf8Char;
   quote: AnsiChar;
   tmp: TTextWriter;
-  wbuf: TTextWriterStackBuffer;
   ch: AnsiChar;
   c: cardinal;
   i: PtrInt;
@@ -437,7 +433,7 @@ begin
   if quote = '''' then
   begin
     // single-quoted: only '' is an escape
-    tmp := TTextWriter.CreateOwnedStream(wbuf);
+    tmp := TTextWriter.CreateOwnedStream;
     try
       inc(p);
       while p < stop do
@@ -464,7 +460,7 @@ begin
     exit; // unclosed
   end;
   // double-quoted: full escape set
-  tmp := TTextWriter.CreateOwnedStream(wbuf);
+  tmp := TTextWriter.CreateOwnedStream;
   try
     inc(p);
     while p < stop do
@@ -594,7 +590,6 @@ type
     fDepth: integer;
     fMaxDepth: integer;
     fOut: TJsonWriter;
-    fOutBuf: TTextWriterStackBuffer;
     procedure Error(LineIdx: integer; const Msg: RawUtf8); overload;
     procedure ErrorFmt(LineIdx: integer; const Fmt: RawUtf8;
       const Args: array of const);
@@ -633,7 +628,7 @@ type
 constructor TYamlToJson.Create;
 begin
   inherited Create;
-  fOut := TJsonWriter.CreateOwnedStream(fOutBuf);
+  fOut := TJsonWriter.CreateOwnedStream;
   fMaxDepth := YamlMaxDepth;
   if fMaxDepth < 4 then
     fMaxDepth := 4; // sanity floor: allow at least a few nested structures
@@ -903,7 +898,6 @@ function TYamlToJson.CollectBlockScalar(MinIndent: integer; Folded: boolean;
   Chomp: AnsiChar; ExplicitIndent: integer): RawUtf8;
 var
   tmp: TTextWriter;
-  wbuf: TTextWriterStackBuffer;
   i, blockIndent, startIdx: integer;
   raw, content: RawUtf8;
   lineContent: RawUtf8;
@@ -965,7 +959,7 @@ begin
     end;
     exit;
   end;
-  tmp := TTextWriter.CreateOwnedStream(wbuf);
+  tmp := TTextWriter.CreateOwnedStream;
   try
     blankRun := 0;
     prevWasContent := false;
@@ -1146,7 +1140,6 @@ var
 
 var
   tmp: TTextWriter;
-  wbuf: TTextWriterStackBuffer;
   cur: RawUtf8;
 begin
   if rest = '' then
@@ -1157,7 +1150,7 @@ begin
   if ScanQuoteClosed(rest, {skipOpeningQuote=}true) then
     exit; // single-line, already closed
   // multi-line merge
-  tmp := TTextWriter.CreateOwnedStream(wbuf);
+  tmp := TTextWriter.CreateOwnedStream;
   try
     cur := rest;
     while true do
@@ -1933,7 +1926,6 @@ type
   TVariantToYaml = class
   private
     fOut: TJsonWriter;
-    fOutBuf: TTextWriterStackBuffer;
     fOptions: TYamlWriterOptions;
     procedure WriteValue(const v: variant; Indent: integer);
     procedure WriteBlockMap(const dv: TDocVariantData; Indent: integer);
@@ -1953,7 +1945,7 @@ type
 constructor TVariantToYaml.Create(Options: TYamlWriterOptions);
 begin
   inherited Create;
-  fOut := TJsonWriter.CreateOwnedStream(fOutBuf);
+  fOut := TJsonWriter.CreateOwnedStream;
   fOptions := Options;
 end;
 
