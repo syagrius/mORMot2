@@ -2024,12 +2024,12 @@ function StringToConsole(const S: string): RawByteString;
 /// write some text to the console using a given color
 // - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Fmt: RawUtf8; const Args: array of const;
-  Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+  Color: TConsoleColor = ccDefault; NoLineFeed: boolean = false); overload;
 
 /// write some text to the console using a given color
 // - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Args: array of const;
-  Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+  Color: TConsoleColor = ccDefault; NoLineFeed: boolean = false); overload;
 
 /// write some text to the console using the current color
 // - similar to writeln() but redirect to ConsoleWrite() with proper thread safety
@@ -9811,7 +9811,7 @@ begin
   if not HasConsole then
     exit;
   Make(Args, tmp);
-  ConsoleWrite(tmp, ccLightGray, NoLineFeed, {nocolor=}true);
+  ConsoleWrite(tmp, ccDefault, NoLineFeed, {nocolor=}true);
 end;
 
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean);

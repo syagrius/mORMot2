@@ -1436,7 +1436,7 @@ end;
 
 procedure TSynTests.DoText(const value: RawUtf8);
 begin
-  ConsoleWrite(value, ccLightGray, {nolf=}true, {nocolor=}true);
+  ConsoleWrite(value, ccDefault, {nolf=}true, {nocolor=}true);
   if Assigned(CustomOutput) then
     CustomOutput(value);
 end;
@@ -1488,7 +1488,7 @@ begin
   Append(fNotifyProgress, value);
   DoColor(cc);
   DoText(value);
-  DoColor(ccLightGray);
+  DoColor(ccDefault);
 end;
 
 procedure TSynTests.DoLog(Level: TSynLogLevel; const TextFmt: RawUtf8;
@@ -1632,7 +1632,7 @@ begin
                 titledone := true;
                 DoColor(ccWhite);
                 DoTextLn([CRLF + CRLF, m + 1, '. ', fTests[m].TestName]);
-                DoColor(ccLightGray);
+                DoColor(ccDefault);
               end;
               if not started then
               begin
@@ -1644,7 +1644,7 @@ begin
                 c.Setup;
                 DoColor(ccWhite);
                 DoTextLn([CRLF + ' ', m + 1, '.', i + 1, '. ', c.Ident, ': ']);
-                DoColor(ccLightGray);
+                DoColor(ccDefault);
                 started := true;
               end;
               c.fAssertionsBeforeRun := c.fAssertions;
@@ -1672,7 +1672,7 @@ begin
                 {$ifndef NOEXCEPTIONINTERCEPT}
                 DoTextLn(['! ', GetLastExceptionText]); // with extended info
                 {$endif NOEXCEPTIONINTERCEPT}
-                DoColor(ccLightGray);
+                DoColor(ccDefault);
               end;
             end;
             _CurrentMethodInfo := nil;
@@ -1699,7 +1699,7 @@ begin
               AppendShortToUtf8(' FAILED', s);
             Append(s, ['  ', TotalTimer.Stop, CRLF]);
             DoText(s); // write at once to the console output
-            DoColor(ccLightGray);
+            DoColor(ccDefault);
             inc(fAssertions, c.fAssertions); // compute global assertions count
             inc(fAssertionsFailed, c.fAssertionsFailed);
           finally
@@ -1750,7 +1750,7 @@ begin
     DoTextLn([CRLF + '! Some tests FAILED: please correct the code.']);
     ExitCode := 1;
   end;
-  DoColor(ccLightGray);
+  DoColor(ccDefault);
 end;
 
 procedure TSynTests.AfterOneRun;
@@ -1808,7 +1808,7 @@ begin
     C.fRunConsole := '';
   end;
   DoText(s); // append whole information at once to the console
-  DoColor(ccLightGray);
+  DoColor(ccDefault);
 end;
 
 class procedure TSynTests.DescribeCommandLine;

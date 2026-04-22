@@ -3998,7 +3998,7 @@ begin
       ConsoleWrite(c.Text[i], c.Color[i]);
       dec(c.Count);
     end;
-  TextColor(ccLightGray);
+  TextColor(ccDefault); // eventually reset console text color
 end;
 
 procedure TAutoFlushThread.Execute;
@@ -5289,7 +5289,7 @@ begin
     else
     begin
       ConsoleWrite(Text, LOG_CONSOLE_COLORS[Level]);
-      TextColor(ccLightGray);
+      TextColor(ccDefault);
     end;
 end;
 

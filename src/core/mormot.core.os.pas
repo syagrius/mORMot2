@@ -3889,7 +3889,7 @@ procedure TextBackground(Color: TConsoleColor);
 
 /// write some UTF-8 text to the console using a given color
 // - this method is protected by its own CriticalSection for output consistency
-procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor = ccLightGray;
+procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor = ccDefault;
   NoLineFeed: boolean = false; NoColor: boolean = false); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -8670,12 +8670,12 @@ end;
 
 procedure ConsoleWriteRaw(const Text: RawUtf8; NoLineFeed: boolean);
 begin
-  ConsoleWriteBuf(pointer(Text), length(Text), ccLightGray, NoLineFeed, true);
+  ConsoleWriteBuf(pointer(Text), length(Text), ccDefault, NoLineFeed, true);
 end;
 
 procedure ConsoleWriteLn;
 begin
-  ConsoleWrite(CRLF, ccLightGray, {nolinefeed=}true, {nocolor=}true);
+  ConsoleWrite(CRLF, ccDefault, {nolinefeed=}true, {nocolor=}true);
 end;
 
 function ConsoleReadBody: RawByteString;

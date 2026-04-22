@@ -2382,7 +2382,7 @@ begin
   if (ord(Color) = TextAttr) or
      not StdOutIsTTY then
     exit;
-  if Color = ccLightGray then // handle ccLightGray as default console color
+  if Color = ccLightGray then // handle ccLightGray = ccDefault
   begin
     s := TERM_DEFAULT;
     exit;
@@ -2434,7 +2434,7 @@ begin
       tmp.AddDirect(#10);
     if not NoColor then
     begin
-      TextColorCmd(ccLightGray, c);
+      TextColorCmd(ccDefault, c);
       tmp.AddShort(c);
     end;
     Text := tmp.Buffer;
