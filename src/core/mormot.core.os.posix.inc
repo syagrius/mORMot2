@@ -2375,12 +2375,18 @@ end;
 
 procedure TextColorCmd(Color: TConsoleColor; var s: TShort7);
 const
+  TERM_DEFAULT: TShort7 = #27'[0m';
   TERM_CTRL: PUtf8Char = '04261537';
 begin
   s[0] := #0;
   if (ord(Color) = TextAttr) or
      not StdOutIsTTY then
     exit;
+  if Color = ccLightGray then // handle ccLightGray as default console color
+  begin
+    s := TERM_DEFAULT;
+    exit;
+  end;
   TextAttr := ord(Color);
   s := #27'[0;3#m';
   if ord(Color) >= 8 then

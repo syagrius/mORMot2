@@ -513,26 +513,32 @@ function  Unicode_InPlaceLower;       external user32 name 'CharLowerBuffW';
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   ConsoleOutputCP: cardinal;       // to call the Windows API once
+  TextAttr, DefaultTextAttr: integer;
   {$ifdef ISDELPHI}
   StdInputHandle: THandle;         // Delphi doesn't define this global variable
   {$endif ISDELPHI}
 
 function HasConsole: boolean;
+var
+  nfo: TConsoleScreenBufferInfo;
 begin
   if StdOut = 0 then
     StdOut := GetStdHandle(STD_OUTPUT_HANDLE);
   result := (StdOut <> 0) and
             (StdOut <> INVALID_HANDLE_VALUE);
+  if result and
+     (DefaultTextAttr = 0) then
+    if GetConsoleScreenBufferInfo(StdOut, nfo) then
+      DefaultTextAttr := nfo.wAttributes // typically 7 = ord(ccLightGray)
+    else
+      DefaultTextAttr := ord(ccLightGray);
 end;
 
 procedure WinAllocConsole;
 begin
   ConsoleOutputCP := 0; // reset to force calling GetConsoleOutputCP() again
   Windows.AllocConsole;
-  if (StdOut = 0) or
-     (StdOut = INVALID_HANDLE_VALUE) then
-    // force setup StdOut global variable
-    StdOut := GetStdHandle(STD_OUTPUT_HANDLE);
+  HasConsole; // ensure setup StdOut/DefaultTextAttr global variables
 end;
 
 function ConsoleNeedConversion(P: pointer; Len: PtrInt): boolean;
@@ -2591,9 +2597,6 @@ begin
   end;
 end;
 
-var
-  TextAttr: integer = ord(ccDarkGray);
-
 procedure TextColor(Color: TConsoleColor);
 var
   oldAttr: integer;
@@ -2602,8 +2605,11 @@ begin
     exit;
   oldAttr := TextAttr;
   TextAttr := (TextAttr and $F0) or ord(Color);
-  if TextAttr <> oldAttr then
-    SetConsoleTextAttribute(StdOut, TextAttr);
+  if TextAttr = oldAttr then
+    exit;
+  if Color = ccLightGray then // = ccDefault
+    TextAttr := DefaultTextAttr or (TextAttr and $F0);
+  SetConsoleTextAttribute(StdOut, TextAttr);
 end;
 
 procedure TextBackground(Color: TConsoleColor);

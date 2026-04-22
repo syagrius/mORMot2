@@ -3830,7 +3830,7 @@ function GetDiskPartitions: TDiskPartitions;
 procedure XorOSEntropy(var e: THash512Rec);
 
 type
-  /// available console colors
+  /// available console colors for TextColor/TextBackground functions
   TConsoleColor = (
     ccBlack,
     ccBlue,
@@ -3848,6 +3848,9 @@ type
     ccLightMagenta,
     ccYellow,
     ccWhite);
+const
+  /// TextColor(ccLightGray) has a special meaning of "default" console color
+  ccDefault = ccLightGray;
 
 var
   /// low-level handle used for console writing
@@ -3878,9 +3881,10 @@ function StdOutIsTTY: boolean; {$ifdef FPC} inline; {$endif}
 {$endif OSWINDOWS}
 
 /// change the console text writing color
+// - TextColor(ccDefault=ccLightGray) will reset to the default console color
 procedure TextColor(Color: TConsoleColor);
 
-/// change the console text background color
+/// change the console text background color - do nothing on POSIX
 procedure TextBackground(Color: TConsoleColor);
 
 /// write some UTF-8 text to the console using a given color
