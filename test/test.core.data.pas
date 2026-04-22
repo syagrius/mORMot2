@@ -8755,11 +8755,8 @@ procedure TTestCoreYaml.RunGolden(const Name, Yaml, ExpectedJson: RawUtf8);
 var
   doc: TDocVariantData;
   actual: RawUtf8;
-  ok: boolean;
 begin
-  doc.Clear;
-  ok := YamlToVariant(Yaml, doc);
-  CheckUtf8(ok, 'YamlToVariant returned false for %', [Name]);
+  YamlToVariant(Yaml, doc);
   actual := doc.ToJson;
   CheckEqual(actual, ExpectedJson, FormatUtf8('golden "%"', [Name]));
 end;
@@ -8809,11 +8806,11 @@ begin
     doc2.Clear;
     // first parse MUST succeed for every golden case; silently skipping would
     // let real regressions pass this test - that is the anti-pattern
-    CheckUtf8(YamlToVariant(GOLDEN[i].Yaml, doc1),
-      'roundtrip initial parse failed for %', [GOLDEN[i].Name]);
+    YamlToVariant(GOLDEN[i].Yaml, doc1);
+    CheckUtf8(true, 'roundtrip initial parse failed for %', [GOLDEN[i].Name]);
     yaml := VariantToYaml(variant(doc1));
-    CheckUtf8(YamlToVariant(yaml, doc2),
-      'roundtrip parse-2 failed for %', [GOLDEN[i].Name]);
+    YamlToVariant(yaml, doc2);
+    CheckUtf8(true, 'roundtrip parse-2 failed for %', [GOLDEN[i].Name]);
     CheckEqual(doc2.ToJson, doc1.ToJson,
       FormatUtf8('roundtrip "%"', [GOLDEN[i].Name]));
   end;
@@ -8849,7 +8846,8 @@ begin
   Join([BOM_UTF8_CHARS, 'a: 1'], yamlBom);
   Check(PCardinal(yamlBom)^ and $ffffff = BOM_UTF8, 'bom');
   doc.Clear;
-  Check(YamlToVariant(yamlBom, doc), 'YamlToVariant with BOM');
+  YamlToVariant(yamlBom, doc);
+  CheckUtf8(doc.Count <> 0, 'YamlToVariant with BOM');
   CheckEqual(doc.ToJson, '{"a":1}', 'inline BOM stripped');
 end;
 
@@ -8874,8 +8872,8 @@ begin
     ExpectRaise(' depth 20 must raise EYamlException when YamlMaxDepth=8', yaml);
     // same input parses cleanly when the cap is high enough
     YamlMaxDepth := 100;
-    Check(YamlToVariant(yaml, doc),
-      'depth 20 must parse when YamlMaxDepth=100');
+    YamlToVariant(yaml, doc);
+    Check(doc.Count <> 0,  'depth 20 must parse when YamlMaxDepth=100');
   finally
     YamlMaxDepth := saved;
   end;
@@ -8941,7 +8939,8 @@ const
 var
   fromYaml, fromJson: TDocVariantData;
 begin
-  Check(YamlToVariant(OPENAPI_YAML, fromYaml, OPENAPI_OPT), 'YamlToVariant');
+  YamlToVariant(OPENAPI_YAML, fromYaml, OPENAPI_OPT);
+  Check(fromYaml.Count <> 0, 'YamlToVariant');
   Check(fromJson.InitJson(OPENAPI_JSON, OPENAPI_OPT), 'InitJson');
   CheckEqual(fromYaml.ToJson, fromJson.ToJson,
     'OpenAPI-shaped YAML must match JSON equivalent');
