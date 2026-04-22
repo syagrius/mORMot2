@@ -80,6 +80,19 @@ function VariantToYaml(const Doc: variant;
 procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
   Options: TYamlWriterOptions = []);
 
+/// convert YAML 1.2 UTF-8 text directly into a JSON RawUtf8
+// - convenience wrapper around the internal parser's JSON buffer, useful for
+//   pipelines that feed further JSON-based processing (e.g. RTTI settings,
+//   JsonToObject, LoadJson) without going through TDocVariantData
+// - returns '' on parse failure (inspect EYamlException for details)
+function YamlToJson(const Yaml: RawUtf8): RawUtf8;
+
+/// convert JSON UTF-8 text into YAML 1.2 UTF-8 text
+// - pipes the JSON through TDocVariantData then VariantToYaml
+// - useful for converting existing JSON settings files or API payloads to YAML
+function JsonToYaml(const Json: RawUtf8;
+  Options: TYamlWriterOptions = []): RawUtf8;
+
 
 var
   /// maximum YAML nesting depth before the parser raises EYamlException
@@ -94,9 +107,6 @@ implementation
 
 
 { ----- internal helpers --------------------------------------------------- }
-
-const
-  HEX_LOWER: array[0..15] of AnsiChar = '0123456789abcdef';
 
 type
   TYamlLine = record
@@ -1922,7 +1932,7 @@ end;
 type
   TVariantToYaml = class
   private
-    fOut: TTextWriter;
+    fOut: TJsonWriter;
     fOutBuf: TTextWriterStackBuffer;
     fOptions: TYamlWriterOptions;
     procedure WriteValue(const v: variant; Indent: integer);
@@ -1943,7 +1953,7 @@ type
 constructor TVariantToYaml.Create(Options: TYamlWriterOptions);
 begin
   inherited Create;
-  fOut := TTextWriter.CreateOwnedStream(fOutBuf);
+  fOut := TJsonWriter.CreateOwnedStream(fOutBuf);
   fOptions := Options;
 end;
 
@@ -2064,38 +2074,10 @@ begin
     fOut.AddNoJsonEscape(pointer(S), n);
     exit;
   end;
-  // emit as double-quoted with JSON-like escapes
-  fOut.Add('"');
-  for i := 1 to n do
-  begin
-    c := S[i];
-    case c of
-      #0..#7:
-        begin
-          // \x0X where X is the single hex digit for ord(c) in 0..7
-          fOut.AddShort('\x0');
-          fOut.Add(AnsiChar(ord('0') + ord(c)));
-        end;
-      #8: fOut.AddShort('\b');
-      #9: fOut.AddShort('\t');
-      #10: fOut.AddShort('\n');
-      #11: fOut.AddShort('\v');
-      #12: fOut.AddShort('\f');
-      #13: fOut.AddShort('\r');
-      #14..#31:
-        begin
-          fOut.AddShort('\x');
-          fOut.Add(HEX_LOWER[ord(c) shr 4]);
-          fOut.Add(HEX_LOWER[ord(c) and $F]);
-        end;
-      '"': fOut.AddShort('\"');
-      '\': fOut.AddShort('\\');
-    else
-      fOut.Add(c);
-    end;
-  end;
-  fOut.Add('"');
-  // suppress unused-var warnings when we reference hasSpecial
+  // emit as JSON-escaped double-quoted string - valid YAML 1.2 §5.7
+  // since the JSON escape set is a subset of YAML's flow-scalar escapes
+  fOut.AddJsonString(S);
+  // hasSpecial is still computed for potential future heuristics
   if hasSpecial then ;
 end;
 
@@ -2106,31 +2088,26 @@ end;
 
 procedure TVariantToYaml.WriteScalar(const v: variant);
 var
-  vt: word;
+  vd: TVarData absolute v;
   s: RawUtf8;
 begin
-  vt := TVarData(v).VType;
-  case vt of
+  case vd.VType of
     varEmpty, varNull:
       fOut.AddShort('null');
     varBoolean:
-      if TVarData(v).VBoolean then
+      if vd.VBoolean then
         fOut.AddShort('true')
       else
         fOut.AddShort('false');
-    varByte, varShortInt, varWord, varSmallInt, varLongWord, varInteger,
-    varInt64, varWord64:
-      begin
-        VariantToUtf8(v, s);
-        fOut.AddNoJsonEscape(pointer(s), length(s));
-      end;
+    varByte, varShortInt, varWord, varSmallInt,
+    varLongWord, varInteger, varInt64, varWord64,
     varSingle, varDouble, varCurrency:
-      begin
-        VariantToUtf8(v, s);
-        fOut.AddNoJsonEscape(pointer(s), length(s));
-      end;
+      // numeric types share the same text form in JSON and YAML, so let
+      // TJsonWriter.AddVariant emit them directly without any escaping
+      fOut.AddVariant(v, twNone);
   else
     begin
+      // string-like or unknown: coerce to UTF-8 and apply YAML quoting rules
       VariantToUtf8(v, s);
       WriteYamlString(s);
     end;
@@ -2302,6 +2279,34 @@ procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
   Options: TYamlWriterOptions);
 begin
   FileFromString(VariantToYaml(Doc, Options), FileName);
+end;
+
+function YamlToJson(const Yaml: RawUtf8): RawUtf8;
+var
+  conv: TYamlToJson;
+  src: RawUtf8;
+begin
+  src := Yaml;
+  // strip optional UTF-8 BOM - accepted in files and in-memory buffers
+  if (length(src) >= 3) and
+     (PCardinal(pointer(src))^ and $00ffffff = BOM_UTF8) then
+    delete(src, 1, 3);
+  conv := TYamlToJson.Create;
+  try
+    result := conv.Run(src);
+  finally
+    conv.Free;
+  end;
+end;
+
+function JsonToYaml(const Json: RawUtf8; Options: TYamlWriterOptions): RawUtf8;
+var
+  doc: TDocVariantData;
+begin
+  result := '';
+  if not doc.InitJson(Json, JSON_FAST_FLOAT + [dvoInternNames]) then
+    exit;
+  result := VariantToYaml(variant(doc), Options);
 end;
 
 
