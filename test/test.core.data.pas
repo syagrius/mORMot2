@@ -8800,19 +8800,23 @@ var
   doc1, doc2: TDocVariantData;
   yaml: RawUtf8;
 begin
+  doc1.Init;
+  doc2.Init;
   for i := low(GOLDEN) to high(GOLDEN) do
   begin
-    doc1.Clear;
-    doc2.Clear;
     // first parse MUST succeed for every golden case; silently skipping would
     // let real regressions pass this test - that is the anti-pattern
     YamlToVariant(GOLDEN[i].Yaml, doc1);
-    CheckUtf8(true, 'roundtrip initial parse failed for %', [GOLDEN[i].Name]);
+    CheckUtf8(doc1.Kind <> dvUndefined,
+      'roundtrip initial parse failed for %', [GOLDEN[i].Name]);
     yaml := VariantToYaml(variant(doc1));
     YamlToVariant(yaml, doc2);
-    CheckUtf8(true, 'roundtrip parse-2 failed for %', [GOLDEN[i].Name]);
+    CheckUtf8(doc2.Kind <> dvUndefined,
+      'roundtrip parse-2 failed for %', [GOLDEN[i].Name]);
     CheckEqual(doc2.ToJson, doc1.ToJson,
       FormatUtf8('roundtrip "%"', [GOLDEN[i].Name]));
+    doc1.Clear;
+    doc2.Clear;
   end;
 end;
 
