@@ -2465,7 +2465,7 @@ var
 begin
   content := StringFromFile(FileName);
   if (content = '') and
-     (ExtractFileExt(filename) = '') then
+     not HasExt(filename) then
     content := StringFromFile(filename + ECCCERTIFICATEPUBLIC_FILEEXT);
   if content = '' then
     result := false
@@ -3142,7 +3142,7 @@ function TEccCertificateSecret.LoadFromSecureFile(const FileName: TFileName;
 var
   FN: TFileName;
 begin
-  if ExtractFileExt(FileName) = '' then
+  if not HasExt(FileName) then
     FN := FileName + ECCCERTIFICATESECRET_FILEEXT
   else
     FN := FileName;
@@ -4620,7 +4620,7 @@ end;
 
 function GetChainFileName(const jsonfile: TFileName): TFileName;
 begin
-  if ExtractFileExt(jsonfile) = '' then
+  if not HasExt(jsonfile) then
     result := jsonfile + ECCCERTIFICATES_FILEEXT
   else
     result := jsonfile;

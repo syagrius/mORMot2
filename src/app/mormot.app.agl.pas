@@ -1825,7 +1825,7 @@ begin
     ESynAngelize.RaiseUtf8('/new: duplicated servicename "%"', [sn]);
   exe := sysutils.Trim(paramstr(3));
   {$ifdef OSWINDOWS}
-  if ExtractFileExt(exe) = '' then
+  if not HasExt(exe) then
     exe := exe + '.exe';
   {$endif OSWINDOWS}
   if exe <> '' then

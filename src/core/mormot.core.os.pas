@@ -3374,6 +3374,10 @@ function ExtractNameU(const FileName: RawUtf8): RawUtf8;
 // - but cross-platform, i.e. detect both '\' and '/' on all platforms
 function ExtractExt(const FileName: TFileName; WithoutDot: boolean = false): TFileName;
 
+/// returns true if the file name as a non-void extension (e.g. 'toto.txt' = true)
+// - see also GetFileNameExtIndex() from mormot.core.text
+function HasExt(const FileName: TFileName): boolean;
+
 // defined here for proper ExtractExtP() inlining
 function GetLastDelimU(const FileName: RawUtf8; OtherDelim: AnsiChar = #0): PtrInt;
 function GetLastDelim(const FileName: TFileName; OtherDelim: cardinal = 0): PtrInt;
@@ -7873,6 +7877,15 @@ begin
   if WithoutDot then
     inc(i);
   result := copy(FileName, i, 100);
+end;
+
+function HasExt(const FileName: TFileName): boolean;
+var
+  i: PtrInt;
+begin
+  i := GetLastDelim(FileName, ord('.'));
+  result := (i > 1) and
+            (FileName[i] = '.');
 end;
 
 function ExtractExtU(const FileName: RawUtf8; WithoutDot: boolean): RawUtf8;
