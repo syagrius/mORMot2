@@ -89,7 +89,6 @@ uses
   mormot.core.json,
   mormot.core.fmt,
   mormot.core.variants,
-  mormot.core.yaml,
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.core.perf,
@@ -8835,9 +8834,8 @@ var
   yamlBom: RawUtf8;
 begin
   fn := WorkDir + 'test.core.yaml.tmp.yaml';
-  FileFromString('a: 1'#10'b: 2'#10, fn);
+  Check(FileFromString('a: 1'#10'b: 2'#10, fn));
   try
-    doc.Clear;
     Check(YamlFileToVariant(fn, doc), 'YamlFileToVariant returned false');
     CheckEqual(doc.ToJson, '{"a":1,"b":2}', 'file api');
   finally

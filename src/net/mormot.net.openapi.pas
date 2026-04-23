@@ -51,8 +51,7 @@ uses
   mormot.core.rtti,
   mormot.core.data, // for TRawUtf8List
   mormot.core.fmt,
-  mormot.core.variants,
-  mormot.core.yaml; // for YAML spec input
+  mormot.core.variants;
 
 
 { ************************************ OpenAPI Document Wrappers }

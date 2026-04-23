@@ -182,6 +182,7 @@ Our JSON engine uses a very efficient SAX-like kernel and full RTTI support.
 Binary, JSON and Text Advanced Formatting Functions
 - HTML Text Conversions
 - Basic XML Conversions
+- YAML 1.2 core-schema to JSON or `TDocVariant` Support
 - Markup (e.g. Markdown or Emoji) process
 - INI Files In-memory Access
 - `TSynJsonFileSettings` Parent Class
