@@ -57,18 +57,25 @@ type
     ywoNoComments);
   TYamlWriterOptions = set of TYamlWriterOption;
 
+const
+  /// TDocVariant flavor for YAML, enabling floating numbers and name interning
+  JSON_YAML =
+    [dvoReturnNullForUnknownProperty,
+     dvoValueCopiedByReference,
+     dvoAllowDoubleValue,
+     dvoInternNames];
 
 /// parse YAML UTF-8 text into a TDocVariantData
 // - accepts YAML 1.2 core-schema subset (see unit header)
 // - raises EYamlException on unsupported constructs or syntactic errors
 // - Options defaults to mormot.net.openapi-compatible values when empty
 procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
-  Options: TDocVariantOptions = JSON_FAST_FLOAT);
+  Options: TDocVariantOptions = JSON_YAML);
 
 /// parse a YAML file into a TDocVariantData
 // - file is expected to be UTF-8 (BOM tolerated); see YamlToVariant
 function YamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
-  Options: TDocVariantOptions = JSON_FAST_FLOAT): boolean;
+  Options: TDocVariantOptions = JSON_YAML): boolean;
 
 /// serialize a TDocVariant as YAML 1.2 UTF-8 text
 // - result is block-style by default; ywoFlowCompact switches leaf containers
@@ -1703,25 +1710,19 @@ procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
 var
   conv: TYamlToJson;
   json, src: RawUtf8;
-  opt: TDocVariantOptions;
 begin
   src := Yaml;
   // strip UTF-8 BOM regardless of source (file or in-memory) for consistency
   if (length(src) >= 3) and
      (PCardinal(pointer(src))^ and $00ffffff = BOM_UTF8) then
     delete(src, 1, 3);
-  if Options = [] then
-    // force full YAML values compatibility 
-    opt := JSON_FAST_FLOAT + [dvoInternNames]
-  else
-    opt := Options;
   conv := TYamlToJson.Create;
   try
     json := conv.Run(src);
   finally
     conv.Free;
   end;
-  if Doc.InitJsonInPlace(pointer(json), opt) = nil then
+  if Doc.InitJsonInPlace(pointer(json), Options) = nil then
     EYamlException.RaiseU('YamlToVariant: JSON output error');
 end;
 
@@ -2083,10 +2084,10 @@ function JsonToYaml(const Json: RawUtf8; Options: TYamlWriterOptions): RawUtf8;
 var
   doc: TDocVariantData;
 begin
-  result := '';
-  if not doc.InitJson(Json, JSON_FAST_FLOAT + [dvoInternNames]) then
-    exit;
-  result := VariantToYaml(variant(doc), Options);
+  if doc.InitJson(Json, JSON_YAML) then
+    result := VariantToYaml(variant(doc), Options)
+  else
+    result := '';
 end;
 
 

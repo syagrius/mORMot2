@@ -2407,7 +2407,7 @@ end;
 procedure TOpenApiParser.ParseJson(const aJson: RawUtf8);
 begin
   Clear;
-  fSpecs.Data.InitJson(aJson, JSON_FAST + [dvoInternNames]);
+  fSpecs.Data.InitJson(aJson, JSON_YAML);
   ParseSpecs;
 end;
 
@@ -2422,7 +2422,7 @@ end;
 procedure TOpenApiParser.ParseYamlFile(const aYamlFile: TFileName);
 begin
   Clear;
-  if not YamlFileToVariant(aYamlFile, fSpecs.Data, JSON_FAST + [dvoInternNames]) then
+  if not YamlFileToVariant(aYamlFile, fSpecs.Data) then
     EOpenApi.RaiseUtf8('%.ParseYamlFile: invalid YAML file %',
       [self, aYamlFile]);
   ParseSpecs;
@@ -2434,15 +2434,15 @@ var
 begin
   Clear;
   ext := SysUtils.LowerCase(ExtractFileExt(aSpecFile));
-  if (ext = '.yaml') or (ext = '.yml') then
+  if (ext = '.yaml') or
+     (ext = '.yml') then
   begin
-    if not YamlFileToVariant(aSpecFile, fSpecs.Data,
-         JSON_FAST + [dvoInternNames]) then
+    if not YamlFileToVariant(aSpecFile, fSpecs.Data) then
       EOpenApi.RaiseUtf8('%.ParseFile: invalid YAML file %',
         [self, aSpecFile]);
   end
   else
-    fSpecs.Data.InitJsonFromFile(aSpecFile, JSON_FAST + [dvoInternNames]);
+    fSpecs.Data.InitJsonFromFile(aSpecFile, JSON_YAML);
   ParseSpecs;
 end;
 
