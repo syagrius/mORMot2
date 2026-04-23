@@ -3378,6 +3378,10 @@ function ExtractExt(const FileName: TFileName; WithoutDot: boolean = false): TFi
 // - see also GetFileNameExtIndex() from mormot.core.text
 function HasExt(const FileName: TFileName): boolean;
 
+/// case-insensitive check a file name extension, returning -1 or Exts[] found index
+function SameExt(const FileName: TFileName; const Exts: array of TFileName;
+  WithoutDot: boolean = false): PtrInt;
+
 // defined here for proper ExtractExtP() inlining
 function GetLastDelimU(const FileName: RawUtf8; OtherDelim: AnsiChar = #0): PtrInt;
 function GetLastDelim(const FileName: TFileName; OtherDelim: cardinal = 0): PtrInt;
@@ -7886,6 +7890,19 @@ begin
   i := GetLastDelim(FileName, ord('.'));
   result := (i > 1) and
             (FileName[i] = '.');
+end;
+
+function SameExt(const FileName: TFileName; const Exts: array of TFileName;
+  WithoutDot: boolean): PtrInt;
+var
+  ext: TFileName;
+begin
+  ext := ExtractExt(FileName, WithoutDot);
+  if ext <> '' then
+    for result := 0 to high(Exts) do
+      if SameText(ext, Exts[result]) then
+        exit;
+  result := -1;
 end;
 
 function ExtractExtU(const FileName: RawUtf8; WithoutDot: boolean): RawUtf8;

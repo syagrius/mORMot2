@@ -100,6 +100,7 @@ function GetNextItemString(var P: PChar; Sep: Char = ','): string;
 // - will return -1 if no file extension match
 // - will return any matching extension, starting count at 0
 // - extension match is case-insensitive
+// - see also SameExt() from mormot.core.os.pas
 function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 
 /// return next CSV string from P, nil if no more
