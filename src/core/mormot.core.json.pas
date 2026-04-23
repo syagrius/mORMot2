@@ -5313,6 +5313,11 @@ begin
   Ctxt.W.Add(Data^);
 end;
 
+procedure _JS_WordBool(Data: PWord; const Ctxt: TJsonSaveContext);
+begin
+  Ctxt.W.Add(Data^ <> 0); // WordBool specific support
+end;
+
 procedure _JS_Byte(Data: PByte; const Ctxt: TJsonSaveContext);
 begin
   Ctxt.W.AddB(Data^);
@@ -5836,7 +5841,7 @@ const
   VARIANT_JSONSAVE: array[varEmpty .. varOleUInt] of pointer = (
     {0}  @_JS_Null, @_JS_Null, @_JS_SmallInt, @_JS_Integer, @_JS_Single,
     {5}  @_JS_Double, @_JS_Currency, @_JS_DateTime, nil, nil,
-    {10} nil, @_JS_Boolean, nil, nil, nil,
+    {10} nil, @_JS_WordBool, nil, nil, nil,
     {15} nil, @_JS_ShortInt, @_JS_Byte, @_JS_Word, @_JS_Cardinal,
     {20} @_JS_Int64, @_JS_QWord, @_JS_Integer, @_JS_Cardinal);
 
