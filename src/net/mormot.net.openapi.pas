@@ -2413,7 +2413,7 @@ end;
 procedure TOpenApiParser.ParseYaml(const aYaml: RawUtf8);
 begin
   Clear;
-  if not YamlToVariant_OpenApi(aYaml, fSpecs.Data) then
+  if not TryYamlToVariant(aYaml, fSpecs.Data) then
     EOpenApi.RaiseUtf8('%.ParseYaml: invalid YAML payload', [self]);
   ParseSpecs;
 end;
@@ -2421,22 +2421,20 @@ end;
 procedure TOpenApiParser.ParseYamlFile(const aYamlFile: TFileName);
 begin
   Clear;
-  if not YamlFileToVariant(aYamlFile, fSpecs.Data) then
+  if not TryYamlFileToVariant(aYamlFile, fSpecs.Data) then
     EOpenApi.RaiseUtf8('%.ParseYamlFile: invalid YAML file %',
       [self, aYamlFile]);
   ParseSpecs;
 end;
 
 procedure TOpenApiParser.ParseFile(const aSpecFile: TFileName);
-var
-  ext: TFileName;
 begin
   Clear;
   ext := SysUtils.LowerCase(ExtractFileExt(aSpecFile));
   if (ext = '.yaml') or
      (ext = '.yml') then
   begin
-    if not YamlFileToVariant(aSpecFile, fSpecs.Data) then
+    if not TryYamlFileToVariant(aSpecFile, fSpecs.Data) then
       EOpenApi.RaiseUtf8('%.ParseFile: invalid YAML file %',
         [self, aSpecFile]);
   end

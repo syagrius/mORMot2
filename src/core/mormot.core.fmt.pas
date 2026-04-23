@@ -174,9 +174,13 @@ const
 procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
   Options: TDocVariantOptions = JSON_YAML);
 
+/// convenient wrapper called e.g. by TOpenApiParser.ParseYaml()
+function TryYamlToVariant(const Yaml: RawUtf8;
+  out Doc: TDocVariantData): boolean;
+
 /// parse a YAML file into a TDocVariantData
 // - file is expected to be UTF-8 (BOM tolerated); see YamlToVariant
-function YamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
+function TryYamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
   Options: TDocVariantOptions = JSON_YAML): boolean;
 
 /// serialize a TDocVariant as YAML 1.2 UTF-8 text
@@ -184,10 +188,6 @@ function YamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
 //   to flow style
 function VariantToYaml(const Doc: variant;
   Options: TYamlWriterOptions = []): RawUtf8;
-
-/// convenient wrapper called by TOpenApiParser.ParseYaml()
-function YamlToVariant_OpenApi(const Yaml: RawUtf8;
-  out Doc: TDocVariantData): boolean;
 
 /// save a TDocVariant as a YAML file (UTF-8, no BOM, LF line endings)
 procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
@@ -1332,9 +1332,8 @@ begin
 end;
 
 
-{ ************* YAML 1.2 core-schema to JSON or TDocVariant Support }
+{ ************* YAML 1.2 core-schema to JSON or TDocVariant Support
 
-{
   - plain / double-quoted / single-quoted scalars with core-schema type
     inference (null / bool / int / float / string)
   - block and flow mappings and sequences
@@ -2942,16 +2941,11 @@ procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
   Options: TDocVariantOptions);
 var
   conv: TYamlToJson;
-  json, src: RawUtf8;
+  json: RawUtf8;
 begin
-  src := Yaml;
-  // strip UTF-8 BOM regardless of source (file or in-memory) for consistency
-  if (length(src) >= 3) and
-     (PCardinal(pointer(src))^ and $00ffffff = BOM_UTF8) then
-    delete(src, 1, 3);
   conv := TYamlToJson.Create;
   try
-    json := conv.Run(src);
+    json := conv.Run(Yaml);
   finally
     conv.Free;
   end;
@@ -2959,7 +2953,7 @@ begin
     EYamlException.RaiseU('YamlToVariant: JSON output error');
 end;
 
-function YamlToVariant_OpenApi(const Yaml: RawUtf8;
+function TryYamlToVariant(const Yaml: RawUtf8;
   out Doc: TDocVariantData): boolean;
 // convenience alias preserving mormot.net.openapi's exact options set
 begin
@@ -2971,15 +2965,15 @@ begin
   end;
 end;
 
-function YamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
+function TryYamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
   Options: TDocVariantOptions): boolean;
 var
   content: RawUtf8;
 begin
-  if not FileExists(FileName) then
-    EYamlException.RaiseUtf8('YamlFileToVariant: file not found: %',
+  content := RawUtf8FromFile(FileName);
+  if content = '' then
+    EYamlException.RaiseUtf8('TryYamlFileToVariant: file not found: %',
       [FileName]);
-  content := StringFromFile(FileName);
   // BOM stripping happens inside YamlToVariant now
   try
     YamlToVariant(content, Doc, Options);
