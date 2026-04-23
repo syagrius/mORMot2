@@ -8777,7 +8777,7 @@ var
 begin
   Check(VarRecToUtf8IsString(Yaml[0], tmp));
   Utf8ToFileName(tmp, fn);
-  YamlFileToVariant(fn, doc);
+  Check(TryYamlFileToVariant(fn, doc));
 end;
 
 procedure TTestCoreYaml.ExpectRaise(const Name, Yaml: RawUtf8);
@@ -8836,7 +8836,7 @@ begin
   fn := WorkDir + 'test.core.yaml.tmp.yaml';
   Check(FileFromString('a: 1'#10'b: 2'#10, fn));
   try
-    Check(YamlFileToVariant(fn, doc), 'YamlFileToVariant returned false');
+    Check(TryYamlFileToVariant(fn, doc), 'TryYamlFileToVariant ');
     CheckEqual(doc.ToJson, '{"a":1,"b":2}', 'file api');
   finally
     DeleteFile(fn);
@@ -8844,13 +8844,17 @@ begin
   // file-not-found must raise EYamlException (patch P10)
   CheckRaised(RunFile, [WorkDir + 'does.not.exist.yaml'], EYamlException,
     'file-not-found must raise EYamlException');
-  // BOM must be stripped even in inline YamlToVariant (patch P8)
+  // BOM must be stripped from file content
   Join([BOM_UTF8_CHARS, 'a: 1'], yamlBom);
   Check(PCardinal(yamlBom)^ and $ffffff = BOM_UTF8, 'bom');
-  doc.Clear;
-  YamlToVariant(yamlBom, doc);
-  CheckUtf8(doc.Count <> 0, 'YamlToVariant with BOM');
-  CheckEqual(doc.ToJson, '{"a":1}', 'inline BOM stripped');
+  Check(FileFromString('a: 1'#10#10, fn));
+  try
+    doc.Clear;
+    Check(TryYamlFileToVariant(fn, doc), 'TryYamlFileToVariant bom');
+    CheckEqual(doc.ToJson, '{"a":1}', 'file api bom');
+  finally
+    DeleteFile(fn);
+  end;
 end;
 
 procedure TTestCoreYaml._RecursionDepth;
@@ -9338,7 +9342,13 @@ begin
         Check(AddString(json, Ansi7ToString(Entry[i].intName)) = i);
         if (i and 1) = (m - 1) then
           AddString(deleted, json[i]);
-        Check(SameText(ExtractFileExt(json[i]), '.json'), 'json');
+        Check(SameText(ExtractFileExt(json[i]), '.json'), 'json1');
+        Check(SameText(ExtractExt(json[i]), '.json'), 'json2');
+        Check(SameText(ExtractExt(json[i], true), 'json'), 'json3');
+        Check(SameExt(json[i], ['.JSon']) >= 0, 'json4');
+        Check(SameExt(json[i], ['JSon'], true) >= 0, 'json5');
+        Check(SameExt(json[i], ['.js']) < 0, 'json6');
+        Check(HasExt(json[i]), 'ext');
       end;
     finally
       Free;
