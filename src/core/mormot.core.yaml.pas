@@ -423,7 +423,7 @@ type
     fDepth: integer;
     fMaxDepth: integer;
     fOut: TJsonWriter;
-    procedure Error(LineIdx: integer; const Msg: RawUtf8);
+    procedure Error(LineIdx: integer; const Msg: ShortString);
     procedure ErrorFmt(LineIdx: integer; const Fmt: RawUtf8;
       const Args: array of const);
     function SkipBlankLines: PYamlLine;
@@ -474,7 +474,7 @@ begin
   inherited Destroy;
 end;
 
-procedure TYamlToJson.Error(LineIdx: integer; const Msg: RawUtf8);
+procedure TYamlToJson.Error(LineIdx: integer; const Msg: ShortString);
 begin
   EYamlException.RaiseUtf8('YAML line %: %', [LineIdx + 1, Msg]);
 end;
@@ -482,9 +482,9 @@ end;
 procedure TYamlToJson.ErrorFmt(LineIdx: integer; const Fmt: RawUtf8;
   const Args: array of const);
 var
-  msg: RawUtf8;
+  msg: ShortString;
 begin
-  FormatUtf8(Fmt, Args, msg);
+  FormatShort(Fmt, Args, msg);
   Error(LineIdx, msg);
 end;
 
@@ -1477,7 +1477,8 @@ begin
                 dec(depth);
           ',':
             if not inSingle and
-               not inDouble and (depth = 0) then
+               not inDouble and
+               (depth = 0) then
               break;
         end;
         inc(p);
