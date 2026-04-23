@@ -193,6 +193,9 @@ function VariantToYaml(const Doc: variant;
 procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
   Options: TYamlWriterOptions = []);
 
+/// recognize *.yaml and *.yml file patterns
+function IsYamlFileName(const FileName: TFileName): boolean;
+
 /// convert YAML 1.2 UTF-8 text directly into a JSON RawUtf8
 // - convenience wrapper around the internal parser's JSON buffer, useful for
 // pipelines that feed further JSON-based processing (e.g. RTTI settings,
@@ -3287,6 +3290,11 @@ procedure SaveVariantToYamlFile(const Doc: variant; const FileName: TFileName;
   Options: TYamlWriterOptions);
 begin
   FileFromString(VariantToYaml(Doc, Options), FileName);
+end;
+
+function IsYamlFileName(const FileName: TFileName): boolean;
+begin
+  result := SameExt(FileName, ['yaml', 'yml'], {withoutdot=}true) >= 0;
 end;
 
 function YamlToJson(const Yaml: RawUtf8): RawUtf8;

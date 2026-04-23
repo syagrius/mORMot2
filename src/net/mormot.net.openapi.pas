@@ -2430,9 +2430,7 @@ end;
 procedure TOpenApiParser.ParseFile(const aSpecFile: TFileName);
 begin
   Clear;
-  ext := SysUtils.LowerCase(ExtractFileExt(aSpecFile));
-  if (ext = '.yaml') or
-     (ext = '.yml') then
+  if IsYamlFileName(aSpecFile) then
   begin
     if not TryYamlFileToVariant(aSpecFile, fSpecs.Data) then
       EOpenApi.RaiseUtf8('%.ParseFile: invalid YAML file %',
