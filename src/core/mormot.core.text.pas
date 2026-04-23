@@ -2935,20 +2935,18 @@ end;
 
 function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 var
-  Ext: TFileName;
+  ext: TFileName;
   P: PChar;
 begin
   result := -1;
   P := pointer(CsvExt);
-  Ext := ExtractFileExt(FileName);
+  ext := ExtractExt(FileName, {withoutdot=}true);
   if (P = nil) or
-     (Ext = '') or
-     (Ext[1] <> '.') then
+     (ext = '') then
     exit;
-  delete(Ext, 1, 1);
   repeat
     inc(result);
-    if SameText(GetNextItemString(P), Ext) then
+    if SameText(GetNextItemString(P), ext) then
       exit;
   until P = nil;
   result := -1;

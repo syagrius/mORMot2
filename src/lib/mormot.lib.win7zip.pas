@@ -1430,8 +1430,7 @@ begin
       exit;
   end;
   // fallback to guess from file extension
-  StringToUtf8(ExtractFileExt(FileName), ext);
-  delete(ext, 1, 1);
+  StringToUtf8(ExtractExt(FileName, {withoutdot=}true), ext);
   l := length(ext);
   if l = 1 then
     case ext[1] of

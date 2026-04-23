@@ -7513,7 +7513,7 @@ begin
     else
     begin
       fn := aFileName;
-      ext := ExtractFileExt(aFileName);
+      ext := ExtractExt(aFileName);
       for retry := 1 to aAliases do
       begin
         if IsSharedViolation(err) then

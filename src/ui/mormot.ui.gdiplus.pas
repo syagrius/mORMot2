@@ -546,10 +546,9 @@ var
   i: PtrInt;
 begin
   result := nil;
-  ext := ExtractFileExt(FileName);
+  ext := ExtractExt(FileName, {withoutdot=}true);
   if ext = '' then
     exit;
-  Delete(ext, 1, 1); // '.bmp' -> 'bmp'
   if SameText(ext, 'BMP') then
     result := TBitmap
   else if SameText(ext, 'EMF') then

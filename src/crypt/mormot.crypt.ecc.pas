@@ -2146,7 +2146,7 @@ begin
   if FileExists(TruncatedFileName) then
     exit;
   ext := ECCCERTIFICATE_FILEEXT[privkey];
-  if ExtractFileExt(TruncatedFileName) <> ext then
+  if ExtractExt(TruncatedFileName) <> ext then
   begin
     fn := TruncatedFileName + ext;
     if FileExists(fn) then
@@ -3659,7 +3659,7 @@ function TEccSignatureCertifiedFile.FromFile(const aFileName: TFileName): boolea
 var
   json: RawUtf8;
 begin
-  if SameText(ExtractFileExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
+  if SameText(ExtractExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
     json := StringFromFile(aFileName)
   else
     json := StringFromFile(aFileName + ECCCERTIFICATESIGN_FILEEXT);
