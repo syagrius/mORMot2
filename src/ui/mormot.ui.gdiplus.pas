@@ -546,10 +546,9 @@ var
   i: PtrInt;
 begin
   result := nil;
-  ext := ExtractFileExt(FileName);
+  ext := ExtractExt(FileName, {withoutdot=}true);
   if ext = '' then
     exit;
-  Delete(ext, 1, 1); // '.bmp' -> 'bmp'
   if SameText(ext, 'BMP') then
     result := TBitmap
   else if SameText(ext, 'EMF') then
@@ -1179,16 +1178,13 @@ function LoadFrom(const FileName: TFileName): TBitmap;
 var
   P: TSynPicture;
   mf: TMetafile;
-  ext: TFileName;
 begin
   result := nil;
   if not FileExists(FileName) then
     exit;
   EnsureGdipExistsAndLock('LoadFrom');
   try
-    ext := ExtractFileExt(FileName);
-    if SameText(ext, '.WMF') or
-       SameText(ext, '.EMF') then
+    if SameExt(FileName, ['.wmf', '.emf']) >= 0 then
     begin
       // EMF will be loaded and rendered using GDI+ anti-aliasing
       mf := TMetaFile.Create;

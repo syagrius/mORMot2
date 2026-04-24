@@ -736,7 +736,7 @@ const
 type
   /// Oracle native number low-level representation
   OCINumber = packed record
-    OCINumberPart: array [0..OCI_NUMBER_SIZE-1] of ub1;
+    OCINumberPart: array[0..OCI_NUMBER_SIZE - 1] of ub1;
   end;
 
 
@@ -1614,11 +1614,11 @@ begin
 end;
 
 var
-  _NLSLANG: AnsiString = '';
+  _NLSLANG: RawUtf8 = '';
 
 procedure SetNlsLang;
 begin
-  _NLSLANG := AnsiString(GetEnvironmentVariable('NLS_LANG'));
+  _NLSLANG := GetSystemEnv('NLS_LANG');
   if _NLSLANG = '' then
     _NLSLANG := '-';
 end;
@@ -1682,7 +1682,7 @@ begin
         l2 := Executable.ProgramFilePath + 'OracleInstantClient';
     l2 := l2 + PathDelim + LibraryFileName;
   end;
-  l3 := GetEnvironmentVariable('ORACLE_HOME');
+  l3 := GetSystemEnvString('ORACLE_HOME');
   if l3 <> '' then
     l3 := MakePath([l3, 'bin', LibraryFileName]);
   try

@@ -31,7 +31,7 @@ uses
   mormot.core.perf,
   mormot.core.buffers,
   mormot.core.variants,
-  mormot.core.search, // for soundex functions
+  mormot.core.search, // for soundex JSON-SAX and functions
   mormot.core.log,
   mormot.db.core,
   mormot.lib.static;
@@ -6367,7 +6367,7 @@ begin
        (V2 = 0) then
       // any invalid date -> compare as UTF-8 strings
       result := Utf8ILComp(s1, s2, s1Len, s2Len)
-    else if SameValue(V1, V2, 1 / MilliSecsPerDay) then
+    else if SameValue(V1, V2, MilliSecsPerDate) then
       result := 0
     else if V1 < V2 then
       result := -1
@@ -8332,7 +8332,7 @@ begin
     FieldToJson(W, sqlite3.column_value(Request, f), {noblob=}false);
     W.AddComma;
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TSqlRequest.ExecuteDocVariant(aDB: TSqlite3DB; const aSql: RawUtf8;

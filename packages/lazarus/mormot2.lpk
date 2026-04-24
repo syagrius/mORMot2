@@ -12,7 +12,9 @@
         <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
         <SrcPath Value="../../src"/>
       </SearchPaths>
+      <Conditionals Value="if TargetCPU=&apos;arm&apos; then CustomOptions := &apos;-O2&apos;;"/>
       <CodeGeneration>
+        <SmartLinkUnit Value="True"/>
         <Optimizations>
           <OptimizationLevel Value="3"/>
         </Optimizations>
@@ -46,8 +48,8 @@
     </CompilerOptions>
     <Description Value="mORMot 2 ORM/SOA/MVC framework"/>
     <License Value="MPL, GPL or LGPL"/>
-    <Version Major="2" Release="1"/>
-    <Files Count="118">
+    <Version Major="2" Minor="4"/>
+    <Files Count="121">
       <Item1>
         <Filename Value="../../src/app/mormot.app.console.pas"/>
         <UnitName Value="mormot.app.console"/>
@@ -521,6 +523,18 @@
         <Filename Value="../../src/crypt/mormot.crypt.other.pas"/>
         <UnitName Value="mormot.crypt.other"/>
       </Item118>
+      <Item119>
+        <Filename Value="../../src/net/mormot.net.dhcp.pas"/>
+        <UnitName Value="mormot.net.dhcp"/>
+      </Item119>
+      <Item120>
+        <Filename Value="../../src/core/mormot.core.fmt.pas"/>
+        <UnitName Value="mormot.core.fmt"/>
+      </Item120>
+      <Item121>
+        <Filename Value="../../src/core/mormot.core.os.delphi.pas"/>
+        <UnitName Value="mormot.core.os.delphi"/>
+      </Item121>
     </Files>
     <CompatibilityMode Value="True"/>
     <UsageOptions>

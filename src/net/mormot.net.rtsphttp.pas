@@ -278,7 +278,8 @@ begin
           log.Log(sllTrace, 'ConnectionCreate received % % %',
             [sock.Method, sock.URL, sock.Http.Headers], self);
         cookie := sock.HeaderGetValue('X-SESSIONCOOKIE');
-        if cookie = '' then
+        if (cookie = '') or
+           (sock.Method = '') then
           exit;
         now := GetTickSec;
         fPendingGet.Safe.WriteLock;
@@ -335,7 +336,7 @@ begin
               get := fPendingGet.Objects[found];
               fPendingGet.Objects[found] := nil; // will be owned by rtspinstance
               fPendingGet.Delete(found);
-              sock.Sock := TNetSocket(-1); // disable Close on sock.Free -> handled in pool
+              sock.Sock := NO_SOCKET; // disable Close on sock.Free -> handled in pool
             end;
           end;
         finally

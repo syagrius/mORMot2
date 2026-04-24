@@ -939,7 +939,7 @@ type
     fDescriptions: TDocVariantData;
     fOnCall: TOnCommandLineCall;
     procedure ToConsole(const Fmt: RawUtf8; const Args: array of const;
-      Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false);
+      Color: TConsoleColor = ccDefault; NoLineFeed: boolean = false);
     function Find(const name: RawUtf8; out service: TInterfaceFactory): boolean;
     procedure WriteDescription(desc: RawUtf8; color: TConsoleColor;
       firstline: boolean);
@@ -1040,7 +1040,7 @@ begin
   begin
     ToConsole('% %', [fExe, fServices[i].InterfaceUri], ccWhite);
     WriteDescription(
-      fDescriptions.U[fServices[i].interfaceName], ccLightGray, true);
+      fDescriptions.U[fServices[i].interfaceName], ccDefault, true);
   end;
 end;
 
@@ -1049,14 +1049,14 @@ var
   m: PtrInt;
 begin
   ToConsole('% %', [fExe, service.InterfaceUri], ccWhite);
-  WriteDescription(fDescriptions.U[service.InterfaceName], ccLightGray, false);
+  WriteDescription(fDescriptions.U[service.InterfaceName], ccDefault, false);
   for m := 0 to service.MethodsCount - 1 do
     with service.Methods[m] do
     begin
       ToConsole('% % % [parameters]',
         [fExe, service.InterfaceUri, uri], ccWhite);
       WriteDescription(
-        fDescriptions.U[InterfaceDotMethodName], ccLightGray, true);
+        fDescriptions.U[InterfaceDotMethodName], ccDefault, true);
     end;
 end;
 
@@ -1098,7 +1098,7 @@ begin
   ToConsole('% % % [parameters]',
     [fExe, service.InterfaceUri, method.Uri], ccWhite);
   WriteDescription(
-    fDescriptions.U[method.InterfaceDotMethodName], ccLightGray, false);
+    fDescriptions.U[method.InterfaceDotMethodName], ccDefault, false);
   if method.ArgsInputValuesCount <> 0 then
     Arguments({input=}true);
   if method.ArgsOutputValuesCount <> 0 then
@@ -1127,7 +1127,7 @@ begin
   end;
   // writeln(call.InBody); exit;
   if [cloVerbose, cloHeaders] * fOptions <> [] then
-    ToConsole('POST %', [method.InterfaceDotMethodName], ccLightGray);
+    ToConsole('POST %', [method.InterfaceDotMethodName], ccDefault);
   if cloVerbose in fOptions then
     ToConsole('%', [call.InBody], ccLightBlue);
   // execute the OnCall event handler to actually run the process
@@ -1137,7 +1137,7 @@ begin
   fOnCall(fOptions, service, method, call); // will set URI + Bearer
   // send output to Console
   if [cloVerbose, cloHeaders] * fOptions <> [] then
-    ToConsole('HTTP %'#13#10'%', [call.OutStatus, call.OutHead], ccLightGray);
+    ToConsole('HTTP %'#13#10'%', [call.OutStatus, call.OutHead], ccDefault);
   if (call.OutBody <> '') and
      (call.OutBody[1] = '[') then
     call.OutBody := method^.ArgsArrayToObject(pointer(call.OutBody), false);
@@ -1147,7 +1147,7 @@ begin
           not call.OutBodyTypeIsJson then
     result := call.OutBody
   else
-    JsonBufferReformat(pointer(call.OutBody), result);
+    JsonBufferReformat(pointer(call.OutBody), result, jsonHumanReadable);
   cc := ccWhite;
   if not StatusCodeIsSuccess(call.OutStatus) then
     cc := ccLightRed;

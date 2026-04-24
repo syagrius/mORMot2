@@ -247,19 +247,22 @@ type
   /// a services provider class to be used on the client side
   // - this will maintain a list of fake implementation classes, which will
   // remotely call the server to make the actual process
+  // - after Client.SetUser(), you could just call Client.Services.Resolve<>()
+  // to register and retrieve an interface instance on the client side
   TServiceContainerClient = class(TServiceContainerClientAbstract)
   protected
     fDisableAutoRegisterAsClientDriven: boolean;
   public
     /// retrieve a service provider from its type information
-    // - this overridden method will register the interface, if was not yet made
-    // - in this case, the interface will be registered with sicClientDriven
-    // implementation method, unless DisableAutoRegisterAsClientDriven is TRUE
+    // - overridden to register the interface, if was not yet made, using "soa"
+    // information as retrieved during SetUser(), or fallback to sicClientDriven
+    // implementation, unless DisableAutoRegisterAsClientDriven is TRUE
     function Info(aTypeInfo: PRttiInfo): TServiceFactory; overload; override;
     /// notify the other side that the given Callback event interface is released
     // - this overriden implementation will check the private fFakeCallbacks list
     function CallBackUnRegister(const Callback: IInvokable): boolean; override;
     /// allow to disable the automatic registration as sicClientDriven in Info()
+    // - note "soa" authentication information is used instead after SetUser()
     property DisableAutoRegisterAsClientDriven: boolean
       read fDisableAutoRegisterAsClientDriven write fDisableAutoRegisterAsClientDriven;
   end;
@@ -806,31 +809,58 @@ constructor TServiceFactoryClient.Create(aRest: TRest; aInterface: PRttiInfo;
 var
   err, contract: RawUtf8;
   cli: TRestClientUri absolute aRest;
+  s: PRestClientService;
+  n: TDALen;
+
+  procedure RaiseWrongClient(const contract: RawUtf8);
+  begin
+    EServiceException.RaiseUtf8('%.Create(): server''s I% contract ' +
+      'differs from client''s: expected %, received % - you may need to ' +
+      'upgrade your % client to match % server expectations',
+      [self, fInterfaceUri, ContractExpected, contract,
+       Executable.Version.DetailedOrVoid, cli.Session.Version]);
+  end;
+
 begin
-  // extract interface RTTI and create fake interface (and any shared instance)
+  // ensure we are working with an associated TRestClientUri instance
   if not aRest.InheritsFrom(TRestClientUri) then
-    EServiceException.RaiseUtf8('%.Create(): % interface requires a Client',
-      [self, aInterface^.Name]);
+    EServiceException.RaiseUtf8('Unexpected %.Create(%,%)',
+      [self, aInterface^.Name, aRest]);
   if fClient = nil then
     fClient := aRest;
+  // extract interface RTTI and create fake interface
   inherited Create(aRest, aInterface, aInstanceCreation, aContractExpected);
-  // initialize a shared instance (if needed)
-  case fInstanceCreation of
-    sicShared,
-    sicPerSession,
-    sicPerUser,
-    sicPerGroup,
-    sicPerThread:
-      begin
-        // the instance shall remain active during the whole client session
-        fSharedInstance := CreateFakeInstance;
-        IInterface(fSharedInstance)._AddRef; // force stay alive
-      end;
-  end;
-  // check if this interface contract is supported on the server
-  if PosEx(SERVICE_CONTRACT_NONE_EXPECTED, ContractExpected) = 0 then
+  // validate the interface from its server side contract
+  s := pointer(cli.Session.Services);
+  if s = nil then
+    s := cli.ParseSoa(nil); // make GET stat/soa once if we are before SetUser()
+  if s <> nil then
   begin
-    // call 'root/InterfaceName._contract_' endpoint
+    // verify interface from authentication "soa" info without _contract_ call
+    n := PDALen(PAnsiChar(s) - _DALEN)^ + _DAOFF;
+    repeat
+      if PropNameEquals(s^.Name, fInterfaceUri) then
+      begin
+        if fInstanceCreation <> s^.Creation then
+          EServiceException.RaiseUtf8('%.Create(): I% service %<>%',
+            [self, fInterfaceUri, ToText(fInstanceCreation)^, ToText(s^.Creation)^]);
+        if (PosExChar(SERVICE_CONTRACT_NONE_EXPECTED, ContractExpected) = 0) and
+           (PosExChar(SERVICE_CONTRACT_NONE_EXPECTED, s^.ExpectedContract) = 0) and
+           (ContractExpected <> s^.ExpectedContract) then
+          RaiseWrongClient(s^.ExpectedContract);
+        break; // valid
+      end;
+      dec(n);
+      if n = 0 then
+        EServiceException.RaiseUtf8('%.Create(): I% service ' +
+          'not supported by this server', [self, fInterfaceUri]);
+      inc(s);
+    until false;
+  end
+  else if PosExChar(SERVICE_CONTRACT_NONE_EXPECTED, ContractExpected) = 0 then
+  begin
+    // call 'root/InterfaceName._contract_' endpoint to verify this endpoint
+    // (legacy mORMot 1.18-2.4 behavior)
     if InternalInvoke(SERVICE_PSEUDO_METHOD[imContract],
          cli.ServicePublishOwnInterfaces, @contract, @err) and
        (contract <> '') then
@@ -842,12 +872,21 @@ begin
       EServiceException.RaiseUtf8('%.Create(): I% interface or % routing ' +
         'not supported by this server [%]',
          [self, fInterfaceUri, cli.ServicesRouting, err]);
-    if contract <> ContractExpected then
-      EServiceException.RaiseUtf8('%.Create(): server''s I% contract ' +
-        'differs from client''s: expected [%], received % - you may need to ' +
-        'upgrade your % client to match % server expectations',
-        [self, fInterfaceUri, ContractExpected, contract,
-         Executable.Version.DetailedOrVoid, cli.Session.Version]);
+    if ContractExpected <> contract then
+      RaiseWrongClient(contract);
+  end;
+  // interface seems valid: initialize a shared instance (if needed)
+  case fInstanceCreation of
+    sicShared,
+    sicPerSession,
+    sicPerUser,
+    sicPerGroup,
+    sicPerThread:
+      begin
+        // the instance shall remain active during the whole client session
+        fSharedInstance := CreateFakeInstance;
+        IInterface(fSharedInstance)._AddRef; // force stay alive
+      end;
   end;
 end;
 
@@ -989,11 +1028,41 @@ end;
 { TServiceContainerClient }
 
 function TServiceContainerClient.Info(aTypeInfo: PRttiInfo): TServiceFactory;
+var
+  s: PRestClientService;
+  n: TDALen;
+  sic: TServiceInstanceImplementation;
 begin
+  // first try any already registered interface type
   result := inherited Info(aTypeInfo);
-  if (result = nil) and
-     not fDisableAutoRegisterAsClientDriven then
-    result := AddInterface(aTypeInfo, sicClientDriven);
+  if result <> nil then
+    exit; // found
+  // allow late registration of this interface type
+  sic := sicClientDriven; // make Delphi compiler happy
+  s := pointer((fOwner as TRestClientUri).Session.Services);
+  if s = nil then // make GET stat/soa once if we are before SetUser()
+    s := TRestClientUri(fOwner).ParseSoa(nil);
+  if s <> nil then
+  begin
+    // register using accurate SetUser() "soa" server-side information
+    n := PDALen(PAnsiChar(s) - _DALEN)^ + _DAOFF;
+    repeat
+      if PropNameEquals(s^.Name, @aTypeInfo^.RawName[2], ord(aTypeInfo^.RawName[0]) - 1) then
+      begin
+        sic := s^.Creation; // found - AddInterface() will verify "contract"
+        break;
+      end;
+      dec(n);
+      if n = 0 then
+        exit; // an interface not present in "soa" would not work for sure
+      inc(s);
+    until false;
+  end
+  // no "soa": default as sicClientDriven (mORMot 1.18 way)
+  else if fDisableAutoRegisterAsClientDriven then
+    exit; // if not disabled
+  // this will verify this interface and register it to the internal list
+  result := AddInterface(aTypeInfo, sic);
 end;
 
 function TServiceContainerClient.CallBackUnRegister(const Callback: IInvokable): boolean;

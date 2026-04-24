@@ -10,7 +10,6 @@
 
 uses
   Windows,
-  mormot.core.os.security,
   mormot.lib.sspi; // for Low-Level SSPI/SChannel Functions
 
 
@@ -81,42 +80,29 @@ const
   }
 
 type
-  PInAddr = ^in_addr;
-  in_addr = packed record
-    case integer of
-      0: (S_bytes: packed array [0..3] of byte);
-      1: (S_addr: cardinal);
-  end;
-
-  PSockAddrIn = ^sockaddr_in;
-  sockaddr_in = packed record
+  TSockAddrIn = packed record
     case integer of
       0: (sin_family: word;
-          sin_port: word;
-          sin_addr: in_addr;
-          sin_zero: array[0..7] of AnsiChar);
-      1: (sa_family: word;
-          sa_data: array[0..13] of AnsiChar)
+          sin_port:   word;
+          sin_addr:   TNetIP4;
+          sin_zero:   array[0..7] of AnsiChar);
+      1: (sa_family:  word;
+          sa_data:    array[0..13] of AnsiChar)
   end;
+  PSockAddrIn = ^TSockAddrIn;
 
-  PInAddr6 = ^in6_addr;
-  in6_addr = packed record
-    case integer of
-      0: (S6_addr:   THash128);
-      1: (u6_addr8:  packed array [0..15] of byte);
-      2: (u6_addr16: packed array [0..7]  of word);
-      3: (u6_addr32: packed array [0..3]  of integer);
-  end;
-
-  PSockAddrIn6 = ^sockaddr_in6;
-  sockaddr_in6 = packed record
+  TSockAddrIn6 = packed record
     sin6_family:   word;     // AF_INET6
     sin6_port:     word;     // Transport level port number
     sin6_flowinfo: cardinal; // IPv6 flow information
-    sin6_addr:     in6_addr; // IPv6 address
-    sin6_scope_id: cardinal; // Scope Id: IF number for link-local
-                             //           SITE id for site-local
+    sin6_addr:     TNetIP6; // IPv6 address
+    sin6_scope_id: cardinal; // IF number for link-local, SITE id for site-local
   end;
+  PSockAddrIn6 = ^TSockAddrIn6;
+
+  // structure used by kernel to store most addresses
+  TSockAddr = TSockAddrIn;
+  PSockAddr = ^TSockAddr;
 
 const
   INADDR_ANY       = $00000000;
@@ -222,12 +208,6 @@ const
   PF_INET         = AF_INET;
   PF_INET6        = AF_INET6;
   PF_MAX          = AF_MAX;
-
-type
-  // Structure used by kernel to store most addresses
-  PSockAddr = ^TSockAddr;
-  TSockAddr = sockaddr_in;
-  sockaddr = sockaddr_in; // as in POSIX
 
 type
   PAddrInfo = ^TAddrInfo;
@@ -567,10 +547,15 @@ begin
   FillCharFast(Addr, SizeOf(Addr), 0);
 end; // some obscure Windows docs seem to state that zeroing is expected
 
+procedure TNetAddr.SetFamily(fam: cardinal);
+begin
+  PSockAddr(@Addr)^.sin_family := fam;
+end;
+
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
-  p: cardinal;
+  p: TNetPort;
 begin
   Clear;
   result := nrNotImplemented;
@@ -681,7 +666,7 @@ begin
 end;
 
 function TNetSocketWrap.WaitFor(ms: integer; scope: TNetEvents;
-  loerr: system.PInteger): TNetEvents;
+  loerr: PNetErrorInt): TNetEvents;
 var
   sock: TSocket;
   rd, wr, er: record
@@ -906,7 +891,7 @@ type
     DnsSuffix: PWCHAR;
     Description: PWCHAR;
     FriendlyName: PWCHAR;
-    PhysicalAddress: array [0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
+    PhysicalAddress: array[0 .. MAX_ADAPTER_ADDRESS_LEN - 1] of byte;
     PhysicalAddressLength: DWord;
     Flags: DWord;
     Mtu: DWord;
@@ -914,7 +899,7 @@ type
     OperStatus: DWord;
     // below fields are only available on Windows XP with SP1 and later
     Ipv6IfIndex: DWord;
-    ZoneIndices: array [0..15] of DWord;
+    ZoneIndices: array[0..15] of DWord;
     FirstPrefix: PIP_ADAPTER_PREFIX;
     // below fields are only available on Windows Vista and later
     TransmitLinkSpeed: Int64;
@@ -932,8 +917,8 @@ type
     // DHCP v6 Info following (not used by our code)
   end;
 
-  IP_ADDRESS_STRING = array [0..15] of AnsiChar;
-  IP_ADDR_IP4 = cardinal;
+  IP_ADDRESS_STRING = array[0..15] of AnsiChar;
+  IP_ADDR_IP4 = TNetIP4;
 
   IP_ADDR_STRING = packed record
     IpAddress: IP_ADDRESS_STRING;
@@ -1087,9 +1072,9 @@ begin
               if b <= 32 then
                 b := IP4Netmask(b)
               else
-                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr.S_addr);
+                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr);
               IP4Text(@b, m^.NetMask);
-              b := a^.Address.lpSockaddr^.sin_addr.S_addr or (not b);
+              b := a^.Address.lpSockaddr^.sin_addr or (not b);
               IP4Text(@b, m^.Broadcast);
               break; // we found the first IPv4 network information
             end;
@@ -1170,7 +1155,7 @@ function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
 var
   dwRemoteIP: DWord;
   PhyAddrLen: Longword;
-  pMacAddr: array [0..7] of byte;
+  pMacAddr: array[0..7] of byte;
 begin
   result := '';
   if NetIsIP4(pointer(IP), @dwRemoteIP) and
@@ -1501,7 +1486,7 @@ end;
 constructor TWinIocp.Create(processing: integer; options: TWinIocpOptions);
 begin
   if processing = 0 then
-    processing := SystemInfo.dwNumberOfProcessors;
+    processing := CpuThreads;
   fIocp := IocpCreate(INVALID_HANDLE_VALUE, 0, nil, processing);
   if fIocp <= 0 then
     RaiseLastError('TWinIocp: CreateIoCompletionPort', EWinIocp);
@@ -2090,13 +2075,14 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
-procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean;
+procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS, DisableTls13: boolean;
   dwFlags: cardinal; paServCred: PPCCERT_CONTEXT);
 begin
   FillCharFast(cred, SizeOf(cred), 0);
   if SChannelEnableTls13 and // should be explicitly enabled
      ((OSVersion in [wEleven, wEleven_64]) or
-      (OSVersion >= wServer2022_64)) then
+      (OSVersion >= wServer2022_64)) and
+     not DisableTls13 then
   // TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
   // Enabling TLS 1.3 on earlier versions of Windows is possible through the
   // registry, but is explictly documented as unsafe by Microsoft.
@@ -2160,7 +2146,7 @@ begin
       else
         f := SCH_CRED_REVOCATION_CHECK_CHAIN or
              SCH_CRED_IGNORE_REVOCATION_OFFLINE;
-      CredInit(cred, Context.AllowDeprecatedTLS, f, nil);
+      CredInit(cred, Context.AllowDeprecatedTLS, Context.DisableTls13, f, nil);
       CheckSEC_E_OK('AcquireCredentialsHandleW', AcquireCredentialsHandleW(
         nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
       fDataPos := 0;
@@ -2283,7 +2269,8 @@ begin
   // prepare TLS connection properties from AfterBind() global certificate
   if BoundContext.AcceptCert = nil then
     raise ESChannel.Create('AfterAccept: missing AfterBind');
-  CredInit(cred, BoundContext.AllowDeprecatedTls, 0, @BoundContext.AcceptCert);
+  CredInit(cred, BoundContext.AllowDeprecatedTls, BoundContext.DisableTls13,
+    0, @BoundContext.AcceptCert);
   CheckSEC_E_OK('AcquireCredentialsHandleW',
     AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
       nil, @cred, nil, nil, @fCred, nil));
@@ -2649,8 +2636,7 @@ var
 begin
   // the Windows Sockets API (WSA) needs explicit initialization
   WSAStartup($0202, WsaDataOnce);
-  SocketAPIVersion := RawUtf8(Format('%s.%d',
-    [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
+  _fmt('%s.%d', [WsaDataOnce.szDescription, WsaDataOnce.wVersion], SocketAPIVersion);
   // get some low-level extended functions for IOCP
   sock := socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   acceptex := GetExtensionFunc(sock, WSAID_ACCEPTEX);

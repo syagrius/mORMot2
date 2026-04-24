@@ -200,7 +200,7 @@ type
 
     /// extract the JS_TAG_INT value
     function Int32: integer;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// extract the JS_TAG_INT or JS_TAG_FLOAT64 value as an 53-bit integer
     function Int64: Int64;
     /// extract the JS_TAG_BOOL value
@@ -257,6 +257,7 @@ type
     {$packrecords C}
   {$endif FPC}
 
+  PJSValueRaw = ^JSValueRaw;
   PJSValue = ^JSValue;
   JSValues = array[0..(MaxInt div SizeOf(JSValue)) - 1] of JSValue;
   PJSValues = ^JSValues;
@@ -283,7 +284,6 @@ type
     function New: JSContext;
     /// just a wrapper around JS_FreeRuntime(@self)
     procedure Done;
-      {$ifdef HASINLINE} inline; {$endif}
     /// just a wrapper around Done with exception/signal tracking
     // - EQuickJS panic exception may occur if the GC detected some leak
     function DoneSafe: string;
@@ -299,13 +299,9 @@ type
   public
     /// just a wrapper around JS_FreeContext(@self)
     procedure Done;
-      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// release the memory used by a JSValueRaw - JS_FreeValue() alternative
-    procedure FreeInlined(var v: JSValueRaw); overload;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// release the memory used by a JSValue - JS_FreeValue() alternative
-    procedure FreeInlined(var v: JSValue); overload;
-      {$ifdef HASINLINE} inline; {$endif}
+    procedure FreeInlined(v: PJSValue);
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// release the memory used by a JSValue - JS_FreeValue() alternative
     // - won't be inlined so may be used when performance matters less
     procedure Free(var v: JSValue);
@@ -348,6 +344,8 @@ type
     /// output ErrorMessage() text into the current error stream
     // - is the StdErr console by default, but may be redirected e.g. to a log
     procedure ErrorDump(stacktrace: boolean; reason: PJSValue = nil);
+    /// compute a JS_EXCEPTION from an object pascal exception instance
+    function ThrowInternalError(E: Exception): JSValueRaw;
     /// raw execution of some JavaScript code
     function Eval(const code, fn: RawUtf8; flags: integer; out err: RawUtf8): JSValue;
     /// execute some JavaScript code in the global context
@@ -624,7 +622,6 @@ const
 
 type
   PJSContext = ^JSContext;
-  PJSValueRaw = ^JSValueRaw;
 
   JSObject = pointer;
 
@@ -1822,113 +1819,113 @@ end;
 
 procedure memcmp;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_memcmp
 end;
 
 procedure __ms_vsnprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_vsnprintf
 end;
 
 procedure printf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_printf
 end;
 
 procedure sprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_sprintf
 end;
 
 procedure fprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_fprintf
 end;
 
 procedure strchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strchr
 end;
 
 procedure strcspn;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strcspn
 end;
 
 procedure strrchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.strrchr
 end;
 
 procedure putchar;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.putchar
 end;
 
 procedure __strtod;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strtod
 end;
 
 procedure strcpy;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strcpy
 end;
 
 procedure fwrite;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.fwrite
 end;
 
 procedure memchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_memchr
 end;
 
 procedure log;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_log // Delphi Win64 ln() is buggy -> redirect to msvcrt
 end;
 
@@ -1960,7 +1957,7 @@ begin
   result := mormot.core.base.StrComp(p1, p2);
 end;
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 
 procedure ___chkstk_ms;
 asm
@@ -2024,7 +2021,7 @@ asm
   jmp udivmoddi4
 end;
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 function atoi(const str: PUtf8Char): PtrInt; cdecl;
 begin
@@ -2763,6 +2760,19 @@ begin
   self := JSValue(value); // direct 64-bit binary copy
 end;
 
+function JSValue.Ptr: pointer;
+begin
+  result := u.ptr;
+  {$ifdef JS_ANY_NAN_BOXING_CPU64}
+  PtrUInt(result) := PtrUInt(result) and JS_PTR64_MASK;
+  {$endif JS_ANY_NAN_BOXING_CPU64}
+end;
+
+procedure JSValue.IncRefCnt;
+begin
+  inc(PInteger(Ptr)^);
+end;
+
 function JSValue.Duplicate: JSValue;
 begin
   if IsRefCounted then
@@ -2805,19 +2815,6 @@ begin
   result := u.i32 <> 0; // normalize
 end;
 
-function JSValue.Ptr: pointer;
-begin
-  result := u.ptr;
-  {$ifdef JS_ANY_NAN_BOXING_CPU64}
-  PtrUInt(result) := PtrUInt(result) and JS_PTR64_MASK;
-  {$endif JS_ANY_NAN_BOXING_CPU64}
-end;
-
-procedure JSValue.IncRefCnt;
-begin
-  inc(PInteger(Ptr)^);
-end;
-
 function JSValue.DecRefCnt: boolean;
 var
   prefcnt: PInteger;
@@ -2841,7 +2838,7 @@ begin
   SetTag(newtag);
   {$ifdef JS_ANY_NAN_BOXING_CPU64}
   if PtrUInt(val) > JS_PTR64_MASK then
-    raise EQuickJS.CreateFmt('JSValue.From(%x) 48-bit overflow', [ptr]);
+    raise EQuickJS.CreateFmt('JSValue.From(%x) 48-bit overflow', [Ptr]);
   PtrUInt(u.ptr) := PtrUInt(u.ptr) or PtrUInt(val); // keep upper tag bits
   {$else}
   u.ptr := val;
@@ -2916,7 +2913,7 @@ begin
     JS_FreeRuntime(@self);
   except
     on E: Exception do
-      result := Format('%s %s', [ClassNameShort(E)^, E.Message]);
+      FormatString('% %', [E, E.Message], result);
   end;
 end;
 
@@ -2931,50 +2928,44 @@ end;
 
 {$ifdef JS_STRICT_NAN_BOXING} // worth manual inlining
 
-procedure TJSContext.FreeInlined(var v: JSValueRaw);
+procedure TJSContext.FreeInlined(v: PJSValue);
 {$ifdef CPU64}
 var
   q: UInt64;
 {$endif CPU64}
 begin
-  if (JSValue(v).u.tag and $fff80000) <> $00080000 then
+  if (v^.u.tag and $fff80000) <> $00080000 then
     exit;
   {$ifdef CPU32}
-  if JSValue(v).u.u64 > JS_TAG_MASK then
+  if v^.u.u64 > JS_TAG_MASK then
     exit;
-  dec(PInteger(JSValue(v).u.ptr)^);
-  if PInteger(JSValue(v).u.ptr)^ = 0 then
+  dec(PInteger(v^.u.ptr)^);
+  if PInteger(v^.u.ptr)^ = 0 then
   {$else}
-  q := JSValue(v).u.u64;
+  q := v^.u.u64;
   if q > JS_TAG_MASK then
     exit;
   q := q and JS_PTR64_MASK;
   dec(PInteger(q)^);
   if PInteger(q)^ = 0 then
   {$endif CPU32}
-    __JS_FreeValue(@self, v);
+    __JS_FreeValue(@self, PJsValueRaw(v)^);
 end;
 
 {$else}
 
-procedure TJSContext.FreeInlined(var v: JSValueRaw);
+procedure TJSContext.FreeInlined(v: PJSValue);
 begin
-  if JSValue(v).IsRefCounted and
-     JSValue(v).DecRefCnt then
-    __JS_FreeValue(@self, v);
+  if v^.IsRefCounted and
+     v^.DecRefCnt then
+    __JS_FreeValue(@self, PJsValueRaw(v)^);
 end;
 
 {$endif JS_STRICT_NAN_BOXING}
 
-procedure TJSContext.FreeInlined(var v: JSValue);
-begin
-  FreeInlined(JSValueRaw(v));
-  v.Empty;
-end;
-
 procedure TJSContext.Free(var v: JSValue);
 begin
-  FreeInlined(JSValueRaw(v));
+  FreeInlined(@v);
   v.Empty;
 end;
 
@@ -3011,7 +3002,7 @@ function TJSContext.GetValueFree(obj: JSValue; prop: PAnsiChar;
   out val: JSValue; raiseIfNotFound: boolean): boolean;
 begin
   result := GetValue(obj, prop, val, raiseIfNotFound);
-  FreeInlined(JSValueRaw(obj));
+  FreeInlined(@obj);
 end;
 
 function TJSContext.GetValue(const prop: array of PAnsiChar; out val: JSValue;
@@ -3120,8 +3111,8 @@ end;
 
 function TJSContext.ToUtf8Free(var v: JSValue; noJson: boolean): RawUtf8;
 begin
-  ToUtF8(v, result, noJson);
-  FreeInlined(v);
+  ToUtf8(v, result, noJson);
+  FreeInlined(@v);
 end;
 
 procedure TJSContext.AddUtf8(
@@ -3176,6 +3167,14 @@ var
 begin
   ErrorMessage({stacktrace=}true, err, reason);
   DisplayError('QuickJS: %s', [err]); // default is output to (stderr) console
+end;
+
+function TJSContext.ThrowInternalError(E: Exception): JSValueRaw;
+var
+  msg: RawUtf8;
+begin
+  Make([E, ' ', E.Message], msg);
+  result := JS_ThrowInternalError(@self, pointer(msg));
 end;
 
 function TJSContext.Eval(const code, fn: RawUtf8; flags: integer;
@@ -3243,7 +3242,7 @@ begin
       result := CallRaw(obj, fun, args);
   finally
     for i := 0 to high(args) do
-      FreeInlined(args[i]);
+      Free(args[i]);
     Free(obj);
     Free(fun);
   end;
@@ -3261,7 +3260,7 @@ begin
       result := CallRaw(obj, fun, args);
   finally
     for i := 0 to high(args) do
-      FreeInlined(args[i]);
+      Free(args[i]);
     Free(fun);
   end;
 end;
@@ -3411,7 +3410,7 @@ end;
 function TJSContext.ToVariantFree(var v: JSValue; var res: variant): boolean;
 begin
   result := ToVariant(v, res);
-  FreeInlined(v);
+  FreeInlined(@v);
 end;
 
 function TJSContext.From(P: PUtf8Char; Len: PtrInt): JSValue;

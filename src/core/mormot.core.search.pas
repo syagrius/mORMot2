@@ -7,6 +7,8 @@ unit mormot.core.search;
   *****************************************************************************
 
    Several Indexing and Search Engines, as used by other parts of the framework
+    - SAX-oriented JSON buffers access
+    - JSON-aware TSynNameValue TSynCache TObjectStoreJson
     - Files Search in Folders
     - ScanUtf8, GLOB and SOUNDEX Text Search
     - Efficient CSV Parsing using RTTI
@@ -36,7 +38,333 @@ uses
   mormot.core.buffers,
   mormot.core.datetime,
   mormot.core.data,
-  mormot.core.json;
+  mormot.core.json,
+  mormot.core.fmt,
+  mormot.core.variants;
+
+
+{ ************ SAX-oriented JSON buffers access }
+
+{ those functions are used e.g. to implement our SQLite3 JSON SQL functions }
+
+/// go to the #nth item of a JSON array
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - returns nil if the supplied index is out of range
+// - returns a pointer to the index-nth item in the JSON array (first index=0)
+// - this will handle any kind of arrays, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '[' char
+function JsonArrayItem(P: PUtf8Char; Index: integer): PUtf8Char;
+
+/// retrieve the positions of all elements of a JSON array
+// - this will handle any kind of arrays, including those with nested
+// JSON objects or arrays
+// - warning: incoming P^ should point to the first char AFTER the initial '['
+// (which may be a closing ']') - calling e.g. NextNotSpaceCharIs()
+// - returns false if the supplied input is invalid
+// - returns true on success, with Values[] pointing to each unescaped value,
+// may be a JSON string, object, array of constant
+function JsonArrayDecode(P: PUtf8Char;
+  out Values: TPUtf8CharDynArray): boolean;
+
+/// go to a named property of a JSON object
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - PropName is search case-insensitively  as 'propertyname' or 'property*'
+// - returns nil if the supplied property name does not exist
+// - returns a pointer to the matching item value in the JSON object
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectItem(P: PUtf8Char; const PropName: RawUtf8;
+  PropNameFound: PRawUtf8 = nil): PUtf8Char; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// go to a buffer-named property of a JSON object
+// - as called by overloaded JsonObjectItem()
+function JsonObjectItem(P, PropName: PUtf8Char; PropNameLen: PtrInt;
+  PropNameFound: PRawUtf8): PUtf8Char; overload;
+
+/// go to a property of a JSON object, by its full path, e.g. 'parent.child'
+// - implemented via a fast SAX-like approach: the input buffer is not changed,
+// nor no memory buffer allocated neither content copied
+// - PropPath is search case-insensitively as 'parent.child' or 'parent.ch*'
+// - returns nil if the supplied property path does not exist
+// - returns a pointer to the matching item value in the JSON object
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectByPath(JsonObject, PropPath: PUtf8Char): PUtf8Char;
+
+/// return all matching properties of a JSON object
+// - here the PropPath could be a comma-separated list of case-insensitive full
+// paths, e.g. 'Prop1,Prop2' or 'Obj1.Obj2.Prop*,Obj1.Prop1'
+// - returns '' if no property did match
+// - returns a JSON object of all matching properties
+// - this will handle any kind of objects, including those with nested
+// JSON objects or arrays
+// - incoming P^ should point to the first initial '{' char
+function JsonObjectsByPath(JsonObject, PropPath: PUtf8Char): RawUtf8;
+
+
+{ ************ JSON-aware TSynNameValue TSynCache TObjectStoreJson }
+
+type
+  /// store one Name/Value pair, as used by TSynNameValue class
+  TSynNameValueItem = record
+    /// the name of the Name/Value pair
+    // - this property is hashed by TSynNameValue for fast retrieval
+    Name: RawUtf8;
+    /// the value of the Name/Value pair
+    Value: RawUtf8;
+    /// any associated pointer or numerical value
+    Tag: PtrInt;
+  end;
+  PSynNameValueItem = ^TSynNameValueItem;
+
+  /// Name/Value pairs storage, as used by TSynNameValue class
+  TSynNameValueItemDynArray = array of TSynNameValueItem;
+
+  /// event handler used to convert on the fly some UTF-8 text content
+  TOnSynNameValueConvertRawUtf8 = function(
+    const text: RawUtf8): RawUtf8 of object;
+
+  /// callback event used by TSynNameValue
+  TOnSynNameValueNotify = procedure(
+    const Item: TSynNameValueItem; Index: PtrInt) of object;
+
+  /// pseudo-class used to store Name/Value RawUtf8 pairs
+  // - use internally a TDynArrayHashed instance for fast retrieval
+  // - is therefore faster than TRawUtf8List
+  // - is defined as an object, not as a class: you can use this in any
+  // class, without the need to destroy the content
+  // - Delphi "object" is buggy on stack -> also defined as record with methods
+  {$ifdef USERECORDWITHMETHODS}
+  TSynNameValue = record
+  private
+  {$else}
+  TSynNameValue = object
+  protected
+  {$endif USERECORDWITHMETHODS}
+    fOnAdd: TOnSynNameValueNotify;
+    function GetBlobData: RawByteString;
+    procedure SetBlobData(const aValue: RawByteString);
+    function GetStr(const aName: RawUtf8): RawUtf8;
+      {$ifdef HASINLINE}inline;{$endif}
+    function GetInt(const aName: RawUtf8): Int64;
+      {$ifdef HASINLINE}inline;{$endif}
+  public
+    /// the internal Name/Value storage
+    List: TSynNameValueItemDynArray;
+    /// the number of Name/Value pairs
+    Count: integer;
+    /// low-level access to the internal storage hasher
+    DynArray: TDynArrayHashed;
+    /// initialize the storage
+    // - will also reset the internal List[] and the internal hash array
+    procedure Init(aCaseSensitive: boolean);
+    /// add an element to the array
+    // - if aName already exists, its associated Value will be updated
+    procedure Add(const aName, aValue: RawUtf8; aTag: PtrInt = 0);
+    /// add an element from Join(aValue) to the array
+    // - if aName already exists, its associated Value will be updated
+    procedure AddJoined(const aName: RawUtf8;
+      const aValue: array of RawByteString; aTag: PtrInt = 0);
+    /// reset content, then add all name=value pairs from a supplied .ini file
+    // section content
+    // - will first call Init(false) to initialize the internal array
+    // - Section can be retrieved e.g. via FindSectionFirstLine()
+    procedure InitFromIniSection(Section: PUtf8Char;
+      const OnTheFlyConvert: TOnSynNameValueConvertRawUtf8 = nil;
+      const OnAdd: TOnSynNameValueNotify = nil);
+    /// reset content, then add all name=value; CSV pairs
+    // - will first call Init(false) to initialize the internal array
+    // - if ItemSep=#10, then any kind of line feed (CRLF or LF) will be handled
+    procedure InitFromCsv(Csv: PUtf8Char; NameValueSep: AnsiChar = '=';
+      ItemSep: AnsiChar = #10);
+    /// reset content, then add all fields from an JSON object
+    // - will first call Init() to initialize the internal array
+    // - then parse the incoming JSON object, storing all its field values
+    // as RawUtf8, and returning TRUE if the supplied content is correct
+    // - warning: the supplied JSON buffer will be decoded and modified in-place
+    function InitFromJson(Json: PUtf8Char; aCaseSensitive: boolean = false): boolean;
+    /// reset content, then add all name, value pairs
+    // - will first call Init(false) to initialize the internal array
+    procedure InitFromNamesValues(const Names, Values: array of RawUtf8);
+    /// search for a Name, return the index in List[]
+    // - using fast O(1) hash algoritm
+    function Find(const aName: RawUtf8): PtrInt;
+    /// search for a Name, return the raw PSynNameValueItem in List[]
+    function FindItem(const aName: RawUtf8): PSynNameValueItem;
+    /// search for the first chars of a Name, return the index in List
+    // - using O(n) calls of IdemPChar() function
+    // - here aUpperName should be already uppercase, as expected by IdemPChar()
+    function FindStart(const aUpperName: RawUtf8): PtrInt;
+    /// search for a Value, return the index in List
+    // - using O(n) brute force algoritm with case-sensitive aValue search
+    function FindByValue(const aValue: RawUtf8): PtrInt;
+    /// search for a Name, and delete its entry in the List if it exists
+    function Delete(const aName: RawUtf8): boolean;
+    /// search for a Value, and delete its entry in the List if it exists
+    // - returns the number of deleted entries
+    // - you may search for more than one match, by setting a >1 Limit value
+    function DeleteByValue(const aValue: RawUtf8; Limit: integer = 1): integer;
+    /// search for a Name, return the associated Value as a UTF-8 string
+    function Value(const aName: RawUtf8; const aDefaultValue: RawUtf8 = ''): RawUtf8;
+    /// search for a Name, return the associated Value as integer
+    function ValueInt(const aName: RawUtf8; aDefaultValue: Int64 = 0): Int64;
+    /// search for a Name, return the associated Value as boolean
+    // - returns true only if the value is exactly '1' / 'true'
+    function ValueBool(const aName: RawUtf8): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// search for a Name, return the associated Value as an enumerate
+    // - returns true and set aEnum if aName was found, and associated value
+    // matched an aEnumTypeInfo item
+    // - returns false if no match was found
+    function ValueEnum(const aName: RawUtf8; aEnumTypeInfo: PRttiInfo;
+      out aEnum; aEnumDefault: PtrUInt = 0): boolean; overload;
+    /// returns all values, as CSV or INI content
+    function AsCsv(const KeySeparator: RawUtf8 = '=';
+      const ValueSeparator: RawUtf8 = EOL; const IgnoreKey: RawUtf8 = ''): RawUtf8;
+    /// returns all values as a JSON object of string fields
+    function AsJson: RawUtf8;
+    /// fill the supplied two arrays of RawUtf8 with the stored values
+    procedure AsNameValues(out Names, Values: TRawUtf8DynArray);
+    /// search for a Name, return the associated Value as variant
+    // - returns null if the name was not found
+    function ValueVariantOrNull(const aName: RawUtf8): variant;
+    /// compute a TDocVariant document from the stored values
+    // - output variant will be reset and filled as a TDocVariant instance,
+    // ready to be serialized as a JSON object
+    // - if there is no value stored (i.e. Count=0), set null
+    procedure AsDocVariant(out DocVariant: variant;
+      ExtendedJson: boolean = false; ValueAsString: boolean = true;
+      AllowVarDouble: boolean = false); overload;
+    /// compute a TDocVariant document from the stored values
+    function AsDocVariant(ExtendedJson: boolean = false;
+      ValueAsString: boolean = true): variant; overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// merge the stored values into a TDocVariant document
+    // - existing properties would be updated, then new values will be added to
+    // the supplied TDocVariant instance, ready to be serialized as a JSON object
+    // - if ValueAsString is TRUE, values would be stored as string
+    // - if ValueAsString is FALSE, constants and numerical values would be
+    // identified by some heuristic and stored as such in this TDocVariant
+    // - if you let ChangedProps point to a TDocVariantData, it would contain
+    // an object with the stored values, just like AsDocVariant
+    // - returns the number of updated values in the TDocVariant, 0 if
+    // no value was changed
+    function MergeDocVariant(var DocVariant: variant; ValueAsString: boolean;
+      ChangedProps: PVariant = nil; ExtendedJson: boolean = false;
+      AllowVarDouble: boolean = false): integer;
+    /// returns true if the Init() method has been called
+    function Initialized: boolean;
+    /// can be used to set all data from one BLOB memory buffer
+    procedure SetBlobDataPtr(aValue, aValueMax: pointer);
+    /// can be used to set or retrieve all stored data as one BLOB content
+    property BlobData: RawByteString
+      read GetBlobData write SetBlobData;
+    /// event triggerred after an item has just been added to the list
+    property OnAfterAdd: TOnSynNameValueNotify
+      read fOnAdd write fOnAdd;
+    /// search for a Name, return the associated Value as a UTF-8 string
+    // - returns '' if aName is not found in the stored keys
+    property Str[const aName: RawUtf8]: RawUtf8
+      read GetStr; default;
+    /// search for a Name, return the associated Value as integer
+    // - returns 0 if aName is not found, or not a valid Int64 in the stored keys
+    property Int[const aName: RawUtf8]: Int64
+      read GetInt;
+    /// search for a Name, return the associated Value as boolean
+    // - returns true if aName stores '1' / 'true' as associated value
+    property Bool[const aName: RawUtf8]: boolean
+      read ValueBool;
+  end;
+
+  /// a reference pointer to a Name/Value RawUtf8 pairs storage
+  PSynNameValue = ^TSynNameValue;
+
+  /// implement a cache of some key/value pairs, e.g. to improve reading speed
+  // - used e.g. by TSqlDataBase for caching the SELECT statements results in an
+  // internal JSON format (which is faster than a query to the SQLite3 engine)
+  // - internally make use of an efficient hashing algorithm for fast response
+  // (i.e. TSynNameValue will use the TDynArrayHashed wrapper mechanism)
+  TSynCache = class(TSynPersistent)
+  protected
+    fNameValue: TSynNameValue;
+    fRamUsed: cardinal;
+    fMaxRamUsed: cardinal;
+    fTimeoutSeconds: cardinal;
+    fTimeoutTix: cardinal;
+    fSafe: TRWLock; // writes should be reentrant for Reset
+    procedure ResetIfNeeded; // call Reset after TimeoutSeconds
+  public
+    /// initialize the internal storage
+    // - aMaxCacheRamUsed can set the maximum RAM to be used for values, in bytes
+    // (default is 16 MB), after which the cache is flushed
+    // - by default, key search is done case-insensitively, but you can specify
+    // another option here
+    // - by default, there is no timeout period, but you may specify a number of
+    // seconds of inactivity (i.e. no Add call) after which the cache is flushed
+    constructor Create(aMaxCacheRamUsed: cardinal = 16 shl 20;
+      aCaseSensitive: boolean = false; aTimeoutSeconds: cardinal = 0); reintroduce;
+    /// find a Key in the cache entries
+    // - return '' if nothing found: you may call Add() just after to insert
+    // the expected value in the cache
+    // - return the associated Value otherwise, and the associated integer tag
+    // if aResultTag address is supplied
+    // - this method is thread-safe, using the Safe R/W locker of this instance
+    function Find(const aKey: RawUtf8; aResultTag: PPtrInt = nil): RawUtf8;
+    /// add a Key/Value pair in the cache entries
+    // - returns true if aKey was not existing yet, and aValue has been stored
+    // - returns false if aKey did already exist in the internal cache, and
+    // its entry has been updated with the supplied aValue/aTag
+    // - this method is thread-safe, using the Safe R/W locker of this instance
+    function AddOrUpdate(const aKey, aValue: RawUtf8; aTag: PtrInt): boolean;
+    /// called after a write access to the database to flush the cache
+    // - set Count to 0
+    // - release all cache memory
+    // - returns TRUE if was flushed, i.e. if there was something in cache
+    // - this method is thread-safe, using the Safe R/W locker of this instance
+    function Reset: boolean;
+    /// access to the internal R/W locker, for thread-safe process
+    // - Find/AddOrUpdate methods are protected by this R/W lock
+    property Safe: TRWLock
+      read fSafe;
+  published
+    /// number of entries in the cache
+    property Count: integer
+      read fNameValue.Count;
+    /// the current global size of Values in RAM cache, in bytes
+    property RamUsed: cardinal
+      read fRamUsed;
+    /// the maximum RAM to be used for values, in bytes
+    // - the cache is flushed when ValueSize reaches this limit
+    // - default is 16 MB (16 shl 20)
+    property MaxRamUsed: cardinal
+      read fMaxRamUsed;
+    /// after how many seconds betwen Add() calls the cache should be flushed
+    // - equals 0 by default, meaning no time out
+    property TimeoutSeconds: cardinal
+      read fTimeoutSeconds;
+  end;
+
+
+type
+  /// implement binary persistence and JSON serialization (not deserialization)
+  TObjectStoreJson = class(TObjectStore)
+  protected
+    // append "name" -> inherited should add properties to the JSON object
+    procedure AddJson(W: TJsonWriter); virtual;
+  public
+    /// serialize this instance as a JSON object
+    function SaveToJson(reformat: TTextWriterJsonFormat = jsonCompact): RawUtf8;
+  end;
+
+  {$ifndef PUREMORMOT2}
+  TSynPersistentStoreJson = TObjectStoreJson;
+  {$endif PUREMORMOT2}
 
 
 { ****************** Files Search in Folders }
@@ -416,6 +744,7 @@ procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
 // - 'this [e-n]s a [!zy]est' would match 'this is a test', but would not
 // match 'this as a test' nor 'this is a zest'
 // - consider using TMatch or TMatchs if you expect to reuse the pattern
+// - consider using Glob() if the pattern expects no [range] but only ? and *
 function IsMatch(const Pattern, Text: RawUtf8;
   CaseInsensitive: boolean = false): boolean;
 
@@ -526,14 +855,15 @@ const
 // (case-insensitive), not necessary in the same exact order than in the record;
 // any unknown header name within the RTTI fields will just be ignored
 // - following CSV lines will be read and parsed into the dynamic array records
-// - you can optionally intern all RawUtf8 values to reduce memory consumption
+// - you can optionally intern all RawUtf8 values to reduce memory consumption,
+// or change the value separator from comma to another character - e.g. ';'
 function TDynArrayLoadCsv(var Value: TDynArray; Csv: PUtf8Char;
-  Intern: TRawUtf8Interning = nil): boolean;
+  Intern: TRawUtf8Interning = nil; CommaSep: AnsiChar = ','): boolean;
 
 /// parse a CSV UTF-8 string into a dynamic array of records using its RTTI fields
 // - just a wrapper around DynArrayLoadCsv() with a temporary TDynArray
 function DynArrayLoadCsv(var Value; const Csv: RawUtf8; TypeInfo: PRttiInfo;
-  Intern: TRawUtf8Interning = nil): boolean;
+  Intern: TRawUtf8Interning = nil; CommaSep: AnsiChar = ','): boolean;
 
 
 { ****************** Versatile Expression Search Engine }
@@ -1722,6 +2052,802 @@ function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TD
 implementation
 
 
+{ ************ SAX-oriented JSON buffers access }
+
+function JsonArrayDecode(P: PUtf8Char; out Values: TPUtf8CharDynArray): boolean;
+var
+  n, max: PtrInt;
+  parser: TJsonParser;
+begin
+  result := false;
+  max := 0;
+  n := 0;
+  {%H-}parser.Init({strict=}false, nil);
+  P := GotoNextNotSpace(P);
+  if P^ <> ']' then
+    repeat
+      if max = n then
+      begin
+        max := NextGrow(max);
+        SetLength(Values, max);
+      end;
+      Values[n] := P;
+      inc(n);
+      P := parser.GotoEnd(P);
+      if P = nil then
+        exit; // invalid content, or #0 reached
+      if P^ <> ',' then
+        break;
+      inc(P);
+    until false;
+  if P^ = ']' then
+  begin
+    if n <> 0 then
+      DynArrayFakeLength(Values{%H-}, n);
+    result := true;
+  end
+  else
+    Values := nil;
+end;
+
+function JsonArrayItem(P: PUtf8Char; Index: integer): PUtf8Char;
+var
+  parser: TJsonParser;
+begin
+  if P <> nil then
+  begin
+    P := GotoNextNotSpace(P);
+    if P^ = '[' then
+    begin
+      {%H-}parser.Init({strict=}false, nil);
+      repeat
+        inc(P);
+      until not (P^ in [#1..' ']);
+      if P^ <> ']' then
+        repeat
+          if Index <= 0 then
+          begin
+            result := P;
+            exit;
+          end;
+          P := parser.GotoEnd(P);
+          if (P = nil) or
+             (P^ <> ',') then
+            break; // invalid content or #0 reached
+          inc(P);
+          dec(Index);
+        until false;
+    end;
+  end;
+  result := nil;
+end;
+
+function JsonObjectItem(P: PUtf8Char; const PropName: RawUtf8;
+  PropNameFound: PRawUtf8): PUtf8Char;
+begin
+  result := JsonObjectItem(P, pointer(PropName), length(PropName), PropNameFound);
+end;
+
+function JsonObjectItem(P, PropName: PUtf8Char; PropNameLen: PtrInt;
+  PropNameFound: PRawUtf8): PUtf8Char;
+var
+  name: PUtf8Char;
+  namelen: integer; // not PtrInt
+  bystart: boolean; // mark 'PropName*' search
+  parser: TJsonParser;
+begin
+  result := nil;
+  if (P = nil) or
+     (PropNameLen = 0) then
+    exit;
+  P := GotoNextNotSpace(P);
+  bystart := false;
+  if PropName[PropNameLen - 1] = '*' then
+  begin
+    dec(PropNameLen);
+    bystart := true;
+  end;
+  if P^ = '{' then
+    repeat
+      inc(P);
+    until not (P^ in [#1..' ']);
+  if P^ = '}' then
+    exit;
+  repeat
+    name := GetJsonPropName(P, @namelen, {NoJsonUnescapeNorEnding0=}true);
+    if name = nil then
+      exit;
+    while (P^ <= ' ') and
+          (P^ <> #0) do
+      inc(P);
+    if (namelen >= PropNameLen) and
+       (bystart or
+        (namelen = PropNameLen)) then
+      if IdemPropName(name, PropName, PropNameLen, PropNameLen) then
+      begin
+        if bystart and
+           (PropNameFound <> nil) then
+          FastSetString(PropNameFound^, name, namelen);
+        result := P;
+        exit;
+      end;
+    {%H-}parser.Init({strict=}false, nil);
+    P := parser.GotoEnd(P);
+    if (P = nil) or
+       (P^ <> ',') then
+      break; // invalid content, or #0 reached
+    inc(P);
+  until false;
+end;
+
+function JsonObjectByPath(JsonObject, PropPath: PUtf8Char): PUtf8Char;
+var
+  objName: ShortString;
+begin
+  result := nil;
+  if (JsonObject = nil) or
+     (PropPath = nil) then
+    exit;
+  repeat
+    GetNextItemShortString(PropPath, @objName, '.');
+    if objName[0] = #0 then
+      exit;
+    JsonObject := JsonObjectItem(JsonObject, @objName[1], ord(objName[0]), nil);
+    if JsonObject = nil then
+      exit;
+  until PropPath = nil; // found full name scope
+  result := JsonObject;
+end;
+
+function JsonObjectsByPath(JsonObject, PropPath: PUtf8Char): RawUtf8;
+var
+  itemName, objName, propNameFound, objPath: RawUtf8;
+  start, ending, obj: PUtf8Char;
+  WR: TTextWriter;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
+
+  procedure AddFromStart(const name: RawUtf8);
+  begin
+    start := GotoNextNotSpace(start);
+    ending := GotoEndJsonItem(start);
+    if ending = nil then
+      exit;
+    if WR = nil then
+    begin
+      WR := TTextWriter.CreateOwnedStream(temp);
+      WR.AddDirect('{');
+    end
+    else
+      WR.AddComma;
+    WR.AddFieldName(name);
+    while (ending > start) and
+          (ending[-1] <= ' ') do
+      dec(ending); // trim right
+    WR.AddNoJsonEscapeBig(start, ending - start);
+  end;
+
+begin
+  result := '';
+  if (JsonObject = nil) or
+     (PropPath = nil) then
+    exit;
+  WR := nil;
+  try
+    repeat
+      GetNextItem(PropPath, ',', itemName);
+      if itemName = '' then
+        break;
+      if itemName[length(itemName)] <> '*' then // single property lookup
+      begin
+        start := JsonObjectByPath(JsonObject, pointer(itemName));
+        if start <> nil then
+          AddFromStart(itemName);
+      end
+      else // 'propname*' may append several properties
+      begin
+        objPath := '';
+        obj := pointer(itemName);
+        repeat
+          GetNextItem(obj, '.', objName);
+          if objName = '' then
+            exit;
+          propNameFound := '';
+          JsonObject := JsonObjectItem(JsonObject, objName, @propNameFound);
+          if JsonObject = nil then
+            exit;
+          if obj = nil then
+          begin
+            // found full name scope
+            start := JsonObject;
+            repeat
+              AddFromStart(objPath + propNameFound);
+              ending := GotoNextNotSpace(ending);
+              if ending^ <> ',' then
+                break;
+              propNameFound := '';
+              start := JsonObjectItem(
+                GotoNextNotSpace(ending + 1), objName, @propNameFound);
+            until start = nil;
+            break;
+          end
+          else
+            Append(objPath, objName, '.');
+        until false;
+      end;
+    until PropPath = nil;
+    if WR <> nil then
+    begin
+      WR.AddDirect('}');
+      WR.SetText(result);
+    end;
+  finally
+    WR.Free;
+  end;
+end;
+
+
+{ ************ JSON-aware TSynNameValue TSynCache TObjectStoreJson }
+
+{ TSynNameValue }
+
+procedure TSynNameValue.Init(aCaseSensitive: boolean);
+begin
+  // release dynamic arrays memory before FillCharFast()
+  List := nil;
+  Finalize(PDynArrayHasher(@DynArray.Hasher)^); // fHashTableStore := nil
+  // initialize hashed storage
+  FillCharFast(self, SizeOf(self), 0);
+  DynArray.InitSpecific(TypeInfo(TSynNameValueItemDynArray), List,
+    ptRawUtf8, @Count, not aCaseSensitive);
+end;
+
+procedure TSynNameValue.InitFromIniSection(Section: PUtf8Char;
+  const OnTheFlyConvert: TOnSynNameValueConvertRawUtf8;
+  const OnAdd: TOnSynNameValueNotify);
+var
+  s: RawUtf8;
+  i: PtrInt;
+begin
+  Init(false);
+  fOnAdd := OnAdd;
+  while (Section <> nil) and
+        (Section^ <> '[') do
+  begin
+    s := GetNextLine(Section, Section);
+    i := PosExChar('=', s);
+    if (i > 1) and
+       not (s[1] in [';', '[']) then
+      if Assigned(OnTheFlyConvert) then
+        Add(copy(s, 1, i - 1), OnTheFlyConvert(copy(s, i + 1, 1000)))
+      else
+        Add(copy(s, 1, i - 1), copy(s, i + 1, 1000));
+  end;
+end;
+
+procedure TSynNameValue.InitFromCsv(Csv: PUtf8Char; NameValueSep, ItemSep: AnsiChar);
+var
+  n, v: RawUtf8;
+begin
+  Init(false);
+  while Csv <> nil do
+  begin
+    GetNextItem(Csv, NameValueSep, n);
+    if ItemSep = #10 then
+      GetNextItemTrimedCRLF(Csv, v)
+    else
+      GetNextItem(Csv, ItemSep, v);
+    if n = '' then
+      break;
+    Add(n, v);
+  end;
+end;
+
+procedure TSynNameValue.InitFromNamesValues(const Names, Values: array of RawUtf8);
+var
+  i: PtrInt;
+begin
+  Init(false);
+  if high(Names) <> high(Values) then
+    exit;
+  DynArray.Capacity := length(Names);
+  for i := 0 to high(Names) do
+    Add(Names[i], Values[i]);
+end;
+
+function TSynNameValue.InitFromJson(Json: PUtf8Char; aCaseSensitive: boolean): boolean;
+var
+  N: PUtf8Char;
+  nam, val: RawUtf8;
+  Nlen, c: integer;
+  info: TGetJsonField;
+begin
+  result := false;
+  Init(aCaseSensitive);
+  if Json = nil then
+    exit;
+  while (Json^ <= ' ') and
+        (Json^ <> #0) do
+    inc(Json);
+  if Json^ <> '{' then
+    exit;
+  repeat
+    inc(Json)
+  until (Json^ = #0) or
+        (Json^ > ' ');
+  info.Json := Json;
+  c := JsonObjectPropCount(Json); // fast GB/s parsing
+  if c <= 0 then
+    exit;
+  DynArray.Capacity := c;
+  repeat
+    N := GetJsonPropName(info.Json, @Nlen);
+    if N = nil then
+      exit;
+    info.GetJsonFieldOrObjectOrArray;
+    if info.Json = nil then
+      exit;
+    FastSetString(nam, N, Nlen);
+    FastSetString(val, info.Value, info.Valuelen);
+    Add(nam, val);
+  until info.EndOfObject = '}';
+  result := true;
+end;
+
+function TSynNameValue.Find(const aName: RawUtf8): PtrInt;
+begin
+  result := DynArray.FindHashed(aName);
+end;
+
+procedure TSynNameValue.Add(const aName, aValue: RawUtf8; aTag: PtrInt);
+var
+  added: boolean;
+  ndx: PtrInt;
+  p: PSynNameValueItem;
+begin
+  ndx := DynArray.FindHashedForAdding(aName, added);
+  p := @List[ndx];
+  if added then
+    p^.Name := aName;
+  p^.Value := aValue;
+  p^.Tag := aTag;
+  if Assigned(fOnAdd) then
+    fOnAdd(p^, ndx);
+end;
+
+procedure TSynNameValue.AddJoined(const aName: RawUtf8;
+  const aValue: array of RawByteString; aTag: PtrInt);
+begin
+  Add(aName, Join(aValue));
+end;
+
+function TSynNameValue.FindItem(const aName: RawUtf8): PSynNameValueItem;
+var
+  ndx: PtrInt;
+begin
+  ndx := DynArray.FindHashed(aName);
+  if ndx >= 0 then
+    result := @List[ndx]
+  else
+    result := nil;
+end;
+
+function TSynNameValue.FindStart(const aUpperName: RawUtf8): PtrInt;
+var
+  p: PSynNameValueItem;
+begin
+  p := pointer(List);
+  for result := 0 to Count - 1 do
+    if IdemPChar(pointer(p^.Name), pointer(aUpperName)) then
+      exit
+    else
+      inc(p);
+  result := -1;
+end;
+
+function TSynNameValue.FindByValue(const aValue: RawUtf8): PtrInt;
+var
+  p: PSynNameValueItem;
+begin
+  p := pointer(List);
+  for result := 0 to Count - 1 do
+    if p^.Value = aValue then
+      exit
+    else
+      inc(p);
+  result := -1;
+end;
+
+function TSynNameValue.Delete(const aName: RawUtf8): boolean;
+begin
+  result := DynArray.FindHashedAndDelete(aName) >= 0;
+end;
+
+function CompByValue(const Item, aValue): integer;
+begin // called as CompByValue(List[], aValue) to return 0 if List[].Value=aValue
+  result := ord(TSynNameValueItem(Item).Value <> RawUtf8(aValue));
+end;
+
+function TSynNameValue.DeleteByValue(const aValue: RawUtf8; Limit: integer): integer;
+begin
+  result := PDynArray(@DynArray)^.FindAndDeleteAll(aValue, CompByValue, Limit);
+  if result > 0 then
+    DynArray.ForceReHash; // required after direct DynArray.Delete()
+end;
+
+function TSynNameValue.Value(const aName: RawUtf8; const aDefaultValue: RawUtf8): RawUtf8;
+var
+  ndx: PtrInt;
+begin
+  if @self = nil then
+    ndx := -1
+  else
+    ndx := DynArray.FindHashed(aName);
+  if ndx < 0 then
+    result := aDefaultValue
+  else
+    result := List[ndx].Value;
+end;
+
+function TSynNameValue.ValueInt(const aName: RawUtf8; aDefaultValue: Int64): Int64;
+var
+  ndx: PtrInt;
+  err: integer;
+begin
+  ndx := DynArray.FindHashed(aName);
+  if ndx < 0 then
+    result := aDefaultValue
+  else
+  begin
+    result := GetInt64(pointer(List[ndx].Value), err);
+    if err <> 0 then
+      result := aDefaultValue;
+  end;
+end;
+
+function TSynNameValue.ValueBool(const aName: RawUtf8): boolean;
+begin
+  result := GetBoolean(pointer(Value(aName)));
+end;
+
+function TSynNameValue.ValueEnum(const aName: RawUtf8; aEnumTypeInfo: PRttiInfo;
+  out aEnum; aEnumDefault: PtrUInt): boolean;
+var
+  rtti: PRttiEnumType;
+  v: RawUtf8;
+  err: integer;
+  i: PtrInt;
+begin
+  result := false;
+  rtti := aEnumTypeInfo.EnumBaseType;
+  if rtti = nil then
+    exit;
+  RTTI_TO_ORD[rtti.RttiOrd](@aEnum, aEnumDefault); // always set default value
+  v := Value(aName, '');
+  TrimSelf(v);
+  if v = '' then
+    exit;
+  i := GetInteger(pointer(v), err);
+  if (err <> 0) or
+     (PtrUInt(i) > PtrUInt(rtti.MaxValue)) then
+    i := rtti.GetEnumNameValue(pointer(v), length(v), {alsotrimleft=}true);
+  if i >= 0 then
+  begin
+    RTTI_TO_ORD[rtti.RttiOrd](@aEnum, i); // we found a proper value
+    result := true;
+  end;
+end;
+
+function TSynNameValue.Initialized: boolean;
+begin
+  result := DynArray.Value = @List;
+end;
+
+function TSynNameValue.GetBlobData: RawByteString;
+begin
+  result := DynArray.SaveTo;
+end;
+
+procedure TSynNameValue.SetBlobDataPtr(aValue, aValueMax: pointer);
+begin
+  DynArray.LoadFrom(aValue, aValueMax);
+  DynArray.ForceReHash;
+end;
+
+procedure TSynNameValue.SetBlobData(const aValue: RawByteString);
+begin
+  DynArray.LoadFromBinary(aValue);
+  DynArray.ForceReHash;
+end;
+
+function TSynNameValue.GetStr(const aName: RawUtf8): RawUtf8;
+begin
+  result := Value(aName, '');
+end;
+
+function TSynNameValue.GetInt(const aName: RawUtf8): Int64;
+begin
+  result := ValueInt(aName, 0);
+end;
+
+function TSynNameValue.AsCsv(const KeySeparator, ValueSeparator, IgnoreKey: RawUtf8): RawUtf8;
+var
+  i: PtrInt;
+  p: PSynNameValueItem;
+  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
+begin
+  with TTextWriter.CreateOwnedStream(temp) do
+  try
+    p := pointer(List);
+    for i := 1 to Count do
+    begin
+      if (IgnoreKey = '') or
+         (p^.Name <> IgnoreKey) then
+      begin
+        AddString(p^.Name);
+        AddString(KeySeparator);
+        AddString(p^.Value);
+        AddString(ValueSeparator);
+      end;
+      inc(p);
+    end;
+    SetText(result);
+  finally
+    Free;
+  end;
+end;
+
+function TSynNameValue.AsJson: RawUtf8;
+var
+  i: PtrInt;
+  p: PSynNameValueItem;
+  temp: TTextWriterStackBuffer;
+begin
+  with TJsonWriter.CreateOwnedStream(temp) do
+  try
+    AddDirect('{');
+    p := pointer(List);
+    for i := 1 to Count do
+    begin
+      AddProp(pointer(p^.Name), length(p^.Name));
+      AddDirect('"');
+      AddJsonEscape(pointer(p^.Value));
+      AddDirect('"', ',');
+      inc(p);
+    end;
+    ReplaceLastComma('}');
+    SetText(result);
+  finally
+    Free;
+  end;
+end;
+
+procedure TSynNameValue.AsNameValues(out Names, Values: TRawUtf8DynArray);
+var
+  i: PtrInt;
+  p: PSynNameValueItem;
+begin
+  SetLength(Names,  Count);
+  SetLength(Values, Count);
+  p := pointer(List);
+  for i := 0 to Count - 1 do
+  begin
+    Names[i]  := p^.Name;
+    Values[i] := p^.Value;
+    inc(p);
+  end;
+end;
+
+function TSynNameValue.ValueVariantOrNull(const aName: RawUtf8): variant;
+var
+  ndx: PtrInt;
+begin
+  ndx := Find(aName);
+  if ndx < 0 then
+    SetVariantNull(result{%H-})
+  else
+    RawUtf8ToVariant(List[ndx].Value, result);
+end;
+
+procedure TSynNameValue.AsDocVariant(out DocVariant: variant;
+  ExtendedJson, ValueAsString, AllowVarDouble: boolean);
+var
+  ndx: PtrInt;
+  p: PSynNameValueItem;
+  dv: TDocVariantData absolute DocVariant;
+begin
+  if Count > 0 then
+    begin
+      dv.Init(JSON_NAMEVALUE[ExtendedJson], dvObject);
+      dv.SetCount(Count);
+      dv.Capacity := Count;
+      p := pointer(List);
+      for ndx := 0 to Count - 1 do
+      begin
+        dv.Names[ndx] := p^.Name;
+        if ValueAsString or
+           not GetVariantFromNotStringJson(pointer(p^.Value),
+              TVarData(dv.Values[ndx]), AllowVarDouble) then
+          RawUtf8ToVariant(p^.Value, dv.Values[ndx]);
+      end;
+    end
+  else
+    TVarData(DocVariant).VType := varNull;
+end;
+
+function TSynNameValue.AsDocVariant(ExtendedJson, ValueAsString: boolean): variant;
+begin
+  AsDocVariant(result, ExtendedJson, ValueAsString);
+end;
+
+function TSynNameValue.MergeDocVariant(var DocVariant: variant;
+  ValueAsString: boolean; ChangedProps: PVariant; ExtendedJson,
+  AllowVarDouble: boolean): integer;
+var
+  dv: TDocVariantData absolute DocVariant;
+  i, ndx: PtrInt;
+  v: variant;
+  p: PSynNameValueItem;
+  intvalues: TRawUtf8Interning;
+  forcenoutf8: boolean;
+begin
+  if dv.VarType <> DocVariantVType then
+    TDocVariant.New(DocVariant, JSON_NAMEVALUE[ExtendedJson]);
+  if ChangedProps <> nil then
+    TDocVariant.New(ChangedProps^, dv.Options);
+  if dvoInternValues in dv.Options then
+    intvalues := DocVariantType.InternValues
+  else
+    intvalues := nil;
+  forcenoutf8 := dvoValueDoNotNormalizeAsRawUtf8 in dv.Options;
+  result := 0; // returns number of changed values
+  p := pointer(List);
+  for i := 1 to Count do
+  begin
+    if p^.Name <> '' then
+    begin
+      VarClear(v{%H-});
+      if ValueAsString or
+         not GetVariantFromNotStringJson(
+            pointer(p^.Value), TVarData(v), AllowVarDouble) then
+        RawUtf8ToVariant(p^.Value, v);
+      ndx := dv.GetValueIndex(p^.Name);
+      if ndx < 0 then
+        ndx := dv.InternalAdd(p^.Name)
+      else if FastVarDataComp(@v, @dv.Values[ndx], false) = 0 then
+        continue; // value not changed -> skip
+      if ChangedProps <> nil then
+        PDocVariantData(ChangedProps)^.AddValue(p^.Name, v);
+      SetVariantByValue(v, dv.Values[ndx], forcenoutf8);
+      if intvalues <> nil then
+        intvalues.UniqueVariant(dv.Values[ndx]);
+      inc(result);
+    end;
+    inc(p);
+  end;
+end;
+
+
+{ TObjectStoreJson }
+
+procedure TObjectStoreJson.AddJson(W: TJsonWriter);
+begin
+  W.AddPropJsonString('name', fName);
+end;
+
+function TObjectStoreJson.SaveToJson(reformat: TTextWriterJsonFormat): RawUtf8;
+var
+  W: TJsonWriter;
+begin
+  W := TJsonWriter.CreateOwnedStream(65536);
+  try
+    W.AddDirect('{');
+    AddJson(W);
+    W.ReplaceLastComma('}');
+    W.SetText(result, reformat);
+  finally
+    W.Free;
+  end;
+end;
+
+
+{ TSynCache }
+
+constructor TSynCache.Create(aMaxCacheRamUsed: cardinal;
+  aCaseSensitive: boolean; aTimeoutSeconds: cardinal);
+begin
+  inherited Create; // may have been overriden
+  fNameValue.Init(aCaseSensitive);
+  fMaxRamUsed := aMaxCacheRamUsed;
+  fTimeoutSeconds := aTimeoutSeconds;
+end;
+
+procedure TSynCache.ResetIfNeeded;
+var
+  tix: cardinal;
+begin
+  if fRamUsed > fMaxRamUsed then
+    Reset;
+  if fTimeoutSeconds = 0 then
+    exit;
+  tix := GetTickSec;
+  if fTimeoutTix > tix then
+    Reset;
+  fTimeoutTix := tix + fTimeoutSeconds;
+end;
+
+function TSynCache.Find(const aKey: RawUtf8; aResultTag: PPtrInt): RawUtf8;
+var
+  p: PSynNameValueItem;
+begin
+  result := '';
+  if (self = nil) or
+     (aKey = '') then
+    exit;
+  fSafe.ReadOnlyLock;
+  {$ifdef HASFASTTRYFINALLY}
+  try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    p := fNameValue.FindItem(aKey);
+    if p <> nil then
+    begin
+      result := p^.Value;
+      if aResultTag <> nil then
+        aResultTag^ := p^.Tag;
+    end;
+  {$ifdef HASFASTTRYFINALLY}
+  finally
+  {$endif HASFASTTRYFINALLY}
+    fSafe.ReadOnlyUnLock;
+  end;
+end;
+
+function TSynCache.AddOrUpdate(const aKey, aValue: RawUtf8; aTag: PtrInt): boolean;
+var
+  ndx: PtrInt;
+  p: PSynNameValueItem;
+begin
+  result := false;
+  if self = nil then
+    exit; // avoid GPF
+  fSafe.WriteLock;
+  try
+    ResetIfNeeded;
+    ndx := fNameValue.DynArray.FindHashedForAdding(aKey, result);
+    p := @fNameValue.List[ndx];
+    p^.Name := aKey;
+    dec(fRamUsed, length(p^.Value));
+    p^.Value := aValue;
+    inc(fRamUsed, length(p^.Value));
+    p^.Tag := aTag;
+  finally
+    fSafe.WriteUnlock;
+  end;
+end;
+
+function TSynCache.Reset: boolean;
+begin
+  result := false;
+  if (self = nil) or
+     (fNameValue.Count = 0) then
+    exit; // avoid GPF or a lock for nothing
+  fSafe.WriteLock;
+  try
+    if fNameValue.Count <> 0 then
+    begin
+      fNameValue.DynArray.Clear;
+      fNameValue.DynArray.ForceReHash;
+      result := true; // mark something was flushed
+    end;
+    fRamUsed := 0;
+    fTimeoutTix := 0;
+  finally
+    fSafe.WriteUnlock;
+  end;
+end;
+
+
 { ****************** Files Search in Folders }
 
 procedure TFindFiles.FromSearchRec(const Directory: TFileName; const F: TSearchRec);
@@ -1896,6 +3022,32 @@ end;
 
 {$ifdef OSPOSIX}
 
+procedure FileNamesU(const Directory, Mask: TFileName; Options: TFindFilesOptions;
+  const IgnoreFileName: TFileName; var Files: TRawUtf8DynArray);
+var
+  m: TMatchDynArray;
+  cb: TOnPosixFileName;
+begin
+  // use much faster PosixFileNames() low-level function over TMatchDynArray
+  cb := nil;
+  if Mask <> FILES_ALL then
+  begin
+    cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
+    SetMatchs(RawUtf8(Mask), {caseinsens=}false, m, ';');
+  end;
+  Files := PosixFileNames(Directory, ffoSubFolder in Options, cb, pointer(m),
+    ffoExcludesDir in Options, ffoIncludeHiddenFiles in Options,
+    ffoIncludeFolder in Options);
+  if Files = nil then
+    exit;
+  if IgnoreFileName <> '' then
+    DeleteRawUtf8(Files, FindRawUtf8(Files, RawUtf8(IgnoreFileName)));
+  if ffoSortByName in Options then
+    QuickSortRawUtf8(Files, length(Files), nil, StrCompPosixFileName)
+  else if ffoSortByFullName in Options then
+    QuickSortRawUtf8(Files, length(Files));
+end;
+
 function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
   Options: TFindFilesOptions): TFindFilesDynArray;
 var
@@ -1911,7 +3063,7 @@ begin
   if not DirectoryExists(dir) then
     exit;
   // call PosixFileNames() i.e. efficient getdents/getdents64 syscall
-  names := FileNames(dir, Mask, Options, IgnoreFileName);
+  FileNamesU(dir, Mask, Options, IgnoreFileName, names);
   n := length(names);
   if n = 0 then
     exit;
@@ -1924,7 +3076,11 @@ begin
   d := pointer(result);
   for i := 0 to n - 1 do
   begin
+    {$ifdef UNICODE}
+    Utf8ToStringVar(names[i], string(d^.Name));
+    {$else}
     d^.Name := names[i];
+    {$endif UNICODE}
     if FileInfoByName(dir + d^.Name, d^.Size, ts, @d^.Attr) then // = fpStat()
     begin
       d^.Timestamp := UnixMSTimeToDateTime(ts + tolocal);
@@ -1942,29 +3098,21 @@ end;
 
 function FileNames(const Directory, Mask: TFileName; Options: TFindFilesOptions;
   const IgnoreFileName: TFileName): TFileNameDynArray;
+{$ifdef UNICODE}
 var
-  m: TMatchDynArray;
-  cb: TOnPosixFileName;
+  i: PtrInt;
+  u: TRawUtf8DynArray;
 begin
-  // use much faster PosixFileNames() low-level function over TMatchDynArray
-  cb := nil;
-  if Mask <> FILES_ALL then
-  begin
-    cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
-    SetMatchs(Mask, {caseinsens=}false, m, ';');
-  end;
-  result := PosixFileNames(Directory, ffoSubFolder in Options, cb, pointer(m),
-    ffoExcludesDir in Options, ffoIncludeHiddenFiles in Options,
-    ffoIncludeFolder in Options);
-  if result = nil then
-    exit;
-  if IgnoreFileName <> '' then
-    DeleteRawUtf8(result, FindRawUtf8(result, IgnoreFileName));
-  if ffoSortByName in Options then
-    QuickSortRawUtf8(result, length(result), nil, StrCompPosixFileName)
-  else if ffoSortByFullName in Options then
-    QuickSortRawUtf8(result, length(result));
+  FileNamesU(Directory, Mask, Options, IgnoreFileName, u);
+  SetLength(result, length(u));
+  for i := 0 to length(u) - 1 do
+    Utf8ToFileName(u[i], result[i]);
 end;
+{$else}
+begin
+  FileNamesU(Directory, Mask, Options, IgnoreFileName, result);
+end;
+{$endif UNICODE}
 
 {$else} // Windows can just call FindFiles() and RTL FindFirst/FindNext
 
@@ -2142,7 +3290,7 @@ end;
 procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
   out Html: RawUtf8; NoSubFolder: boolean);
 const
-  _DIR: array[boolean] of string[7] = ('[dir]', '&nbsp;');
+  _DIR: array[boolean] of TShort7 = ('[dir]', '&nbsp;');
 var
   w: TTextDateWriter;
   tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
@@ -2155,10 +3303,10 @@ begin
   w := TTextDateWriter.CreateOwnedStream(tmp);
   try
     w.AddShort('<!DOCTYPE html>'#13#10'<html>'#13#10'<head>'#13#10'<title>Index of /');
-    w.AddHtmlEscapeUtf8(Name); // paranoid
+    AddHtmlEscapeUtf8(w, Name); // paranoid
     w.AddShort('</title>'#13#10'</head>'#13#10 +
       '<body style="font-family:verdana">'#13#10'<h1>Index of /');
-    w.AddHtmlEscapeUtf8(Name);
+    AddHtmlEscapeUtf8(w, Name);
     w.AddShort('</h1>'#13#10'<table>'#13#10 +
       '<tr><th></th><th>Name</th><th>Last modified</th><th>Size</th></tr>'#13#10 +
       '<tr><th colspan="4"><hr></th></tr>'#13#10);
@@ -2180,7 +3328,7 @@ begin
         w.AddShort('</td><td><a href="');
         if Path <> '' then
         begin
-          w.AddHtmlEscapeUtf8(Path);
+          AddHtmlEscapeUtf8(w, Path);
           if Path[length(Path)] <> '/' then
             w.AddDirect('/');
         end;
@@ -2188,7 +3336,7 @@ begin
         if not isFile then
           w.AddDirect('/');
         w.AddDirect('"', '>');
-        w.AddHtmlEscapeUtf8(n);
+        AddHtmlEscapeUtf8(w, n);
         if not isFile then
           w.AddDirect('/');
         w.AddShort('</a></td><td>');
@@ -2537,7 +3685,7 @@ end;
 
 // faster alternative (without recursion) for only * ? (but not [...])
 
-{$ifdef CPU32} // less registers on this CPU - also circumvent ARM problems (Alf)
+{$ifdef CPU32} // less registers on i386 - also circumvent ARM32 problems (Alf)
 
 function SearchNoRange(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
 var
@@ -2660,7 +3808,7 @@ fin:result := false;
   result := true;
 end;
 
-{$endif CPUX86}
+{$endif CPU32}
 
 function SearchNoRangeU(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
 var
@@ -3381,6 +4529,28 @@ begin
              MatchAnyP(pointer(Paths), uri.Path.Text, uri.Path.Len));
 end;
 
+function _Glob(Pattern, Text: PUtf8Char; PatternLen, TextLen: PtrInt;
+  CaseInsensitive: boolean): boolean;
+var
+  match: TMatch;
+begin // GLOB has no [range] -> dedicated inlined Prepare() + Match()
+  if Pattern = nil then
+    result := TextLen = 0 // most simple case for sure
+  else if TextLen = 0 then
+    result := false       // as in match.Match()
+  else
+  begin
+    match.Pattern := Pattern;
+    match.PMax := PatternLen - 1;
+    if CaseInsensitive then
+    begin
+      match.Upper := @NormToUpperAnsi7;
+      result := SearchNoRangeU(@match, Text, TextLen);
+    end
+    else
+      result := SearchNoRange(@match, Text, TextLen);
+  end;
+end;
 
 function IsMatch(const Pattern, Text: RawUtf8; CaseInsensitive: boolean): boolean;
 var
@@ -3959,7 +5129,7 @@ end;
 { ******************  Efficient CSV Parsing using RTTI }
 
 function TDynArrayLoadCsv(var Value: TDynArray; Csv: PUtf8Char;
-  Intern: TRawUtf8Interning): boolean;
+  Intern: TRawUtf8Interning; CommaSep: AnsiChar): boolean;
 var
   rt: TRttiCustom;
   pr: PRttiCustomProp;
@@ -3987,7 +5157,7 @@ begin
     exit; // no data
   while p <> nil do
   begin
-    GetNextItem(p, ',', '"', s);
+    GetNextItem(p, CommaSep, '"', s);
     if s = '' then
       exit; // we don't support void headers
     if mapcount = length(map) then
@@ -4020,7 +5190,7 @@ begin
       Csv := v;
       if v^ = '"' then
         v := GotoEndOfQuotedString(v); // special handling of double quotes
-      while (v^ <> ',') and
+      while (v^ <> CommaSep) and
             (v^ > #13) do
         inc(v);
       if mcount <> 0 then
@@ -4040,7 +5210,7 @@ begin
         inc(m);
         dec(mcount);
       end;
-      if v^ <> ',' then
+      if v^ <> CommaSep then
         break;
       inc(v);
     until v^ in [#0, #10, #13];
@@ -4057,12 +5227,12 @@ begin
 end;
 
 function DynArrayLoadCsv(var Value; const Csv: RawUtf8; TypeInfo: PRttiInfo;
-  Intern: TRawUtf8Interning): boolean;
+  Intern: TRawUtf8Interning; CommaSep: AnsiChar): boolean;
 var
   da: TDynArray;
 begin
   da.Init(TypeInfo, Value);
-  result := TDynArrayLoadCsv(da, pointer(CSV), Intern);
+  result := TDynArrayLoadCsv(da, pointer(CSV), Intern, CommaSep);
 end;
 
 
@@ -4076,8 +5246,7 @@ end;
 
 function ToUtf8(r: TExprParserResult): RawUtf8;
 begin
-  result := TrimLeftLowerCaseShort(ToText(r));
-  UnCamelCaseSelf(result);
+  TrimLeftLowerUncamelCaseShort(ToText(r), result);
 end;
 
 
@@ -4625,8 +5794,7 @@ begin
     W := TBufferWriter.Create(TRawByteStringStream, BufLen);
   try
     SaveTo(W, aMagic);
-    W.Flush;
-    result := TRawByteStringStream(W.Stream).DataString;
+    result := W.FlushTo;
   finally
     W.Free;
   end;
@@ -5079,22 +6247,20 @@ begin
   result := sp;
 end;
 
-{$ifdef CPUINTEL}
-// crc32c SSE4.2 hardware accellerated dword hash
-{$ifdef CPUX86}
+{$ifdef ASMINTEL} // crc32c SSE4.2 hardware accellerated dword hash
 function crc32c32sse42(buf: pointer): cardinal;
+{$ifdef ASMX86}
 {$ifdef FPC} nostackframe; assembler; {$endif}
 asm
         mov     edx, eax
         xor     eax, eax
-        {$ifdef HASAESNI}
+        {$ifdef ASMAESNI}
         crc32   eax, dword ptr [edx]
         {$else}
         db $F2, $0F, $38, $F1, $02
-        {$endif HASAESNI}
+        {$endif ASMAESNI}
 end;
 {$else}
-function crc32c32sse42(buf: pointer): cardinal;
 {$ifdef FPC}nostackframe; assembler; asm {$else}
 asm // ecx=buf (Linux: edi=buf)
         .noframe
@@ -5102,8 +6268,8 @@ asm // ecx=buf (Linux: edi=buf)
         xor     eax, eax
         crc32   eax, dword ptr [buf]
 end;
-{$endif CPUX86}
-{$endif CPUINTEL}
+{$endif ASMX86}
+{$endif ASMINTEL}
 
 function hash32prime(buf: pointer): cardinal;
 begin
@@ -5135,11 +6301,11 @@ var
   hash: function(buf: pointer): cardinal;
 begin
   // 1. fill HTab[] with hashes for all old data
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   if cfSSE42 in CpuFeatures then
     hash := @crc32c32sse42
   else
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
     hash := @hash32prime;
   FillCharFast(HTab^, SizeOf(HTab^), $ff); // HTab[]=HListMask by default
   pInBuf := OldBuf;
@@ -6994,5 +8160,9 @@ begin
   result := TSynTimeZone.Default.LocalToUtc(LocalDateTime, TzId);
 end;
 
+
+initialization
+  // setup proper GLOB function redirection
+  GlobBuffer := @_Glob;
 
 end.

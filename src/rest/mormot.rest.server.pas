@@ -40,6 +40,7 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
   mormot.core.perf,
   mormot.crypt.core,
@@ -434,6 +435,9 @@ type
     // parameters which may appear
     property InputPairs: TRawUtf8DynArray
       read fInput;
+    /// low-level access to the internal flags, mainly boolean properties aliases
+    property Flags: TRestServerUriContextFlags
+      read fFlags;
 
     /// method overriden to support rsoAuthenticationUriDisable option
     // - i.e. as an alternative, a non-standard and slightly less safe way of
@@ -1007,10 +1011,12 @@ type
   // an external credential check (e.g. via SSPI or Active Directory)
   // - saoFullServerVersion will include the full detailed '1.2.3.4' version of
   // the server executable instead of safer default '1.2' TFileVersion.Main value
+  // - soaNoSoaContract won't include the "soa" value of TServiceContainer.AsSoa
   TRestServerAuthenticationOption = (
     saoUserByLogonOrID,
     saoHandleUnknownLogonAsStar,
-    saoFullServerVersion);
+    saoFullServerVersion,
+    soaNoSoaContract);
 
   /// defines the optional behavior of TRestServerAuthentication class
   TRestServerAuthenticationOptions =
@@ -2365,9 +2371,11 @@ type
     {$endif PUREMORMOT2}
 
     /// main access to the IRestOrmServer methods of this instance
-    // - the Orm: IRestOrm property will publish most needed CRUDbusiness logic,
+    // - the Orm: IRestOrm property will publish most needed CRUD business logic,
     // but this IRestOrmServer interface could be used to properly setup the
     // storage, e.g. via CreateMissingTables() or CreateSqlIndex() methods
+    // - you should NEVER use TRestOrmServer itself, but only IRestOrmServer
+    // interface via this property or IRestOrm via TRest.Orm
     property Server: IRestOrmServer
       read fServer;
     /// set this property to true to transmit the JSON data in a "not expanded" format
@@ -2888,7 +2896,7 @@ end;
 
 procedure TRestServerUriContext.SetOutSetCookie(const aOutSetCookie: RawUtf8);
 const
-  HTTPONLY: array[boolean] of string[15] = (
+  HTTPONLY: array[boolean] of TShort15 = (
     '; HttpOnly', '');
 begin
 // https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
@@ -3080,7 +3088,7 @@ begin
 end;
 
 var
-  OAFR_TXT: array[TOnAuthenticationFailedReason] of RawUtf8;
+  OAFR_TXT: array[TOnAuthenticationFailedReason] of RawUtf8; // stUnCamelCase
 
 procedure TRestServerUriContext.AuthenticationFailed(
   Reason: TOnAuthenticationFailedReason; const aUserName: RawUtf8);
@@ -3253,7 +3261,7 @@ begin
 end;
 
 const
-  COMMAND_TEXT: array[TRestServerUriContextCommand] of string[15] = (
+  COMMAND_TEXT: array[TRestServerUriContextCommand] of TShort15 = (
     '?', 'Method', 'Interface', 'Read', 'Write');
 
 procedure TRestServerUriContext.LogFromContext;
@@ -3364,7 +3372,7 @@ end;
 
 procedure TRestServerUriContext.ServiceResultStart(WR: TJsonWriter);
 const
-  JSONSTART: array[boolean] of string[15] = (
+  JSONSTART: array[boolean] of TShort15 = (
     '{"result":[', '{"result":{');
 begin
   // InternalExecuteSoaByInterface has set ForceServiceResultAsJsonObject
@@ -3376,7 +3384,7 @@ end;
 
 procedure TRestServerUriContext.ServiceResultEnd(WR: TJsonWriter; ID: TID);
 const
-  JSONSEND_WITHID: array[boolean] of string[7] = (
+  JSONSEND_WITHID: array[boolean] of TShort7 = (
     '],"id":', '},"id":');
   JSONSEND_NOID: array[boolean] of AnsiChar = (
     ']', '}');
@@ -3612,14 +3620,14 @@ begin
   rec := Table.CreateAndFillPrepare(fCall^.OutBody);
   try
     W := TableModelProps.Props.CreateJsonWriter(TRawByteStringStream.Create,
-      true, FieldsCsv, {knownrows=}0, 0, @tmp);
+      true, FieldsCsv, 0, 0, @tmp);
     try
+      W.StreamIsOwned := true;
       W.CustomOptions := [twoForceJsonStandard]; // regular JSON
       W.OrmOptions := Options; // SetOrmOptions() may refine ColNames[]
       rec.AppendFillAsJsonValues(W);
       W.SetText(fCall^.OutBody);
     finally
-      W.Stream.Free; // associated TRawByteStringStream instance
       W.Free;
     end;
   finally
@@ -4227,7 +4235,7 @@ begin
        IsSessionSignature(P) then // = IdemPChar(P, 'SESSION_SIGNATURE=')
     begin
       // don't include the TAuthSession signature into Input[]
-      P := PosChar(P + 18, '&');
+      P := PosChar(P + 18, '&'); // use fast SSE2 asm on x86_64
       if P = nil then
         break;
       inc(P);
@@ -4772,7 +4780,7 @@ begin
       inc(a);
       inc(arg);
     end;
-    WR.CancelLastComma(']');
+    WR.ReplaceLastComma(']');
     WR.SetText(fCall^.InBody); // input Body contains new generated input JSON
   finally
     WR.Free;
@@ -5232,7 +5240,7 @@ var
   body: TDocVariantData;
   vers: string;
 begin
-  body.InitFast(12, dvObject);
+  body.InitFast(13, dvObject);
   if result = '' then
     body.AddValue('result', Session.ID) // no private key
   else
@@ -5266,6 +5274,9 @@ begin
       vers := Executable.Version.Main;
     body.AddValue('version', StringToVariant(vers));
   end;
+  if Assigned(fServer.Services) and
+     not (soaNoSoaContract in fOptions) then
+    body.AddValue('soa', fServer.Services.AsSoa);
   include(Ctxt.fServiceExecutionOptions, optNoLogOutput); // hide sensitive info
   Ctxt.ReturnsJson(variant(body), HTTP_SUCCESS, false, twJsonEscape, false, header);
 end;
@@ -5712,8 +5723,10 @@ end;
 // https://learn.microsoft.com/en-us/previous-versions/ms995330(v=msdn.10)
 
 // note that Negotiate/Kerberos is two-way so a single call is enough
-// (NTLM three-way is deprecated since Windows 11 version 24H2 and Server 2025
-// so was removed from mORMot in August 2025)
+// - NTLM three-way is deprecated since Windows 11 version 24H2 and Server 2025
+// so was removed from mORMot in August 2025, together with multiple roundtrips
+// - probably wrongly in case of credential delegation on the AD - see
+// https://github.com/synopse/mORMot2/issues/407
 
 function TRestServerAuthenticationSspi.Auth(Ctxt: TRestServerUriContext;
   const aUserName: RawUtf8): boolean;
@@ -6374,11 +6387,17 @@ begin
   if fModel.TablesMax < 0 then // before AuthenticationRegister() User+Group add
     fOptions := [rsoNoTableURI, rsoNoInternalState]; // no table/state to send
   if aHandleUserAuthentication then
-    AuthenticationRegister([
-      TRestServerAuthenticationDefault
-      {$ifdef DOMAINRESTAUTH},
-      TRestServerAuthenticationSspi
-      {$endif DOMAINRESTAUTH}]);
+  begin
+    AuthenticationRegister(TRestServerAuthenticationDefault);
+    {$ifdef DOMAINRESTAUTH}
+    // detect mormot.lib.sspi/gssapi unit depending on the OS and availability
+    if InitializeDomainAuth then // avoid ESecurityException at startup
+      AuthenticationRegister(TRestServerAuthenticationSspi)
+    else
+      TSynLog.Add.Log(sllWarning, 'Create: no % available: bypass %',
+        [SECPKGNAMEAPI, TRestServerAuthenticationSspi], self);
+    {$endif DOMAINRESTAUTH}
+  end;
   // initialize TRestServer
   fRootRedirectForbiddenToAuth := Model.Root + '/auth';
   fAssociatedServices := TServicesPublishedInterfacesList.Create(0);
@@ -6399,7 +6418,7 @@ begin
   ServiceMethodRegister(
     'cacheflush', CacheFlush, false, [mGET, mPOST]); // for ORM and callbacks
   fPublishedMethodStatIndex := ServiceMethodRegister(
-    'stat', Stat, false, [mGET]);
+    'stat', Stat, false, [mGET, mPOST]);
 end;
 
 var
@@ -6896,7 +6915,7 @@ end;
 
 procedure TRestServer.AddStat(Flags: TRestServerAddStats; W: TJsonWriter);
 const
-  READWRITE: array[boolean] of string[9] = (
+  READWRITE: array[boolean] of TShort15 = (
     '{"read":', '{"write":');
 var
   s, i: PtrInt;
@@ -7016,7 +7035,7 @@ begin
     W.CancelLastComma;
     W.AddDirect(']', ',');
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 function TRestServer.GetServiceMethodStat(
@@ -7158,7 +7177,6 @@ begin
       r.Setup(sm^.Methods, [n], rnMethod, nil, nil, j);
       r.Setup(sm^.Methods, [n, '/'], rnMethod, nil, nil, j);
       if (j <> fPublishedMethodAuthIndex) and
-         (j <> fPublishedMethodStatIndex) and
          (j <> fPublishedMethodBatchIndex) then
       begin
         // ModelRoot/MethodName/<path:fulluri>
@@ -7463,7 +7481,7 @@ begin
         W.WriteObject(fSessions.List[i]);
         W.AddComma;
       end;
-      W.CancelLastComma(']');
+      W.ReplaceLastComma(']');
       W.SetText(RawUtf8(result));
     finally
       fSessions.Safe.ReadOnlyUnLock;
@@ -7745,6 +7763,10 @@ begin
       fStats.ClientConnect;
     end;
     fSessionCounter := PCardinal(R.P)^;
+    if n = 0 then
+      fSessionCounterMin := fSessionCounter
+    else
+      fSessionCounterMin := TAuthSession(fSessions.List[0]).ID - 1;
   finally
     fSessions.Safe.WriteUnLock;
   end;
@@ -8040,6 +8062,26 @@ var
   tix: cardinal;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
+  if PropNameEquals(Ctxt.fUriMethodPath, 'soa') then
+  begin
+    case Ctxt.Method of
+      mGET:
+        Ctxt.ReturnsJson(fServices.AsSoa);  // GET /stat/soa from ParseSoa()
+      mPOST:
+        if (Ctxt.Call^.InBody <> '') and
+           (Ctxt.Call^.InBody <> '[]') then // POST /stat/soa from SetUser()
+        begin
+          AssociatedServices.RegisterFromClientJson(Ctxt.Call^.InBody);
+          Ctxt.Call^.OutStatus := HTTP_SUCCESS;
+        end;
+    end;
+    exit;
+  end;
+  if Ctxt.Method <> mGET then
+  begin
+    Ctxt.Error('', HTTP_NOTALLOWED); // 405
+    exit;
+  end;
   W := TJsonWriter.CreateOwnedStream(temp);
   try
     Ctxt.RetrieveInputUtf8OrVoid('findservice', name);
@@ -8061,7 +8103,7 @@ begin
     end;
     if Ctxt.InputExists['format'] or
        PropNameEquals(Ctxt.fUriMethodPath, 'json') then
-      json := JsonReformat(json)
+      json := JsonReformat(json, jsonHumanReadable)
     else if PropNameEquals(Ctxt.fUriMethodPath, 'xml') then
     begin
       if name = '' then
@@ -8373,7 +8415,7 @@ initialization
   // should match TPerThreadRunningContext definition in mormot.core.interfaces
   assert(SizeOf(TServiceRunningContext) =
     SizeOf(TObject) + SizeOf(TObject) + SizeOf(TThread));
-  GetEnumTrimmedNames(TypeInfo(TOnAuthenticationFailedReason), @OAFR_TXT, true);
+  GetEnumTrimmedNames(TypeInfo(TOnAuthenticationFailedReason), @OAFR_TXT, scUnCamelCase);
 
 end.
 

@@ -87,10 +87,15 @@ uses
   sysutils,
   mormot.core.base,
   {$ifdef OSPOSIX}
+  {$ifdef FPC}
   unixtype,
+  {$else}
+  mormot.core.os.delphi,
+  {$endif FPC}
   {$endif OSPOSIX}
   mormot.core.os,
-  mormot.net.sock; // for INetTls
+  mormot.core.os.security, // for TSystemCertificateStore
+  mormot.net.sock;         // for INetTls
 
 
 { ******************** Dynamic or Static OpenSSL Library Loading }
@@ -6045,7 +6050,7 @@ begin
     // read and validate OPENSSL_LIBPATH environment variable
     libenv := OpenSslDefaultPath; // priority to the global variable
     if libenv = '' then
-      libenv := GetEnvironmentVariable('OPENSSL_LIBPATH');
+      libenv := GetSystemEnvString('OPENSSL_LIBPATH');
     if libenv <> '' then
       if DirectoryExists(libenv) then
         libenv := IncludeTrailingPathDelimiter(libenv)
@@ -7663,8 +7668,8 @@ begin
   result := (res = X509_V_OK); // not yet verified, or peer verification failed
   if (msg <> nil) and
      not result then // append '(text #error)' to msg^
-    msg^ := RawUtf8(format('%s (%s #%d)',
-              [msg^, X509_verify_cert_error_string(res), res]));
+    msg^ := _fmt('%s (%s #%d)',
+              [msg^, X509_verify_cert_error_string(res), res]);
 end;
 
 procedure SSL.Free;
@@ -9334,7 +9339,7 @@ begin
     result := OBJ_nid2sn(nid);
     if X509_get_signature_info(@self, @md, nil, @bits, nil) = OPENSSLSUCCESS then
     begin
-      result := RawUtf8(format('%d %s', [bits, result]));
+      result := _fmt('%d %s', [bits, result]);
       if nid = NID_rsassaPss then // only PS256/PS384/PS512 don't supply the MD
         result := Join([result, '-', RawUtf8(OBJ_nid2sn(md))]);
     end;
@@ -11248,6 +11253,8 @@ begin
   if Context.AllowDeprecatedTls then
     v := TLS1_VERSION; // allow TLS1.0 TLS1.1 but no SSL
   SSL_CTX_set_min_proto_version(fCtx, v);
+  if Context.DisableTls13 then
+    SSL_CTX_set_max_proto_version(fCtx, TLS1_2_VERSION); // stick to TLS 1.2
 end;
 
 function AfterAcceptSNI(s: PSSL; ad: PInteger; arg: pointer): integer; cdecl;

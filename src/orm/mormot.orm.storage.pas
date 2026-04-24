@@ -3150,8 +3150,8 @@ begin
   else
     KnownRowsCount := 0;
   Stmt.SelectFieldBits(bits, withID);
-  wr := fStoredClassRecordProps.CreateJsonWriter(
-    Stream, Expand, withID, bits, KnownRowsCount, 65500, tmp);
+  wr := fStoredClassRecordProps.CreateJsonWriter(Stream,
+          Expand, withID, bits, KnownRowsCount, 65500, tmp);
   if wr <> nil then
   try
     if Expand then
@@ -3425,7 +3425,7 @@ end;
 procedure TRestStorageInMemory.ComputeStateAfterLoad(
   loadstart: Int64; binary: boolean);
 const
-  _CALLER: array[boolean] of string[7] = (
+  _CALLER: array[boolean] of TShort7 = (
     'Json', 'Binary');
 var
   f: PtrInt;
@@ -3515,8 +3515,8 @@ begin
   try
     if fUnSortedID then
       fValues.CreateOrderedIndex(ndx, nil); // write in ascending ID order
-    W := fStoredClassRecordProps.CreateJsonWriter(Stream, Expand, true,
-      ALL_FIELDS, fCount, {bufsize=}1 shl 20);
+    W := fStoredClassRecordProps.CreateJsonWriter(Stream,
+      Expand, true, ALL_FIELDS, fCount, {bufsize=}1 shl 20);
     try
       if Expand then
         W.Add('[');
@@ -4344,7 +4344,7 @@ begin
   else
   begin
     json := RawUtf8FromFile(fFileName);
-    result := LoadFromJson(pointer(json), length(json)); // buffer parsed in-place
+    result := LoadFromJson(pointer(json), length(json)); // parsed in-place
   end;
 end;
 

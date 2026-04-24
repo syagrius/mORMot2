@@ -25,11 +25,14 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.datetime,
+  mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.data,
+  mormot.core.fmt,
   mormot.core.log,
-  mormot.crypt.core;
+  mormot.crypt.core,
+  mormot.crypt.secure;
 
 
 
@@ -435,7 +438,8 @@ end;
 procedure TSynDaemon.Command(cmd: TExecuteCommandLineCmd; aAutoStart: boolean;
   const param: RawUtf8);
 var
-  exe: RawByteString;
+  hashes: TRawUtf8DynArray;
+  siz: Int64;
   log: TSynLog;
   {$ifdef OSWINDOWS}
   service: TServiceSingle;
@@ -516,12 +520,14 @@ begin
     cVersion:
       begin
         WriteCopyright;
-        exe := StringFromFile(Executable.ProgramFileName);
+        hashes := HashFileRaw(Executable.ProgramFileName,
+                    [hfMD5, hfSHA1, hfSHA256], @siz); // 3 hashes in one pass
         ConsoleWriteRaw([' ', fSettings.ServiceName, CRLF +
-             ' Size:       ', length(exe), ' bytes (', KB(exe), ')' + CRLF +
+             ' Size:       ', siz, ' bytes (', KB(siz), ')' + CRLF +
              ' Build date: ', Executable.Version.BuildDateTimeString, CRLF +
-             ' MD5:        ', Md5(exe), CRLF +
-             ' SHA256:     ', Sha256(exe), CRLF +
+             ' MD5:        ', hashes[0], CRLF +
+             ' SHA1:       ', hashes[1], CRLF +
+             ' SHA256:     ', hashes[2], CRLF +
              ' Running OS: ', OSVersionText]);
         if Executable.Version.Version32 <> 0 then
           ConsoleWriteRaw([

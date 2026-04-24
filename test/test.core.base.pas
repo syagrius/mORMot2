@@ -22,6 +22,7 @@ uses
   mormot.core.data,
   mormot.core.json,
   mormot.core.variants,
+  mormot.core.fmt,
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.crypt.ecc,
@@ -36,6 +37,7 @@ uses
   mormot.db.core,
   mormot.orm.base,
   mormot.orm.core,
+  mormot.rest.core,
   mormot.rest.client;
 
 const
@@ -350,7 +352,8 @@ end;
 
 procedure TTestCoreBase._CamelCase;
 var
-  v: RawUtf8;
+  v, v2, all: RawUtf8;
+  k: TSetCase;
 begin
   CheckEqual(UnCamelCase(''), '');
   v := UnCamelCase('On');
@@ -416,12 +419,43 @@ begin
   CheckEqual(SnakeCase('Abc_Def'), 'abc_def');
   CheckEqual(SnakeCase('AbcDef_'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def'), 'abc_def');
+  CheckEqual(SnakeCase('Abc__Def', '-'), 'abc-def');
   CheckEqual(SnakeCase('AbcDef__'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def__'), 'abc_def_');
+  CheckEqual(SnakeCase('Abc12Def'), 'abc_12_def');
+  CheckEqual(SnakeCase('X64Def', '-'), 'x64-def');
+  CheckEqual(SnakeCase('XY64Def', '-'), 'xy-64-def');
+  CheckEqual(SnakeCase('column1', '-'), 'column-1');
+  CheckEqual(SnakeCase('column100', '-'), 'column-100');
+  CheckEqual(SnakeCase('Column 1', '-'), 'column-1');
   CheckEqual(SnakeCase('variable name'), 'variable_name');
   CheckEqual(SnakeCase('Variable Name'), 'variable_name');
   CheckEqual(SnakeCase('VARIABLE NAME'), 'variable_name');
   CheckEqual(SnakeCase('VariableName'), 'variable_name');
+  v := 'Something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'Some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  v := 'some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  for k := low(k) to high(k) do
+  begin
+    v := GetEnumNameTrimed(TypeInfo(TSetCase), ord(k));
+    v2 := SetCase(v, k);
+    CheckUtf8((v = v2) = (k in [scNoTrim, scTrimLeft, scPascalCase, scTitleCase]), v);
+    v := SetCase(v, k);
+    CheckEqual(v, v2, 'SetCase(self)');
+    Append(all, v, ',');
+  end;
+  CheckEqual(all, 'NoTrim,TrimLeft,AnyRemoved,Un camel case,Un Camel Title,' +
+    'lowercase,lower-case,lowerCaseFirst,UPPERCASE,snake_case,SCREAMING_SNAKE_CASE,' +
+    'kebab-case,dot.case,TitleCase,camelCase,PascalCase,');
 end;
 
 function GetBitsCount64(const Bits; Count: PtrInt): PtrInt;
@@ -432,7 +466,7 @@ begin
   begin
     dec(Count);
     if Count in TBits64(Bits) then // bt dword[rdi],edx is slow in such a loop
-      inc(result);                 // ... but correct :)
+      inc(result);                 // ... but simple and correct :)
   end;
 end;
 
@@ -612,7 +646,7 @@ begin
   Check(mormot.core.text.HexToBin('200100B80A0B12F00000000000000001', PByte(@ip), 16));
   IP6Text(@ip, txt);
   CheckEqual(txt, '2001:b8:a0b:12f0::1');
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   GetBitsCountPtrInt := @GetBitsCountPurePascal;
   TestPopCnt('pas');
   GetBitsCountPtrInt := @GetBitsCountPas; // x86/x86_64 assembly
@@ -624,7 +658,7 @@ begin
   end;
   {$else}
   TestPopCnt('pas');
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   {$ifdef FPC}
   timer.Start;
   for u := 1 to N do
@@ -924,7 +958,7 @@ begin
   CheckEqual(FindIniNameValueU(Content, 'NAME4:'), 'value 4');
   Check(ExistsIniName(pointer(Content), 'NAME='), 'exist1');
   Check(ExistsIniName(pointer(Content), 'NAME2='), 'exist2');
-  Check(not ExistsIniName(pointer(Content), 'NAME 3='), 'exist2');
+  Check(ExistsIniName(pointer(Content), 'NAME 3='), 'exist2');
   Check(ExistsIniNameValue(pointer(Content), 'NAME=', @VUP));
   Check(ExistsIniNameValue(pointer(Content), 'NAME2=', @VUP));
   Check(not ExistsIniNameValue(pointer(Content), 'NAME3=', @VUP));
@@ -1034,84 +1068,175 @@ end;
 procedure TTestCoreBase.TRawUtf8ListSlow(Context: TObject);
 const
   MAX = 20000;
+  ONLYLOG = false;
 var
-  i, n: integer;
+  i, n, len: PtrInt; // @len = PPtrInt
   L: TRawUtf8List;
-  C: TComponent;
-  Rec: TSynFilterOrValidate;
-  s: RawUtf8;
+  B: TBinDictionary;
+  O: TSynMonitorTime;
+  v: TRawUtf8DynArray;
+  v64: Int64;
+  timer: TPrecisionTimer;
+
+  procedure TestBinDictionary;
+  var
+    i, len: PtrInt; // @len = PPtrInt
+  begin
+    CheckEqual(B.Count, MAX + 1);
+    Check(B.IndexOf(nil, 0) < 0);
+    for i := MAX downto 0 do
+    begin
+      len := 0;
+      Check(PInteger(B.Find(pointer(v[i]), length(v[i]), @len))^ = i);
+      Check(len = 4);
+    end;
+  end;
+
 begin
+  SetLength(v, MAX + 1); // allocate once the strings
+  for i := 0 to MAX do
+    UInt32ToUtf8(i, v[i]);
   L := TRawUtf8List.CreateEx([fObjectsOwned]);
   try // no hash table involved
+    timer.Start;
     for i := 0 to MAX do
     begin
-      C := TComponent.Create(nil);
-      C.Tag := i;
-      Check(L.AddObject(UInt32ToUtf8(i), C) = i);
+      O := TSynMonitorTime.Create; // any TObject would fit
+      O.MicroSec := i;
+      Check(L.AddObject(v[i], O) = i);
     end;
+    NotifyTestSpeed('TRawUtf8List.Add no hash', MAX + 1, 0, @timer, ONLYLOG);
     Check(L.Count = MAX + 1);
     for i := 0 to MAX do
-      Check(GetInteger(Pointer(L[i])) = i);
+    begin
+      Check(IsInt64(Pointer(L[i]), length(L[i]), @v64));
+      Check(v64 = i);
+    end;
     for i := 0 to MAX do
-      Check(TComponent(L.Objects[i]).Tag = i);
+      Check(TSynMonitorTime(L.Objects[i]).MicroSec = i);
+    timer.Start;
     Check(L.IndexOf('') < 0);
+    for i := MAX downto MAX - 99 do // O(n) worst case: appear at the end
+      Check(L.IndexOf(v[i]) = i);
+    NotifyTestSpeed('TRawUtf8List.IndexOf no hash', 100, 0, @timer, ONLYLOG);
     Check(L.IndexOf('5') = 5);
-    Check(L.IndexOf('999') = 999);
+    if MAX {%H-}>= 999 then
+      Check(L.IndexOf('999') = 999);
     for i := MAX downto 0 do
       if i and 1 = 0 then
         L.Delete(i); // delete half the array
     Check(L.Count = MAX div 2);
     for i := 0 to L.Count - 1 do
-      Check(GetInteger(Pointer(L[i])) = TComponent(L.Objects[i]).Tag);
+      Check(GetInteger(Pointer(L[i])) = TSynMonitorTime(L.Objects[i]).MicroSec);
     Check(L.IndexOf('5') = 2);
     Check(L.IndexOf('6') < 0);
     Check(L.Exists('5'));
     Check(not L.Exists('6'));
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
   finally
     L.Free;
   end;
   L := TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
   try // with hash table
+    timer.Start;
     for i := 1 to MAX do
     begin
-      Rec := TSynFilterLowerCase.Create; // any TSynPersistent would have done
-      Rec.Parameters := Int32ToUtf8(i);
-      CheckEqual(L.AddObject(Rec.Parameters, Rec), i - 1);
-      CheckEqual(L.IndexOf(Rec.Parameters), i - 1);
+      O := TSynMonitorTime.Create; // any TSynPersistent would fit
+      O.MicroSec := i;
+      Check(L.AddObject(v[i], O) = i - 1);
     end;
+    NotifyTestSpeed('TRawUtf8List.Add hashed', MAX, 0, @timer, ONLYLOG);
+    timer.Start;
+    for i := 1 to MAX do
+      Check(L.IndexOf(v[i]) = i - 1);
+    NotifyTestSpeed('TRawUtf8List.IndexOf hashed', MAX, 0, @timer, ONLYLOG);
     Check(not L.Exists(''));
     Check(L.IndexOf('abcd') < 0);
     Check(L.Count = MAX);
     n := 0;
     for i := 1 to MAX do
     begin
-      UInt32ToUtf8(i, s);
-      CheckEqual(L.IndexOf(s), n);
-      CheckEqual(TSynFilterOrValidate(L.Objects[n]).Parameters, s);
+      Check(L.IndexOf(v[i]) = n);
+      Check(TSynMonitorTime(L.Objects[n]).MicroSec = i);
       if i and 127 = 0 then
-        CheckEqual(L.Delete(s), n)
+        CheckEqual(L.Delete(v[i]), n, 'delete')
       else
         inc(n);
     end;
     CheckEqual(L.Count, n);
     for i := 1 to MAX do
-    begin
-      UInt32ToUtf8(i, s);
-      Check((L.IndexOf(s) >= 0) = (i and 127 <> 0));
-    end;
+      Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     L.SaveToFile(WorkDir + 'utf8list.txt');
     L.Clear;
     CheckEqual(L.Count, 0);
     L.LoadFromFile(WorkDir + 'utf8list.txt');
     CheckEqual(L.Count, n);
     for i := 1 to MAX do
-    begin
-      UInt32ToUtf8(i, s);
-      Check((L.IndexOf(s) >= 0) = (i and 127 <> 0));
-    end;
+      Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     DeleteFile(WorkDir + 'utf8list.txt');
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
+    Check(L.IndexOf('') < 0);
+    Check(L.Add('') = 1);
+    Check(L.Count = 2);
+    Check(L.IndexOf('') = 1);
+    Check(L.IndexOf('toto') = 0);
   finally
     L.Free;
+  end;
+  B := TBinDictionary.Create;
+  try // with hash table
+    timer.Start;
+    for i := 0 to MAX do
+    begin
+      CheckEqual(B.Count, i);
+      Check(B.Add(pointer(v[i]), @i, length(v[i]), 4) = i);
+    end;
+    NotifyTestSpeed('TBinDictionary.Add', MAX + 1, 0, @timer, ONLYLOG);
+    timer.Start;
+    TestBinDictionary;
+    NotifyTestSpeed('TBinDictionary.Find', MAX + 1, 0, @timer, ONLYLOG);
+    B.Clear;
+    for i := 0 to MAX do
+    begin
+      CheckEqual(B.Count, i);
+      Check(B.Update(pointer(v[i]), @i, length(v[i]), 4) = i);
+    end;
+    for i := 0 to MAX do
+      if i and 127 = 0 then
+        Check(B.Update(pointer(v[i]), @i, length(v[i]), 4) = i)
+      else if i and 255 = 0 then
+        Check(B.Add(pointer(v[i]), @i, length(v[i]), 4) < 0);
+    for i := 0 to MAX do
+    begin
+      len := 0;
+      Check(MemCmp(B.Keys(i, @len), pointer(v[i]), length(v[i])) = 0);
+      Check(len = length(v[i]));
+      len := 0;
+      Check(PInteger(B.Values(i, @len))^ = i);
+      Check(len = 4);
+    end;
+    TestBinDictionary;
+    B.Clear;
+    Check(B.Count = 0);
+    Check(B.IndexOf(nil, 0) < 0);
+    Check(B.Add(nil, nil, 0, 0) = 0);
+    Check(B.Count = 1);
+    Check(B.IndexOf(nil, 0) = 0);
+    len := 1;
+    Check(PInteger(B.Find(nil, 0, @len))^ = 0);
+    Check(len = 0);
+finally
+    B.Free;
   end;
 end;
 
@@ -1344,7 +1469,8 @@ type
   TDataItems = array of TDataItem;
 
   TRawUtf8DynArray1 = type TRawUtf8DynArray;
-  TRawUtf8DynArray2 = array of RawUtf8;
+  TRawUtf8DynArray2 = array of SpiUtf8;
+  TAnsiStringDynArray = array of AnsiString;
 
 function FVSort(const A, B): integer;
 begin
@@ -1478,6 +1604,8 @@ begin
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray)), 'IsRawUtf8DynArray1');
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray1)), 'IsRawUtf8DynArray11');
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray2)), 'IsRawUtf8DynArray12');
+  Check(not IsRawUtf8DynArray(TypeInfo(TRawByteStringDynArray)), 'TRawByteStringDynArray');
+  Check(not IsRawUtf8DynArray(TypeInfo(TAnsiStringDynArray)), 'TAnsiStringDynArray');
   Check(not IsRawUtf8DynArray(TypeInfo(TAmount)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
@@ -2251,9 +2379,9 @@ var
     timer: TPrecisionTimer;
     P: PByteArray;
     msg: string;
-    {$ifdef ASMX64}
+    {$ifdef ASMX64NOTPIC}
     cputxt: RawUtf8;
-    {$endif ASMX64}
+    {$endif ASMX64NOTPIC}
     elapsed: Int64;
   begin
     // first validate FillCharFast
@@ -2275,17 +2403,17 @@ var
         inc(len, 777 + len shr 4);
     until len >= length(buf);
     // benchmark FillChar/FillCharFast
-    {$ifdef ASMX64}
+    {$ifdef ASMX64NOTPIC}
     cputxt := GetSetName(TypeInfo(TX64CpuFeatures), X64CpuFeatures);
-    {$endif ASMX64}
+    {$endif ASMX64NOTPIC}
     if rtl then
       msg := 'FillChar'
     else
-      {$ifdef ASMX64}
+      {$ifdef ASMX64NOTPIC}
       FormatString('FillCharFast [%]', [{%H-}cputxt], msg);
       {$else}
       msg := 'FillCharFast';
-      {$endif ASMX64}
+      {$endif ASMX64NOTPIC}
     // now make the same test with no Check() but with timing
     // small len makes timer.Resume/Pause unreliable -> single shot measure
     b1 := 0;
@@ -2315,11 +2443,11 @@ var
     if rtl then
       msg := 'Move'
     else
-      {$ifdef ASMX64}
+      {$ifdef ASMX64NOTPIC}
       FormatString('MoveFast [%]', [{%H-}cputxt], msg);
       {$else}
       msg := 'MoveFast';
-      {$endif ASMX64}
+      {$endif ASMX64NOTPIC}
     P := pointer(buf);
     for i := 0 to length(buf) - 1 do
       P[i] := i; // fills with 0,1,2,...
@@ -2398,26 +2526,26 @@ var
     CheckHash(buf, $B49DB8A5);
   end;
 
-{$ifdef ASMX64}
+{$ifdef ASMX64NOTPIC}
 var
   bak, cpu: TX64CpuFeatures;
-{$endif ASMX64}
+{$endif ASMX64NOTPIC}
 begin
   Check(FileIsExecutable(Executable.ProgramFileName));
   Check(not FileIsExecutable(Executable.ProgramFilePath));
   SetLength(buf, 16 shl 20); // 16MB
-  {$ifdef ASMX64} // activate and validate SSE2 + AVX branches
+  {$ifdef ASMX64NOTPIC} // activate and validate SSE2 + AVX branches
   bak := X64CpuFeatures;
   cpu := bak - [cpuHaswell, cpuAvx2];
   X64CpuFeatures := []; // default SSE2 128-bit process
   Validate({rtl=}false);
-  {$ifdef ASMX64AVXNOCONST} // oldest Delphi doesn't support AVX asm
+  {$ifdef ASMX64AVX1} // oldest Delphi doesn't support AVX asm
   if cpuAvx in cpu then
   begin
     X64CpuFeatures := [cpuAvx]; // AVX 256-bit process
     Validate(false);
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
   X64CpuFeatures := bak; // there is no AVX move/fillchar (still 256-bit wide)
   if (cpu <> []) and
      (cpu <> [cpuAvx]) then
@@ -2426,7 +2554,7 @@ begin
   {$else}
   Validate(true);
   Validate(false);
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 end;
 
 type
@@ -2481,6 +2609,29 @@ type
     Enum: TEnum;
   end;
 
+  TTipoUsuario = (ti0, ti1, ti2);
+
+  TUsuario = class(TAuthUser)
+   protected
+     FTipo: TTipoUsuario;
+     FEmpresaID: TID;
+     FIdExterno: TNullableInteger;
+   public
+     function IdExternoEquals(const value: variant): boolean;
+   published
+     property Tipo: TTipoUsuario read FTipo write FTipo;
+     property EmpresaID: TID read FEmpresaID write FEmpresaID;
+     property IdExterno: TNullableInteger read FIdExterno write FIdExterno;
+   end;
+
+   TDTOUsuario = packed record
+     ID: Int64;
+     IdExterno: variant;
+     Email: RawUtf8;
+     Nome: RawUtf8;
+     Cpf: RawUtf8;
+   end;
+
 function TPeople2.GetEnum: TEnum;
 begin
   result := fEnum;
@@ -2489,6 +2640,11 @@ end;
 procedure TPeople2.SetEnum(const Value: TEnum);
 begin
   fEnum := Value;
+end;
+
+function TUsuario.IdExternoEquals(const value: variant): boolean;
+begin // circumvent weird FPC compiler issue with variant sub types
+  result := VariantCompare(PVariant(@FIdExterno)^, value) = 0;
 end;
 
 procedure TTestCoreBase._Records;
@@ -2505,6 +2661,8 @@ var
   err, err2: string;
   oa: TOrmPeopleObjArray;
   pa: array of TRecordPeople;
+  ua: TUsuario;
+  ub: TDTOUsuario;
 begin
   // FillZeroRtti()
   CheckEqual(lic.CustomerName, '', 'c1');
@@ -2630,9 +2788,11 @@ begin
     o2.Enum := e4;
     {$ifndef HASEXTRECORDRTTI} // oldest Delphi or FPC
     Rtti.RegisterType(TypeInfo(TEnum));
-    Rtti.RegisterFromText(TypeInfo(TPeopleR),
-      'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
+    if not RecordHasFields(TypeInfo(TPeopleR)) then
+      Rtti.RegisterFromText(TypeInfo(TPeopleR),
+        'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
     {$endif HASEXTRECORDRTTI}
+    Check(RecordHasFields(TypeInfo(TPeopleR)), 'RecordHasFields');
     r.YearOfBirth := -1;
     CheckEqual(r.YearOfBirth, -1);
     RecordZero(@r, TypeInfo(TPeopleR));
@@ -2775,6 +2935,27 @@ begin
   CheckEqual(oa[0].FirstName, p.FirstName);
   CheckEqual(m.Compare(oa[0], @pa[0]), 0, 'array1');
   ObjArrayClear(oa);
+  //  A:TDTOUsuario B:TUsuario with TNullableInteger
+  Rtti.RegisterFromText(TypeInfo(TDTOUsuario),
+    'ID:Int64 IdExterno:variant Email,Nome,Cpf:RawUtf8');
+  m.Init(TUsuario, TypeInfo(TDTOUsuario)).AutoMap
+   .Map([
+     'DisplayName', 'Nome',
+     'LogonName',   'Email'
+  ]);
+  ua := TUsuario.Create;
+  try
+    m.RandomA(ua);
+    Check(m.Compare(ua, @ub) <> 0, 'ua0');
+    m.ToA(ua, @ub);
+    Check(ua.IdExternoEquals(ub.IdExterno));
+    Check(m.Compare(ua, @ub) = 0, 'ua1');
+    ub.IdExterno := 10;
+    m.ToA(ua, @ub);
+    Check(ua.IdExternoEquals(10));
+  finally
+    ua.Free;
+  end;
   // TRttiFilter validation with p record
   fr := TRttiFilter.Create(TypeInfo(TRecordPeople));
   try
@@ -2913,6 +3094,12 @@ begin
   CheckEqual(MacTextFromHex(UpperCase(s)), x);
   CheckEqual(HumanHexCompare(x, x), 0);
   CheckEqual(HumanHexCompare(x, MacTextFromHex(s)), 0);
+  x := MacToText(@Guid);
+  CheckEqual(x, 'd3:46:a6:c9:61:9c');
+  FillZero(g);
+  CheckEqual(MacToText(@g), '00:00:00:00:00:00');
+  Check(TextToMac(pointer(x), @g));
+  CheckEqual(MacToText(@g), x);
   for i := 1 to 100 do
   begin
     x2 := x;
@@ -3012,6 +3199,28 @@ begin
     Check(LoadJsonInPlace(h2, pointer(s), PT_INFO[pt]) <> nil);
     CheckUtf8(CompareMem(@h, @h2, PT_SIZE[pt]), '%', [PT_INFO[pt].RawName]);
   end;
+  // validate IdentifierGuid()/DotNetIdentifierGuid()
+  IdentifierGuid('www.opentofu.org', g, UUID_DNS);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'df1e675d-b743-5f6c-9952-6311d0f141df');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  IdentifierGuid('https://www.opentofu.org/', g, UUID_URL);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ace93eea-1a2c-5eed-b41b-718be15d2e50');
+  IdentifierGuid('1.3.6.1.4', g, UUID_OID);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'af9d40a5-7a36-5c07-b23a-851cd99fbfa5');
+  IdentifierGuid('CN=Example,C=GB', g, UUID_X500);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '84e09961-4aa4-57f8-95b7-03edb1073253');
+  DotNetIdentifierGuid('MyCompany.MyComponent', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ce5fa4ea-ab00-5402-8b76-9f76ac858fb5');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  DotNetIdentifierGuid('YourProviderNameYourProviderName', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '6f8eac67-f87f-598a-71a0-67e48d8c468d');
+  Check(not IsRandomGuid(@g), 'from identifier');
 end;
 
 procedure TTestCoreBase._ParseCommandArgs;
@@ -4054,22 +4263,22 @@ begin
   Test(crc32creference, 'pas');
   Test(crc32cinlined, 'inl');
   Test(crc32cfast, 'fast');
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   {$ifndef OSDARWIN}
-  // Not [yet] working on Darwin
+  // Not [yet] implemented on Darwin
   if cfSSE42 in CpuFeatures then
     Test(crc32csse42, 'sse42');
   {$endif OSDARWIN}
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   if (cfSSE42 in CpuFeatures) and
      (cfAesNi in CpuFeatures) and
      (cfCLMUL in CpuFeatures) then
     Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
-  {$endif CPUX64}
+  {$endif ASMX64}
   {$else}
   if @crc32c <> @crc32cfast then
     Test(crc32c, 'armv8');
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   AddConsole('%', [msg]);
 end;
 
@@ -4506,32 +4715,43 @@ begin
   for i := 1 to 10 do
     AppendShortCardinal(i, a);
   check(a = '012345678910');
-  for i := 11 to 150 do
+  for i := 11 to 120 do
     AppendShortCardinal(i, a);
-  CheckHash(a, $6C291F09, 'AppendShortCardinal');
-  Check(TwoDigits(0) = '0');
-  Check(TwoDigits(1) = '1');
-  Check(TwoDigits(10) = '10');
-  Check(TwoDigits(100) = '100');
-  Check(TwoDigits(1000) = '1000');
-  Check(TwoDigits(0.1) = '0.10');
-  Check(TwoDigits(0.12) = '0.12');
-  Check(TwoDigits(0.123) = '0.12');
-  Check(TwoDigits(0.124) = '0.12');
-  Check(TwoDigits(0.125) = '0.12');
-  Check(TwoDigits(0.1251) = '0.13');
-  Check(TwoDigits(0.126) = '0.13');
-  Check(TwoDigits(0.129) = '0.13');
-  Check(TwoDigits(70.131) = '70.13');
-  Check(TwoDigits(70.135) = '70.13');
-  Check(TwoDigits(70.1351) = '70.14');
-  Check(TwoDigits(0.01) = '0.01');
-  Check(TwoDigits(0.05) = '0.05');
-  Check(TwoDigits(0.051) = '0.05');
-  Check(TwoDigits(0.055) = '0.05');
-  Check(TwoDigits(0.0551) = '0.06');
-  Check(TwoDigits(0.0015) = '0');
-  Check(TwoDigits(0.0055) = '0.01');
+  CheckEqual(length(a), 253);
+  CheckEqual(Hash32(@a[1], ord(a[0])), $1CDCEE09, 'AppendShortCardinal');
+  a := '';
+  AppendShortByte(0, @a);
+  check(a = '0');
+  for i := 1 to 10 do
+    AppendShortByte(i, @a);
+  check(a = '012345678910');
+  for i := 11 to 120 do
+    AppendShortByte(i, @a);
+  CheckEqual(length(a), 253);
+  CheckEqual(Hash32(@a[1], ord(a[0])), $1CDCEE09, 'AppendShortByte');
+  CheckEqualShort(TwoDigits(0), '0');
+  CheckEqualShort(TwoDigits(1), '1');
+  CheckEqualShort(TwoDigits(10), '10');
+  CheckEqualShort(TwoDigits(100), '100');
+  CheckEqualShort(TwoDigits(1000), '1000');
+  CheckEqualShort(TwoDigits(0.1), '0.10');
+  CheckEqualShort(TwoDigits(0.12), '0.12');
+  CheckEqualShort(TwoDigits(0.123), '0.12');
+  CheckEqualShort(TwoDigits(0.124), '0.12');
+  CheckEqualShort(TwoDigits(0.125), '0.12');
+  CheckEqualShort(TwoDigits(0.1252), '0.13');
+  CheckEqualShort(TwoDigits(0.126), '0.13');
+  CheckEqualShort(TwoDigits(0.129), '0.13');
+  CheckEqualShort(TwoDigits(70.131), '70.13');
+  CheckEqualShort(TwoDigits(70.135), '70.13');
+  CheckEqualShort(TwoDigits(70.1352), '70.14');
+  CheckEqualShort(TwoDigits(0.01), '0.01');
+  CheckEqualShort(TwoDigits(0.05), '0.05');
+  CheckEqualShort(TwoDigits(0.051), '0.05');
+  CheckEqualShort(TwoDigits(0.055), '0.05');
+  CheckEqualShort(TwoDigits(0.0551), '0.06');
+  CheckEqualShort(TwoDigits(0.0015), '0');
+  CheckEqualShort(TwoDigits(0.0055), '0.01');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -4634,15 +4854,20 @@ begin
   Check(not SameValue(386.0, 700, 2));
   Check(IntToThousandString(0) = '0');
   Check(IntToThousandString(1) = '1');
+  Check(IntToThousandString(9) = '9');
   Check(IntToThousandString(10) = '10');
   Check(IntToThousandString(100) = '100');
+  Check(IntToThousandString(999) = '999');
   Check(IntToThousandString(1000) = '1,000');
   Check(IntToThousandString(10000) = '10,000');
   Check(IntToThousandString(100000) = '100,000');
   Check(IntToThousandString(1000000) = '1,000,000');
+  Check(IntToThousandString(10000000) = '10,000,000');
   Check(IntToThousandString(-1) = '-1');
+  Check(IntToThousandString(-9) = '-9');
   Check(IntToThousandString(-10) = '-10');
   Check(IntToThousandString(-100) = '-100');
+  Check(IntToThousandString(-999) = '-999');
   Check(IntToThousandString(-1000) = '-1,000');
   Check(IntToThousandString(-10000) = '-10,000');
   Check(IntToThousandString(-100000) = '-100,000');
@@ -5364,9 +5589,14 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
     FillCharFast(src, SizeOf(src), ord('a'));
     for i := 0 to 200 do
     begin
-      FillCharFast(dst, SizeOf(dst), 0);
+      FillCharFast(dst, SizeOf(dst), 10);
       UpperCopy255Buf(@dst, @src, i)^ := #0;
       Check(StrLen(@dst) = i);
+      Check(StrLenSafe(@dst) = i);
+      Check(ByteScanIndex(@dst, SizeOf(dst), 0) = i);
+      if i = 0 then
+        continue;
+      Check(ByteScanIndex(@dst, i, 0) < 0);
       for j := 0 to i - 1 do
         Check(dst[j] = 'A');
     end;
@@ -5395,16 +5625,19 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
   var
-    t: RawUtf8;
+    t, c, u: RawUtf8;
   begin
     trimcopy(S, start, count, t);
-    checkEqual(t, TrimU(copy(S, start, count)));
+    c := copy(S, start, count);
+    CheckEqual(t, TrimU(c));
+    TrimU(c, u);
+    CheckEqual(t, u);
   end;
 
 var
   i, j, k, len, len120, lenup100, CP, L, lcid: integer;
   bak, bakj: AnsiChar;
-  W: WinAnsiString;
+  W, W2: WinAnsiString;
   WS: WideString;
   SU, SU2: SynUnicode;
   WU: array[0..3] of WideChar;
@@ -5415,6 +5648,7 @@ var
   arr, arr2: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
+  PW: PWideChar;
   q: RawUtf8;
   Unic: RawByteString;
   Ucs4: RawUcs4;
@@ -5505,6 +5739,12 @@ begin
   rb1 := ARawFastSetString;
   Append(rb1, 'test');
   CheckEqual(rb1, '123456test', 'ARawFastSetString2');
+  CheckEqual(PCardinal(BOM_UTF8_CHARS)^, BOM_UTF8, 'BOM_UTF8_CHARS');
+  U := '1234' + BOM_UTF8_CHARS + '5678';
+  CheckEqual(PCardinalArray(U)[1] and $ffffff, BOM_UTF8, 'BOM_UTF8');
+  CheckHash(U, $2F8C2556, 'BOM concat');
+  CheckHash('1234' + BOM_UTF8_CHARS + '5678', $2F8C2556, 'xpacket ui.pdf');
+  // raw filenames functions
   Check(SafeFileName(''));
   Check(SafePathName(''));
   Check(SafeFileName('toto'));
@@ -5819,6 +6059,20 @@ begin
   Check(RawUtf8DynArrayContains(arr, arr2, {insens=}true), 'RawUtf8DynArrayContains5i');
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame5');
   Check(not RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame5i');
+  LinesToRawUtf8DynArray('', arr);
+  CheckEqual(length(arr), 0);
+  LinesToRawUtf8DynArray('one', arr);
+  CheckEqual(length(arr), 1);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'one');
+  LinesToRawUtf8DynArray('first'#13#10#13#10'one', arr);
+  CheckEqual(length(arr), 2);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'first,one');
+  LinesToRawUtf8DynArray('first'#13#10#13#10'one'#10'two'#10#13#10, arr);
+  CheckEqual(length(arr), 3);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'first,one,two');
+  LinesToRawUtf8DynArray(#13#10'one'#13#10, arr);
+  CheckEqual(length(arr), 1);
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'one');
   CheckEqual(Join([]), '');
   CheckEqual(Join(['one']), 'one');
   CheckEqual(Join(['one', 'two']), 'onetwo');
@@ -6051,9 +6305,24 @@ begin
   CheckEqual(U, '#abcd##e##fg###');
   U := QuotedStr('#abcd#efg', '#');
   CheckEqual(U, '###abcd##efg#');
+  Utf8ToSynUnicode('123456789abcdefghijkl', su);
+  PW := pointer(su);
+  len := length(su);
+  for i := 1 to len do
+    Check(SU[i] <> #0);
+  repeat
+    CheckEqual(StrLenW(PW), len);
+    CheckEqual(WordScanIndex(pointer(PW), len + 10, 0), len);
+    PW^ := #0; // force some #0 within the SSE2 16 bytes alignment
+    inc(PW);
+    dec(len);
+  until len < 0;
+  for i := 1 to length(su) do
+    Check(SU[i] = #0);
   for i := 0 to 1000 do
   begin
     len := i * 5;
+    // test encodings on ASCII 7-bit content
     W := RandomAnsi7(len, CP_WINANSI);
     CheckEqual(length(W), len);
     lenup100 := len;
@@ -6092,12 +6361,12 @@ begin
     Test(949, W);
     Test(874, W);
     Test(CP_UTF8, W); // note: CP_UTF16 is not a true ANSI charset for Test()
-    L := Length(W);
-    if L and 1 <> 0 then
-      SetLength(W, L - 1); // force exact UTF-16 buffer length
+    // test WinAnsi/CP1252 encoding with proper accents support
     W := RandomWinAnsi(len);
-    Check(length(W) = len);
-    U := WinAnsiToUtf8(W);
+    if CheckEqual(length(W), len, 'len') then
+      for j := 1 to len do
+        Check(W[j] >= ' ', '#32');
+    U := WinAnsiToUtf8(W);  // ConsoleWrite(U);
     Check(length(U) >= len);
     check(IsValidUtf8(U), 'IsValidUtf8');
     P := UniqueRawUtf8(U);
@@ -6130,7 +6399,7 @@ begin
     else
       len120 := 0;
     Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer truncated');
-    {$ifdef ASMX64AVXNOCONST}
+    {$ifdef ASMX64AVX1}
     HasValidUtf8Avx2 := (cpuHaswell in X64CpuFeatures);
     if HasValidUtf8Avx2 then
     begin
@@ -6139,7 +6408,7 @@ begin
     end;
     {$else}
     HasValidUtf8Avx2 := false; // IsValidUtf8Buffer = @IsValidUtf8Pas
-    {$endif ASMX64AVXNOCONST}
+    {$endif ASMX64AVX1}
     for j := 1 to lenup100 do
     begin
       check(PosChar(P, U[j])^ = U[j], 'PosCharj');
@@ -6183,15 +6452,24 @@ begin
     json2 := JsonReformat(json1, jsonNoEscapeUnicode);
     CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
-    CheckEqual(Utf8ToWinAnsi(U), W);
+    CheckEqual(Utf8ToWinAnsi(U), W, 'ua');
     WinAnsiConvert.AnsiToUtf8(W, U1);
-    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W);
-    CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W, 'uw');
+    SU := WinAnsiConvert.AnsiToUnicodeString(W);
+    CheckEqual(StrLenWSafe(pointer(SU)), length(SU));
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
+    if SU <> '' then
+      Check(WordScanIndex(pointer(SU), length(SU) + 10, 0) = length(SU));
+    W2 := WinAnsiConvert.UnicodeStringToAnsi(SU);
+    //ConsoleWrite(['SU len=', length(SU), ' =', SU]); ConsoleWrite(['W2 len=', length(W2), ' =', W2]); readln;
+    CheckEqual(W2, W, 'A2U(U2A)');
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
       CurrentAnsiConvert.AnsiToUtf8(W, U1);
-      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(U1), W);
-      CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
+      W2 := CurrentAnsiConvert.Utf8ToAnsi(U1);
+      CheckEqual(W2, W, 'u2a(a2u)');
+      SU := CurrentAnsiConvert.AnsiToUnicodeString(W);
+      CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(SU), W, 'U2A(A2U)');
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
     CheckEqual(res, U);
@@ -6204,6 +6482,7 @@ begin
     CheckEqual(integer(Utf8ToUnicodeLength(Pointer(U))), length(WS));
     SU := Utf8ToSynUnicode(U);
     CheckEqual(length(SU), length(Unic) shr 1);
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
     if SU <> '' then
       Check(CompareMem(pointer(SU), pointer(Unic), length(Unic)), 'Utf8ToSU');
     WA := IsWinAnsi(pointer(Unic));
@@ -6256,7 +6535,8 @@ begin
       end;
     except
       on E: Exception do
-        CheckUtf8(false, '% for %[%]%', [E, length(U), EscapeToShort(U), length(up4)]);
+        CheckUtf8(false, '% for %[%]%',
+          [E, length(U), EscapeToShort(U), length(up4)]);
     end;
     U2 := LowerCase(U);
     Check(IsLower(U2));
@@ -6266,9 +6546,9 @@ begin
     SetString(Up2, PAnsiChar(pointer(U)), L);
     L := Utf8UpperCopy(pointer(Up), pointer(U), L) - pointer(Up);
     Check(L <= length(U));
-    CheckEqual(ConvertCaseUtf8(pointer(Up2), pointer(Up2), NormToUpperByte), L);
+    CheckEqual(ConvertCaseUtf8(pointer(U), pointer(Up2), NormToUpperByte), L);
     if Up <> '' then
-      Check(EqualBuf(Up, Up2));
+      Check(CompareMem(pointer(Up), pointer(Up2), L));
     if CurrentAnsiConvert.CodePage = CODEPAGE_US then
        // initial text above is WinAnsiString (CP 1252)
       CheckEqual(StringToUtf8(Utf8ToString(U)), U, '1252');
@@ -6338,6 +6618,7 @@ begin
   Utf8ToSynUnicode(U, SU);
   if not CheckFailed(length(SU) = 2) then
     Check(PCardinal(SU)^ = $DCD2D863);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
   Check(Utf8FirstLineToUtf16Length(Pointer(U)) = 2);
   PCardinal(@WU)^ := 0;
@@ -6346,6 +6627,7 @@ begin
   U := SynUnicodeToUtf8(SU);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsiVar(
     pointer(SU), length(SU), RawByteString(U));
   Check(length(U) = 4);
@@ -6372,6 +6654,7 @@ begin
   FastSetString(U, @CHINESE_TEXT, 9);
   CheckEqual(StrLen(pointer(U)), 9);
   SU := Utf8ToSynUnicode(U);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   eng := TSynAnsiConvert.Engine(936);
   Check(eng <> nil, 'Engine(936)');
   rb1 := eng.UnicodeStringToAnsi(SU); // GB2312
@@ -6410,16 +6693,20 @@ begin
     PCardinal(U)^ := $A59AAAF0; // valid in GB18030 only
     SU := Utf8ToSynUnicode(U);  // 69 D8 A5 DE , UTF16, Code Point: \uD869\uDEA5
     CheckEqual(PCardinal(SU)^, $DEA5D869);
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
     RB1 := eng.Utf8ToAnsi(U);
-    Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
-    RB2 := eng.UnicodeStringToAnsi(SU);
-    Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
-    eng.AnsiToUtf8(RB1, U2);
-    CheckEqual(U2, U, 'AnsiToUtf8');
+    if RB1 = '' then // not supported on this sytem
+    begin
+      Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
+      RB2 := eng.UnicodeStringToAnsi(SU);
+      Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
+      eng.AnsiToUtf8(RB1, U2);
+      CheckEqual(U2, U, 'AnsiToUtf8');
+    end;
   end;
   CheckEqual(CodePageToText(CP_UTF8), 'utf8');
   CheckEqual(CodePageToText(CP_UTF16), 'utf16le');
-  CheckEqual(CodePageToText(CP_WINANSI), 'ms1252');
+  CheckEqual(CodePageToText(CP_WINANSI), 'windows-1252');
   CheckEqual(CodePageToText(54936), 'gb18030');
   Check(LcidToLanguage(0) = lngUndefined);
   CheckEqual(LANG_LCID[lngUndefined], LANG_ENGLISH_US);
@@ -6704,10 +6991,12 @@ procedure TTestCoreBase.Charsets;
     // validate UTF-8 to/from UTF-16 conversion
     su := Utf8ToSynUnicode(ru);
     Check(su <> '', msg);
+    CheckEqual(StrLenW(pointer(su)), length(su));
     CheckEqual(SynUnicodeToUtf8(su), ru, 'utf8');
     {$ifdef HASCODEPAGE} // old Delphi RTL does not decode UTF-16 surrogates
     w := UTF8Decode(ru);
     CheckEqual(length(w), length(su), 'rtl1');
+    CheckEqual(StrLenW(pointer(w)), length(su));
     Check(CompareMem(pointer(w), pointer(su), length(w)), 'rtl2');
     {$endif HASCODEPAGE}
     {$ifdef OSWINDOWS}
@@ -6721,6 +7010,7 @@ procedure TTestCoreBase.Charsets;
     CheckEqual(eng.CodePage, cp, 'eng2');
     // with ASCII-7 chars
     su2 := eng.AnsiToUnicodeString('abcd efgh');
+    CheckEqual(StrLenW(pointer(su2)), length(su2));
     Check(su2 = 'abcd efgh', msg);
     a := eng.UnicodeStringToAnsi(su2);
     {$ifdef OSPOSIX}
@@ -6748,6 +7038,10 @@ procedure TTestCoreBase.Charsets;
       // -> we would need some input from native speakers of missing charsets
     end;
     {$ifdef OSPOSIX}
+    {$ifdef ISDELPHI}
+    if cp = 1361 then
+      exit; // not worth investigating yet
+    {$endif ISDELPHI}
     if (name = 'hz') and
        not icu.IsAvailable then // FPC RTL iconv is not enough about HZ-GB2312
       exit;
@@ -6772,6 +7066,7 @@ procedure TTestCoreBase.Charsets;
       exit; // some casing issue to investigate on Windows (not with ICU)
     {$endif OSWINDOWS}
     su2 := eng.AnsiToUnicodeString(ra);
+    CheckEqual(StrLenW(pointer(su2)), length(su));
     Check(su = su2, msg);
     eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
     Check(eng <> nil, 'eng3');
@@ -7344,6 +7639,8 @@ var
   b: TTimeLogBits;
   st, start: TSynSystemTime;
 begin
+  Check(TTextDateWriter.InstanceSize <= SizeOf(TLocalWriter) - 256, 'TLocalWriter');
+  Check(PtrUInt(@HTML_MONTH_NAMES[3]) - PtrUInt(@HTML_MONTH_NAMES[1]) = 8);
   Check(st.FromText('19821031T142319'));
   start := st;
   CheckEqual(st.ToText, '1982-10-31T14:23:19.000');
@@ -7473,6 +7770,8 @@ begin
   CheckEqual(tmp, '0001-00-01');
   tmp := UnixTimePeriodToString(SecsPerDay * 365 * 2);
   CheckEqual(tmp, '0002-00-00');
+  CheckEqual(DateTimeToIso8601Text(Iso8601ToDateTime('1492-10-12T16:00:00')),
+    '1492-10-12T16:00:00');
 end;
 
 function LocalTimeToUniversal(LT: TDateTime; TZOffset: Integer): TDateTime;
@@ -7517,9 +7816,31 @@ begin
   CheckEqual(bias, 0);
   Check(ParseTimeZone('+0100', bias));
   CheckEqual(bias, 60);
+  Check(ParseTimeZone('+02', bias));
+  CheckEqual(bias, 120);
   Check(ParseTimeZone('+1005', bias));
   CheckEqual(bias, 605);
   Check(ParseTimeZone('-1005', bias));
+  CheckEqual(bias, -605);
+  Check(ParseTimeZone('Z', bias));
+  CheckEqual(bias, 0);
+  Check(ParseTimeZone('+10', bias));
+  CheckEqual(bias, 600);
+  Check(ParseTimeZone('GMT', bias));
+  CheckEqual(bias, 0);
+  Check(not ParseTimeZone('-1', bias));
+  Check(not ParseTimeZone('-100', bias));
+  Check(ParseTimeZone('-10', bias));
+  CheckEqual(bias, -600);
+  Check(ParseTimeZone('-00:00', bias));
+  CheckEqual(bias, TimeZoneLocalBias);
+  Check(ParseTimeZone('+00:00', bias));
+  CheckEqual(bias, 0);
+  Check(ParseTimeZone('+01:00', bias));
+  CheckEqual(bias, 60);
+  Check(ParseTimeZone('+10:05', bias));
+  CheckEqual(bias, 605);
+  Check(ParseTimeZone('-10:05', bias));
   CheckEqual(bias, -605);
   Check(not ParseTimeZone('+1O05', bias));
   CheckEqual(bias, -605);
@@ -7716,6 +8037,8 @@ var
   bak: byte;
   s: RawUtf8;
   b: RawByteString;
+  act: TArmCpuType;
+  aci: TArmCpuImplementer;
 
   procedure CheckAgainst(const full: TSmbiosInfo; const os: TSmbiosBasicInfos);
   begin
@@ -7736,6 +8059,16 @@ var
   end;
 
 begin
+  for act := low(act) to high(act) do
+  begin
+    ShortStringToAnsi7String(ARMCPU_ID_TXT[act], s);
+    CheckEqual(ord(ArmCpuType(ARMCPU_ID[act])), ord(act), s);
+  end;
+  for aci := low(aci) to high(aci) do
+  begin
+    ShortStringToAnsi7String(ARMCPU_IMPL_TXT[aci], s);
+    CheckEqual(ord(ArmCpuImplementer(ARMCPU_IMPL[aci])), ord(aci), s);
+  end;
   CheckEqual(ord(arm64DCPODP), 64);
   CheckEqual(ord(arm32AES), 32);
   CheckEqual(SizeOf(TSmbiosBiosFlags), 8);
@@ -7842,7 +8175,7 @@ begin
   Check(WinErrorConstant(12002)^ = 'TIMEOUT', 'wecf');
   Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
   Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
-  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant($800b010d)^[0] = #0, 'wech');
   Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
   Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
   Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
@@ -9091,6 +9424,19 @@ begin
   Check(not IsInvalidHttpHeader('a'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'));
+  Check(not IsInvalidHttpHeader('aa'#13#10'bb'#13#10));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'#13#10));
   Check(IsInvalidHttpHeader(#13#10'a'#13#10));
   Check(IsInvalidHttpHeader(#10'a'#13#10));
   Check(IsInvalidHttpHeader(#13#10#13#10'a'#13#10));
@@ -9103,6 +9449,15 @@ begin
   Check(IsInvalidHttpHeader('a'#13#10'b'#13#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  s := 'Content-Type: text/html;charset=utf-8'#13#10'ETag: "E039C149"';
+  Check(not IsInvalidHttpHeader(s), 'httphead0');
+  Check(not IsInvalidHttpHeader(s), 'httphead1');
+  Append(s, [#13#10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead2');
+  AppendLine(s, ['name: ', 10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead3');
+  AppendLine(s, ['ident: ', 7]);
+  CheckHash(s, $56DED9BD, 'httphead4');
   s := 'toto'#13#10;
   Check(not IsInvalidHttpHeader(s));
   CheckEqual(PurgeHeaders(''), '');
@@ -9397,13 +9752,15 @@ procedure TTestCoreBase.Debugging;
   end;
 
 var
-  tmp: array[0..512] of AnsiChar;
+  tmp: TBuffer2K;
+  dst, up: PUtf8Char;
   msg, n, v: RawUtf8;
   os, os2: TOperatingSystem;
   ld: TLinuxDistribution;
   islinux: boolean;
   osv: TOperatingSystemVersion;
   len: integer;
+  //sock: TNetSocket;
 begin
   // validate UserAgentParse()
   Check(not UserAgentParse('toto (mozilla)', n, v, os));
@@ -9464,20 +9821,65 @@ begin
     for os2 := low(os) to high(os) do
       Check((OS_INITIAL[os2] = OS_INITIAL[os]) = (os2 = os), 'OS_INITIAL');
   end;
-  // validate SyslogMessage()
+  // validate Syslog messages formatting
+  msg := ' test  ';
+  dst := @tmp;
   FillcharFast(tmp, SizeOf(tmp), 1);
-  len := SyslogMessage(sfAuth, ssCrit, 'test', '', '', tmp, SizeOf(tmp), false);
-  // Check(len=65); // <-- different for every PC, due to PC name differences
-  tmp[len] := #0;
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<34>1 ')));
-  Check(PosEx(' - - - test', tmp) = len - 10);
+  len := SyslogBsdPrepare(sllInfo, pointer(msg), length(msg), tmp);
+  // e.g. '<14>Feb 11 13:45:19 dev-ab mormot2tests[23014]: test'
+  Check(len > 10);
+  Check(IdemPChar(dst, PAnsiChar('<14>')));
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
+  {if NewUnixSocket('/dev/log', sock) = nrOk then
+  begin
+    writeln(sock.Send(@tmp, len));
+    sock.Close;
+  end;}
+  FillcharFast(tmp, SizeOf(tmp), 1);
+  len := SyslogMessage(sfAuth, ssCrit, pointer(msg), length(msg),
+    '', '', tmp, SizeOf(tmp), false);
+  // e.g. <34>1 2026-02-11T15:01:23.552Z dev-ab mormot2tests - - - test
+  Check(len > 50); // len different for every PC, due to PC name differences
+  Check(IdemPChar(dst, PAnsiChar('<34>1 ')));
+  up := ' - - - TEST';
+  CheckEqual(StrPosI(up, dst) - dst, len - 11);
   msg := RawUtf8OfChar('+', 300);
-  len := SyslogMessage(sfLocal4, ssNotice, msg, 'proc', 'msg', tmp, 300, false);
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<165>1 ')));
-  Check(PosEx(' proc msg - ++++', tmp) > 1);
+  len := SyslogMessage(sfLocal4, ssNotice, pointer(msg), length(msg),
+    'proc', 'msg', tmp, 300, false);
+  Check(IdemPChar(dst, PAnsiChar('<165>1 ')));
+  up := ' PROC MSG - ++++';
+  Check(StrPosI(up, dst) <> nil, 'proc msg');
   Check(len < 300, 'truncated to avoid buffer overflow');
-  Check(tmp[len - 1] = '+');
-  Check(tmp[len] = #1);
+  Check(tmp[len - 1] = '+', 'last+');
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
+  FillcharFast(tmp, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}false);
+  Check(len > 50);
+  Check(len < 400);
+  Check(IdemPChar(dst, PAnsiChar('<14>1 ')));
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
+  // '361 <14>1 2026-02-11T12:03:02.386Z dev-ab mormot2tests 20096 - - +++++...'
+  FillcharFast(dst^, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}true);
+  Check(StrPosI(pointer(msg), dst) <> nil, 'msg in syslog');
+  FormatUtf8(' % ', [GetCurrentProcessId], v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'pid in syslog');
+  UpperCaseCopy(Executable.Host, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'host in syslog');
+  UpperCaseCopy(Executable.ProgramName, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'appname in syslog');
+  Check(len > 50);
+  Check(len < 400);
+  Check(dst[3] = ' ');
+  Check(IdemPChar(@dst[4], PAnsiChar('<14>1 ')));
+  CheckEqual(GetInteger(dst), len - 4);
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
   // validate TSynLogFile
   Test('D:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.4 (2011-04-07 11:09:06)'#13#10 +
     'Host=MyPC User=MySelf CPU=2*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545 ' +
@@ -10167,7 +10569,7 @@ end;
 
 procedure TTestCoreBase._TSynQueue;
 var
-  o, i, j, k, n: integer;
+  o, i, j, k, n: integer; // not PtrInt
   f: TSynQueue;
   u, v: RawUtf8;
   savedint: TIntegerDynArray;
@@ -10177,34 +10579,43 @@ begin
   try
     for o := 1 to 1000 do
     begin
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
       check(not f.Pending);
       for i := 1 to o do
         f.Push(i);
       check(f.Pending);
-      check(f.Count = o);
+      checkEqual(f.Count, o);
       check(f.Capacity >= o);
       f.Save(savedint);
       check(Length(savedint) = o);
+      check(f.Contains(@o), 'cont0'); // O(n) since queue is a FIFO
       for i := 1 to o do
       begin
         j := -1;
-        check(f.Peek(j));
-        check(j = i);
+        check(f.Peek(j), 'peek');
+        checkEqual(j, i);
+        check(f.Contains(@i), 'cont1'); // O(1) since find immediately
+        checkEqual(f.PeekCompare(nil), 1);
+        checkEqual(f.PeekCompare(@j), 0);
         j := -1;
-        check(f.Pop(j));
-        check(j = i);
+        checkEqual(f.PeekCompare(@j), 1);
+        check(not f.PopEquals(@j, j), 'popeq');
+        check(f.Pop(j), 'pop');
+        checkEqual(j, i);
+        if i < 10 then // is O(n) after Pop()
+          check(not f.Contains(@i), 'cont2');
       end;
       check(not f.Pending);
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
+      checkEqual(f.PeekCompare(@j), -1);
       check(f.Capacity > 0);
       f.Clear; // ensure f.Pop(j) will use leading storage
       check(not f.Pending);
-      check(f.Count = 0);
-      check(f.Capacity = 0);
-      check(Length(savedint) = o);
+      checkEqual(f.Count, 0);
+      checkEqual(f.Capacity, 0);
+      checkEqual(Length(savedint), o);
       for i := 1 to o do
-        check(savedint[i - 1] = i);
+        checkEqual(savedint[i - 1], i);
       n := 0;
       for i := 1 to o do
         if i and 7 = 0 then
@@ -10219,10 +10630,11 @@ begin
           f.Push(i);
           inc(n);
         end;
-      check(f.Count = n);
+      checkEqual(f.Count, n);
       check(f.Pending);
+      check(f.Contains(@o) = (o and 7 <> 0), 'cont3');
       f.Save(savedint);
-      check(Length(savedint) = n);
+      checkEqual(Length(savedint), n);
       for i := 1 to n do
         check(savedint[i - 1] and 7 <> 0);
       for i := 1 to n do
@@ -10231,10 +10643,10 @@ begin
         check(f.Peek(j));
         k := -1;
         check(f.Pop(k));
-        check(j = k);
+        checkEqual(j, k);
         check(j and 7 <> 0);
       end;
-      check(f.Count = 0);
+      checkEqual(f.Count, 0);
       check(f.Capacity > 0);
     end;
   finally
@@ -10274,7 +10686,10 @@ begin
       begin
         u := '';
         check(f.Peek(u));
+        check(f.Contains(@u), 'cont4'); // O(1) since find immediately
+        checkEqual(f.PeekCompare(@u), 0);
         v := '';
+        checkEqual(f.PeekCompare(@v), 1);
         check(f.Pop(v));
         check(u = v);
         check(GetInteger(pointer(u)) and 7 <> 0);

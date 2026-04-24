@@ -375,6 +375,7 @@ type
   TWebSocketSocketIOClientProtocol = class(TWebSocketSocketIOProtocol)
   protected
     fClient: TSocketsIOClient; // weak reference (owned by TSocketsIOClient)
+    fPendingMessage: TSocketIOMessage;
     procedure AfterUpgrade(aProcess: TWebSocketProcess); override;
     procedure EnginePacketReceived(Sender: TWebSocketProcess; PacketType: TEngineIOPacket;
       PayLoad: PUtf8Char; PayLoadLen: PtrInt; PayLoadBinary: boolean); override;
@@ -1155,7 +1156,7 @@ begin
     exit;
   dest := fWaitEventData;
   if dest <> nil then
-    Message.DataGet(dest^);
+    Message.DataParse(dest^);
   WaitEventDone(wepEmit);
   fWaitEventAckID := SIO_NO_ACK;
 end;
@@ -1220,8 +1221,6 @@ end;
 procedure TWebSocketSocketIOClientProtocol.EnginePacketReceived(
   Sender: TWebSocketProcess; PacketType: TEngineIOPacket;
   PayLoad: PUtf8Char; PayLoadLen: PtrInt; PayLoadBinary: boolean);
-var
-  msg: TSocketIOMessage;
 begin
   if fClient = nil then
     ESocketIO.RaiseUtf8('Unexpected %.EnginePacketReceived', [self]);
@@ -1229,11 +1228,27 @@ begin
     eioOpen:
       fClient.AfterOpen(PayLoad);
     eioMessage:
-      // decode the raw Engine.IO packet into a TSocketIOMessage
-      if msg.InitBuffer(PayLoad, PayLoadLen, PayLoadBinary, Sender) then
-        SocketPacketReceived(msg)
-      else
-        ESocketIO.RaiseUtf8('%.EnginePacketReceived: invalid Payload', [self]);
+      begin
+        // decode the raw Engine.IO packet into a TSocketIOMessage
+        if PayLoadBinary then
+        begin
+          // binary attachements are receieved as focBinary frames
+          if not fPendingMessage.AddBinaryAttachment(PayLoad, PayLoadLen) then
+            exit; // not all attachements are available yet
+          // AddBinaryAttachment=true means we got all BinaryAttachment frames
+        end
+        else if not fPendingMessage.InitBuffer(PayLoad, PayLoadLen, Sender) then
+          // the frame should be valid text payload
+          ESocketIO.RaiseUtf8('%.EnginePacketReceived: invalid Payload', [self])
+        else if fPendingMessage.BinaryAttachment <> 0 then
+          if fPendingMessage.PacketType in SIO_BINARY then
+            exit // wait until received all upcoming focBinary frames
+          else
+            fPendingMessage.RaiseESockIO('BinaryAttachment EnginePacketReceived');
+        // if we reached here, we got a full message with its attachements
+        SocketPacketReceived(fPendingMessage);
+        fPendingMessage.Reset; // better safe than sorry
+      end;
   end;
 end;
 
@@ -1246,15 +1261,19 @@ begin
     sioConnect,
     sioConnectError:
       fClient.AfterNamespaceConnect(Message);
-    sioEvent:
+    sioEvent,
+    sioBinaryEvent:
       fClient.OnEvent(Message);
-    sioAck:
+    sioAck,
+    sioBinaryAck:
       fClient.OnAck(Message);
   else
     ESocketIO.RaiseUtf8('%.SocketPacketReceived: not supported packet type: %',
       [self, ToText(Message.PacketType)^]);
   end;
 end;
+
+
 
 end.
 

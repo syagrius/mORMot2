@@ -355,11 +355,11 @@ end;
 
 const
   // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
-  UTF8_NAME: string[7] = 'RawUtf8';
+  UTF8_NAME: TShort7 = 'RawUtf8';
   // FPC RTTI names integer type as "longint"
-  INTEGER_NAME: string[7] = 'Integer';
+  INTEGER_NAME: TShort7 = 'Integer';
   // FPC RTTI names cardinal type as "longword"
-  CARDINAL_NAME: string[8] = 'Cardinal';
+  CARDINAL_NAME: TShort8 = 'Cardinal';
 
 function TRttiInfo.Name: PShortString;
 begin
@@ -678,7 +678,7 @@ const
     {$else}
     4,   // vmtAutoTable is used instead of rkClass slot
     {$endif NOPATCHVMT}
-    8,  // rkObject
+    8,   // rkObject
     2,   // rkWChar
     3,   // rkBool
     9,   // rkInt64

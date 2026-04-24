@@ -15,7 +15,6 @@ unit mormot.core.buffers;
    - Basic MIME Content Types Support
    - Text Memory Buffers and Files
    - TStreamRedirect and other Hash process
-   - Markup (e.g. HTML or Emoji) process
    - RawByteString Buffers Aggregation via TRawByteStringGroup
 
   *****************************************************************************
@@ -32,6 +31,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.datetime,
   mormot.core.rtti;
 
 
@@ -527,6 +527,12 @@ type
   end;
 
 var
+  /// the current list of registered TAlgoCompress class instances
+  // - as used by TAlgoCompress.Algo(AlgoID)
+  // - made public mostly for testing purposes
+  SynCompressAlgos: array of TAlgoCompress;
+
+var
   /// our fast SynLZ compression as a TAlgoCompress class
   // - please use this global variable methods instead of the deprecated
   // SynLZCompress/SynLZDecompress wrapper functions
@@ -575,8 +581,18 @@ const
   ALGO_SAFE: array[boolean] of TAlgoCompressLoad = (
     aclNormal, aclSafeSlow);
 
-  COMPRESS_STORED = #0;
-  COMPRESS_SYNLZ = 1;
+  // the current reserved AlgoID raw values
+  COMPRESS_STORED      = #0;
+  COMPRESS_SYNLZ       = 1;
+  COMPRESS_DEFLATE     = 2;
+  COMPRESS_DEFLATEFAST = 3;
+  COMPRESS_LIZARD      = 4;
+  COMPRESS_LIZARDFAST  = 5;
+  COMPRESS_LIZARDHUFF  = 6;
+  COMPRESS_RLZ         = 7;
+  COMPRESS_RLE         = 8;
+  COMPRESS_GZ          = 9;
+  COMPRESS_GZFAST      = 10;
 
 
 /// fast concatenation of several AnsiStrings
@@ -1413,9 +1429,9 @@ function Base32ToBin(B32: PAnsiChar; B32Len: integer): RawByteString; overload;
 function Base32ToBin(const base32: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// internal raw function used to initialize Base32/58/64/64uri decoding lookup
+// internal raw functions used to initialize Base32/58/64/64uri decoding lookup
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
-
 
 /// fill a RawBlob from TEXT-encoded blob data
 // - blob data can be encoded as SQLite3 BLOB literals (X'53514C697465' e.g.) or
@@ -2081,8 +2097,7 @@ function Plural(const itemname: ShortString; itemcount: cardinal): ShortString;
 // - will be #0 terminated, with '...' characters trailing on dmax overflow
 // - ensure the destination buffer contains at least dmax bytes, which is
 // always the case when using LogEscape() and its local TLogEscape variable
-function EscapeBuffer(s: PAnsiChar; slen: integer;
-  d: PAnsiChar; dmax: integer): PAnsiChar;
+function EscapeBuffer(s: PAnsiChar; slen: PtrInt; d: PAnsiChar; dmax: PtrInt): PAnsiChar;
 
 type
   /// 512 bytes buffer to be allocated on stack when using LogEscape()
@@ -2096,23 +2111,25 @@ type
 // - the "enabled" parameter can be assigned from a process option, avoiding to
 // process the escape if verbose logs are disabled
 // - used e.g. to implement logBinaryFrameContent option for WebSockets
-function LogEscape(source: PAnsiChar; sourcelen: integer; var temp: TLogEscape;
+function LogEscape(source: PAnsiChar; sourcelen: PtrInt; var temp: TLogEscape;
   enabled: boolean = true): PAnsiChar;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// returns a text buffer with the (hexadecimal) chars of the input binary
 // - is much slower than LogEscape/EscapeToShort, but has no size limitation
-function LogEscapeFull(source: PAnsiChar; sourcelen: integer): RawUtf8; overload;
+function LogEscapeFull(source: PAnsiChar; sourcelen: PtrInt): RawUtf8; overload;
 
 /// returns a text buffer with the (hexadecimal) chars of the input binary
 // - is much slower than LogEscape/EscapeToShort, but has no size limitation
 function LogEscapeFull(const source: RawByteString): RawUtf8; overload;
 
 /// fill a ShortString with the (hexadecimal) chars of the input text/binary
-function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString; overload;
+function EscapeToShort(source: PAnsiChar; sourcelen: PtrInt): ShortString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fill a ShortString with the (hexadecimal) chars of the input text/binary
 function EscapeToShort(const source: RawByteString): ShortString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fill an UTF-8 buffer with the (hexadecimal) chars of the input text/binary
 // - as used e.g. by ContentToShort() or TSynLog.LogEscape()
@@ -2125,30 +2142,6 @@ procedure ContentToShortAppend(source: PAnsiChar; len: PtrInt; var txt: ShortStr
 /// if source is not UTF-8 calls EscapeToShort, otherwise return it directly
 function ContentToShort(const source: RawByteString): ShortString;
   {$ifdef HASINLINE}inline;{$endif}
-
-/// generate some pascal source code holding some data binary as constant
-// - can store sensitive information (e.g. certificates) within the executable
-// - generates a source code snippet of the following format:
-// ! const
-// !   // Comment
-// !   ConstName: array[0..2] of byte = (
-// !     $01, $02, $03);
-procedure BinToSource(Dest: TTextWriter; const ConstName, Comment: RawUtf8;
-  Data: pointer; Len: integer; PerLine: integer = 16); overload;
-
-/// generate some pascal source code holding some data binary as constant
-// - can store sensitive information (e.g. certificates) within the executable
-// - generates a source code snippet of the following format:
-// ! const
-// !   // Comment
-// !   ConstName: array[0..2] of byte = (
-// !     $01, $02, $03);
-function BinToSource(const ConstName, Comment: RawUtf8; Data: pointer;
-  Len: integer; PerLine: integer = 16; const Suffix: RawUtf8 = ''): RawUtf8; overload;
-
-/// generate some pascal source code holding some data binary as constant
-function BinToSource(const ConstName, Comment: RawUtf8; const Data: RawByteString;
-  PerLine: integer = 16; const Suffix: RawUtf8 = ''): RawUtf8; overload;
 
 /// generate some 'xx:xx:xx:xx' output buffer with left and right margins
 // - used e.g. by ParsedToText() to output X509 public key content in PeerInfo
@@ -2499,180 +2492,39 @@ function GetStreamBuffer(S: TStream): pointer;
 /// check if class is a TCustomMemoryStream/TRawByteStringStream
 function IsStreamBuffer(S: TStream): boolean;
 
+/// read a TStream content into a RawByteString with
+// - it will read binary or text content from the current position until the
+// end (using TStream.Size)
+function StreamToRawByteString(aStream: TStream; aSize: Int64 = -1;
+  aCodePage: integer = CP_RAWBYTESTRING): RawByteString;
 
-{ ************* Markup (e.g. HTML or Emoji) process }
+/// iterative function to retrieve the new content appended to a stream
+// - aPosition should be set to 0 before the initial call
+function StreamChangeToRawByteString(
+  aStream: TStream; var aPosition: Int64): RawByteString;
 
-type
-  /// tune AddHtmlEscapeWiki/AddHtmlEscapeMarkdown wrapper functions process
-  // - heHtmlEscape will escape any HTML special chars, e.g. & into &amp;
-  // - heEmojiToUtf8 will convert any Emoji text into UTF-8 Unicode character,
-  // recognizing e.g. :joy: or :) in the text
-  TTextWriterHtmlEscape = set of (
-    heHtmlEscape,
-    heEmojiToUtf8);
-
-/// convert some wiki-like text into proper HTML
-// - convert all #13#10 into <p>...</p>, *..* into <em>..</em>, +..+ into
-// <strong>..</strong>, `..` into <code>..</code>, and http://... as
-// <a href=http://...>
-// - escape any HTML special chars, and Emoji tags as specified with esc
-procedure AddHtmlEscapeWiki(W: TTextWriter; P: PUtf8Char;
-  esc: TTextWriterHtmlEscape = [heHtmlEscape, heEmojiToUtf8]);
-
-/// convert minimal Markdown text into proper HTML
-// - see https://enterprise.github.com/downloads/en/markdown-cheatsheet.pdf
-// - convert all #13#10 into <p>...</p>, *..* into <em>..</em>, **..** into
-// <strong>..</strong>, `...` into <code>...</code>, backslash espaces \\
-// \* \_ and so on, [title](http://...) and detect plain http:// as
-// <a href=...>
-// - create unordered lists from trailing * + - chars, blockquotes from
-// trailing > char, and code line from 4 initial spaces
-// - as with default Markdown, won't escape HTML special chars (i.e. you can
-// write plain HTML in the supplied text) unless esc is set otherwise
-// - only inline-style links and images are supported yet (not reference-style);
-// tables aren't supported either
-procedure AddHtmlEscapeMarkdown(W: TTextWriter; P: PUtf8Char;
-  esc: TTextWriterHtmlEscape = [heEmojiToUtf8]);
-
-/// escape some wiki-marked text into HTML
-// - just a wrapper around AddHtmlEscapeWiki() process
-function HtmlEscapeWiki(const wiki: RawUtf8;
-  esc: TTextWriterHtmlEscape = [heHtmlEscape, heEmojiToUtf8]): RawUtf8;
-
-/// escape some Markdown-marked text into HTML
-// - just a wrapper around AddHtmlEscapeMarkdown() process
-function HtmlEscapeMarkdown(const md: RawUtf8;
-  esc: TTextWriterHtmlEscape = [heEmojiToUtf8]): RawUtf8;
-
-type
-  /// map the first Unicode page of Emojis, from U+1F600 to U+1F64F
-  // - naming comes from github/Markdown :identifiers:
-  TEmoji = (
-    eNone,
-    eGrinning,
-    eGrin,
-    eJoy,
-    eSmiley,
-    eSmile,
-    eSweat_smile,
-    eLaughing,
-    eInnocent,
-    eSmiling_imp,
-    eWink,
-    eBlush,
-    eYum,
-    eRelieved,
-    eHeart_eyes,
-    eSunglasses,
-    eSmirk,
-    eNeutral_face,
-    eExpressionless,
-    eUnamused,
-    eSweat,
-    ePensive,
-    eConfused,
-    eConfounded,
-    eKissing,
-    eKissing_heart,
-    eKissing_smiling_eyes,
-    eKissing_closed_eyes,
-    eStuck_out_tongue,
-    eStuck_out_tongue_winking_eye,
-    eStuck_out_tongue_closed_eyes,
-    eDisappointed,
-    eWorried,
-    eAngry,
-    ePout,
-    eCry,
-    ePersevere,
-    eTriumph,
-    eDisappointed_relieved,
-    eFrowning,
-    eAnguished,
-    eFearful,
-    eWeary,
-    eSleepy,
-    eTired_face,
-    eGrimacing,
-    eSob,
-    eOpen_mouth,
-    eHushed,
-    eCold_sweat,
-    eScream,
-    eAstonished,
-    eFlushed,
-    eSleeping,
-    eDizzy_face,
-    eNo_mouth,
-    eMask,
-    eSmile_cat,
-    eJoy_cat,
-    eSmiley_cat,
-    eHeart_eyes_cat,
-    eSmirk_cat,
-    eKissing_cat,
-    ePouting_cat,
-    eCrying_cat_face,
-    eScream_cat,
-    eSlightly_frowning_face,
-    eSlightly_smiling_face,
-    eUpside_down_face,
-    eRoll_eyes,
-    eNo_good,
-    oOk_woman,
-    eBow,
-    eSee_no_evil,
-    eHear_no_evil,
-    eSpeak_no_evil,
-    eRaising_hand,
-    eRaised_hands,
-    eFrowning_woman,
-    ePerson_with_pouting_face,
-    ePray);
-
-var
-  /// github/Markdown compatible text of Emojis
-  // - e.g. 'grinning' or 'person_with_pouting_face'
-  EMOJI_TEXT: array[TEmoji] of RawUtf8;
-
-  /// github/Markdown compatible tag of Emojis, including trailing and ending :
-  // - e.g. ':grinning:' or ':person_with_pouting_face:'
-  EMOJI_TAG: array[TEmoji] of RawUtf8;
-
-  /// the Unicode character matching a given Emoji, after UTF-8 encoding
-  EMOJI_UTF8: array[TEmoji] of RawUtf8;
-
-  /// low-level access to TEmoji RTTI - used when inlining EmojiFromText()
-  EMOJI_RTTI: PShortString;
-
-  /// to recognize simple :) :( :| :/ :D :o :p :s characters as smilleys
-  EMOJI_AFTERDOTS: array['('..'|'] of TEmoji;
-
-/// recognize github/Markdown compatible text of Emojis
-// - for instance 'sunglasses' text buffer will return eSunglasses
-// - returns eNone if no case-insensitive match was found
-function EmojiFromText(P: PUtf8Char; len: PtrInt): TEmoji;
+/// create a TStream from a string content
+// - uses RawByteString for byte storage, whatever the codepage is
+// - in fact, the returned TStream is a TRawByteString instance, since this
+// function is just a wrapper around:
+// ! result := TRawByteStringStream.Create(aString);
+function RawByteStringToStream(const aString: RawByteString): TStream;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// low-level parser of github/Markdown compatible text of Emojis
-// - supplied P^ should point to ':'
-// - will append the recognized UTF-8 Emoji if P contains e.g. :joy: or :)
-// - will append ':' if no Emoji text is recognized, and return eNone
-// - will try both EMOJI_AFTERDOTS[] and EMOJI_RTTI[] reference set
-// - if W is nil, won't append anything, but just return the recognized TEmoji
-function EmojiParseDots(var P: PUtf8Char; W: TTextWriter = nil): TEmoji;
+/// read UTF-8 text from a TStream saved with len prefix by WriteStringToStream
+// - format is Length(integer):Text - use StreamToRawByteString for raw data
+// - will return '' if there is no such text in the stream
+// - you can set a MaxAllowedSize value, if you know how long the size should be
+// - it will read from the current position in S: so if you just write into S,
+// it could be a good idea to rewind it before call, e.g.:
+// !  WriteStringToStream(Stream,aUtf8Text);
+// !  Stream.Seek(0,soBeginning);
+// !  str := ReadStringFromStream(Stream);
+function ReadStringFromStream(S: TStream; MaxAllowedSize: integer = 255): RawUtf8;
 
-/// low-level conversion of UTF-8 Emoji sequences into github/Markdown :identifiers:
-procedure EmojiToDots(P: PUtf8Char; W: TTextWriter); overload;
-
-/// conversion of UTF-8 Emoji sequences into github/Markdown :identifiers:
-function EmojiToDots(const text: RawUtf8): RawUtf8; overload;
-
-/// low-level conversion of github/Markdown :identifiers: into UTF-8 Emoji sequences
-procedure EmojiFromDots(P: PUtf8Char; W: TTextWriter); overload;
-
-/// conversion of github/Markdown :identifiers: into UTF-8 Emoji sequences
-function EmojiFromDots(const text: RawUtf8): RawUtf8; overload;
+/// write an UTF-8 text into a TStream with a len prefix - see ReadStringFromStream
+// - format is Length(integer):Text - use RawByteStringToStream for raw data
+function WriteStringToStream(S: TStream; const Text: RawUtf8): boolean;
 
 
 { ************ RawByteString Buffers Aggregation via TRawByteStringGroup }
@@ -5240,10 +5092,6 @@ end;
 
 { TAlgoCompress }
 
-var
-  // don't use TObjectList before mormot.core.json registered TRttiJson
-  SynCompressAlgos: array of TAlgoCompress;
-
 constructor TAlgoCompress.Create;
 var
   existing: TAlgoCompress;
@@ -6040,7 +5888,7 @@ end;
 
 constructor TAlgoSynLZ.Create;
 begin
-  fAlgoID := COMPRESS_SYNLZ; // =1
+  fAlgoID := COMPRESS_SYNLZ; // 1
   fAlgoFileExt := '.synlz';
   inherited Create;
 end;
@@ -6184,7 +6032,7 @@ end;
 
 constructor TAlgoRleLZ.Create;
 begin
-  fAlgoID := 7;
+  fAlgoID := COMPRESS_RLZ; // 7
   fAlgoFileExt := '.synrlz';
   inherited Create;
 end;
@@ -6220,7 +6068,7 @@ end;
 
 constructor TAlgoRle.Create;
 begin
-  fAlgoID := 8;
+  fAlgoID := COMPRESS_RLE; // 8
   fAlgoFileExt := '.synrle';
   inherited Create;
 end;
@@ -6433,20 +6281,19 @@ end;
 
 { ************ Base64, Base64Uri, Base58 and Baudot Encoding / Decoding }
 
-procedure FillBaseDecoderChars(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
-  {$ifndef CPUX86} inline; {$endif}
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 begin
   repeat
-    d[s[i]] := i; // pre-compute O(1) lookup table for the meaningful characters
-    dec(i);
-  until i = 0;
-  d[s[0]] := i
+    d[s[his]] := his; // pre-compute O(1) lookup table for the meaningful chars
+    dec(his);
+  until his = 0;
+  d[s[0]] := his
 end;
 
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
 begin
   FillcharFast(d^, SizeOf(d^), 255); // fill with -1 = invalid by default
-  FillBaseDecoderChars(s, d, i);
+  FillLookupTable(pointer(s), pointer(d), i);
 end;
 
 
@@ -6529,11 +6376,11 @@ begin
       dec(len)
   else
     dec(len, 2); // Base64AnyDecode() algorithm ignores the trailing '='
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   result := Base64DecodeMain(sp, rp, len); // may be Base64DecodeMainAvx2
   {$else}
   result := Base64AnyDecode(tab, sp, rp, len);
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
 end;
 
 procedure Base64EncodeLoop(rp, sp: PAnsiChar; len: cardinal; enc: PAnsiChar);
@@ -6553,7 +6400,7 @@ begin // this loop is faster than mORMot 1 manual x86 asm, even on Delphi 7
   until len = 0;
 end;
 
-{$ifdef ASMX64AVXNOCONST} // AVX2 ASM not available on Delphi < 11
+{$ifdef ASMX64AVX1} // AVX2 ASM not available on Delphi < 11
 function Base64EncodeMainAvx2(rp, sp: PAnsiChar; len: cardinal): integer;
 var
   blen: PtrUInt;
@@ -6572,7 +6419,7 @@ begin
   // on error, AVX2 code let sp point to the faulty input so result=false
   result := Base64AnyDecode(@ConvertBase64ToBin, sp, rp, len);
 end;
-{$endif ASMX64AVXNOCONST}
+{$endif ASMX64AVX1}
 
 function Base64EncodeMainPas(rp, sp: PAnsiChar; len: cardinal): integer;
 var
@@ -6641,7 +6488,7 @@ begin
   if BinBytes = 0 then
     exit;
   destlen := BinToBase64Length(BinBytes);
-  if destlen > 255 then
+  if destlen > high(result) then
     exit; // avoid buffer overflow
   result[0] := AnsiChar(destlen);
   Base64Encode(@result[1], Bin, BinBytes);
@@ -7020,7 +6867,7 @@ begin
   if BinBytes <= 0 then
     exit;
   len := BinToBase64uriLength(BinBytes);
-  if len > 255 then
+  if len > high(result) then
     exit;
   byte(result[0]) := len;
   Base64uriEncode(@result[1], Bin, BinBytes, enc);
@@ -7579,7 +7426,7 @@ begin
     if ConvertBase32ToBin[#255] = 0 then // delayed thread-safe initialization
     begin
       FillBaseDecoder(@b32encUpper, @ConvertBase32ToBin, high(b32encUpper));
-      FillBaseDecoderChars(@b32encLower, @ConvertBase32ToBin, high(b32encLower));
+      FillLookupTable(@b32encLower, @ConvertBase32ToBin, high(b32encLower));
     end;
     p := Base32Decode(@ConvertBase32ToBin, B32,
       FastNewRawByteString(result, (B32Len shr 3) * 5), B32Len);
@@ -7818,10 +7665,10 @@ begin
         end
         else
           IdemPCharAndGetNextItem(P, 'CONTENT-TRANSFER-ENCODING: ', part.Encoding);
-        P := GotoNextLine(P);
-        if P = nil then
+        P := GotoNextLineSmall(P);
+        if P^ = #0 then
           exit;
-      until PWord(P)^ = 13 + 10 shl 8;
+      until PWord(P)^ = EOLW;
       // decode section content
       i := P - PUtf8Char(pointer(Body)) + 3; // i = just after header
       j := PosEx(boundary, Body, i);
@@ -8843,6 +8690,7 @@ const
      mtGif,     mtFont,   mtWebm,   mtTiff,
      mtTiff,    mtTiff,   mtWebp{=riff}, mtDoc,
      mtOgg,     mtDicom,  mtZstd);
+  _HTML32 = ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24;
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8856,14 +8704,13 @@ begin
   case PAnsiChar(Content)^ of
     '<':
       case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
-        ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+        _HTML32:
           result := mtHtml; // legacy HTML document
         ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
           if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
              ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
              (PAnsiChar(Content)[9] = ' ') then
-            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
-               ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 = _HTML32) then
               result := mtHtml // HTML5 markup
             else
               result := mtXml // malformed XML document
@@ -8904,7 +8751,7 @@ begin
             if (PtrInt(bswap32(PCardinal(Content)^)) <= Len) and
                (PCardinalArray(Content)^[1] = $70797466) then // 'ftyp'
               case PCardinalArray(Content)^[2] of // brand
-                $20207471, // qt   Apple’s QuickTime File Format
+                $20207471, // qt   Apple's QuickTime File Format
                 $3134706d, // mp41 old ISO/IEC 14496-1 MPEG-4 Version 1
                 $3234706d, // mp42 MPEG-4 Version 2 video/QuickTime file
                 $326f7369, // iso2 ISO Base Media file (MPEG-4) v2
@@ -8915,7 +8762,7 @@ begin
                 $6d6f7369: // isom ISO Base Media file (MPEG-4) v1
                   result := mtMp4;
                 $20763466, // f4v  Adobe Flash Video
-                $2076346d, // m4v  Apple’s iTunes and QuickTime
+                $2076346d, // m4v  Apple's iTunes and QuickTime
                 $31637661, // avc1 H.264/AVC codec
                 $35706733, // 3gp5 Mobile optimized 3GPP Release 5
                 $36706733: // 3gp6 Mobile optimized 3GPP Release 6
@@ -8987,17 +8834,17 @@ end;
 
 const // https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/MIME_types/Common_types
   MIME_EXT = 'PNG|GIF|TIF|JP|BMP|DOC|HTM|CSS|JSON|ICO|WOF|TXT|SVG|ATOM|RDF|' +
-     'RSS|WEBP|APPC|MANI|XML|JS|MJS|OGA|OGV|MP4|M2V|M2P|MP3|H264|TEXT|LOG|' +
-     'GZ|WEBM|MKV|RAR|7Z|BZ2|WMA|WMV|AVI|PPT|XLS|PDF|DCM|DICOM|SQLIT|DB3|' +
-     'HEIC|H265|AVIF|AAC|CSV|MD|ICS|OGX|OGG|OPUS|';
+    'RSS|WEBP|APPC|MANI|XML|JS|MJS|OGA|OGV|MP4|M2V|M2P|MP3|H264|TEXT|LOG|' +
+    'GZ|WEBM|MKV|RAR|7Z|BZ2|WMA|WMV|AVI|PPT|XLS|PDF|DCM|DICOM|SQLIT|DB3|' +
+    'HEIC|H265|AVIF|AAC|CSV|MD|ICS|OGX|OGG|OPUS|';
   MIME_EXT_TYPE: array[0 .. 56] of TMimeType = (
     mtPng,  mtGif,  mtTiff,  mtJpg,  mtBmp,  mtDoc,  mtHtml, mtCss,
     mtJson, mtXIcon, mtFont, mtText, mtSvg,  mtXml,  mtXml,  mtXml,
     mtWebp, mtManifest, mtManifest,  mtXml,  mtJS,   mtJS, mtOga, mtOgv,
     mtMp4,  mtMp2,   mtMp2,  mtMpeg, mtH264, mtText, mtText, mtGzip,
-    mtWebm, mtWebm,  mtRar,  mt7z,   mtBz2,  mtWma,  mtWmv, mtAvi,
-    mtPpt,  mtXls,   mtPdf, mtDicom, mtDicom, mtSQlite3, mtSQlite3, mtHeic,
-    mtH265, mtAvif,  mtAac,  mtCsv,  mtMarkdown, mtICalendar, mtOgg,  mtOga, mtOga);
+    mtWebm, mtWebm,  mtRar,  mt7z,   mtBz2,  mtWma,  mtWmv, mtAvi, mtPpt,
+    mtXls,   mtPdf, mtDicom, mtDicom, mtSQlite3, mtSQlite3, mtHeic, mtH265,
+    mtAvif,  mtAac,  mtCsv,  mtMarkdown, mtICalendar, mtOgg,  mtOga, mtOga);
 
 function GetMimeTypeFromExt(const Ext: RawUtf8): TMimeType;
 var
@@ -9424,17 +9271,17 @@ begin
   if P < PEnd then
     repeat
       PBeg := P;
-      {$ifdef CPUX64}
+      {$ifdef ASMX64}
       inc(P, BufferLineLength(P, PEnd)); // use branchless SSE2 on x86_64
       {$else}
       while (P < PEnd) and
             (P^ <> #13) and
             (P^ <> #10) do
         inc(P);
-      {$endif CPUX64}
+      {$endif ASMX64}
       Map.ProcessOneLine(PBeg, P);
       if P + 1 < PEnd then
-        if PWord(P)^ = 13 + 10 shl 8 then
+        if PWord(P)^ = EOLW then
         begin
           inc(P, 2); // ignore #13#10
           if P < PEnd then
@@ -9584,11 +9431,10 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(itemname, result);
   if itemcount > 1 then
-    AppendShortCharSafe('s', @result);
+    AppendShortCharSafe('s', result);
 end;
 
-function EscapeBuffer(s: PAnsiChar; slen: integer;
-  d: PAnsiChar; dmax: integer): PAnsiChar;
+function EscapeBuffer(s: PAnsiChar; slen: PtrInt; d: PAnsiChar; dmax: PtrInt): PAnsiChar;
 var
   c: AnsiChar;
   tab: PWordArray;
@@ -9634,11 +9480,11 @@ begin
     exit;
   until false;
   result := d;
-  PWord(result - 2)^ := ord('.') + ord('.') shl 8;
+  PWord(result - 2)^ := DOT_16;
   result^ := #0;
 end;
 
-function LogEscape(source: PAnsiChar; sourcelen: integer;
+function LogEscape(source: PAnsiChar; sourcelen: PtrInt;
   var temp: TLogEscape; enabled: boolean): PAnsiChar;
 begin
   if enabled then
@@ -9656,7 +9502,7 @@ begin
   result := LogEscapeFull(pointer(source), length(source));
 end;
 
-function LogEscapeFull(source: PAnsiChar; sourcelen: integer): RawUtf8;
+function LogEscapeFull(source: PAnsiChar; sourcelen: PtrInt): RawUtf8;
 begin
   FastSetString(result{%H-}, sourcelen * 3); // worse case
   if sourcelen <> 0 then
@@ -9664,16 +9510,16 @@ begin
       pointer(source), sourcelen, pointer(result), sourcelen * 3 + 4)));
 end;
 
-function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString;
+function EscapeToShort(source: PAnsiChar; sourcelen: PtrInt): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(source, sourcelen, @result[1], 255) - @result[1]);
+    EscapeBuffer(source, sourcelen, @result[1], high(result)) - @result[1]);
 end;
 
 function EscapeToShort(const source: RawByteString): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(pointer(source), length(source), @result[1], 255) - @result[1]);
+    EscapeBuffer(pointer(source), length(source), @result[1], high(result)) - @result[1]);
 end;
 
 function ContentAppend(source: PAnsiChar; len, pos, max: PtrInt; txt: PUtf8Char): integer;
@@ -9715,76 +9561,7 @@ end;
 
 procedure ContentToShortAppend(source: PAnsiChar; len: PtrInt; var txt: ShortString);
 begin
-  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), 255, @txt[1]));
-end;
-
-function BinToSource(const ConstName, Comment: RawUtf8;
-  Data: pointer; Len, PerLine: integer; const Suffix: RawUtf8): RawUtf8;
-var
-  W: TTextWriter;
-  temp: TTextWriterStackBuffer;
-begin
-  if (Data = nil) or
-     (Len <= 0) or
-     (PerLine <= 0) then
-    result := ''
-  else
-  begin
-    W := TTextWriter.CreateOwnedStream(temp,
-      Len * 5 + 50 + length(Comment) + length(Suffix));
-    try
-      BinToSource(W, ConstName, Comment, Data, Len, PerLine);
-      if Suffix <> '' then
-      begin
-        W.AddString(Suffix);
-        W.AddCR;
-      end;
-      W.SetText(result);
-    finally
-      W.Free;
-    end;
-  end;
-end;
-
-function BinToSource(const ConstName, Comment: RawUtf8;
-  const Data: RawByteString; PerLine: integer; const Suffix: RawUtf8): RawUtf8;
-begin
-  result := BinToSource(ConstName, Comment, pointer(Data), length(Data), PerLine, Suffix);
-end;
-
-procedure BinToSource(Dest: TTextWriter; const ConstName, Comment: RawUtf8;
-  Data: pointer; Len, PerLine: integer);
-var
-  line, i: integer;
-  P: PByte;
-begin
-  if (Dest = nil) or
-     (Data = nil) or
-     (Len <= 0) or
-     (PerLine <= 0) then
-    exit;
-  Dest.AddShorter('const');
-  if Comment <> '' then
-    Dest.Add(#13#10'  // %', [Comment]);
-  Dest.Add(#13#10'  %: array[0..%] of byte = (', [ConstName, Len - 1]);
-  P := pointer(Data);
-  repeat
-    if len > PerLine then
-      line := PerLine
-    else
-      line := Len;
-    Dest.AddShorter(#13#10'   ');
-    for i := 1 to line do
-    begin
-      Dest.AddDirect(' ', '$');
-      Dest.AddByteToHexLower(P^);
-      inc(P);
-      Dest.AddComma;
-    end;
-    dec(Len,line);
-  until Len = 0;
-  Dest.CancelLastComma;
-  Dest.Add(');'#13#10'  %_LEN = SizeOf(%);'#13#10, [ConstName, ConstName]);
+  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), high(txt), @txt[1]));
 end;
 
 function BinToHumanHex(Data: PByte; Len, PerLine, LeftTab: integer;
@@ -9916,13 +9693,17 @@ begin
   begin
     ctx[0] := #32; // truncate to keep information on a single line
     MoveFast(pointer(Context)^, ctx[1], 29);
-    PCardinal(@ctx[30])^ := ord('.') + ord('.') shl 8 + ord('.') shl 16;
+    PCardinal(@ctx[30])^ := DOT_24;
   end
   else
-    Ansi7StringToShortString(Context, ctx);
+    Ansi7StringToShortString(Context, ctx{%H-});
   persec[0] := #0;
   if PerSecond <> 0 then
-    FormatShort16(' %/s', [KBNoSpace(PerSecond)], persec);
+  begin
+    PCardinal(@persec)^ := $2001; // ' '
+    AppendKB(PerSecond, persec, {withspace=}false);
+    AppendShortTwoChars(ord('/') + ord('s') shl 8, @persec);
+  end;
   curr[0] := #0;
   AppendKB(CurrentSize, curr, {withspace=}false);
   if ExpectedSize = 0 then
@@ -10551,7 +10332,7 @@ end;
 
 function SameFileContent(const One, Another: TFileName): boolean;
 var
-  b1, b2: array[word] of word; // 2 * 128KB of buffers
+  b1, b2: TBuffer128K;
   r1, r2: integer;
   f1, f2: THandle;
 begin
@@ -10577,7 +10358,6 @@ begin
     FileClose(f1);
 end;
 
-
 function HashFileCrc32c(const FileName: TFileName): RawUtf8;
 begin
   result := CardinalToHexLower(HashFile(FileName, crc32c));
@@ -10599,598 +10379,92 @@ begin
             S.InheritsFrom(TCustomMemoryStream);
 end;
 
-
-{ ************* Markup (e.g. HTML or Emoji) process }
-
-{ internal TTextWriterEscape class }
-
-type
-  TTextWriterEscapeStyle = (
-    tweBold,
-    tweItalic,
-    tweCode);
-
-  TTextWriterEscapeLineStyle = (
-    twlNone,
-    twlParagraph,
-    twlOrderedList,
-    twlUnorderedList,
-    twlBlockquote,
-    twlCode4,
-    twlCode3);
-
-  {$ifdef USERECORDWITHMETHODS}
-  TTextWriterEscape = record
-  {$else}
-  TTextWriterEscape = object
-  {$endif USERECORDWITHMETHODS}
-  public
-    P, B, P2, B2: PUtf8Char;
-    W: TTextWriter;
-    st: set of TTextWriterEscapeStyle;
-    fmt: TTextWriterHtmlFormat;
-    esc: TTextWriterHtmlEscape;
-    lst: TTextWriterEscapeLineStyle;
-    procedure Start(dest: TTextWriter; src: PUtf8Char; escape: TTextWriterHtmlEscape);
-    function ProcessText(const stopchars: TSynByteSet): AnsiChar;
-    procedure ProcessHRef;
-    function ProcessLink: boolean;
-    procedure ProcessEmoji;
-      {$ifdef HASINLINE}inline;{$endif}
-    procedure Toggle(style: TTextWriterEscapeStyle);
-    procedure SetLine(style: TTextWriterEscapeLineStyle);
-    procedure EndOfParagraph;
-    procedure NewMarkdownLine;
-    procedure AddHtmlEscapeWiki(dest: TTextWriter; src: PUtf8Char;
-      escape: TTextWriterHtmlEscape);
-    procedure AddHtmlEscapeMarkdown(dest: TTextWriter; src: PUtf8Char;
-      escape: TTextWriterHtmlEscape);
-  end;
-
-procedure TTextWriterEscape.Start(dest: TTextWriter; src: PUtf8Char;
-  escape: TTextWriterHtmlEscape);
+function StreamToRawByteString(aStream: TStream; aSize: Int64;
+  aCodePage: integer): RawByteString;
+var
+  current: Int64;
 begin
-  P := src;
-  W := dest;
-  st := [];
-  if heHtmlEscape in escape then
-    fmt := hfOutsideAttributes
-  else
-    fmt := hfNone;
-  esc := escape;
-  lst := twlNone;
-end;
-
-function IsHttpOrHttps(P: PUtf8Char): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-begin
-  result := (PCardinal(P)^ =
-             ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
-            ((PCardinal(P + 4)^ and $ffffff =
-             ord(':') + ord('/') shl 8 + ord('/') shl 16) or
-             (PCardinal(P + 4)^ =
-             ord('s') + ord(':') shl 8 + ord('/') shl 16 + ord('/') shl 24));
-end;
-
-function TTextWriterEscape.ProcessText(const stopchars: TSynByteSet): AnsiChar;
-begin
-  if P = nil then
+  result := '';
+  if aStream = nil then
+    exit;
+  current := aStream.Position;
+  if (current = 0) and
+     aStream.InheritsFrom(TRawByteStringStream) and
+     ((aSize < 0) or
+      (aSize = length(TRawByteStringStream(aStream).DataString))) then
   begin
-    result := #0;
+    result := TRawByteStringStream(aStream).DataString; // fast COW
     exit;
   end;
-  B := P;
-  while not (ord(P^) in stopchars) and
-        not IsHttpOrHttps(P) do
-    inc(P);
-  W.AddHtmlEscape(B, P - B, fmt);
-  result := P^;
-end;
-
-procedure TTextWriterEscape.ProcessHRef;
-begin
-  B := P;
-  while P^ > ' ' do
-    inc(P);
-  W.AddShort('<a href="');
-  W.AddHtmlEscape(B, P - B, hfWithinAttributes);
-  W.AddShort('" rel="nofollow">');
-  W.AddHtmlEscape(B, P - B);
-  W.AddDirect('<', '/', 'a', '>');
-end;
-
-function TTextWriterEscape.ProcessLink: boolean;
-begin
-  inc(P);
-  B2 := P;
-  while not (P^ in [#0, ']']) do
-    inc(P);
-  P2 := P;
-  if PWord(P)^ = ord(']') + ord('(') shl 8 then
-  begin
-    inc(P, 2);
-    B := P;
-    while not (P^ in [#0, ')']) do
-      inc(P);
-    if P^ = ')' then
-    begin
-      // [GitHub](https://github.com)
-      result := true;
-      exit;
-    end;
-  end;
-  P := B2; // rollback
-  result := false;
-end;
-
-procedure TTextWriterEscape.ProcessEmoji;
-begin
-  if heEmojiToUtf8 in esc then
-    EmojiParseDots(P, W)
-  else
-  begin
-    W.Add(':');
-    inc(P);
-  end;
-end;
-
-procedure TTextWriterEscape.Toggle(style: TTextWriterEscapeStyle);
-const
-  HTML: array[tweBold..tweCode] of string[7] = (
-    'strong>', 'em>', 'code>');
-begin
-  W.Add('<');
-  if style in st then
-  begin
-    W.Add('/');
-    exclude(st, style);
-  end
-  else
-    include(st, style);
-  W.AddShorter(HTML[style]);
-end;
-
-procedure TTextWriterEscape.EndOfParagraph;
-begin
-  if tweBold in st then
-    Toggle(tweBold);
-  if tweItalic in st then
-    Toggle(tweItalic);
-  if P <> nil then
-    if PWord(P)^ = EOLW then
-      inc(P, 2)
-    else
-      inc(P);
-end;
-
-procedure TTextWriterEscape.SetLine(style: TTextWriterEscapeLineStyle);
-const
-  HTML: array[twlParagraph..twlCode3] of string[5] = (
-    'p>', 'li>', 'li>', 'p>', 'code>', 'code>');
-  HTML2: array[twlOrderedList..twlCode3] of string[11] = (
-    'ol>', 'ul>', 'blockquote>', 'pre>', 'pre>');
-begin
-  if lst >= low(HTML) then
-  begin
-    if (lst < twlCode4) or
-       (lst <> style) then
-    begin
-      W.Add('<', '/');
-      W.AddShorter(HTML[lst]);
-    end;
-    if (lst >= low(HTML2)) and
-       (lst <> style) then
-    begin
-      W.Add('<', '/');
-      W.AddShort(HTML2[lst]);
-    end;
-  end;
-  if style >= low(HTML) then
-  begin
-    if (style >= low(HTML2)) and
-       (lst <> style) then
-    begin
-      W.Add('<');
-      W.AddShort(HTML2[style]);
-    end;
-    if (style < twlCode4) or
-       (lst <> style) then
-    begin
-      W.Add('<');
-      W.AddShorter(HTML[style]);
-    end;
-  end;
-  lst := style;
-end;
-
-procedure TTextWriterEscape.NewMarkdownLine;
-label
-  none;
-var
-  c: cardinal;
-begin
-  if P = nil then
+  if aSize < 0 then
+    aSize := aStream.Size - current;
+  if (aSize = 0) or
+     (aSize > maxInt) then // Delphi uses 32-bit length() even on Win64
     exit;
-  c := PCardinal(P)^;
-  if c and $ffffff = ord('`') + ord('`') shl 8 + ord('`') shl 16 then
+  if aStream.InheritsFrom(TCustomMemoryStream) then
   begin
-    inc(P, 3);
-    if lst = twlCode3 then
-    begin
-      lst := twlCode4; // to close </code></pre>
-      NewMarkdownLine;
-      exit;
-    end;
-    SetLine(twlCode3);
-  end;
-  if lst = twlCode3 then
-    exit; // no prefix process within ``` code blocks
-  if c = $20202020 then
-  begin
-    SetLine(twlCode4);
-    inc(P, 4);
+    FastSetStringCP(result, PAnsiChar(TCustomMemoryStream(aStream).
+      Memory) + current, aSize, aCodePage);
     exit;
   end;
-  P := GotoNextNotSpaceSameLine(P); // don't implement nested levels yet
-  case P^ of
-    '*',
-    '+',
-    '-':
-      if P[1] = ' ' then
-        SetLine(twlUnorderedList)
-      else
-        goto none;
-    '1'..'9':
-      begin
-        // first should be 1. then any ##. number to continue
-        B := P;
-        repeat
-          inc(P)
-        until not (P^ in ['0'..'9']);
-        if (P^ = '.') and
-           ((lst = twlOrderedList) or
-            (PWord(B)^ = ord('1') + ord('.') shl 8)) then
-          SetLine(twlOrderedList)
-        else
-        begin
-          P := B;
-none:     if lst = twlParagraph then
-          begin
-            c := PWord(P)^; // detect blank line to separate paragraphs
-            if c = EOLW then
-              inc(P, 2)
-            else if c and $ff = $0a then
-              inc(P)
-            else
-            begin
-              W.AddOnce(' ');
-              exit;
-            end;
-          end;
-          SetLine(twlParagraph);
-          exit;
-        end;
-      end;
-    '>':
-      if P[1] = ' ' then
-        SetLine(twlBlockquote)
-      else
-        goto none;
-  else
-    goto none;
-  end;
-  P := GotoNextNotSpaceSameLine(P + 1);
+  pointer(result) := FastNewString(aSize, aCodePage);
+  if not StreamReadAll(aStream, pointer(result), aSize) then
+    result := '';
+  aStream.Position := current; // always restore position
 end;
 
-procedure TTextWriterEscape.AddHtmlEscapeWiki(dest: TTextWriter;
-  src: PUtf8Char; escape: TTextWriterHtmlEscape);
-begin
-  Start(dest, src, escape);
-  SetLine(twlParagraph);
-  repeat
-    case ProcessText([0, 10, 13,
-                      ord('*'), ord('+'), ord('`'), ord('\'), ord(':')]) of
-      #0:
-        break;
-      #10,
-      #13:
-        begin
-          EndOfParagraph;
-          SetLine(twlParagraph);
-          continue;
-        end;
-      '\':
-        if P[1] in ['\', '`', '*', '+'] then
-        begin
-          inc(P);
-          W.Add(P^);
-        end
-        else
-          W.Add('\');
-      '*':
-        Toggle(tweItalic);
-      '+':
-        Toggle(tweBold);
-      '`':
-        Toggle(tweCode);
-      'h':
-        begin
-          ProcessHRef;
-          continue;
-        end;
-      ':':
-        begin
-          ProcessEmoji;
-          continue;
-        end;
-    end;
-    inc(P);
-  until false;
-  EndOfParagraph;
-  SetLine(twlNone);
-end;
-
-procedure TTextWriterEscape.AddHtmlEscapeMarkdown(dest: TTextWriter;
-  src: PUtf8Char; escape: TTextWriterHtmlEscape);
-begin
-  Start(dest, src, escape);
-  NewMarkDownLine;
-  repeat
-    if lst >= twlCode4 then // no Markdown tags within code blocks
-      if ProcessText([0, 10, 13]) = #0 then
-        break
-      else
-      begin
-        if PWord(P)^ = EOLW then
-          inc(P, 2)
-        else
-          inc(P);
-        W.AddCR; // keep LF within <pre>
-        NewMarkdownLine;
-        continue;
-      end
-    else
-      case ProcessText([0, 10, 13, ord('*'), ord('_'), ord('`'),
-                        ord('\'), ord('['), ord('!'), ord(':')]) of
-        #0:
-          break;
-        #10,
-        #13:
-          begin
-            EndOfParagraph;
-            NewMarkdownLine;
-            continue;
-          end;
-        '\':
-          if P[1] in ['\', '`', '*', '_', '[', ']', '{', '}',
-                      '(', ')', '#', '+', '-', '.', '!'] then
-          begin
-            // backslash escape
-            inc(P);
-            W.Add(P^);
-          end
-          else
-            W.Add('\');
-        '*',
-        '_':
-          if P[1] = P[0] then
-          begin
-            // **This text will be bold** or __This text will be bold__
-            inc(P);
-            Toggle(tweBold);
-          end
-          else
-            // *This text will be italic* or _This text will be italic_
-            Toggle(tweItalic);
-        '`':
-          // `This text will be code`
-          Toggle(tweCode);
-        '[':
-          if ProcessLink then
-          begin
-            // [GitHub](https://github.com)
-            W.AddShort('<a href="');
-            W.AddHtmlEscape(B, P - B, hfWithinAttributes);
-            if IsHttpOrHttps(B) then
-              W.AddShort('" rel="nofollow">')
-            else
-              W.Add('"', '>');
-            W.AddHtmlEscape(B2, P2 - B2, fmt);
-            W.AddDirect('<', '/', 'a', '>'); // no inc(P) needed here
-          end
-          else
-            // not a true link -> just append
-            W.Add('[');
-        '!':
-          begin
-            if P[1] = '[' then
-            begin
-              inc(P);
-              if ProcessLink then
-              begin
-                W.AddShort('<img alt="');
-                W.AddHtmlEscape(B2, P2 - B2, hfWithinAttributes);
-                W.AddShorter('" src="');
-                W.AddNoJsonEscape(B, P - B);
-                W.AddDirect('"', '>');
-                inc(P);
-                continue;
-              end;
-              dec(P);
-            end;
-            W.Add('!'); // not a true image
-          end;
-        'h':
-          begin
-            ProcessHRef;
-            continue;
-          end;
-        ':':
-          begin
-            ProcessEmoji;
-            continue;
-          end;
-      end;
-    inc(P);
-  until false;
-  EndOfParagraph;
-  SetLine(twlNone);
-end;
-
-function HtmlEscapeWiki(const wiki: RawUtf8; esc: TTextWriterHtmlEscape): RawUtf8;
+function StreamChangeToRawByteString(aStream: TStream; var aPosition: Int64): RawByteString;
 var
-  temp: TTextWriterStackBuffer; // 8KB work buffer on stack
-  W: TTextWriter;
+  current, size: Int64;
 begin
-  W := TTextWriter.CreateOwnedStream(temp);
-  try
-    AddHtmlEscapeWiki(W, pointer(wiki), esc);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
-end;
-
-function HtmlEscapeMarkdown(const md: RawUtf8; esc: TTextWriterHtmlEscape): RawUtf8;
-var
-  temp: TTextWriterStackBuffer;
-  W: TTextWriter;
-begin
-  W := TTextWriter.CreateOwnedStream(temp);
-  try
-    AddHtmlEscapeMarkdown(W, pointer(md), esc);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
-end;
-
-procedure AddHtmlEscapeWiki(W: TTextWriter; P: PUtf8Char; esc: TTextWriterHtmlEscape);
-var
-  doesc: TTextWriterEscape;
-begin
-  doesc.AddHtmlEscapeWiki(W, P, esc);
-end;
-
-procedure AddHtmlEscapeMarkdown(W: TTextWriter; P: PUtf8Char; esc: TTextWriterHtmlEscape);
-var
-  doesc: TTextWriterEscape;
-begin
-  doesc.AddHtmlEscapeMarkdown(W, P, esc);
-end;
-
-function EmojiFromText(P: PUtf8Char; len: PtrInt): TEmoji;
-begin
-  // RTTI has shortstrings in adjacent L1 cache lines -> faster than EMOJI_TEXT[]
-  result := TEmoji(FindShortStringListTrimLowerCase(
-                     EMOJI_RTTI, ord(high(TEmoji)) - 1, P, len) + 1);
-  // note: we may enhance performance by using FastFindPUtf8CharSorted()
-end;
-
-function EmojiParseDots(var P: PUtf8Char; W: TTextWriter): TEmoji;
-var
-  c: PUtf8Char;
-begin
-  result := eNone;
-  inc(P); // ignore trailing ':'
-  c := P;
-  if c[-2] <= ' ' then
-  begin
-    if (c[1] <= ' ') and
-       (c^ in ['('..'|']) then
-      result := EMOJI_AFTERDOTS[c^]; // e.g. :)
-    if result = eNone then
-    begin
-      while c^ in ['a'..'z', 'A'..'Z', '_'] do
-        inc(c);
-      if (c^ = ':') and
-         (c[1] <= ' ') then // try e.g. :joy_cat:
-        result := EmojiFromText(P, c - P);
-    end;
-    if result <> eNone then
-    begin
-      P := c + 1; // continue parsing after the Emoji text
-      if W <> nil then
-        W.AddShort(pointer(EMOJI_UTF8[result]), 4);
-      exit;
-    end;
-  end;
-  if W <> nil then
-    W.Add(':');
-end;
-
-procedure EmojiToDots(P: PUtf8Char; W: TTextWriter);
-var
-  B: PUtf8Char;
-  c: cardinal;
-begin
-  if (P <> nil) and
-     (W <> nil) then
-    repeat
-      B := P;
-      while (P^ <> #0) and
-            (PWord(P)^ <> $9ff0) do
-        inc(P);
-      W.AddNoJsonEscape(B, P - B);
-      if P^ = #0 then
-        break;
-      B := P;
-      c := NextUtf8Ucs4(P) - $1f5ff;
-      if c <= cardinal(high(TEmoji)) then
-        W.AddString(EMOJI_TAG[TEmoji(c)])
-      else
-        W.AddNoJsonEscape(B, P - B);
-    until P^ = #0;
-end;
-
-function EmojiToDots(const text: RawUtf8): RawUtf8;
-var
-  W: TTextWriter;
-  tmp: TTextWriterStackBuffer;
-begin
-  if PosExChar(#$f0, text) = 0 then
-  begin
-    result := text; // no UTF-8 smiley for sure
+  result := '';
+  if aStream = nil then
     exit;
-  end;
-  W := TTextWriter.CreateOwnedStream(tmp);
-  try
-    EmojiToDots(pointer(text), W);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
+  size := aStream.Size - aPosition;
+  if size <= 0 then
+    exit; // nothing new
+  pointer(result) := FastNewString(size);
+  current := aStream.Position;
+  if aPosition <> current then
+    aStream.Position := aPosition;
+  if StreamReadAll(aStream, pointer(result), size) then
+    aPosition := current
+  else
+    result := '';
+  aStream.Position := current; // always restore position
 end;
 
-procedure EmojiFromDots(P: PUtf8Char; W: TTextWriter);
-var
-  B: PUtf8Char;
+function RawByteStringToStream(const aString: RawByteString): TStream;
 begin
-  if (P <> nil) and
-     (W <> nil) then
-    repeat
-      B := P;
-      while not (P^ in [#0, ':']) do
-        inc(P);
-      W.AddNoJsonEscape(B, P - B);
-      if P^ = #0 then
-        break;
-      EmojiParseDots(P, W);
-    until P^ = #0;
+  result := TRawByteStringStream.Create(aString);
 end;
 
-function EmojiFromDots(const text: RawUtf8): RawUtf8;
+function ReadStringFromStream(S: TStream; MaxAllowedSize: integer): RawUtf8;
 var
-  W: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  L: integer;
 begin
-  W := TTextWriter.CreateOwnedStream(tmp);
-  try
-    EmojiFromDots(pointer(text), W);
-    W.SetText(result);
-  finally
-    W.Free;
-  end;
+  L := 0;
+  if (S.Read(L, 4) <> 4) or
+     (L <= 0) or
+     (L > MaxAllowedSize) or
+     not StreamReadAll(S, FastSetString(result, L), L) then
+    result := '';
+end;
+
+function WriteStringToStream(S: TStream; const Text: RawUtf8): boolean;
+var
+  L: integer;
+begin
+  L := length(Text);
+  if L = 0 then
+    result := S.Write(L, 4) = 4
+  else
+    {$ifdef FPC}
+    result := (S.Write(L, 4) = 4) and
+              (S.Write(pointer(Text)^, L) = L);
+    {$else}
+    result := S.Write(pointer(PtrInt(Text) - SizeOf(integer))^, L + 4) = L + 4;
+    {$endif FPC}
 end;
 
 
@@ -11513,8 +10787,7 @@ begin
     W.WrBase64(P, aLength, withMagic);
 end;
 
-procedure TRawByteStringGroup.FindMove(aPosition, aLength: integer;
-  aDest: pointer);
+procedure TRawByteStringGroup.FindMove(aPosition, aLength: integer; aDest: pointer);
 var
   P: pointer;
 begin
@@ -11797,8 +11070,6 @@ end; // keep fLen since may be not final - see e.g. TPostConnection.OnRead
 
 
 procedure InitializeUnit;
-var
-  e: TEmoji;
 begin
   // initialize Base64/Base64Uri encoding/decoding tables
   FillBaseDecoder(@ConvertToBase64,    @ConvertBase64ToBin,    high(ConvertToBase64));
@@ -11807,36 +11078,14 @@ begin
   Base64EncodeMain     := @Base64EncodeMainPas;
   Base64DecodeMain     := @Base64DecodeMainPas;
   Base64MagicRawDecode := @_Base64MagicRawDecode;
-  {$ifdef ASMX64AVXNOCONST} // focus on x86_64 server performance
+  {$ifdef ASMX64AVX1} // focus on x86_64 server performance
   if cfAVX2 in CpuFeatures then
   begin // our AVX2 asm code is almost 10x faster than the pascal version
     Base64EncodeMain := @Base64EncodeMainAvx2; // 11.5 GB/s vs 1.3 GB/s
     Base64DecodeMain := @Base64DecodeMainAvx2; //  8.7 GB/s vs 0.9 GB/s
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
   RawToBase64 := _RawToBase64; // for mormot.net.sock and mormot.crypt.core
-  // HTML/Emoji Efficient Parsing
-  Assert(ord(high(TEmoji)) = $4f + 1);
-  EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0
-  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, false, {lower=}true);
-  FastAssignNew(EMOJI_TEXT[eNone]);
-  for e := succ(low(e)) to high(e) do
-  begin
-    Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
-    // order matches U+1F600 to U+1F64F codepoints
-    Ucs4ToUtf8(ord(e) + $1f5ff, FastSetString(EMOJI_UTF8[e], 4));
-  end;
-  EMOJI_AFTERDOTS[')'] := eSmiley;
-  EMOJI_AFTERDOTS['('] := eFrowning;
-  EMOJI_AFTERDOTS['|'] := eExpressionless;
-  EMOJI_AFTERDOTS['/'] := eConfused;
-  EMOJI_AFTERDOTS['D'] := eLaughing;
-  EMOJI_AFTERDOTS['o'] := eOpen_mouth;
-  EMOJI_AFTERDOTS['O'] := eOpen_mouth;
-  EMOJI_AFTERDOTS['p'] := eYum;
-  EMOJI_AFTERDOTS['P'] := eYum;
-  EMOJI_AFTERDOTS['s'] := eScream;
-  EMOJI_AFTERDOTS['S'] := eScream;
   // setup internal compression algorithms
   AlgoSynLZ := TAlgoSynLZ.Create;
   AlgoRleLZ := TAlgoRleLZ.Create;

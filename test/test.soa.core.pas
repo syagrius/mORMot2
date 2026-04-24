@@ -22,6 +22,7 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.log,
   mormot.core.perf,
   mormot.core.search,
@@ -538,7 +539,7 @@ begin
       Add('"', ',');
       dec(count);
     end;
-    CancelLastComma(']');
+    ReplaceLastComma(']');
     SetText(RawUtf8(Result));
   finally
     Free;
@@ -1104,7 +1105,7 @@ begin
         Check(Args[2].ValueDirection = imdVar);
       end;
     end;
-  // IComplexCalculator + IComplexNumber services
+  // register IComplexCalculator + IComplexNumber services on server side
   Check(result.Server.ServiceRegister(
     TServiceComplexCalculator, [TypeInfo(IComplexCalculator)], sicSingle) <> nil);
   Check(result.Server.ServiceRegister(
@@ -1122,7 +1123,7 @@ begin
   begin
     result.ServicesRouting := ROUTING[rout].ClientRouting;
     result.Server.ServicesRouting := ROUTING[rout];
-    if rout = 0 then
+    if rout = 0 then // TRestServerRoutingRest not JsonRpc
       (result.Server.Services['Calculator'] as TServiceFactoryServer).
         ResultAsXMLObjectIfAcceptOnlyXML := true;
     CheckEqual(Ask(result, 'None', '1,2', 'one=1&two=2',
@@ -1149,8 +1150,8 @@ begin
       '{result:"abc",value=777}', HTTP_SUCCESS), '777');
     if rout = 0 then
       CheckEqual(result.URI(
-        'root/ComplexCalculator.GetCustomer?CustomerId=John%20Doe', 'POST',
-          @resp, nil, nil), 406, 'incorrect input');
+        'root/ComplexCalculator.GetCustomer?buggy=dum]my&CustomerId=John%20Doe',
+        'POST', @resp, nil, nil), HTTP_SUCCESS);
   end;
   result.ServicesRouting := TRestServerRoutingRest.ClientRouting; // back to default
   result.Server.ServicesRouting := TRestServerRoutingRest;
@@ -1570,12 +1571,20 @@ begin
   Inst.ClientSide := aClient.ClientSide;
   ok := '!';
   try
+    // define at least ICalculator with specific options
     Check(aClient.ServiceRegister([TypeInfo(ICalculator)], sicShared));
-    Check(aClient.ServiceRegister([TypeInfo(IComplexCalculator)], sicSingle));
-    Check(aClient.ServiceRegister([TypeInfo(ITestSession)], sicPerSession));
-    Check(aClient.ServiceRegister([TypeInfo(ITestUser)], sicPerUser));
-    Check(aClient.ServiceRegister([TypeInfo(ITestGroup)], sicPerGroup));
-    Check(aClient.ServiceRegister([TypeInfo(ITestPerThread)], sicPerThread));
+    {
+    // no need to register other services - after SetUser "soa" or via GET /stat/soa
+    if aClient.Session.Services = nil then
+    begin
+      // after aClient.SetUser(), can't rely on late registration using "soa"
+      Check(aClient.ServiceRegister([TypeInfo(IComplexCalculator)], sicSingle));
+      Check(aClient.ServiceRegister([TypeInfo(ITestSession)], sicPerSession));
+      Check(aClient.ServiceRegister([TypeInfo(ITestUser)], sicPerUser));
+      Check(aClient.ServiceRegister([TypeInfo(ITestGroup)], sicPerGroup));
+      Check(aClient.ServiceRegister([TypeInfo(ITestPerThread)], sicPerThread));
+    end;
+    }
     (aClient.Services['Calculator'] as TServiceFactoryClient).
       ParamsAsJsonObject := aAsJsonObject;
     SetOptions(aClient, aAsJsonObject, aOptions);
@@ -1587,9 +1596,28 @@ begin
     CheckEqual(sign, sign2, 'sign');
     (aClient.Server.Services as TServiceContainerServer).PublishSignature := false;
     CheckEqual(aClient.Services['Calculator'].RetrieveSignature, '');
-    // once registered, can be accessed by its GUID or URI
+    // client access by its GUID or URI (with "soa" resolution)
+    {$ifdef HASGENERICS}
+    if CheckFailed(
+         aClient.Services.Resolve<ICalculator>(Inst.I)) or
+       // those services will use late registration via "soa" info
+       CheckFailed(
+         aClient.Services.Resolve<IComplexCalculator>(Inst.CC)) or
+       CheckFailed(
+         aClient.Services.Resolve<IComplexNumber>(Inst.CN)) or
+       CheckFailed(
+         aClient.Services.Resolve<ITestUser>(Inst.CU)) or
+       CheckFailed(
+         aClient.Services.Resolve<ITestSession>(Inst.CS)) or
+       CheckFailed(
+         aClient.Services.Resolve<ITestGroup>(Inst.CG)) or
+       CheckFailed(
+         aClient.Services.Resolve<ITestPerThread>(Inst.CT)) then
+      exit;
+    {$else}
     if CheckFailed(
          aClient.Services.Info(TypeInfo(ICalculator)).Get(Inst.I)) or
+       // those services will use late registration via "soa" info
        CheckFailed(
          aClient.Services.Info(TypeInfo(IComplexCalculator)).Get(Inst.CC)) or
        CheckFailed(
@@ -1603,6 +1631,7 @@ begin
        CheckFailed(
          aClient.Services.Info(TypeInfo(ITestPerThread)).Get(Inst.CT)) then
       exit;
+    {$endif HASGENERICS}
     O := ObjectFromInterface(Inst.I);
     Check((O <> nil) and
           (Copy(O.ClassName, 1, 21) = 'TInterfacedObjectFake'));
@@ -1971,15 +2000,17 @@ begin
       //clt.OnIdle := TLoginForm.OnIdleProcess; // from mORMotUILogin
       // clt.Compression := [hcSynShaAes]; // 350ms (300ms for [])
       Check(clt.SetUser('User', 'synopse'));
-      // register services on the client side
+      {
+      // no need to register services on the client side - will use SetUser "soa"
       Check(clt.ServiceRegister([TypeInfo(ICalculator)], sicShared));
       Check(clt.ServiceRegister([TypeInfo(IComplexCalculator)], sicSingle));
       Check(clt.ServiceRegister([TypeInfo(ITestSession)], sicPerSession));
       Check(clt.ServiceRegister([TypeInfo(ITestUser)], sicPerUser));
       Check(clt.ServiceRegister([TypeInfo(ITestGroup)], sicPerGroup));
       Check(clt.ServiceRegister([TypeInfo(ITestPerThread)], sicPerThread));
+      }
       // retrieve service instances
-      if CheckFailed(clt.Services.Info(TypeInfo(ICalculator)).
+      if CheckFailed(clt.ServiceContainer.Info(TypeInfo(ICalculator)).
            Get(Inst.I)) or
          CheckFailed(clt.Services.Info(TypeInfo(IComplexCalculator)).
            Get(Inst.CC)) or

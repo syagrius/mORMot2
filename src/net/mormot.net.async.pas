@@ -1073,7 +1073,7 @@ type
     fInterningTix: cardinal;
     fExecuteEvent: TSynEvent;
     fClientSockets: THttpAsyncClientConnections; // allocated when needed
-    fHttpDateNowUtc: THttpDateNowUtc;
+    fHttpDateNowUtc: THttpDateNowUtc;            // set by IdleEverySecond
     function GetHttpQueueLength: cardinal; override;
     procedure SetHttpQueueLength(aValue: cardinal); override;
     function GetConnectionsActive: cardinal; override;
@@ -1409,7 +1409,7 @@ type
     /// create a THttpProxyUrlSettings definition for using a callback
     function AddEvent(const request: TOnHttpProxyServerRequest;
       const uri: RawUtf8 = ''): THttpProxyUrlSettings;
-    /// load URI definitions from local *.json files
+    /// load URI definitions from local *.json files (also supports JSON5 or HJson)
     // - returns the number of added THttpProxyUrl instances into Url[]
     function AddFromFiles(const settingsfolder: TFileName;
       const mask: TFileName = '*.json'): integer;
@@ -1503,6 +1503,8 @@ type
     function OnExecute(Ctxt: THttpServerRequestAbstract): cardinal;
     function OnGetHeadLocalFolder(Ctxt: THttpServerRequest; const Uri: TUriMatchName): cardinal;
     function OnGetHeadRemoteUri(Ctxt: THttpServerRequest; const Uri: TUriMatchName): cardinal;
+    // TOnComputeHashFromFileName callback
+    function OnComputeHashFromFileName(const LocalFile: TFileName; out Hash: THash160): boolean;
   public
     /// initialize this forward proxy instance
     // - the supplied aSettings should be owned by the caller (e.g from a main
@@ -2814,8 +2816,7 @@ begin
     aThreadPoolCount := 1;
   ThreadCountAdjust(aThreadPoolCount); // e.g. WinARM PRISM
   {$ifndef USE_WINIOCP}
-  fThreadPollingWakeupLoad :=
-    (cardinal(aThreadPoolCount) div SystemInfo.dwNumberOfProcessors) * 8;
+  fThreadPollingWakeupLoad := (cardinal(aThreadPoolCount) div CpuThreads) * 8;
   if fThreadPollingWakeupLoad < 4 then
     fThreadPollingWakeupLoad := 4; // below 4, the whole algorithm seems pointless
   {$endif USE_WINIOCP}
@@ -4021,7 +4022,7 @@ begin
     // BIND + LISTEN (TLS is done later)
     fServer := TCrtSocket.Create(5000);
     if fLogClass <> nil  then
-      fServer.OnLog := fLogClass.DoLog;
+      fServer.OnLog := fLogClass.DoLog; // bind + TLS process
     fServer.BindPort(fSockPort, nlTcp, acoReusePort in fOptions);
     if not fServer.SockIsDefined then // paranoid check
       EAsyncConnections.RaiseUtf8('%.Execute: bind % failed', [self, fSockPort]);
@@ -5320,14 +5321,12 @@ procedure THttpAsyncServer.IdleEverySecond;
 var
   tix, cleaned: cardinal;
   T: TSynSystemTime;
-  tmp: ShortString;
 begin
   // no need to use the global HttpDateNowUtc and its GetTickCount64 API call
   if hsoIncludeDateHeader in fOptions then
   begin
-    T.FromNowUtc;
-    T.ToHttpDateShort(tmp, 'GMT'#13#10, 'Date: ');
-    fHttpDateNowUtc := tmp; // (almost) atomic set within CPU L1 cache line
+    FromGlobalTime(T, {local=}false);
+    T.ToHttpDateShort(fHttpDateNowUtc, 'GMT'#13#10, 'Date: ');
   end;
   // ensure log file(s) are flushed/consolidated if needed
   if fLogger <> nil then
@@ -5402,7 +5401,7 @@ begin
       fSock := fAsync.fServer;
       fAsync.DoLog(sllTrace, 'Execute: main loop', [], self);
       IdleEverySecond; // initialize idle process (e.g. fHttpDateNowUtc)
-      tix := mormot.core.os.GetTickCount64 shr 16; // delay=500 after 1 min idle
+      tix := GetTickSec shr 6; // delay=500 after 64s idle
       lasttix := tix;
       mscallbacks := 0;
       if fCallbackSendDelay <> nil then
@@ -5452,7 +5451,7 @@ begin
             fAsync.fSockets.ProcessWrite(notif, 0);
           if mscallbacks <> 0 then
           begin
-            tix := mormot.core.os.GetTickCount64 shr 16;
+            tix := GetTickSec shr 6;
             lasttix := tix;
           end;
         {$endif USE_WINIOCP}
@@ -5687,14 +5686,9 @@ type
   end;
 
 const
-  TOBEPURGEDPROXY: array[0..6] of PAnsiChar = (
-    'CONTENT-LENGTH:',
-    'CONTENT-RANGE:',
-    'CONTENT-ENCODING:',
-    'CONNECTION:',
-    'KEEP-ALIVE:',
-    'DATE:',
-    nil);
+  TOBEPURGEDPROXY: PUtf8Char =
+    'CONTENT-LENGTH:|CONTENT-RANGE:|CONTENT-ENCODING:|CONNECTION:|' +
+    'KEEP-ALIVE:|DATE:|';
 
 function TStartProxyRequest.AskRemoteServer(const path: TUriMatchName): cardinal;
 var
@@ -5728,7 +5722,7 @@ begin // this method is protected by proxy.fSafe.Lock
       exit;
     end;
   // check the header against the local cached file (headlastmod may be 0)
-  ctxt.OutCustomHeaders := PurgeHeaders(remotehead, false, @TOBEPURGEDPROXY);
+  ctxt.OutCustomHeaders := PurgeHeaders(remotehead, false, TOBEPURGEDPROXY);
   if (lastmod <> 0) and
      (size >= 0) then // check the local file
     if ((headsiz < 0) or
@@ -5904,7 +5898,7 @@ end;
 constructor THttpProxyServerMainSettings.Create;
 begin
   inherited Create;
-  fThreadCount := SystemInfo.dwNumberOfProcessors + 1;
+  fThreadCount := CpuThreads + 1;
   fPort := '8098';
 end;
 
@@ -6317,6 +6311,29 @@ begin
       [Ctxt.Method, Ctxt.Url, fn, result, siz, (cached <> '')], self);
 end;
 
+function THttpProxyServer.OnComputeHashFromFileName(const LocalFile: TFileName;
+  out Hash: THash160): boolean;
+var
+  tmp: array[0 .. (SizeOf(THash160) * 2) - 1] of AnsiChar;
+  i, l: PtrInt;
+  bin: RawByteString;
+begin // LocalFile could be without any path e.g. from TSearchRec.Name
+  result := false;
+  l := length(LocalFile);
+  if (l > 0) and
+     (LocalFile[l] = '.') then
+    dec(l);
+  if l < SizeOf(tmp) then
+    exit;
+  for i := l - high(tmp) to l do
+    tmp[i] := AnsiChar(ord(LocalFile[i])); // extract file name (no extension)
+  bin := Base32ToBin(@tmp, SizeOf(tmp));
+  if bin = '' then
+    exit;
+  MoveFast(pointer(bin)^, Hash, SizeOf(Hash));
+  result := true;
+end;
+
 function THttpProxyServer.OnGetHeadRemoteUri(Ctxt: THttpServerRequest;
   const Uri: TUriMatchName): cardinal;
 var
@@ -6335,7 +6352,7 @@ begin
     if ByteScanIndex(pointer(Uri.Path.Text), Uri.Path.Len, ord('/')) <> 0 then
       exit;
   req.remote := req.proxy.fRemoteUri;
-  AppendBufferToUtf8(Uri.Path.Text, StrLen(Uri.Path.Text), req.remote.Address);
+  Append(req.remote.Address, Uri.Path.Text, Uri.Path.Len);
   // check the local file (named from hashed URI)
   req.name := HttpRequestHashBase32(req.remote, nil, 20, @req.hash);
   if req.name = '' then

@@ -1087,9 +1087,10 @@ type
     fData: PUtf8Char;
     fDataLen: PtrInt;
     fPacketType: TSocketIOPacket;
-    fDataBinary: boolean;
     fID: TSocketIOAckID;
     fBinaryAttachment: cardinal;
+    fBase64Attachment: TRawUtf8DynArray; // base-64 encoded
+    fDataOwned: RawUtf8; // when fBinaryAttachment>0
   public
     /// decode a Socket.IO raw text packet into its message fields
     // - mainly used for testing purposes
@@ -1097,7 +1098,9 @@ type
     /// decode a Socket.IO raw packet into its message fields
     // - returns true on success, false if the input PayLoad is incorrect
     function InitBuffer(PayLoad: PUtf8Char; PayLoadLen: PtrInt;
-      PayLoadBinary: boolean; Process: TWebSocketProcess): boolean;
+      Process: TWebSocketProcess): boolean;
+    /// finalize all internal fields
+    procedure Reset;
     /// quickly check if the NameSpace value does match (case sensitive)
     function NameSpaceIs(const Name: RawUtf8): boolean;
     /// retrieve the NameSpace value as a new RawUtf8
@@ -1105,15 +1108,27 @@ type
     /// retrieve the NameSpace value as a shortstring (used e.g. for RaiseESockIO)
     function NameSpaceShort: ShortString;
       {$ifdef HASINLINE} inline; {$endif}
-    /// decode the Data content JSON payload into a TDocVariant
+    /// parse the Data content JSON payload into a TDocVariant
     // - can optionally override the default JSON_SOCKETIO options
     // - warning: the Data/DataLen buffer will be decoded in-place, so modified
-    function DataGet(out Dest: TDocVariantData;
-      Options: PDocVariantOptions = nil): boolean; overload;
+    function DataParse(out Dest: TDocVariantData;
+      Options: PDocVariantOptions = nil): boolean;
+    /// decode the Data content JSON payload into a TDocVariant
+    // - first call DataParse() to decode the JSON payload in-place
+    // - will adjust the payload so that 1) an array with a single object will
+    // return this single object 2) any Base64Attachment[] will replace the
+    // {"_placeholder":true,num:#} items as base-64 encoded binary
+    function DataDecode(out Dest: TDocVariantData; EventName: PRawUtf8 = nil;
+      Options: PDocVariantOptions = nil): boolean;
     /// return the Data content payload raw buffer without any decoding
-    function DataGet(CodePage: cardinal = CP_UTF8): RawByteString; overload;
+    // - will detect UTF-8 content and set CP_UTF8 or return a RawByteString
+    function DataRaw: RawByteString;
     /// quickly check if the Data content does match (mainly used for testing)
     function DataIs(const Content: RawUtf8): boolean;
+    /// add to Base64Attachment[] if length is < BinaryAttachment maximum count
+    // - returns true if all attachements have been received so this message is
+    // considered as complete
+    function AddBinaryAttachment(PayLoad: pointer; PayLoadLen: PtrInt): boolean;
     /// raise a ESockIO exception with the specified text context
     procedure RaiseESockIO(const ctx: RawUtf8);
     /// low-level kind of Socket.IO packet of this message
@@ -1122,9 +1137,14 @@ type
     /// optional low-level Socket.IO acknowledge ID of this message
     property ID: TSocketIOAckID
       read fID;
-    /// optional low-level Socket.IO binary attachement ID of this message
+    /// optional low-level Socket.IO binary attachement numbers in this message
+    // - Base64Attachment[0..BinaryAttachment-1] buffers are received just after
+    // the initial focText frame, as individual websocket focBinary frames
     property BinaryAttachment: cardinal
       read fBinaryAttachment;
+    /// contain [0..BinaryAttachment-1] base-64 encoded focBinary websockets buffers
+    property Base64Attachment: TRawUtf8DynArray
+      read fBase64Attachment;
     /// access to the internal NameSpace text buffer - for internal use
     // - call NameSpaceIs() and NameSpaceGet() functions instead
     // - warning: this buffer is NOT #0 ended but follows NameSpaceLen
@@ -1141,6 +1161,9 @@ type
 const
   /// constant used if no TSocketIOAckID is necessary
   SIO_NO_ACK = 0;
+
+  /// the TSocketIOPacket kinds which are followed by binary attachments
+  SIO_BINARY = [sioBinaryEvent, sioBinaryAck];
 
 function ToText(p: TEngineIOPacket): PShortString; overload;
 function ToText(p: TSocketIOPacket): PShortString; overload;
@@ -1162,6 +1185,8 @@ type
   ESocketIO = class(ESynException);
 
   /// Socket.IO process Acknowledgment callback
+  // - you can use Message.DataDecode() to retrieve the associated JSON data,
+  // potentially with binary attachements encoded as Base-64 strings
   TOnSocketIOAck = procedure(const Message: TSocketIOMessage) of object;
 
   /// internal slot for one Socket.IO process Acknowledgment callback
@@ -1172,13 +1197,15 @@ type
   PSocketIOCallback = ^TSocketIOCallback;
 
   /// Socket.IO process Event handler callback signature
-  // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
+  // - the associated JSON data is decoded and supplied as a TDocVariant,
+  // potentially with binary attachements encoded as Base-64 strings
   // - if the result is not '', it is expected to be JSON array acknowledgment
   // payload, e.g. from JsonEncodeArray([])
   TOnSocketIOEvent = function(Sender: TSocketIOLocalNamespace;
     const EventName: RawUtf8; const Data: TDocVariantData): RawJson of object;
   /// Socket.IO process published methods handler signature
-  // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
+  // - the associated JSON data is decoded and supplied as a TDocVariant,
+  // potentially with binary attachements encoded as Base-64 strings
   // - required signature of TSocketIOLocalNamespace.RegisterPublishedMethods()
   // - if the result is not '', it is expected to be JSON array acknowledgment
   // payload, e.g. from JsonEncodeArray([])
@@ -1319,7 +1346,7 @@ type
     // called by Create: can override this method to register some events
     procedure RegisterHandlers; virtual;
   public
-    /// global callback triggerred when any event message is received and
+    /// global callback triggerred when a JSON/text event message is received and
     // decoded for this name space
     OnEventReceived: procedure(Sender: TSocketIOLocalNamespace;
       const EventName: RawUtf8; var Data: TDocVariantData) of object;
@@ -1445,14 +1472,14 @@ end;
 
 procedure ComputeChallenge(const Base64: RawByteString; out Digest: TSha1Digest);
 const
-  // see https://tools.ietf.org/html/rfc6455
-  SALT: string[36] = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+  // see https://datatracker.ietf.org/doc/html/rfc6455#section-1.3
+  SALT: PAnsiChar = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 var
   sha1: TSha1;
 begin
   sha1.Init;
   sha1.Update(pointer(Base64), length(Base64));
-  sha1.Update(@SALT[1], 36);
+  sha1.Update(SALT, 36);
   sha1.Final(Digest);
 end;
 
@@ -2308,7 +2335,7 @@ begin
   P := pointer(frame.payload);
   if not CompareMemFast(pointer(Head), P, len) then
     exit;
-  result := PosChar(P + len, FRAME_HEAD_SEP);
+  result := PosChar(P + len, FRAME_HEAD_SEP); // use fast SSE2 asm on x86_64
   if result = nil then
     exit;
   if PMax <> nil then
@@ -2788,7 +2815,7 @@ begin
   key := Http.HeaderGetValue('SEC-WEBSOCKET-KEY');
   if Base64ToBinLengthSafe(pointer(key), length(key)) <> 16 then
     exit; // WS nonce must be a Base64-encoded value of 16 bytes
-  uri := TrimU(Http.CommandUri);
+  TrimU(Http.CommandUri, uri);
   if (uri <> '') and
      (uri[1] = '/') then
     Delete(uri, 1, 1);
@@ -3279,7 +3306,7 @@ begin
     exit;
   if WebSocketLog <> nil then
   begin
-    bak := PosCharU(aRequest.Url, '?');
+    bak := PosCharU(aRequest.Url, '?'); // use fast SSE2 asm on x86_64
     if bak <> nil then
       bak^ := #0;  // truncate URI before query parameters
     WebSocketLog.Add.Log(sllTrace,
@@ -3782,8 +3809,19 @@ end;
 
 { TSocketIOMessage }
 
+procedure TSocketIOMessage.Reset;
+begin
+  fSender := nil;
+  fID := 0;
+  fData := nil;
+  fDataLen := 0;
+  fBinaryAttachment := 0;
+  fBase64Attachment := nil;
+  fDataOwned := '';
+end;
+
 function TSocketIOMessage.InitBuffer(PayLoad: PUtf8Char; PayLoadLen: PtrInt;
-  PayLoadBinary: boolean; Process: TWebSocketProcess): boolean;
+  Process: TWebSocketProcess): boolean;
 var
   v: PtrUInt;
 begin
@@ -3791,14 +3829,13 @@ begin
   if (PayLoad = nil) or
      (PayLoadLen = 0) then
     exit;
+  Reset;
   fPacketType := TSocketIOPacket(PByte(PayLoad)^ - ord('0'));
   if byte(fPacketType) > byte(high(fPacketType)) then
     exit;
   fSender := Process;
-  fNameSpaceLen := 1; // '/' by default (if not specified)
+  fNameSpaceLen := length(DefaultSocketIONameSpace); // '/' if not specified
   fNameSpace := pointer(DefaultSocketIONameSpace);
-  fID := 0;
-  fBinaryAttachment := 0;
   inc(PayLoad);
   dec(PayLoadLen);
   if PayLoadLen <> 0 then
@@ -3847,17 +3884,21 @@ begin
         dec(PayLoadLen);
       end;
   end;
+  result := true;
   if PayLoadLen = 0 then
-    PayLoad := nil;
+    exit;
+  if fBinaryAttachment <> 0 then // this focText payload buffer will vanish
+  begin
+    FastSetString(fDataOwned, PayLoad, PayLoadLen); // make a private copy
+    PayLoad := pointer(fDataOwned);
+  end;
   fData := PayLoad;
   fDataLen := PayLoadLen;
-  fDataBinary := PayLoadBinary;
-  result := true;
 end;
 
 function TSocketIOMessage.Init(const PayLoad: RawUtf8): boolean;
 begin
-  result := InitBuffer(pointer(PayLoad), length(PayLoad), {binary=}false, nil);
+  result := InitBuffer(pointer(PayLoad), length(PayLoad), nil);
 end;
 
 function TSocketIOMessage.NameSpaceIs(const Name: RawUtf8): boolean;
@@ -3884,22 +3925,90 @@ begin
              CompareMemFast(pointer(Content), fData, fDataLen));
 end;
 
-function TSocketIOMessage.DataGet(out Dest: TDocVariantData;
+function TSocketIOMessage.DataParse(out Dest: TDocVariantData;
   Options: PDocVariantOptions): boolean;
 begin
+  // decode the input JSON array into a TDocVariant data
   if Options = nil then
     Options := @JSON_SOCKETIO;
-  result := Dest.InitJsonInPlace(fData, Options^) <> nil;
+  result := (Dest.InitJsonInPlace(fData, Options^) <> nil);
 end;
 
-function TSocketIOMessage.DataGet(CodePage: cardinal): RawByteString;
+function TSocketIOMessage.DataDecode(out Dest: TDocVariantData;
+  EventName: PRawUtf8; Options: PDocVariantOptions): boolean;
+var
+  ndx, i: PtrInt;
+  num: integer; // not PtrInt
+  bin64: variant;
+  d: PDocVariantData;
+  tmp: TDocVariantData;
 begin
-  FastSetStringCP(result, fData, fDataLen, CodePage);
+  // decode the input JSON array into a TDocVariant data
+  result := false;
+  if not DataParse(Dest, Options) or
+     (Dest.Count = 0) or
+     not Dest.IsArray then
+    exit;
+  result := true;
+  if EventName <> nil then
+  begin
+    // trim the event name from the data array (ACK will use EventName=nil)
+    VariantToUtf8(Dest.Values[0], EventName^);
+    Dest.Delete(0);
+  end;
+  if fBase64Attachment <> nil then
+    // replace place holders with base-64 encoded binary attachements
+    for ndx := 0 to length(fBase64Attachment) - 1 do
+    begin
+      RawUtf8ToVariant(fBase64Attachment[ndx], bin64);
+      for i := 0 to Dest.Count - 1 do
+        if _SafeObject(Dest.Values[i], d) and
+           d^.Exists('_placeholder') and
+           d^.GetAsInteger('num', num) and
+           (num = ndx) then
+        begin
+          Dest.Values[i] := bin64;
+          VarClear(bin64); // mark added in the proper position
+          break;
+        end;
+      if not VarIsEmptyOrNull(bin64) then
+        Dest.AddItem(bin64); // _placeholder not found: just append as base-64
+    end;
+  // return a single object as root (common case)
+  if (Dest.Count = 1) and
+     _SafeObject(Dest.Values[0], d) then
+  begin
+    tmp := d^; // need a transient safe local copy
+    Dest := tmp;
+  end;
+end;
+
+function TSocketIOMessage.DataRaw: RawByteString;
+var
+  cp: integer;
+begin
+  cp := CP_RAWBYTESTRING;
+  if IsValidUtf8Buffer(fData, fDataLen) then
+    cp := CP_UTF8; // socket.io eioMessage frame should always be valid JSON
+  FastSetStringCP(result, fData, fDataLen, cp);
+end;
+
+function TSocketIOMessage.AddBinaryAttachment(
+  PayLoad: pointer; PayLoadLen: PtrInt): boolean;
+begin
+  result := false;
+  if length(fBase64Attachment) >= PtrInt(fBinaryAttachment) then
+    exit;
+  AddRawUtf8(fBase64Attachment, BinToBase64(PayLoad, PayLoadLen));
+  result := length(fBase64Attachment) = PtrInt(fBinaryAttachment); // got'm all
 end;
 
 procedure TSocketIOMessage.RaiseESockIO(const ctx: RawUtf8);
 begin
-  ESocketIO.RaiseUtf8('% NameSpace=% Data=%', [ctx, NameSpaceShort, fData]);
+  raise ESocketIO.CreateUtf8('% Packet=% NameSpace=% Data=%',
+    [ctx, ToText(PacketType)^, NameSpaceShort, fData])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
 end;
 
 
@@ -3926,7 +4035,7 @@ function TSocketIOLocalNamespace.RegisterEvent(const aEventName: RawUtf8;
 var
   h: PEventHandler;
 begin
-  h := fHandlers.AddUniqueName(aEventName, 'Duplicated h name %', [aEventName]);
+  h := fHandlers.AddUniqueName(aEventName, 'Duplicated event name %', [aEventName]);
   h^.OnEvent := aCallback;
   result := self;
 end;
@@ -3940,7 +4049,7 @@ begin
   for m := 0 to GetPublishedMethods(aInstance, met) - 1 do
   begin
     h := fHandlers.AddUniqueName(met[m].Name,
-       'Duplicated h name % on %', [met[m].Name, aInstance]);
+       'Duplicated event name % on %', [met[m].Name, aInstance]);
     h^.OnMethod := TOnSocketIOMethod(met[m].Method);
   end;
 end;
@@ -3948,15 +4057,14 @@ end;
 procedure TSocketIOLocalNamespace.RegisterFrom(aAnother: TSocketIOLocalNamespace);
 var
   i: integer;
-  s, d: PEventHandler;
+  s: PEventHandler;
 begin
   if aAnother = nil then
     exit;
   s := pointer(aAnother.fHandler);
   for i := 1 to length(aAnother.fHandler) do
   begin
-    d := fHandlers.AddUniqueName(s^.Name);
-    d^ := s^;
+    PEventHandler(fHandlers.AddUniqueName(s^.Name))^ := s^;
     inc(s);
   end;
 end;
@@ -3967,33 +4075,24 @@ var
   ndx: PtrInt;
   event, ack: RawUtf8;
   data: TDocVariantData;
-  d: PDocVariantData;
 begin
   // validate input context (paranoid checks)
   if (fNameSpace <> '*') and
      not aMessage.NameSpaceIs(fNameSpace) then
     ESocketIO.RaiseUtf8('%.HandleEvent: unexpected namespace ([%]<>[%])',
       [self, aMessage.NameSpaceShort, fNameSpace]);
-  if aMessage.PacketType <> sioEvent then
+  if not (aMessage.PacketType in [sioEvent, sioBinaryEvent]) then
     ESocketIO.RaiseUtf8('%.HandleEvent: unexpected % message for namespace %',
       [self, ToText(aMessage.PacketType)^, fNameSpace]);
-  // decode the input JSON array
-  if not aMessage.DataGet(data) or
-     not data.IsArray or
-     (data.Count = 0) then
+  // decode the input JSON array and binary attachements into a TDocVariant data
+  if not aMessage.DataDecode(data, @event) then
     if snoIgnoreIncorrectData in fOptions then
       exit // ignore in silence
     else
       ESocketIO.RaiseUtf8('%.HandleEvent: message is not a JSON array', [self]);
-  VariantToUtf8(data.Values[0], event);
-  data.Delete(0); // trim the event name from the data array
-  d := @data;
-  if (d^.Count = 1) and
-     _Safe(d^.Values[0])^.IsObject then
-    d := _Safe(d^.Values[0]); // return a single object as root (common case)
-  // optional callback
+  // optional global callback
   if Assigned(OnEventReceived) then
-    OnEventReceived(self, event, d^);
+    OnEventReceived(self, event, data);
   // retrieve event name and search for associated handler
   ndx := fHandlers.FindHashed(event);
   if ndx < 0 then
@@ -4006,14 +4105,15 @@ begin
   // call the handler
   with fHandler[ndx] do
     if Assigned(OnEvent) then
-      ack := OnEvent(self, event, d^)
+      ack := OnEvent(self, event, data)
     else if Assigned(OnMethod) then
-      ack := OnMethod(d^);
+      ack := OnMethod(data);
   // optionally call back the server with an ACK payload
   if (ack <> '') and
      (aMessage.ID <> SIO_NO_ACK) then
     SocketIOSendPacket(fOwner.fWebSockets, sioAck, fNameSpace,
       pointer(ack), length(ack), aMessage.ID);
+  // TODO: check ack is not CP_UTF8 and return the payload as sioBinaryAck ?
 end;
 
 
@@ -4038,7 +4138,7 @@ var
   data: TDocVariantData;
   sid, namespace: RawUtf8;
 begin
-  if not aMessage.DataGet(data) or
+  if not aMessage.DataParse(data) or
      not data.GetAsRawUtf8('sid', sid) then
     EEngineIO.RaiseUtf8('%.Create: missing "sid" in message', [aOwner]);
   aMessage.NameSpaceGet(namespace);
@@ -4122,8 +4222,8 @@ begin
   if not aMessage.NameSpaceIs(fNameSpace) then
     ESocketIO.RaiseUtf8('%.Acknowledge: unexpected namespace ([%]<>[%])',
       [self, aMessage.NameSpaceShort, fNameSpace]);
-  if (aMessage.PacketType <> sioAck) or
-     (aMessage.ID = SIO_NO_ACK) then
+  if (aMessage.ID = SIO_NO_ACK) or
+     not (aMessage.PacketType in [sioAck, sioBinaryAck]) then
     ESocketIO.RaiseUtf8('%.Acknowledge: message %#% is not a valid ' +
       'acknowledgment message for namespace %',
       [self, ToText(aMessage.PacketType)^, aMessage.ID, fNameSpace]);
@@ -4227,36 +4327,45 @@ var
   p: TEngineIOPacket;
 begin
   // focText/focBinary or focContinuation/focConnectionClose
-  if not (Request.opcode in [focText, focBinary]) then
-    exit;
-  if Request.payload = '' then
-    EEngineIO.RaiseUtf8('%.ProcessIncomingFrame with no Payload', [self]);
-  p := TEngineIOPacket(PByte(Request.payload)^ - ord('0'));
-  case p of
-    eioOpen:
-      if fOpened then
-        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: OPEN twice', [self])
-      else
-        fOpened := true;
-    eioClose:
-      if fOpened then
-        fOpened := false
-      else
-        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected CLOSE', [self]);
-    eioPing:
-      EngineIOSendPacket(Sender, nil, 0, {binary=}false, eioPong);
-    eioPong:
-      ; // process depends on the client or server side (mostly do nothing)
-    eioMessage:
-      if not fOpened then
-        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: missing OPEN', [self]);
-  else // eioUpgrade, eioNoop
-    EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected % (%)',
-      [self, ToText(p)^, Request.payload[1]])
+  case Request.opcode of
+    focText:
+      // JSON only event or ack in engine.io format
+      begin
+        if Request.payload = '' then
+          EEngineIO.RaiseUtf8('%.ProcessIncomingFrame with no Payload', [self]);
+        p := TEngineIOPacket(PByte(Request.payload)^ - ord('0'));
+        case p of
+          eioOpen:    // '0'
+            if fOpened then
+              EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: OPEN twice', [self])
+            else
+              fOpened := true;
+          eioClose:   // '1'
+            if fOpened then
+              fOpened := false
+            else
+              EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected CLOSE', [self]);
+          eioPing:    // '2'
+            EngineIOSendPacket(Sender, nil, 0, {binary=}false, eioPong);
+          eioPong:    // '3'
+            ; // process depends on the client or server side (mostly do nothing)
+          eioMessage: // '4'
+            if not fOpened then
+              EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: missing OPEN', [self]);
+        else // eioUpgrade, eioNoop
+          EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected % (%)',
+            [self, ToText(p)^, Request.payload[1]])
+        end;
+        // call virtual method for proper process of this incoming Engine.IO packet
+        EnginePacketReceived(Sender, p, @PByteArray(Request.payload)[1],
+          length(Request.payload) - 1, {payloadBin=}false);
+      end;
+    focBinary:
+      // after sioBinaryEvent or sioBinaryAck: raw attachement
+      // call virtual method for proper process of this incoming Engine.IO packet
+      EnginePacketReceived(Sender, eioMessage, pointer(Request.payload),
+        length(Request.payload), {payloadBin=}true);
   end;
-  // call virtual method for proper process of this incoming Engine.IO packet
-  EnginePacketReceived(Sender, p, @PByteArray(Request.payload)[1],
-    length(Request.payload) - 1, (Request.opcode = focBinary));
 end;
 
 

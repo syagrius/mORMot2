@@ -259,14 +259,14 @@ procedure TTestCoreCrypto._SHA1;
 
 begin
   DoTest;
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSHA in CpuFeatures then
   begin
     Exclude(CpuFeatures, cfSHA); // validate regular code without SHA-NI
     DoTest;
     Include(CpuFeatures, cfSHA);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   // see https://datatracker.ietf.org/doc/html/rfc6070
   Rfc(saSha1, 'password', 'salt', 1, 20,
       '0c60c80f961f0e71f3a9b524af6012062fe037a6', '1 round');
@@ -373,7 +373,7 @@ procedure TTestCoreCrypto._SHA256;
 
 begin
   DoTest;
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSSE41 in CpuFeatures then // validate regular code without Sha256Sse4()
   begin
     Exclude(CpuFeatures, cfSSE41);
@@ -386,7 +386,7 @@ begin
     DoTest;
     Include(CpuFeatures, cfSHA);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 // https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
   Rfc(saSha224, 'password', 'salt', 1, 20,
       '3c198cbdb9464b7857966bd05b7bc92bc1cc4e6e', '1 round');
@@ -601,22 +601,22 @@ procedure TTestCoreCrypto._SHA512;
 
 begin
   DoTest;
-  {$ifdef ASMX86}
+  {$ifdef ASMX86NOTPIC}
   if cfSSSE3 in CpuFeatures then // validate regular code without sha512_compress()
   begin
     Exclude(CpuFeatures, cfSSSE3);
     DoTest;
     Include(CpuFeatures, cfSSSE3);
   end;
-  {$endif ASMX86}
-  {$ifdef ASMX64}
+  {$endif ASMX86NOTPIC}
+  {$ifdef ASMX64NOTPIC}
   if cfSSE41 in CpuFeatures then // validate regular code without sha512_sse4()
   begin
     Exclude(CpuFeatures, cfSSE41);
     DoTest;
     Include(CpuFeatures, cfSSE41);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 // https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
   Rfc(saSha384, 'password', 'salt', 1, 20,
       'c0e14f06e49e32d73f9f52ddf1d0c5c719160923', '1 round');
@@ -762,14 +762,14 @@ procedure TTestCoreCrypto._SHA3;
 
 begin
   DoTest;
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   if cpuAVX2 in X64CpuFeatures then // validate without KeccakPermutationAvx2()
   begin
     Exclude(X64CpuFeatures, cpuAVX2);
     DoTest;
     Include(X64CpuFeatures, cpuAVX2);
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
 end;
 
 procedure TTestCoreCrypto._PRNG;
@@ -963,7 +963,13 @@ begin
   case dpapi of
     {$ifdef OSWINDOWS}
     0:
-      func := CryptDataForCurrentUserDPAPI;
+      begin
+        if IsWow64Emulation then // PRISM seems inconsistent about this API
+          exit;
+        func := CryptDataForCurrentUserDPAPI;
+        if OSVersion < wVista then
+          max := 100; // slow API on Windows XP
+      end;
     {$endif OSWINDOWS}
     1:
       func := CryptDataForCurrentUser;
@@ -976,9 +982,9 @@ begin
     exit;
   end;
   enc := func('warmup', 'appsec', true);
-  Check(enc <> '');
+  Check(enc <> '', 'warmup');
   test := func(enc, 'appsec', false);
-  Check(test <> '');
+  Check(test <> '', 'appsec');
   CheckEqual(test, 'warmup');
   size := 0;
   tim.Start;
@@ -988,11 +994,10 @@ begin
     CheckEqual(length(plain), i);
     UInt32ToUtf8(i, appsec);
     enc := func(plain, appsec, true);
-    if not ((plain = '') or
-            (enc <> '')) then
-      enc := func(plain, appsec, true);
     check((plain = '') or
-          (enc <> ''));
+          (enc <> ''), 'not void');
+    check((plain = '') or
+          (enc <> plain), 'enc<>plain');
     check(length(enc) >= length(plain));
     test := func(enc, appsec, false);
     CheckEqual(length(test), i);
@@ -1444,7 +1449,7 @@ var
   AES: array[bAESFIRST..bAESLAST] of TAesAbstract;
   TXT: array[TBenchmark] of RawUtf8;
 begin
-  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT, false, {lower=}true);
+  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT, scLowerCase);
   for b := low(AES) to high(AES) do
     if AESCLASS[b].IsAvailable then
     begin
@@ -1472,7 +1477,7 @@ begin
   FillCharFast(time, SizeOf(time), 0);
   size := 0;
   n := 0;
-  for s := 0 to high(SIZ) do
+  for s := 0 to high(SIZ) do // up to 10KB of CP1252 text
   begin
     data := RandomWinAnsi(SIZ[s]);
     CheckEqual(length(data), SIZ[s]);
@@ -2497,8 +2502,8 @@ begin
   Check(Zeroed(UnZeroed('~'#0#0'~~')) = '~'#0#0'~~', 'unz4');
   enc.Init;
   dec.Init;
-  tmp := RandomWinAnsi(1 shl 20);
-  Check(length(tmp) = 1 shl 20);
+  tmp := RandomWinAnsi(1 shl 20); // 1MB of 8-bit random
+  CheckEqual(length(tmp), 1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
@@ -2511,13 +2516,13 @@ begin
   SetLength(tmp2, length(tmp));
   L := 0;
   n := 50;
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   if cfAVX2 in CpuFeatures then
   begin
     n := n * 10;
     msg := ' avx2';
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
   for i := 0 to 20 do
   begin
     enc.Resume;
@@ -2675,13 +2680,13 @@ var
   Tags: array[0..2, 7..9] of THash256DynArray; // Tags[k,m]
   h32: array[0..2, 0..9] of TCardinalDynArray;
   tab: PCardinalArray;
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   backup: TIntelCpuFeatures;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
 begin
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   backup := CpuFeatures;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -2702,7 +2707,7 @@ begin
   SetLength(crypted, MAX + 256);
   st := '1234essai';
   orig := RandomWinAnsi(8000);
-  Check(length(orig) = 8000);
+  CheckEqual(length(orig), 8000);
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
@@ -3012,7 +3017,7 @@ begin
           end
         end;
       end;
-    {$ifdef CPUINTEL}
+    {$ifdef ASMINTEL}
     if noaesni then
     begin
       AddConsole('cypher with AES-NI: %, without: %',
@@ -3021,11 +3026,11 @@ begin
     end;
     if HasHWAes then
       Exclude(CpuFeatures, cfAESNI);
-    {$endif CPUINTEL}
+    {$endif ASMINTEL}
   end;
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   CpuFeatures := backup;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   // see https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
   st := mormot.core.text.HexToBin('636869636b656e207465726979616b69');
   CheckEqual(length(st), 16);
@@ -3246,9 +3251,9 @@ const
         IV_Len, aLen, cLen, tag, avx), 'FullEncryptAndAuthenticate #%', [tn]);
       CheckUtf8(CompareMem(@tag, ptag, tlen), 'Tag #%', [tn]);
       CheckUtf8(CompareMem(@ct, ctp, cLen), 'Encoded #%', [tn]);
-      {$ifndef CPUX64ASM}
+      {$ifndef ASMX64AVX0}
       break;
-      {$endif CPUX64ASM}
+      {$endif ASMX64AVX0}
     end;
   end;
 
@@ -3838,7 +3843,7 @@ begin
     if CheckEqual(length(ktg.Entry), 2) then
     begin
       CheckHash(ktg.Entry[1].Key, $D101D374);
-      Check(ktg.Entry[1].Timestamp > 1750947820);
+      Check(ktg.Entry[0].Timestamp > 1750947820);
       Check(ktg.Entry[1].Timestamp > 1750947820);
       Check(UnixTimeUtc - ktg.Entry[0].Timestamp < 2, 'UnixTimeUtc');
       ktg.Entry[0].Timestamp := 1750947820; // as in KEYTAB_REF
@@ -4529,7 +4534,7 @@ begin
   {$endif USE_OPENSSL}
   DoEcc(TCryptPublicKeyEcc);
   alg := TCryptAsym.Instances;
-  //fCatalogAllGenerate := SystemInfo.dwNumberOfProcessors > 8; // not worth it
+  //fCatalogAllGenerate := CpuThreads > 8; // not worth it
   for a := 0 to high(alg) do
   begin
     asy := alg[a] as TCryptAsym;
@@ -4863,8 +4868,8 @@ begin
     begin
       CheckEqual(c.ActiveCount, 0, 'nomem');
       rnd := Random32;
-      if rnd = 0 then
-        continue; // avoid division per zero
+      if (rnd < 1024) then
+        continue; // avoid division per zero or too small number of bits
       b := c.AllocateFrom(rnd);
       CheckEqual(b^.Size, 1);
       CheckEqual(b^.Value[0], rnd);
@@ -5028,7 +5033,8 @@ begin
       CheckEqual(b^.Size, 1);
       Check(not b^.IsZero);
       b.Release;
-      CheckUtf8(s^.Size > 80, '%>80', [s^.Size]); // typical 90 .. 512 bytes
+      CheckUtf8(s^.Size > 80, '%>80 rnd=%',
+        [s^.Size, Int64(rnd)]); // typical 90 .. 512 bytes
       Check(not s^.IsZero);
       s.Release;
       CheckEqual(c.ActiveCount, 0);

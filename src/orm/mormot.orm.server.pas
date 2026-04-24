@@ -62,6 +62,8 @@ type
   // engine for TRestOrmServerFullMemory or SQLite3 for TRestOrmServerDB
   // - is able to register and redirect some TOrm classes to their own
   // dedicated TRestStorage
+  // - you should NEVER instantiate this class, but use e.g. TRestServerDB.Server
+  // and use IRestOrmServer methods or TRest.Orm and use IRestOrm methods
   TRestOrmServer = class(TRestOrm, IRestOrmServer)
   protected
     fOwner: TRestServer;
@@ -175,6 +177,7 @@ type
     OnBlobUpdateEvent: TOnOrmFieldEvent;
 
     /// initialize the class, and associated to a TRest and its TOrmModel
+    // - you should NEVER use this constructor, but use e.g. TRestServerDB.Server
     constructor Create(aRest: TRest); override;
     /// release memory and any existing associated resource
     destructor Destroy; override;
@@ -2069,7 +2072,7 @@ begin
     else
     begin
       // e.g. '[...,"POST@Table",{object},...]'
-      cmdtable := PosChar(fCommand, '@');
+      cmdtable := PosChar(fCommand, '@'); // use fast SSE2 asm on x86_64
       if cmdtable <> nil then
       begin
         cmdtable^ := #0; // isolate 'POST' or 'hex'/'ihex' prefix

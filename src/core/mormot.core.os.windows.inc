@@ -10,23 +10,10 @@
 
 {$Z4} // enumerates should be DWORD / 32-bit - see jediapilib.inc
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
-  overload; forward;
-procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload; forward;
 function PosExtString(Str: PChar): PChar; forward;
 
-procedure _DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
-var
-  tmp: TSynTempBuffer;
-begin // FPC RTL is fine, and recent Delphi just calls WideCharToMultiByte() API
-  tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len);
-  if Len > 0 then
-    dec(Len); // UnicodeToUtf8() result includes the null terminator
-  FastSetString(res, tmp.buf, Len);
-  tmp.Done;
-end; // warning: Delphi 7/2007 UnicodeToUtf8() RTL doesn't handle surrogates
+function _utf16toascii(s: PWordArray; d: PByteArray; l: PtrInt): pointer; forward;
+procedure _utf16fromascii(s: PByteArray; d: PWordArray; l: PtrInt); forward;
 
 function IsExtendedPathNameW(Name: PWideChar): boolean; // in '\\?\...' format
 begin
@@ -75,6 +62,11 @@ begin
     Temp[0] := #0; // GetFullPathNameW() failure or W32_MAX overflow
 end;
 
+procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
+begin
+  Unicode_ToUtf8(P, Len, res);
+end;
+
 {$ifdef UNICODE}
 
 function IsExtendedPathName(const Name: TFileName): boolean;
@@ -103,16 +95,10 @@ begin
 end;
 
 procedure SetStringFromAnsi7Buffer(var d: string; s: PByteArray; l: PtrInt);
-var
-  dst: PWordArray;
 begin
   SetString(d, nil, l);
-  dst := pointer(d);
-  if dst <> nil then
-    repeat
-      dec(l);
-      dst[l] := cardinal(s[l]); // fast direct 7-bit conversion
-    until l = 0;
+  if pointer(d) <> nil then
+    _utf16fromascii(s, pointer(d), l);
 end;
 
 {$else}
@@ -134,7 +120,7 @@ end;
 
 function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean): PWideChar;
 var
-  i, len: PtrInt;
+  len: PtrInt;
 begin
   result := nil;
   if FileName = '' then
@@ -145,8 +131,7 @@ begin
        IsExtendedPathName(FileName))) and
      IsAnsiCompatible(pointer(FileName), len) then
     // most common cases do not need any Unicode conversion
-    for i := 0 to len do // includes #0 terminator
-      PWordArray(@Temp)[i] := cardinal(PByteArray(FileName)[i])
+    _utf16fromascii(pointer(FileName), @Temp, len)
   else
     // use a temporary SynUnicode variable for complex UTF-16 conversion
     // or if MAX_PATH is reached and \\?\ prefix is needed for extended-length
@@ -155,8 +140,6 @@ begin
 end;
 
 procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string);
-var
-  i: PtrInt;
 
   procedure DoSynUnicodeConv;
   var
@@ -170,12 +153,12 @@ begin
   if IsAnsiCompatibleW(P, l) then // most common case
   begin
     SetString(s, nil, l);
-    for i := 0 to l - 1 do
-      PByteArray(s)[i] := PWordArray(P)[i]; // fast direct conversion
+    if pointer(s) <> nil then
+      _utf16toascii(pointer(P), pointer(s), l); // fast direct conversion
   end
   {$ifdef FPC}
   else if DefaultRTLFileSystemCodePage = CP_UTF8 then // happens with Lazarus
-    DoWin32PWideCharToUtf8(P, l, RawUtf8(s)) // use RTL or mormot.core.unicode
+    Unicode_ToUtf8(P, l, RawUtf8(s)) // use RTL or mormot.core.unicode
   {$endif FPC}
   else
     DoSynUnicodeConv;
@@ -194,31 +177,15 @@ begin
   Win32PWideCharToString(P, StrLenW(P), string(fn));
 end;
 
-procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
-var
-  i: PtrInt;
-  R: PByteArray;
-begin
-  if Len > 0 then
-    if IsAnsiCompatibleW(P, Len) then
-    begin
-      R := FastSetString(res, Len);
-      for i := 0 to Len - 1 do
-        R[i] := PWordArray(P)[i]; // fast direct ASCII 7-bit conversion
-    end
-    else
-      DoWin32PWideCharToUtf8(P, Len, res); // use RTL or mormot.core.unicode
-end;
-
 procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8);
 begin
   if P <> nil then
-    Win32PWideCharToUtf8(P, StrLenW(P), res);
+    Unicode_ToUtf8(P, StrLenW(P), res);
 end;
 
 function Utf8ToWin32PWideChar(const u: RawUtf8; var d: TSynTempBuffer): PWideChar;
 begin
-  result := Unicode_FromUtf8(pointer(u), length(u), d); // call the RTL
+  result := Unicode_FromUtf8(pointer(u), length(u), d);
 end;
 
 const
@@ -253,15 +220,15 @@ end;
 function Win32Utf8ToAnsi(P: pointer; L, CP: integer; var A: RawByteString): boolean;
 var
   tmpW, tmpA: TSynTempBuffer;
-begin
+begin // fast enough: used internally only by Utf8ToConsole() if CP <> CP_UTF8
   result := false;
   tmpW.Init(L * 2);
-  L := Utf8ToUnicode(tmpW.Buf, L + 8, P, L); // use the RTL
+  L := Utf8ToUnicode(tmpW.Buf, L + 8, P, L); // convert to UTF-16 with the RTL
   if L > 0 then // valid UTF-8
   begin
     dec(L); // Utf8ToUnicode() included trailing #0
     tmpA.Init(L * 3);
-    L := Unicode_WideToAnsi(tmpW.buf, tmpA.buf, L, tmpA.len + 16, CP);
+    L := Unicode_WideToAnsi(tmpW.buf, tmpA.buf, L, tmpA.len + 16, CP); // WinAPI
     if L > 0 then
     begin
       FastSetStringCP(A, tmpA.buf, L, CP); // keep A untouched on failure
@@ -391,7 +358,7 @@ begin
 end;
 
 const
-  MilliSecsPerFileTime = 10000;
+  MilliSecsPerFileTime = 10000; // a tick is 100ns
   SecsPerFileTime      = 10000000;
 
 procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
@@ -474,7 +441,7 @@ begin
   if PInt64(@FT)^ = 0 then
     result := 0
   else // inlined UnixTimeToDateTime()
-    result := FileTimeToUnixMSTime(FT) / MilliSecsPerDay + UnixDateDelta;
+    result := FileTimeToUnixMSTime(FT) * MilliSecsPerDate + UnixDateDelta;
 end;
 
 procedure DateTimeToFileTime(dt: TDateTime; out FT: TFileTime);
@@ -546,26 +513,49 @@ function  Unicode_InPlaceLower;       external user32 name 'CharLowerBuffW';
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   ConsoleOutputCP: cardinal;       // to call the Windows API once
+  TextAttr, DefaultTextAttr: integer;
   {$ifdef ISDELPHI}
   StdInputHandle: THandle;         // Delphi doesn't define this global variable
   {$endif ISDELPHI}
 
 function HasConsole: boolean;
+var
+  nfo: TConsoleScreenBufferInfo;
 begin
   if StdOut = 0 then
     StdOut := GetStdHandle(STD_OUTPUT_HANDLE);
   result := (StdOut <> 0) and
             (StdOut <> INVALID_HANDLE_VALUE);
+  if result and
+     (DefaultTextAttr = 0) then
+    if GetConsoleScreenBufferInfo(StdOut, nfo) then
+      DefaultTextAttr := nfo.wAttributes // typically 7 = ord(ccLightGray)
+    else
+      DefaultTextAttr := ord(ccLightGray);
 end;
 
 procedure WinAllocConsole;
 begin
   ConsoleOutputCP := 0; // reset to force calling GetConsoleOutputCP() again
   Windows.AllocConsole;
-  if (StdOut = 0) or
-     (StdOut = INVALID_HANDLE_VALUE) then
-    // force setup StdOut global variable
-    StdOut := GetStdHandle(STD_OUTPUT_HANDLE);
+  HasConsole; // ensure setup StdOut/DefaultTextAttr global variables
+end;
+
+function ConsoleNeedConversion(P: pointer; Len: PtrInt): boolean;
+begin
+  result := false;
+  if IsAnsiCompatible(P, Len) then
+    exit; // most common case
+  if ConsoleOutputCP = 0 then // retrieve once CP_OEM final code page
+    ConsoleOutputCP := GetConsoleOutputCP; // makes a syscall
+  result := ConsoleOutputCP <> CP_UTF8;
+end;
+
+function Utf8ToConsole(const S: RawUtf8): RawByteString;
+begin
+  if not ConsoleNeedConversion(pointer(S), length(S)) or
+     not Win32Utf8ToAnsi(pointer(S), length(S), ConsoleOutputCP, result) then
+    result := S; // no conversion needed, or conversion failed
 end;
 
 procedure ConsoleErrorWrite(const text: RawUtf8);
@@ -611,14 +601,14 @@ begin
   if len = 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
     len := FormatMessageW(flags, pointer(lib), err, 0, @tmp, SizeOf(tmp), nil);
-  SetLastError(errbak);
   while (len <> 0) and
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
     dec(len); // trim right
   if s <> nil then
     Win32PWideCharToString(@tmp, len, s^)
-  else if len <> 0 then
-    ss^[0] := AnsiChar(UnicodeToUtf8(@ss^[1], 255, @tmp, len)); // use RTL
+  else
+    Unicode_WideToShort(@tmp, len, CP_UTF8, ss^);
+  SetLastError(errbak);
   result := len <> 0;
 end;
 
@@ -636,7 +626,7 @@ begin
     WinError(Code, 0, nil, @result); // fallback to FormatMessageW()
 end;
 
-function WinApiErrorShort(Code: cardinal; Lib: HMODULE): shortstring;
+function WinApiErrorShort(Code: cardinal; Lib: HMODULE): ShortString;
 begin
   if (Lib = 0) or
      not WinError(Code, Lib, @result, nil) then // try from library name
@@ -696,6 +686,14 @@ procedure WinCheck(const Context: ShortString; Code: integer;
 begin
   if Code <> NO_ERROR then
     RaiseLastError(Context, RaisedException, Code);
+end;
+
+procedure WinDebugOutput(p: PUtf8Char; len: PtrInt);
+var
+  u: TSynTempBuffer;
+begin
+  OutputDebugStringW(Unicode_FromUtf8(p, len, u));
+  u.Done;
 end;
 
 function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
@@ -1131,6 +1129,15 @@ begin
             DeleteFileW(W32(aFileName, tmp));
 end;
 
+function RenameFile(const aOld, aNew: TFileName): boolean;
+var
+  o, n: TW32Temp;
+begin
+  result := (aOld <> '') and
+            (aNew <> '') and
+            MoveFileW(W32(aOld, o), W32(aNew, n));
+end;
+
 function RemoveDir(const aDirName: TFileName): boolean;
 var
   tmp: TW32Temp;
@@ -1244,17 +1251,6 @@ end;
 procedure FileSetSticky(const FileName: TFileName);
 begin
   FileSetAttr(FileName, FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_SYSTEM);
-end;
-
-function RenameFile(const OldName, NewName: TFileName): boolean;
-var
-  o, n: TW32Temp;
-begin
-  if (OldName = '') or
-     (NewName = '') then
-    result := false
-  else
-    result := MoveFileW(W32(OldName, o), W32(NewName, n));
 end;
 
 function FileSetTime(const FileName: TFileName;
@@ -1507,18 +1503,22 @@ begin
   result := false;
 end;
 
-
-{$ifdef FPC}
-  {$define NOSETTHREADNAME} // only tested and supported on Delphi
-{$endif FPC}
+// thread naming and "int 3" debug opcode only validated on Delphi Wintel
+{$ifndef WINTELDELPHI}
+  {$define NOSETTHREADNAME}
+{$endif WINTELDELPHI}
 
 const
   // see http://msdn.microsoft.com/en-us/library/xcb2z8hs
   cSetThreadNameException = $406D1388;
 
-{$ifdef NOSETTHREADNAME}
+{$ifdef NOSETTHREADNAME} // only available on Delphi Wintel
 
 procedure RawSetThreadName(ThreadID: TThreadID; const Name: RawUtf8);
+begin
+end;
+
+procedure DebuggerBreak;
 begin
 end;
 
@@ -1553,6 +1553,11 @@ begin
     {ignore}
   end;
   {$endif ISDELPHIXE2}
+end;
+
+procedure DebuggerBreak;
+asm
+    int  3
 end;
 
 {$endif NOSETTHREADNAME}
@@ -1806,7 +1811,7 @@ begin
         continue;
       if dest[0] = #0 then
         dest := ' [.NET/CLR unhandled'
-      else if ord(dest[0]) + ps^[0] > 240 then
+      else if PtrUInt(dest[0]) + ps^[0] >= PtrUInt(high(dest)) then
         break; // paranoid
       p := @dest[ord(dest[0]) + 1];
       p^ := ' '; // replace leading '_' by ' '
@@ -1900,9 +1905,11 @@ begin
       end
       else
       begin
+        {$ifndef LLVM}
         if Assigned(ExceptClsProc) then
           ctxt.EClass := GetExceptionClass(ExceptClsProc)(Exc)
         else
+        {$endif LLVM}
           ctxt.EClass := EExternal;
         ctxt.EInstance := nil;
         ctxt.ELevel := sllExceptionOS;
@@ -2018,6 +2025,7 @@ const
   PROCESS_QUERY_LIMITED_INFORMATION = $1000;
 
 var
+  OSSafe: TLightLock; // when GlobalLock is overkill
   // PROCESS_QUERY_INFORMATION (XP) / PROCESS_QUERY_LIMITED_INFORMATION (Vista+)
   OpenProcessAccess: DWord;
 
@@ -2040,7 +2048,7 @@ begin
   if pointer(api) = nil then
   begin
     proc := nil;
-    GlobalLock; // avoid race condition
+    OSSafe.Lock; // avoid race condition
     if lib = 0 then
       lib := Windows.LoadLibrary(libname);
     if lib >= 32 then
@@ -2050,7 +2058,7 @@ begin
     if proc = nil then
       proc := pointer(1); // mark non available
     pointer(api) := proc; // set it last
-    GlobalUnLock;
+    OSSafe.UnLock;
   end;
   result := pointer(api) <> pointer(1);
 end;
@@ -2133,7 +2141,7 @@ begin
       begin
         len := high(name);
         if QueryFullProcessImageNameW(h, 0, name, @len) then
-          Win32PWideCharToUtf8(name, len, result);
+          Unicode_ToUtf8(name, len, result);
       end
       else if DelayedProc(GetModuleFileNameExW, PsapiDll, 'Psapi.dll',
                 'GetModuleFileNameExW') and
@@ -2156,7 +2164,7 @@ type
     th32ParentProcessID: DWord;    // this process's parent process
     pcPriClassBase: integer;       // base priority of process's threads
     dwFlags: DWord;
-    szExeFile: array [0..MAX_PATH - 1] of WideChar;   // Path
+    szExeFile: array[0..MAX_PATH - 1] of WideChar;   // Path
   end;
 
   TThreadEntry32 = record
@@ -2306,7 +2314,7 @@ function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
 
 {$endif UNICODE}
 
-function CoCreateGuid(out guid: THash128Rec): HRESULT;
+function CoCreateGuid(out guid: THash128): HRESULT;
   stdcall; external 'ole32.dll';
 
 procedure XorOSEntropy(var e: THash512Rec);
@@ -2334,7 +2342,7 @@ begin
   DefaultHasher128(@e.h3, @ft, SizeOf(ft));
   for i := 0 to high(e.r) do
   begin
-    CoCreateGuid(u); // very fast on Windows - used to obfuscate system info
+    CoCreateGuid(u.b); // very fast on Windows - used to obfuscate system info
     XorMemory(e.r[i], u);
   end;
   QueryPerformanceCounter(u.Lo); // is likely to have changed in-between
@@ -2557,7 +2565,8 @@ end;
 
 function GetDiskPartitions: TDiskPartitions;
 var
-  drives, drive, m, n: integer;
+  drives, m: DWord;
+  drive, n: integer;
   fn: TFileName;
   volume: SynUnicode;
   av, fr, tot: QWord;
@@ -2566,11 +2575,11 @@ begin
   result := nil;
   n := 0;
   fn := '#:';
-  drives := GetLogicalDrives;
-  m := 1 shl 2; // bit 2 = drive C
+  drives := GetLogicalDrives and not 3; // ignore A: and B: floppies
+  m := 1 shl 2; // bit 2 = drive 3 = C:
   for drive := 3 to 26 do
   begin
-    // retrieve partitions mounted as C..Z drives
+    // retrieve partitions mounted as C: .. Z: drives
     if drives and m <> 0 then
     begin
       fn[1] := char(64 + drive);
@@ -2578,19 +2587,19 @@ begin
       begin
         SetLength(result, n + 1);
         p := @result[n];
-        Win32PWideCharToUtf8(pointer(volume), length(volume), p^.name);
+        Unicode_ToUtf8(pointer(volume), length(volume), p^.name);
         p^.mounted := fn;
         p^.size := tot;
         volume := '';
         inc(n);
       end;
+      drives := drives and not m;
+      if drives = 0 then
+        exit; // no more drives
     end;
-    m := m shl 1;
+    m := m shl 1; // next drive from C: to Z:
   end;
 end;
-
-var
-  TextAttr: integer = ord(ccDarkGray);
 
 procedure TextColor(Color: TConsoleColor);
 var
@@ -2600,8 +2609,11 @@ begin
     exit;
   oldAttr := TextAttr;
   TextAttr := (TextAttr and $F0) or ord(Color);
-  if TextAttr <> oldAttr then
-    SetConsoleTextAttribute(StdOut, TextAttr);
+  if TextAttr = oldAttr then
+    exit;
+  if Color = ccLightGray then // = ccDefault
+    TextAttr := DefaultTextAttr or (TextAttr and $F0);
+  SetConsoleTextAttribute(StdOut, TextAttr);
 end;
 
 procedure TextBackground(Color: TConsoleColor);
@@ -2616,29 +2628,33 @@ begin
     SetConsoleTextAttribute(StdOut, TextAttr);
 end;
 
-procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
+procedure ConsoleWriteBuf(Text: PUtf8Char; Len: PtrInt; Color: TConsoleColor;
   NoLineFeed, NoColor: boolean);
 var
-  txt: RawByteString;
-  l: PtrInt;
+  tmp: RawByteString; // the Windows console is so slow anyway
 begin
   if not HasConsole then
     exit;
-  txt := Utf8ToConsole(Text); // convert to final GetConsoleOutputCP() code page
-  l := length(txt);
+  if Len > 0 then
+    if not ConsoleNeedConversion(Text, Len) or
+       not Win32Utf8ToAnsi(Text, Len, ConsoleOutputCP, tmp) then
+      FastSetStringCP(tmp, Text, Len, CP_UTF8);
+  Len := length(tmp);
   if not NoLineFeed then
   begin
-    SetLength(txt, l + 2); // faster to reallocate than WriteFile() twice
-    PWord(@PByteArray(txt)[l])^ := EOLW;
-    inc(l, 2);
-  end;
+    SetLength(tmp, Len + 2); // faster to resize than WriteFile() twice
+    PWord(@PByteArray(tmp)[Len])^ := EOLW;
+    inc(Len, 2);
+  end
+  else if Len = 0 then
+    exit;
   ConsoleCriticalSection.Lock;
   try
     if not NoColor then
       TextColor(Color);
-    FileWriteAll(StdOut, pointer(txt), l);
+    FileWriteAll(StdOut, pointer(tmp), Len);
     if not NoColor then
-      TextColor(ccLightGray);
+      TextColor(ccDefault);
     // FlushFileBuffers(StdOut); // don't: would block until read on the pipe
   finally
     ConsoleCriticalSection.UnLock;
@@ -2747,19 +2763,6 @@ begin
     result := 0;
 end;
 
-function Utf8ToConsole(const S: RawUtf8): RawByteString;
-begin
-  if not IsAnsiCompatible(S) then // need some encoding conversion
-  begin
-    if ConsoleOutputCP = 0 then // retrieve once CP_OEM final code page
-      ConsoleOutputCP := GetConsoleOutputCP; // makes a syscall
-    if ConsoleOutputCP <> CP_UTF8 then
-      if Win32Utf8ToAnsi(pointer(S), length(S), ConsoleOutputCP, result) then
-        exit;
-  end;
-  result := S; // no conversion needed, or conversion failed
-end;
-
 function TFileVersion.RetrieveInformationFromFileName: boolean;
 var
   siz, siz2: DWord;
@@ -2778,7 +2781,7 @@ var
     u: TSynTempBuffer;
   begin
     sz := 0;
-    if VerQueryValueW(pt, Utf8ToWin32PWideChar(lngnfo + From, u), str, sz) and
+    if VerQueryValueW(pt, Utf8ToWin32PWideChar(Join([lngnfo, From]), u), str, sz) and
        (sz > 0) then
       Win32PWideCharToUtf8(str, Res);
     u.Done;
@@ -2810,8 +2813,8 @@ begin
               ft.dwLowDateTime := dwFileDateLS; // built date from version nfo
               ft.dwHighDateTime := dwFileDateMS;
               FileTimeToSystemTime(ft, st);
-              fBuildDateTime := EncodeDate(
-                st.wYear, st.wMonth, st.wDay);
+              fBuildDateTime := EncodeDate(st.wYear, st.wMonth, st.wDay);
+              fBuildDateTimeString := '';
             end;
           end;
         if VerQueryValueW(pt, '\VarFileInfo\Translation', pointer(trans), siz2) and
@@ -2879,7 +2882,7 @@ const
 
 procedure _ComputeSystemPath(kind: TSystemPath; var result: TFileName);
 const
-  _ENV: array[TSystemPath] of TFileName = (
+  _ENV: array[TSystemPath] of RawUtf8 = (
     'ALLUSERSAPPDATA', // spCommonData
     'LOCALAPPDATA',    // spUserData
     '',                // spCommonDocuments
@@ -2912,7 +2915,7 @@ begin
         if GetTempPathW(MAX_PATH, @tmp) <> 0 then // first try Windows API
           Win32PWideCharToFileName(tmp, result);
         if result = '' then
-          result := GetEnvironmentVariable(_ENV[spTemp]); // fallback
+          result := GetSystemEnvString(_ENV[spTemp]); // fallback
       end;
   else
     if (CSIDL[kind] <> 0) and
@@ -2924,10 +2927,10 @@ begin
     else
     begin
       // fallback to environment variables (very unlikely)
-      result := GetEnvironmentVariable(_ENV[kind]);
+      result := GetSystemEnvString(_ENV[kind]);
       if result = '' then
       begin
-        result := GetEnvironmentVariable('APPDATA');
+        result := GetSystemEnvString('APPDATA');
         if result = '' then
           result := Executable.ProgramFilePath;
       end;
@@ -2935,6 +2938,73 @@ begin
   end;
   if result <> '' then
     result := IncludeTrailingPathDelimiter(result); // no EnsureDirectoryExists
+end;
+
+procedure _SetShell(var a, b: RawUtf8);
+begin
+  if not GetSystemEnv('COMSPEC', a) then
+    if GetSystemEnv('WINDIR', b) then
+      a := Join([b, '\system32\cmd.exe'])
+    else
+      a := 'c:\windows\system32\cmd.exe';
+  b := a;
+end;
+
+var
+  _SystemEnvUnicode: SynUnicode; // for RunCommandWin() below
+
+procedure _GetSystemEnv;
+var
+  p, e, env: PWideChar;
+  i, n: PtrInt;
+begin
+  env := GetEnvironmentStringsW;
+  p := env;
+  if p = nil then
+    exit;
+  n := 0; // pre-compute the number of entries
+  while p^ <> #0 do
+  begin
+    if p^ <> '=' then
+      inc(n);
+    inc(p, StrLenW(p) + 1);
+  end;
+  if n = 0 then
+    exit; // should never happen
+  FastSynUnicode(_SystemEnvUnicode, env, (PtrUInt(p) - PtrUInt(env)) shr 1);
+  SetLength(_SystemEnvNames, n);
+  SetLength(_SystemEnvValues, n);
+  p := env;
+  i := 0;
+  repeat
+    if p^ = '=' then
+      inc(p, StrLenW(p)) // no void string in _SystemEnvNames[]
+    else
+    begin
+      e := p;
+      repeat
+        inc(p);
+      until p^ = '=';
+      Unicode_ToUtf8(e, p - e, _SystemEnvNames[i]);
+      inc(p);
+      e := p;
+      inc(p, StrLenW(p));
+      Unicode_ToUtf8(e, p - e, _SystemEnvValues[i]);
+      inc(i);
+    end;
+    inc(p);
+  until p^ = #0;
+  FreeEnvironmentStringsW(env);
+end;
+
+function _SetSystemEnv(const name, value: RawUtf8): boolean;
+var
+  n, v: TSynTempBuffer;
+begin
+  result := SetEnvironmentVariableW(Utf8ToWin32PWideChar(name, n),
+                                    Utf8ToWin32PWideChar(value, v));
+  n.Done;
+  v.Done;
 end;
 
 procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
@@ -3112,7 +3182,7 @@ begin
   begin
     len := maxlen;
     if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = NO_ERROR then
-      Win32PWideCharToUtf8(tmp.buf, len, result[i]);
+      Unicode_ToUtf8(tmp.buf, len, result[i]);
   end;
   tmp.Done;
 end;
@@ -3285,69 +3355,6 @@ begin
   RegCloseKey(k);
 end;
 
-const
-  crypt32 = 'Crypt32.dll';
-  CRYPT_STRING_BASE64HEADER = 0; // = PEM textual format
-
-type
-  HCRYPTPROV = pointer;
-  HCERTSTORE = pointer;
-  PCERT_INFO = pointer;
-
-  CERT_CONTEXT = record
-    dwCertEncodingType: DWord;
-    pbCertEncoded: PByte;
-    cbCertEncoded: DWord;
-    pCertInfo: PCERT_INFO;
-    hCertStore: HCERTSTORE;
-  end;
-  PCCERT_CONTEXT = ^CERT_CONTEXT;
-
-function CertOpenSystemStoreW(hProv: HCRYPTPROV;
-  szSubsystemProtocol: PWideChar): HCERTSTORE ;
-    stdcall; external crypt32;
-
-function CertEnumCertificatesInStore(hCertStore: HCERTSTORE;
-  pPrevCertContext: PCCERT_CONTEXT): PCCERT_CONTEXT;
-  stdcall; external crypt32;
-
-function CryptBinaryToStringA(pBinary: PByte; cbBinary, dwFlags: DWord;
-  pszString: PAnsiChar; var pchString: DWord): BOOL;
-    stdcall; external crypt32;
-
-function CertCloseStore(hCertStore: HCERTSTORE; dwFlags: DWord): BOOL;
-    stdcall; external crypt32;
-
-function _GetSystemStoreAsPem(CertStore: TSystemCertificateStore): RawUtf8;
-var
-  store: HCERTSTORE;
-  ctx: PCCERT_CONTEXT;
-  certlen: DWord;
-  tmp: TSynTempBuffer;
-begin
-  // call the Windows API to retrieve the System certificates
-  result := '';
-  store := CertOpenSystemStoreW(nil, WINDOWS_CERTSTORE[CertStore]);
-  try
-    ctx := CertEnumCertificatesInStore(store, nil);
-    while ctx <> nil do
-    begin
-      certlen := 0;
-      if not CryptBinaryToStringA(ctx^.pbCertEncoded, ctx^.cbCertEncoded,
-          CRYPT_STRING_BASE64HEADER, nil, certlen) then
-        break;
-      tmp.Init(certlen); // a PEM is very likely to be < 8KB so will be on stack
-      if CryptBinaryToStringA(ctx^.pbCertEncoded, ctx^.cbCertEncoded,
-          CRYPT_STRING_BASE64HEADER, tmp.buf, certlen) then
-         AppendBufferToUtf8(tmp.buf, certlen, result);
-      tmp.Done;
-      ctx := CertEnumCertificatesInStore(store, ctx); // next certificate
-    end;
-  finally
-    CertCloseStore(store, 0);
-  end;
-end;
-
 function SearchSmbios(const mem: RawByteString; var info: TRawSmbiosInfo): PtrUInt;
   forward; // implemented later in mormot.core.os.pas
 
@@ -3362,7 +3369,9 @@ function _GetRawSmbios(var info: TRawSmbiosInfo): boolean;
 var
   siz: DWord;
   tmp: RawByteString;
+  {$ifdef CPUINTEL}
   addr: PtrUInt;
+  {$endif CPUINTEL}
   get: function(sig, id: DWord; buf: pointer; siz: DWord): PtrUInt; stdcall;
 begin
   // first try to use Vista+ API which supports EFI (even on aarch64-win64!)
@@ -3525,20 +3534,20 @@ begin
 end;
 
 constructor TServiceController.CreateOpenService(
-  const TargetComputer, DataBaseName, Name: RawUtf8; DesiredAccess: cardinal);
+  const TargetComputer, DataBaseName, ServiceName: RawUtf8; DesiredAccess: cardinal);
 begin
   inherited Create;
-  fName := RawUtf8(Name);
+  fName := ServiceName;
   fSCHandle := OpenServiceManager(TargetComputer, DataBaseName, GENERIC_READ);
   if fSCHandle = 0 then
   begin
     TService.DoLog(sllLastError, 'OpenSCManager(''%'',''%'') for [%]',
-      [TargetComputer, DataBaseName, fName], self);
+      [TargetComputer, DataBaseName, ServiceName], self);
     exit;
   end;
-  fHandle := OpenServiceInstance(fSCHandle, Name, DesiredAccess);
+  fHandle := OpenServiceInstance(fSCHandle, ServiceName, DesiredAccess);
   if fHandle = 0 then
-    TService.DoLog(sllLastError, 'OpenService(%)', [Name], self);
+    TService.DoLog(sllLastError, 'OpenService(%)', [ServiceName], self);
 end;
 
 function TServiceController.Delete: boolean;
@@ -3786,7 +3795,7 @@ begin
 end;
 
 const
-  _CMD: array[0.. 5] of string[11] = (
+  _CMD: array[0.. 5] of TShort15 = (
     'UNKNOWN', 'STOP', 'PAUSE', 'CONTINUE', 'INTERROGATE', 'SHUTDOWN');
 
 procedure TService.DoCtrlHandle(Code: cardinal);
@@ -4404,28 +4413,7 @@ begin
     [path, arg1, arg2, arg3, arg4, arg5]), waitfor, env, options);
 end;
 
-var
-  EnvironmentCache: SynUnicode;
-  EnvironmentCacheLock: TLightLock; // just set once
-
-procedure GetEnvironmentCache;
-var
-  e, p: PWideChar;
-begin
-  EnvironmentCacheLock.Lock;
-  if EnvironmentCache = '' then
-  begin
-    e := GetEnvironmentStringsW;
-    p := e;
-    while p^ <> #0 do
-      inc(p, StrLenW(p) + 1); // go to name=value#0 pairs end
-    FastSynUnicode(EnvironmentCache, e, (PtrUInt(p) - PtrUInt(e)) shr 1);
-    FreeEnvironmentStringsW(e);
-  end;
-  EnvironmentCacheLock.UnLock;
-end;
-
-function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
+function RunCommand(const cmd: TRunArg; waitfor: boolean; const env: TRunArg;
   options: TRunOptions; processhandle: PHandle): integer;
 var
   processinfo: TProcessInformation;
@@ -4630,9 +4618,9 @@ begin
     wenv := SynUnicode(env);
     if roEnvAddExisting in options then
     begin
-      if EnvironmentCache = '' then
-        GetEnvironmentCache;
-      wenv := EnvironmentCache + wenv;
+      if _SystemEnvUnicode = '' then
+        _GetSystemEnv;
+      wenv := _SystemEnvUnicode + wenv;
     end
     else
       UniqueString(wenv);
@@ -4786,7 +4774,7 @@ type
     CacheInstruction,
     CacheData,
     CacheTrace);
-  TSystemCacheDescriptor = packed record
+  TSystemCacheDescriptor = record
     Level: byte;
     Associativity: byte;
     LineSize: Word;
@@ -4803,7 +4791,7 @@ type
       RelationCache: (
         Cache: TSystemCacheDescriptor);
       RelationGroup: (
-        Reserved: array [0..1] of QWord); // to define the actual struct size
+        Reserved: array[0..1] of QWord); // to define the actual struct size
   end;
 
 {$ifndef UNICODE}
@@ -4844,8 +4832,7 @@ var
   IsWow64Process: function(Handle: THandle; var Res: BOOL): BOOL; stdcall;
   IsWow64Process2: function(Handle: THandle; var Process, Machine: word): BOOL; stdcall;
   GetNativeSystemInfo: procedure(var SystemInfo: TSystemInfo); stdcall;
-  GetLogicalProcessorInformation: function(
-   var Info: TSystemLogicalProcessorInformation; Len: PDWord): BOOL; stdcall;
+  GetLogicalProcessorInformation: function(Info: pointer; var Len: DWord): BOOL; stdcall;
   wine_get_version: function: PAnsiChar; stdcall;
   mem: TMemoryStatusEx;
   res: BOOL;
@@ -4854,8 +4841,10 @@ var
   Vers: TWindowsVersion;
   cpu, manuf, prod, prodver: RawUtf8;
   reg: TWinRegistry;
+  rnd: PHash128;
   proc: array of TSystemLogicalProcessorInformation;
-  i: integer;
+  pi: ^TSystemLogicalProcessorInformation;
+  i, n: PtrInt;
   siz: DWord;
 begin
   // 1. minimal fallback to support of very old 32-bit CPU without SSE2
@@ -4878,7 +4867,6 @@ begin
   {$endif HASNOSSE2}
   {$endif ASMX86}
   // 2. late-binding of newest Windows APIs
-  DoWin32PWideCharToUtf8 := @_DoWin32PWideCharToUtf8; // or mormot.core.unicode
   h := GetModuleHandle(kernel32);
   GetSystemTimePreciseAsFileTime :=
     LibraryResolve(h, 'GetSystemTimePreciseAsFileTime'); // Win8+
@@ -4989,7 +4977,7 @@ begin
       if Vers = wServer2016 then
         // we identify only LTSC server versions
         // see e.g. https://betawiki.net/wiki/Windows_Server_2025
-        if OSVersionInfo.dwBuildNumber >= 177609 then    // up to 17763 RTM
+        if OSVersionInfo.dwBuildNumber >= 17609 then     // up to 17763 RTM
           if OSVersionInfo.dwBuildNumber >= 19504 then   // up to 20348 Preview
             if OSVersionInfo.dwBuildNumber >= 25871 then // up to 26100 Preview
               Vers := wServer2025_64
@@ -5082,62 +5070,77 @@ begin
   if prodver <> '' then
     BiosInfoText := BiosInfoText + ' ' + prodver;
   if {%H-}cpu = '' then
-    cpu := RawUtf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'));
-  if Assigned(GetLogicalProcessorInformation) then
+   cpu := GetSystemEnv('PROCESSOR_IDENTIFIER');
+  siz := 0;
+  if Assigned(GetLogicalProcessorInformation) and
+     not GetLogicalProcessorInformation(nil, siz) and
+     (GetLastError = ERROR_INSUFFICIENT_BUFFER) then
   begin
-    SetLength(proc, 1024);
-    siz := SizeOf(proc[0]) * length(proc);
-    if GetLogicalProcessorInformation(proc[0], @siz) then
+    n := siz div SizeOf(pi^);
+    if (n <= 2048) and
+       (DWord(n) * SizeOf(pi^) = siz) then
     begin
-      for i := 0 to (siz div SizeOf(proc[0])) - 1 do
-        with proc[i] do
-          case Relationship of
+      SetLength(proc, n);
+      if GetLogicalProcessorInformation(pointer(proc), siz) then
+      begin
+        pi := pointer(proc);
+        repeat
+          case pi^.Relationship of
+            RelationProcessorCore:
+              inc(CpuCores);
             RelationProcessorPackage: // physical processor socket
-              AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), CpuSockets, ProcessorMask);
+              AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), integer(CpuSockets),
+                pi^.ProcessorMask);
             RelationCache:            // raw cache information
-              if Cache.CacheType in [CacheUnified, CacheData] then
-                if (Cache.Level >= low(CpuCache)) and
-                   (Cache.Level <= high(CpuCache)) then
-                  with CpuCache[Cache.Level] do
+              if pi^.Cache.CacheType in [CacheUnified, CacheData] then
+                if (pi^.Cache.Level >= low(CpuCache)) and
+                   (pi^.Cache.Level <= high(CpuCache)) then
+                  with CpuCache[pi^.Cache.Level] do
                     if (Count = 0) or
-                       (Cache.CacheType <> CacheUnified) then
+                       (pi^.Cache.CacheType <> CacheUnified) then
                     begin
                       inc(Count);
-                      Size := Cache.Size;
-                      LineSize := Cache.LineSize;
+                      Size := pi^.Cache.Size;
+                      LineSize := pi^.Cache.LineSize;
                     end;
           end;
-      for i := high(CpuCache) downto low(CpuCache) do
-      begin
-        CpuCacheSize := CpuCache[i].Size;
-        if CpuCacheSize <> 0 then // append the biggest level Cache size
+          inc(pi);
+          dec(n);
+        until n = 0;
+        for i := high(CpuCache) downto low(CpuCache) do
         begin
+          CpuCacheSize := CpuCache[i].Size;
+          if CpuCacheSize = 0 then // append the highest level Cache size
+            continue;
           cpu := _fmt('%s [%s]', [cpu, KBNoSpace(CpuCacheSize)]);
           break;
         end;
+        for i := low(CpuCache) to high(CpuCache) do
+          with CpuCache[i] do
+            if Count <> 0 then
+              if Count = 1 then
+                CpuCacheText := _fmt('%s L%d=%s ',
+                  [CpuCacheText, i, KBNoSpace(Size)])
+              else
+                CpuCacheText := _fmt('%s L%d=%d*%s ',
+                  [CpuCacheText, i, Count, KBNoSpace(Size)]);
+        TrimSelf(CpuCacheText);
       end;
-      for i := low(CpuCache) to high(CpuCache) do
-        with CpuCache[i] do
-          if Count <> 0 then
-            if Count = 1 then
-              CpuCacheText :=
-                _fmt('%s L%d=%s ', [CpuCacheText, i, KBNoSpace(Size)])
-            else
-              CpuCacheText :=
-                _fmt('%s L%d=%d*%s ', [CpuCacheText, i, Count, KBNoSpace(Size)]);
-      TrimSelf(CpuCacheText);
     end;
   end;
+  CpuThreads := SystemInfo.dwNumberOfProcessors;
   if CpuSockets = 0 then
     CpuSockets := 1; // e.g. on XP prior to SP3
-  _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
-    [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
+  if CpuCores = 0 then
+    CpuCores := CpuThreads;
+  _fmt('%d x %s (' + CPU_ARCH_TEXT + ')', [CpuThreads, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
-  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique (but not strong)
-  SystemEntropy.Startup := SystemEntropy.LiveFeed;
-  crc32c128(@SystemEntropy.Startup, @SystemInfo, SizeOf(SystemInfo));
-  crc32c128(@SystemEntropy.Startup, @mem, SizeOf(mem));
-  crc32c128(@SystemEntropy.Startup, @OSVersionInfo, SizeOf(OSVersionInfo));
+  rnd := @SystemEntropy.Startup;
+  CoCreateGuid(rnd^); // very fast and unique (but not strong)
+  SystemEntropy.LiveFeed.b := rnd^;
+  crc32c128(rnd, @SystemInfo, SizeOf(SystemInfo));
+  crc32c128(rnd, @mem, SizeOf(mem));
+  crc32c128(rnd, @OSVersionInfo, SizeOf(OSVersionInfo));
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 

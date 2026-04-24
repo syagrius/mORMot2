@@ -365,17 +365,17 @@ type
   /// SQL Query comparison operators
   // - used e.g. by CompareOperator() functions in mormot.orm.storage.pas
   TSqlCompareOperator = (
-     soEqualTo,
-     soNotEqualTo,
-     soLessThan,
-     soLessThanOrEqualTo,
-     soGreaterThan,
-     soGreaterThanOrEqualTo,
-     soBeginWith,
-     soContains,
-     soSoundsLikeEnglish,
-     soSoundsLikeFrench,
-     soSoundsLikeSpanish);
+    soEqualTo,
+    soNotEqualTo,
+    soLessThan,
+    soLessThanOrEqualTo,
+    soGreaterThan,
+    soGreaterThanOrEqualTo,
+    soBeginWith,
+    soContains,
+    soSoundsLikeEnglish,
+    soSoundsLikeFrench,
+    soSoundsLikeSpanish);
 
 const
   /// special TFieldBits value containing all field bits set to 1
@@ -395,7 +395,7 @@ const
     'RawBlob');   // ftBlob
 
   /// return either 'ID' or RowID'
-  ID_SHORT: array[{RowID=}boolean] of string[7] = ('ID', 'RowID');
+  ID_SHORT: array[{RowID=}boolean] of TShort7 = ('ID', 'RowID');
 
 var
   /// contains 'ID' as UTF-8 text with positive RefCnt (avoid const realloc)
@@ -552,9 +552,13 @@ type
 /// detect a TypeInfo(TNullable*) RTTI pointer to nullable variant types
 function NullableVariantType(info: PRttiInfo): TNullableVariantType;
 
+const
+  /// defined in the same unit to circumvent Delphi LLVM compilation issue
+  NullNullable: TVarData = (VType: varNull{%H-});
+
 var
   /// a nullable integer value containing null
-  NullableIntegerNull: TNullableInteger absolute NullVarData;
+  NullableIntegerNull: TNullableInteger absolute NullNullable;
 
 /// creates a nullable integer value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableInteger = type variant
@@ -581,7 +585,7 @@ function NullableIntegerToValue(const V: TNullableInteger): Int64;
 
 var
   /// a nullable boolean value containing null
-  NullableBooleanNull: TNullableBoolean absolute NullVarData;
+  NullableBooleanNull: TNullableBoolean absolute NullNullable;
 
 /// creates a nullable boolean value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableBoolean = type variant
@@ -608,7 +612,7 @@ function NullableBooleanToValue(const V: TNullableBoolean): boolean;
 
 var
   /// a nullable float value containing null
-  NullableFloatNull: TNullableFloat absolute NullVarData;
+  NullableFloatNull: TNullableFloat absolute NullNullable;
 
 /// creates a nullable floating-point value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableFloat = type variant
@@ -635,7 +639,7 @@ function NullableFloatToValue(const V: TNullableFloat): double;
 
 var
   /// a nullable currency value containing null
-  NullableCurrencyNull: TNullableCurrency absolute NullVarData;
+  NullableCurrencyNull: TNullableCurrency absolute NullNullable;
 
 /// creates a nullable Currency value from a supplied currency value
 // - we defined the currency type to circumvent FPC cross-platform issues
@@ -668,7 +672,7 @@ function NullableCurrencyToValue(const V: TNullableCurrency): currency;
 
 var
   /// a nullable TDateTime value containing null
-  NullableDateTimeNull: TNullableDateTime absolute NullVarData;
+  NullableDateTimeNull: TNullableDateTime absolute NullNullable;
 
 /// creates a nullable TDateTime value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableDateTime = type variant
@@ -695,7 +699,7 @@ function NullableDateTimeToValue(const V: TNullableDateTime): TDateTime;
 
 var
   /// a nullable TTimeLog value containing null
-  NullableTimeLogNull: TNullableTimeLog absolute NullVarData;
+  NullableTimeLogNull: TNullableTimeLog absolute NullNullable;
 
 /// creates a nullable TTimeLog value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableTimeLog = type variant
@@ -722,7 +726,7 @@ function NullableTimeLogToValue(const V: TNullableTimeLog): TTimeLog;
 
 var
   /// a nullable UTF-8 encoded text value containing null
-  NullableUtf8TextNull: TNullableUtf8Text absolute NullVarData;
+  NullableUtf8TextNull: TNullableUtf8Text absolute NullNullable;
 
 /// creates a nullable UTF-8 encoded text value from a supplied constant
 // - FPC does not allow direct assignment to a TNullableUtf8 = type variant
@@ -863,6 +867,7 @@ type
 
 /// returns a 64-bit value as inlined ':(1234):' text
 function InlineParameter(ID: Int64): TShort31; overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// returns a string value as inlined ':("value"):' text
 function InlineParameter(const value: RawUtf8): RawUtf8; overload;
@@ -953,12 +958,12 @@ type
     fExpand: boolean;
     /// used to store output format for TOrm.GetJsonValues()
     fWithID: boolean;
-    /// used to store field for TOrm.GetJsonValues()
-    fFields: TFieldIndexDynArray;
     /// if not Expanded format, contains the Stream position of the first
     // useful Row of data; i.e. ',val11' position in:
     // & { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
     fStartDataPosition: integer;
+    /// used to store field for TOrm.GetJsonValues()
+    fFields: TFieldIndexDynArray;
   public
     /// used internally to store column names and count for AddColumns
     ColNames: TRawUtf8DynArray;
@@ -1500,7 +1505,7 @@ begin
   if aType <= high(aType) then
     result := TrimLeftLowerCaseToShort(ToText(aType))
   else
-    FormatShort16('#%', [ord(aType)], result);
+    FormatShort('#%', [ord(aType)], result);
 end;
 
 function IsZero(const Fields: TFieldBits): boolean;
@@ -1783,9 +1788,8 @@ begin
   if FieldName <> nil then
   begin
     f := PInt64(FieldName)^;
-    result := (cardinal(f) and $ffdfdf = (ord('I') + ord('D') shl 8)) or
-        (f and $ffdfdfdfdfdf = (ord('R') + ord('O') shl 8 + ord('W') shl 16 +
-          ord('I') shl 24 + Int64(ord('D')) shl 32))
+    result := (cardinal(f) and $ffdfdf = (_ID16)) or
+              (f and $ffdfdfdfdfdf = (_ROWI32 + Int64(ord('D')) shl 32))
   end
   else
     result := false;
@@ -1794,9 +1798,8 @@ end;
 function IsRowID(FieldName: PUtf8Char): boolean;
 begin
   if FieldName <> nil then
-    result := (PInteger(FieldName)^ and $ffdfdf = ord('I') + ord('D') shl 8) or
-      ((PIntegerArray(FieldName)^[0] and $dfdfdfdf =
-       ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+    result := (PInteger(FieldName)^ and $ffdfdf = _ID16) or
+      ((PIntegerArray(FieldName)^[0] and $dfdfdfdf = _ROWI32) and
        (PIntegerArray(FieldName)^[1] and $ffdf = ord('D')))
   else
     result := false;
@@ -1806,10 +1809,9 @@ end;
 function IsRowID(FieldName: PUtf8Char; FieldLen: integer): boolean;
 begin
   if FieldLen = 2 then
-    result := PInteger(FieldName)^ and $dfdf = ord('I') + ord('D') shl 8
+    result := PInteger(FieldName)^ and $dfdf = _ID16
   else if FieldLen = 5 then
-    result := (PInteger(FieldName)^ and $dfdfdfdf =
-               ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+    result := (PInteger(FieldName)^ and $dfdfdfdf = _ROWI32) and
               (ord(FieldName[4]) and $df = ord('D'))
   else
     result := false;
@@ -1817,11 +1819,9 @@ end;
 
 function IsRowIDShort(const FieldName: ShortString): boolean;
 begin
-  result := ((PIntegerArray(@FieldName)^[0] and $dfdfff =
-              2 + ord('I') shl 8 + ord('D') shl 16) or
-            ((PIntegerArray(@FieldName)^[0] and $dfdfdfff =
-              5 + ord('R') shl 8 + ord('O') shl 16 + ord('W') shl 24) and
-             (PIntegerArray(@FieldName)^[1] and $dfdf = ord('I') + ord('D') shl 8)));
+  result := ((PIntegerArray(@FieldName)^[0] and $dfdfff = 2 + _ID16 shl 8) or
+            ((PIntegerArray(@FieldName)^[0] and $dfdfdfff = 5 + _ROW24 shl 8) and
+             (PIntegerArray(@FieldName)^[1] and $dfdf = _ID16)));
 end;
 
 function IsSqlReservedByTwo(TwoChars: PUtf8Char): boolean;
@@ -2390,13 +2390,18 @@ end;
 
 function InlineParameter(ID: Int64): TShort31;
 begin
-  FormatShort31(':(%):', [ID], result);
+  FormatShort(':(%):', [ID], result);
 end;
 
 function InlineParameter(const value: RawUtf8): RawUtf8;
 begin
   QuotedStrJson(value, result, ':(', '):');
 end;
+
+const
+  _FROM32 = ord('F') + ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24;
+  _WHER32 = ord('W') + ord('H') shl 8 + ord('E') shl 16 + ord('R') shl 24;
+  _NULL32 = ord('N') + ord('U') shl 8 + ord('L') shl 16 + ord('L') shl 24;
 
 function PosSelectTable(Sql: PUtf8Char): PUtf8Char;
 begin
@@ -2412,8 +2417,7 @@ begin
               if Sql^ = #0 then
                 break;
             until Sql^ > ' ';
-            if (PCardinal(Sql)^ and $dfdfdfdf = ord('F') +
-                 ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24) and
+            if (PCardinal(Sql)^ and $dfdfdfdf = _FROM32) and
                (Sql[4] <= ' ') then // found 'FROM table1,table2'
             begin
               result := GotoNextNotSpace(Sql + 5); // return 'table1,table2'
@@ -2463,8 +2467,7 @@ begin
                     if Sql^ = #0 then
                       exit;
                   until Sql^ > ' ';
-                  if (PCardinal(Sql)^ and $dfdfdfdf = ord('F') +
-                       ord('R') shl 8 + ord('O') shl 16 + ord('M') shl 24) and
+                  if (PCardinal(Sql)^ and $dfdfdfdf = _FROM32) and
                      (Sql[4] <= ' ') then
                   begin
                     FastSetString(SelectFields^, beg, len);
@@ -2556,8 +2559,7 @@ begin
         until Sql^ = ''''; // double quotes will reuse this loop
       #9 .. ' ':
         if result and
-           (PCardinal(Sql + 1)^ and $dfdfdfdf = ord('W') +
-              ord('H') shl 8 + ord('E') shl 16 + ord('R') shl 24) and
+           (PCardinal(Sql + 1)^ and $dfdfdfdf = _WHER32) and
            (PCardinal(Sql + 5)^ and $ffdf = ord('E') + ord(' ') shl 8) then
           result := false; // don't cache SELECT with WHERE and no ?
       '?':
@@ -2591,13 +2593,13 @@ begin
         repeat
           inc(result)
         until result^ in [#0, #10]
-      else if c = ord('/') + ord('*') shl 8 then
+      else if c = SLBEG_16 then
       begin
         // C comments
         inc(result);
         repeat
           inc(result);
-          if cardinal(PWord(result)^) = ord('*') + ord('/') shl 8 then
+          if cardinal(PWord(result)^) = SLEND_16 then
           begin
             inc(result, 2);
             break;
@@ -2704,7 +2706,7 @@ begin
           else
             AddComma;
         end;
-        CancelLastComma(')');
+        ReplaceLastComma(')');
       end;
       AddString(Suffix);
       SetText(result);
@@ -2749,7 +2751,7 @@ begin
           else
             AddComma;
         end;
-        CancelLastComma(')');
+        ReplaceLastComma(')');
       end;
       AddString(Suffix);
       SetText(result);
@@ -2980,16 +2982,16 @@ end;
 { TResultsWriter }
 
 const
-  VOID_ARRAYFIELD: array[boolean] of string[16] = (
-    '[]'#10, '{"FieldCount":0}'); // same as sqlite3_get_table()
+  VOID_ARRAYFIELD: array[boolean] of TShort16 = (
+    '[]'#10, '{"FieldCount":0}');
 
 procedure TResultsWriter.CancelAllVoid;
 var
   p: PShortString;
-begin
+begin // called from TSqlRequest.ExecuteStream with no data
   CancelAll; // rewind JSON
   p := @VOID_ARRAYFIELD[fExpand];
-  inc(fWrittenBytes, fStream.Write(p^[1], ord(p^[0])));
+  WriteToStream(@p^[1], ord(p^[0]));
 end;
 
 constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
@@ -3004,13 +3006,17 @@ constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
 begin
   if aStream = nil then
     if aStackBuffer <> nil then
-      CreateOwnedStream(aStackBuffer^)
+      SetOwnedRawUtf8(aStackBuffer^)
     else
-      CreateOwnedStream(aBufSize)
-  else if aStackBuffer <> nil then
-    inherited Create(aStream, aStackBuffer, SizeOf(aStackBuffer^))
+      SetOwnedStream(nil, aBufSize)
   else
-    inherited Create(aStream, aBufSize);
+  begin
+    SetStream(aStream);
+    if aStackBuffer <> nil then
+      SetBuffer(aStackBuffer, SizeOf(aStackBuffer^))
+    else
+      SetBuffer(nil, aBufSize);
+  end;
   fExpand := Expand;
   fWithID := withID;
   fFields := aFields;
@@ -3018,34 +3024,39 @@ end;
 
 procedure TResultsWriter.AddColumns(aKnownRowsCount: integer);
 var
-  i, len: PtrInt;
-  c: PPAnsiChar;
+  n, len: PtrInt;
+  c: PRawUtf8;
+  p: PUtf8Char;
 begin
+  c := pointer(ColNames);
+  if c = nil then
+    exit;
+  n := PDALen(PAnsiChar(c) - _DALEN)^ + _DAOFF;
   if fExpand then
   begin
-    c := pointer(ColNames);
-    for i := 1 to length(ColNames) do
-    begin
-      len := PStrLen(c^ - _STRLEN)^; // ColNames[] <> ''
+    repeat
+      len := PStrLen(PPAnsiChar(c)^ - _STRLEN)^; // ColNames[] <> ''
       if twoForceJsonExtended in CustomOptions then
       begin
-        SetLength(PRawUtf8(c)^, len + 1); // colname: in-place
-        c^[len] := ':';
+        SetLength(c^, len + 1); // colname: in-place
+        PPUtf8Char(c)^[len] := ':';
       end
       else
       begin
-        SetLength(PRawUtf8(c)^, len + 3); // "colname": in-place
-        MoveFast(c^[0], c^[1], len);
-        c^[0] := '"';
-        PWord(c^ + len + 1)^ := ord('"') + ord(':') shl 8;
+        SetLength(c^, len + 3); // "colname": in-place
+        p := PPUtf8Char(c)^;
+        MoveFast(p[0], p[1], len);
+        p[0] := '"';
+        PWord(p + len + 1)^ := ord('"') + ord(':') shl 8;
       end;
       inc(c);
-    end;
+      dec(n);
+    until n = 0;
   end
   else
   begin
     AddShort('{"fieldCount":');
-    AddU(length(ColNames));
+    AddU(n);
     if aKnownRowsCount > 0 then
     begin
       AddShort(',"rowCount":');
@@ -3053,13 +3064,14 @@ begin
     end;
     AddShort(',"values":["');
     // first row is FieldNames
-    for i := 0 to length(ColNames) - 1 do
-    begin
-      AddString(ColNames[i]);
-      AddDirect('"', ',', '"')
-    end;
+    repeat
+      AddString(c^);
+      AddDirect('"', ',', '"');
+      inc(c);
+      dec(n);
+    until n = 0;
     CancelLastChar;
-    fStartDataPosition := PtrInt(fStream.Position) + PtrInt(B - fTempBuf);
+    fStartDataPosition := GetTextLength;
   end;
 end;
 
@@ -3102,7 +3114,7 @@ begin
     begin
       // last AddColumn() call would finalize the non-expanded header
       AddDirect('"' , ',');
-      fStartDataPosition := PtrInt(fStream.Position) + PtrInt(B - fTempBuf);
+      fStartDataPosition := GetTextLength;
     end
     else
       AddDirect('"', ',', '"')
@@ -3122,7 +3134,7 @@ end;
 procedure TResultsWriter.EndJsonObject(aKnownRowsCount, aRowsCount: integer;
   aFlushFinal: boolean);
 begin
-  CancelLastComma(']');
+  ReplaceLastComma(']');
   if not fExpand then
   begin
     if aKnownRowsCount = 0 then
@@ -3140,17 +3152,19 @@ end;
 procedure TResultsWriter.TrimFirstRow;
 var
   P, PBegin, PEnd: PUtf8Char;
+  ms: TCustomMemoryStream;
 begin
   if (self = nil) or
-     not fStream.InheritsFrom(TCustomMemoryStream) or
+     not TStream(fDest).InheritsFrom(TCustomMemoryStream) or
      fExpand or
      (fStartDataPosition = 0) then
     exit;
   // go to begin of first row
-  FlushToStream; // we need the data to be in fStream memory
+  FlushToStream; // we need the data to be in fDest: TStream memory
   // PBegin^=val11 in { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
-  PBegin := TCustomMemoryStream(fStream).Memory;
-  PEnd := PBegin + fStream.Position;
+  ms := fDest;
+  PBegin := ms.Memory;
+  PEnd := PBegin + ms.Position;
   PEnd^ := #0; // mark end of current values
   inc(PBegin, fStartDataPosition + 1); // +1 to include ',' of ',val11'
   // jump to end of first row
@@ -3160,16 +3174,13 @@ begin
   // trim first row data
   if P^ <> #0 then
     MoveFast(P^, PBegin^, PEnd - P); // erase content
-  fStream.Seek(PBegin - P, soCurrent){%H-}; // adjust current stream position
+  ms.Seek(PBegin - P, soCurrent){%H-}; // adjust current stream position
 end;
 
 
 { ************ TSelectStatement SQL SELECT Parser }
 
 { TSelectStatement }
-
-const
-  NULL_UPP = ord('N') + ord('U') shl 8 + ord('L') shl 16 + ord('L') shl 24;
 
 constructor TSelectStatement.Create(const SQL: RawUtf8;
   const GetFieldIndex: TOnGetFieldIndex;
@@ -3237,7 +3248,7 @@ var
       B := P;
       repeat
         inc(P);
-      until not (jcJsonIdentifier in JSON_CHARS[P^]);
+      until not (jcJsonIdentifier in JSON_CHARS[P^]); // _-.[]$0..9a..zA..Z
       FastSetString(select.SubField, B, P - B);
       fHasSelectSubFields := true;
     end;
@@ -3277,7 +3288,7 @@ var
         exit; // end of string before end quote -> incorrect
       RawUtf8ToVariant(Where.Value, Where.ValueVariant);
     end
-    else if (PInteger(P)^ and $DFDFDFDF = NULL_UPP) and
+    else if (PInteger(P)^ and $DFDFDFDF = _NULL32) and
             (P[4] in [#0..' ', ';']) then
     begin
       // NULL statement
@@ -3369,7 +3380,7 @@ var
       B := P;
       repeat
         inc(P);
-      until not (jcJsonIdentifier in JSON_CHARS[P^]);
+      until not (jcJsonIdentifier in JSON_CHARS[P^]); // _-.[]$0..9a..zA..Z
       FastSetString(Where.SubField, B, P - B); // '.subfield1.subfield2'
       fWhereHasSubFields := true;
       P := GotoNextNotSpace(P);
@@ -4080,7 +4091,7 @@ begin
       W.AddShort(') values (');
       for f := 0 to FieldCount - 1 do
         AddValue;
-      W.CancelLastComma(')');
+      W.ReplaceLastComma(')');
     end;
     W.SetText(result);
   finally
@@ -4111,7 +4122,7 @@ begin
         W.AddString(FieldValues[f]);
       W.AddComma;
     end;
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
     W.SetText(result);
   finally
     W.Free;
@@ -4239,14 +4250,13 @@ function StartWithQuotedID(P: PUtf8Char; out ID: TID): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 begin
   if PCardinal(P)^ and $ffffdfdf =
-       ord('I') + ord('D') shl 8 + ord('"') shl 16 + ord(':') shl 24 then
+       _ID16 + ord('"') shl 16 + ord(':') shl 24 then
   begin
     SetID(P + 4, ID{%H-});
     result := ID > 0;
     exit;
   end
-  else if (PCardinalArray(P)^[0] and $dfdfdfdf =
-           ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+  else if (PCardinalArray(P)^[0] and $dfdfdfdf = _ROWI32) and
          (PCardinalArray(P)^[1] and $ffffdf =
            ord('D') + ord('"') shl 8 + ord(':') shl 16) then
   begin
@@ -4261,17 +4271,14 @@ end;
 function StartWithID(P: PUtf8Char; out ID: TID): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 begin
-  if PCardinal(P)^ and $ffdfdf =
-       ord('I') + ord('D') shl 8 + ord(':') shl 16 then
+  if PCardinal(P)^ and $ffdfdf = _ID16 + ord(':') shl 16 then
   begin
     SetID(P + 3, ID{%H-});
     result := ID > 0;
     exit;
   end
-  else if (PCardinalArray(P)^[0] and $dfdfdfdf =
-           ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
-          (PCardinalArray(P)^[1] and $ffdf =
-           ord('D') + ord(':') shl 8) then
+  else if (PCardinalArray(P)^[0] and $dfdfdfdf = _ROWI32) and
+          (PCardinalArray(P)^[1] and $ffdf = ord('D') + ord(':') shl 8) then
   begin
     SetID(P + 6, ID);
     result := ID > 0;

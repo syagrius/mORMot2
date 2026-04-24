@@ -114,7 +114,7 @@ constructor TSimpleHttpAsyncServer.Create;
 begin
   inherited Create;
   fHttpServer := THttpAsyncServer.Create(
-    '8888', nil, nil, '', SystemInfo.dwNumberOfProcessors + 1, 30000,
+    '8888', nil, nil, '', CpuThreads + 1, 30000,
     [hsoNoXPoweredHeader,
      hsoNoStats,
      hsoHeadersInterning,
@@ -156,12 +156,12 @@ begin
     writeln(simpleServer.fHttpServer.ClassName, ' running on localhost:8888'#10);
     TextColor(ccWhite);
     writeln('try curl http://localhost:8888/echo'#10);
-    TextColor(ccLightGray);
+    TextColor(ccDefault);
     writeln('Press [Enter] to quit'#10);
     TextColor(ccCyan);
     ConsoleWaitForEnterKey;
     writeln(ObjectToJson(simpleServer.fHttpServer, [woHumanReadable]));
-    TextColor(ccLightGray);
+    TextColor(ccDefault);
     {$ifdef FPC_X64MM}
     WriteHeapStatus(' ', 16, 8, {compileflags=}true);
     {$endif FPC_X64MM}

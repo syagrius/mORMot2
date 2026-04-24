@@ -1,0 +1,3 @@
+# Local configuration (machine-specific paths)
+.claude.local
+bin/

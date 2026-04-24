@@ -27,6 +27,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.datetime,
   mormot.core.data,
   mormot.core.threads,
   mormot.core.log,
@@ -53,7 +54,9 @@ type
   // - ttoAllowSubFolders will allow RRW/WRQ to access nested files in
   // TTftpServerThread.FileFolder sub-directories
   // - ttoLowLevelLog will log each incoming/outgoing TFTP/UDP frames
-  // - ttoDropPriviledges on POSIX would impersonate the process as 'nobody'
+  // - ttoDropPriviledges on POSIX would impersonate the process as 'nobody' -
+  // but note that it is incompatible with the AutoRebind := true feature with
+  // any port < 1024 which requires root priviledged for socket binding
   // - ttoChangeRoot on POSIX would make the FileFolder the root folder
   // - ttoCaseInsensitiveFileName on POSIX would make file names case-insensitive
   // as they are on Windows (using an in-memory cache, refreshed every minute)
@@ -127,8 +130,8 @@ type
     function SetWrqStream(var Context: TTftpContext): TTftpError; virtual;
     // main processing methods for all incoming frames
     procedure OnFrameReceived(len: integer; var remote: TNetAddr); override;
-    procedure OnIdle(tix64: Int64); override;
-    procedure OnShutdown; override; // = Destroy
+    procedure OnIdle(tix64: Int64); override; // called every second
+    procedure OnShutdown; override; // from Destroy
     procedure NotifyShutdown;
   public
     /// initialize and bind the server instance, in non-suspended state
@@ -361,7 +364,10 @@ begin
   begin
     ok := DropPriviledges;
     if not ok then
-      exclude(fOptions, ttoDropPriviledges);
+      exclude(fOptions, ttoDropPriviledges)
+    else if fAutoRebind and
+            (GetInteger(pointer(BindPort)) < 1024) then
+      fAutoRebind := false; // only root can bind low ports
     LogClass.Add.Log(LOG_INFOWARNING[not ok],
       'Create: DropPriviledges(nobody)=%', [ok], self);
   end;
@@ -465,22 +471,27 @@ end;
 
 function TTftpServerThread.GetFileName(const RequestedFileName: RawUtf8): TFileName;
 var
+  u: RawUtf8;
   fn: TFileName;
   {$ifdef OSPOSIX}
   readms: integer;
   {$endif OSPOSIX}
 begin
   result := '';
-  fn := NormalizeFileName(Utf8ToString(RequestedFileName));
-  if fn = '' then
-    exit;
-  while (fn[1] = '/') or
-        (fn[1] = '\') do
-    delete(fn, 1, 1); // trim any leading root (we start from fFileFolder anyway)
-  if SafeFileName(fn) and
+  u := RequestedFileName;
+  NormalizeFileNameU(u);
+  repeat
+    if u = '' then
+      exit;
+    if not (u[1] in ['/', '\']) then
+      break;
+    delete(u, 1, 1); // trim any leading path delimiter
+  until false;
+  if SafeFileNameU(u) and
      ((ttoAllowSubFolders in fOptions) or
-      (Pos(PathDelim, result) = 0)) then
+      (PosExChar(PathDelim, u) = 0)) then
   begin
+    Utf8ToFileName(u, fn);
     {$ifdef OSPOSIX}
     if Assigned(fPosixFileNames) then
     begin

@@ -1683,7 +1683,7 @@ type
     ProcessorType: TSmbiosProcessorType;
     /// 2.0+/2.6+ Processor family (f)
     // - we use an ordinal and not an enumerate because there are too much types
-    // - see "Table 23 – Processor Information: Processor Family field" in
+    // - see "Table 23 - Processor Information: Processor Family field" in
     // DSP0134 SMBIOS Reference Specification 3.6.0 page 49 to 55
     // - the Version (v) field gives much more intelligible information
     Family: word;
@@ -4096,8 +4096,8 @@ end;
 function GetDiskPartitionsText(
   nocache, withfreespace, nospace, nomount: boolean): RawUtf8;
 begin
-  result := RawUtf8ArrayToCsv(GetDiskPartitionsTexts(
-    nocache, withfreespace, nospace, nomount), ', ');
+  RawUtf8ArrayToCsvVar(GetDiskPartitionsTexts(
+    nocache, withfreespace, nospace, nomount), result, ', ');
 end;
 
 
@@ -4802,7 +4802,8 @@ begin
                  (i < length(info.Oem)) then
               begin
                 FastSetString(info.Oem[i], s, len);
-                inc(i);
+                if info.Oem[i] <> 'Default string' then // see mormot.core.os
+                  inc(i);
               end;
               s := @s[len + 1]; // next string
             until s[0] = 0;
@@ -5041,11 +5042,11 @@ end;
 
 procedure InitializeUnit;
 begin
-  {$ifdef CPUINTELARM}
+  {$ifdef HASCPUFEATURES}
   // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
   CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
   if CpuFeaturesText = '' then
-  {$endif CPUINTELARM}
+  {$endif HASCPUFEATURES}
   begin
     {$ifdef OSLINUXANDROID}
     CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo

@@ -1814,7 +1814,7 @@ type
     /// direct access to the TOrmProperties info of an existing TOrm instance
     // - same as OrmProps, but when we know that PropsCreate is never needed
     function Orm: TOrmProperties;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifndef NOPATCHVMT}{$ifdef HASINLINE}inline;{$endif}{$endif}
     /// the Table name in the database, associated with this TOrm class
     // - 'TSql' or 'TOrm' chars are trimmed at the beginning of the ClassName
     // - or the ClassName is returned as is, if no 'TSql' or 'TOrm' at first
@@ -3113,8 +3113,8 @@ type
     // retrieve the column exact type information
     // - the JSON data is parsed and formatted in-place, after copied
     // in the protected fPrivateCopy variable (by reference if aJsonOwned=true)
-    constructor CreateFromTables(const Tables: array of TOrmClass; const
-      aSql, aJson: RawUtf8; aJsonOwned: boolean = false); reintroduce; overload;
+    constructor CreateFromTables(const Tables: array of TOrmClass;
+      const aSql, aJson: RawUtf8; aJsonOwned: boolean = false); reintroduce; overload;
     /// initialize the result table from a JSON-formated Data message
     // - you can set the expected column types matching the results column layout
     // - the JSON data is parsed and formatted in-place
@@ -4116,6 +4116,7 @@ type
     /// get the index of aTable in Tables[]
     // - raise an EModelException if the table is not in the model
     function GetTableIndexExisting(aTable: TOrmClass): PtrInt;
+      {$ifdef HASINLINE} inline; {$endif}
     /// get the index of a table in Tables[]
     // - expects SqlTableName to be SQL-like formatted (i.e. without TOrm[Record])
     function GetTableIndex(const SqlTableName: RawUtf8): PtrInt; overload;
@@ -5071,6 +5072,16 @@ type
 
 implementation
 
+{ early definition for proper inlining }
+
+function TOrmModel.GetTableIndexExisting(aTable: TOrmClass): PtrInt;
+begin
+  result := GetTableIndex(aTable);
+  if result < 0 then
+    EModelException.RaiseUtf8('% is not part of % root=%',
+      [aTable, self, fRoot]);
+end;
+
 
 { -------------------- ORM Specific TOrmPropInfoRtti Classes }
 
@@ -5088,7 +5099,7 @@ begin
   L := ord(TypeName^[0]);
   if IdemPropName(TypeName^, 'TID') or
      (ord(TypeName^[1]) and $df <> ord('T')) or // expect T...ID pattern
-     (PWord(@TypeName^[L - 1])^ and $dfdf <> ord('I') + ord('D') shl 8) or
+     (PWord(@TypeName^[L - 1])^ and $dfdf <> _ID16) or
      (Rtti.Counts[rkClass] = 0) then
     exit;
   if (L > 13) and IdemPropName('ToBeDeletedID', @TypeName^[L - 12], 13) then
@@ -5193,7 +5204,7 @@ begin
         W.AddStrings('?,', FieldCount);
         dec(RowCount);
       end;
-      W.CancelLastComma(')');
+      W.ReplaceLastComma(')');
     end;
     W.SetText(result);
   finally
@@ -5666,7 +5677,7 @@ begin
     for i := 0 to PRttiEnumType(info.ContentTypeInfo)^.MaxValue do
     begin
       TrimLeftLowerCaseShort(P, EnumValue);
-      GetCaptionFromPCharLen(pointer(EnumValue), s); // translate
+      GetCaptionFromPCharLen(pointer(EnumValue), s); // UnCamelCase + translate
       StringToUtf8(s, EnumValue);
       if ((Lang <> sndxNone) and Soundex.Utf8(pointer(EnumValue))) or
          ((Lang = sndxNone) and FindUtf8(pointer(EnumValue), Search)) then
@@ -6247,7 +6258,7 @@ end;
 class function TOrm.OrmProps: TOrmProperties;
 begin
   {$ifdef NOPATCHVMT}
-  result := LastOrmProps;
+  result := LastOrmProps; // atomic shared pointer access
   if (result <> nil) and
      (result.Table = self) then
     exit;
@@ -6271,7 +6282,7 @@ function TOrm.Orm: TOrmProperties;
 begin
   // we know TRttiCustom is in the slot, and PrivateSlot is TOrmProperties
   {$ifdef NOPATCHVMT} // no need of a TOrmProperties field (LastOrmProps is ok)
-  result := LastOrmProps;
+  result := LastOrmProps; // atomic shared pointer access
   if (result <> nil) and
      (result.Table = PClass(self)^) then
     exit;
@@ -6784,7 +6795,7 @@ begin
     exit;
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
   repeat
-    p^.CopyValue(aRecord, self); // copy all fields between sibbling classes
+    p^.CopyValue(aRecord, self); // copy all fields between sibling classes
     inc(p);
     dec(n);
   until n = 0;
@@ -6809,7 +6820,7 @@ begin
   end;
   if p = nil then
     exit;
-  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibbling classes
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibling classes
   repeat
     if FieldBitGet(aRecordFieldBits, p^.PropertyIndex) then
       p^.CopyValue(aRecord, self);
@@ -7080,7 +7091,7 @@ begin
     GetJsonValues(W);
     W.AddComma;
   end;
-  W.CancelLastComma(']');
+  W.ReplaceLastComma(']');
 end;
 
 function TOrm.SetFieldSqlVars(const Values: TSqlVarDynArray): boolean;
@@ -7201,7 +7212,7 @@ begin
 end;
 
 const
-  ID_STR: array[{owoLowCaseID=}boolean] of string[15] = (
+  ID_STR: array[{owoLowCaseID=}boolean] of TShort15 = (
     '"ID_str":"', '"idStr":"');
 
 procedure TOrm.GetJsonValues(W: TOrmWriter);
@@ -7286,7 +7297,7 @@ begin
     end;
     inc(nfo);
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TOrm.AppendFillAsJsonArray(const FieldName: RawUtf8;
@@ -7300,7 +7311,7 @@ begin
     AppendAsJsonObject(W, Fields, WithID);
     W.AddComma;
   end;
-  W.CancelLastComma(']');
+  W.ReplaceLastComma(']');
   if FieldName <> '' then
     W.AddComma;
 end;
@@ -7350,8 +7361,8 @@ begin
   if self = nil then
     exit;
   with Orm do
-    serializer := CreateJsonWriter(Json, Expand, withID,
-      SimpleFieldsIndex[Occasion], {knownrows=}0, 0, @tmp);
+    serializer := CreateJsonWriter(Json,
+      Expand, withID, SimpleFieldsIndex[Occasion], {knownrows=}0, 0, @tmp);
   serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
   GetJsonValuesAndFree(serializer);
 end;
@@ -7365,8 +7376,8 @@ var
 begin
   J := TRawByteStringStream.Create;
   try
-    serializer := Orm.CreateJsonWriter(J, Expand, withID, Fields,
-      {knownrows=}0, 0, @tmp);
+    serializer := Orm.CreateJsonWriter(J,
+      Expand, withID, Fields, {knownrows=}0, 0, @tmp);
     serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
     GetJsonValuesAndFree(serializer);
     result := J.DataString;
@@ -7936,7 +7947,7 @@ var
     field: TOrmPropInfo;
     i: PtrInt;
     M: TOrmMany;
-    aManyField: string[63];
+    aManyField: TShort63;
 
     function GetManyField(F: PUtf8Char): boolean;
     var
@@ -7986,14 +7997,14 @@ var
               if GetManyField(P + 6) then
               begin
                 aManyField[1] := AnsiChar(i * 2 + 67);
-                result := RawUtf8(aManyField);
+                ShortStringToAnsi7String(aManyField, result);
                 exit; // Categories.Dest.Name=? -> C.Name=?
               end;
             end
             else if (P^ = '.') and GetManyField(P + 1) then
             begin
               aManyField[1] := AnsiChar(i * 2 + 66);
-              result := RawUtf8(aManyField);
+              ShortStringToAnsi7String(aManyField, result);
               exit;  // Categories.Kind=? -> CC.Kind=?
             end;
           end;
@@ -8060,7 +8071,7 @@ begin
   for f := 0 to length(ObjectsClass) - 1 do
     with ObjectsClass[f].OrmProps do
     begin
-      PWord(@aField[2])^ := ord('I') + ord('D') shl 8;
+      PWord(@aField[2])^ := _ID16;
       if not AddField(nil) then
         exit; // try to add the ID field
       if Props.fSqlFillPrepareMany = '' then
@@ -8289,7 +8300,11 @@ begin
   end
   else
   begin
+    if woHumanReadable in Options then
+      W.AddCRAndIndent;
     W.AddProp(pointer(props.IDJsonName), length(props.IDJsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     W.Add(TOrm(Instance).fID);
     W.BlockAfterItem(Options);
   end;
@@ -8297,9 +8312,10 @@ begin
   n := props.Count;
   repeat
     if woHumanReadable in Options then
-      W.WriteObjectPropNameHumanReadable(pointer(cur^.JsonName), length(cur^.JsonName))
-    else
-      W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+      W.AddCRAndIndent; // inlined WriteObjectPropNameHumanReadable()
+    W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     cur^.GetJsonValues(Instance, W);
     inc(cur);
     dec(n);
@@ -8651,48 +8667,48 @@ function TOrm.Validate(const aRest: IRestOrm; const aFields: TFieldBits;
   aInvalidFieldIndex: PInteger; aValidator: PSynValidate): string;
 var
   f, i: PtrInt;
-  Value: RawUtf8;
-  Validate: TSynValidate;
+  value: RawUtf8;
+  validator: TSynValidate;
   valid: boolean;
+  o: TOrmProperties;
 begin
   result := '';
   if (self = nil) or IsZero(aFields) then
     // avoid GPF and handle case if no field was selected
     exit;
-  with Orm do
-    if Filters <> nil then
-      for f := 0 to Fields.Count - 1 do
-        if Fields.List[f].OrmFieldType in COPIABLE_FIELDS then
-        begin
-          for i := 0 to length(Filters[f]) - 1 do
-          begin
-            Validate := TSynValidate(Filters[f, i]);
-            if Validate.InheritsFrom(TSynValidate) then
-            begin
-              if {%H-}Value = '' then
-                Fields.List[f].GetValueVar(self, false, Value, nil);
-              if Validate.InheritsFrom(TSynValidateRest) then
-                valid := TSynValidateRest(Validate).Validate(
-                  f, Value, result, aRest, self)
-              else
-                valid := Validate.Process(f, Value, result);
-              if not valid then
-              begin
-                // TSynValidate process failed -> notify caller
-                if aInvalidFieldIndex <> nil then
-                  aInvalidFieldIndex^ := f;
-                if aValidator <> nil then
-                  aValidator^ := Validate;
-                if result = '' then
-                   // no custom message -> show a default message
-                  result := format(sValidationFailed,
-                    [GetCaptionFromClass(PClass(Validate)^)]);
-                exit;
-              end;
-            end;
-          end;
-          Value := '';
-        end;
+  o := Orm;
+  if o.Filters = nil then
+    exit;
+  for f := 0 to o.Fields.Count - 1 do
+    if o.Fields.List[f].OrmFieldType in COPIABLE_FIELDS then
+    begin
+      for i := 0 to length(o.Filters[f]) - 1 do
+      begin
+        validator := TSynValidate(o.Filters[f, i]); // TSynFilterOrValidate
+        if not validator.InheritsFrom(TSynValidate) then
+          continue;
+        if {%H-}value = '' then // retrieve once per field for all validators
+          o.Fields.List[f].GetValueVar(self, false, value, nil);
+        if validator.InheritsFrom(TSynValidateRest) then
+          valid := TSynValidateRest(validator).Validate(
+            f, value, result, aRest, self)
+        else
+          valid := validator.Process(f, value, result);
+        if valid then
+          continue;
+        // TSynValidate process failed -> notify caller
+        if aInvalidFieldIndex <> nil then
+          aInvalidFieldIndex^ := f;
+        if aValidator <> nil then
+          aValidator^ := validator;
+        if result = '' then
+           // no custom message -> show a default message
+          result := format(sValidationFailed,
+            [GetCaptionFromClass(PClass(validator)^)]);
+        exit;
+      end;
+      value := ''; // next field
+    end;
 end;
 
 function TOrm.Validate(const aRest: IRestOrm; const aFields: array of PUtf8Char;
@@ -9966,7 +9982,7 @@ function TOrmModel.GetTableIndex(aTable: TOrmClass): PtrInt;
 var
   {$ifndef NOPATCHVMT}
   max: integer;
-  Props: TOrmProperties;
+  o: TOrmProperties;
   m: ^TOrmPropertiesModelEntry;
   {$endif NOPATCHVMT}
   c: POrmClass;
@@ -9975,14 +9991,14 @@ begin
      (aTable <> nil) then
   begin
     {$ifndef NOPATCHVMT}
-    Props := aTable.OrmProps;
-    if Props <> nil then
+    o := aTable.OrmProps;
+    if o <> nil then
     begin
-      max := Props.fModelMax;
+      max := o.fModelMax;
       if (max >= 0) and (max <= fTablesMax) then
       begin
         // fastest O(1) search in all registered models (if worth it)
-        m := pointer(Props.fModel);
+        m := pointer(o.fModel);
         repeat
           if m^.Model = self then
           begin
@@ -10017,16 +10033,6 @@ begin
       if Tables[result].InheritsFrom(aTable) then
         exit;
   result := -1;
-end;
-
-function TOrmModel.GetTableIndexExisting(aTable: TOrmClass): PtrInt;
-begin
-  if self = nil then
-    EModelException.RaiseU('nil.GetTableIndexExisting');
-  result := GetTableIndex(aTable);
-  if result < 0 then
-    EModelException.RaiseUtf8('% is not part of % root=%',
-      [aTable, self, fRoot]);
 end;
 
 function TOrmModel.GetTableExactIndex(const TableName: RawUtf8): PtrInt;
@@ -11559,7 +11565,7 @@ begin
             end;
             inc(nfo);
           end;
-          fBatch.CancelLastComma(']');
+          fBatch.ReplaceLastComma(']');
         end
     end;
     if fCalledWithinRest and ForceID then
@@ -11671,7 +11677,7 @@ begin
       end;
       inc(nfo);
     end;
-    fBatch.CancelLastComma(']');
+    fBatch.ReplaceLastComma(']');
   end;
   fBatch.AddComma;
   if Assigned(fRest) and
@@ -11712,7 +11718,7 @@ begin
   begin
     if fBatchCount > 0 then
     begin // if something to send
-      fBatch.CancelLastComma(']');
+      fBatch.ReplaceLastComma(']');
       if (fTable <> nil) and
          (fModel <> nil) and
          not (boOnlyObjects in fOptions) then

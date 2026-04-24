@@ -34,8 +34,9 @@ uses
   mormot.core.data,
   mormot.core.datetime,
   mormot.core.variants,
-  mormot.core.json,
   mormot.core.rtti,
+  mormot.core.json,
+  mormot.core.fmt,
   mormot.core.search, // for EccKeyFileFind()
   mormot.crypt.core,
   mormot.crypt.secure,
@@ -340,7 +341,8 @@ type
     /// save the public key as a .public json file
     // - i.e. a json containing all published properties of this instance
     // - persist ToVariant() as an human-readable JSON file
-    function ToFile(const filename: TFileName): boolean;
+    function ToFile(const filename: TFileName;
+      fmt: TTextWriterJsonFormat = jsonHumanReadable): boolean;
     /// compute the hexadecimal fingerprint of this Certificate
     // - is the hash of its certificate and public key binary serialization
     function GetDigest(Algo: THashAlgo): RawUtf8;
@@ -522,7 +524,7 @@ type
     function SaveToSource(const ConstName, Comment, PassWord: RawUtf8;
       IncludePassword: boolean = true; AFStripes: integer = 0;
       Pbkdf2Round: integer = 100; Aes: TAesAbstractClass = nil;
-      IncludeRaw: boolean = true): RawUtf8;
+      IncludeRaw: boolean = true; LF: TLineFeed = lfSystem): RawUtf8;
     /// read a private secret key from an encrypted secure binary buffer
     // - perform all reverse steps from SaveToSecureBinary() method
     // - returns TRUE on success, FALSE otherwise
@@ -1118,7 +1120,8 @@ type
     // high-level published properties of all stored certificates (e.g. Serial)
     // - as such, this file format is more verbose than CreateFromJson/SaveToJson
     // and may be convenient for managing certificates with a text/json editor
-    function SaveToFile(const jsonfile: TFileName): boolean;
+    function SaveToFile(const jsonfile: TFileName;
+      fmt: TTextWriterJsonFormat = jsonHumanReadable): boolean;
     /// load a certificates chain from some JSON-serialized .ca file
     // - you may use SaveToFile() method to create such JSON file
     // - would create only TEccCertificate instances with their public keys,
@@ -2143,7 +2146,7 @@ begin
   if FileExists(TruncatedFileName) then
     exit;
   ext := ECCCERTIFICATE_FILEEXT[privkey];
-  if ExtractFileExt(TruncatedFileName) <> ext then
+  if ExtractExt(TruncatedFileName) <> ext then
   begin
     fn := TruncatedFileName + ext;
     if FileExists(fn) then
@@ -2462,7 +2465,7 @@ var
 begin
   content := StringFromFile(FileName);
   if (content = '') and
-     (ExtractFileExt(filename) = '') then
+     not HasExt(filename) then
     content := StringFromFile(filename + ECCCERTIFICATEPUBLIC_FILEEXT);
   if content = '' then
     result := false
@@ -2806,10 +2809,11 @@ begin
   _VariantSaveJson(ToVariant(withBase64), twJsonEscape, result{%H-});
 end;
 
-function TEccCertificate.ToFile(const filename: TFileName): boolean;
+function TEccCertificate.ToFile(const filename: TFileName;
+  fmt: TTextWriterJsonFormat): boolean;
 begin
   if CheckCRC then
-    result := JsonReformatToFile(ToJson, filename)
+    result := JsonReformatToFile(ToJson, filename, fmt)
   else
     result := false;
 end;
@@ -3138,7 +3142,7 @@ function TEccCertificateSecret.LoadFromSecureFile(const FileName: TFileName;
 var
   FN: TFileName;
 begin
-  if ExtractFileExt(FileName) = '' then
+  if not HasExt(FileName) then
     FN := FileName + ECCCERTIFICATESECRET_FILEEXT
   else
     FN := FileName;
@@ -3149,7 +3153,7 @@ end;
 function TEccCertificateSecret.SaveToSource(
   const ConstName, Comment, PassWord: RawUtf8; IncludePassword: boolean;
   AFStripes, Pbkdf2Round: integer; Aes: TAesAbstractClass;
-  IncludeRaw: boolean): RawUtf8;
+  IncludeRaw: boolean; LF: TLineFeed): RawUtf8;
 var
   data: RawByteString;
   name, suffix: RawUtf8;
@@ -3178,7 +3182,7 @@ begin
   if IncludeRaw then
     suffix := FormatUtf8('  %_RAW = ''%'';'#13#10'%', [name,
       mormot.core.text.BinToHex(@fPrivateKey, SizeOf(fPrivateKey)), suffix]);
-  result := BinToSource(name, Comment, pointer(data), length(data), 16, suffix)
+  result := BinToSource(name, Comment, pointer(data), length(data), 16, suffix, LF);
 end;
 
 function TEccCertificateSecret.SignToBase64(Data: pointer; Len: integer): RawUtf8;
@@ -3655,7 +3659,7 @@ function TEccSignatureCertifiedFile.FromFile(const aFileName: TFileName): boolea
 var
   json: RawUtf8;
 begin
-  if SameText(ExtractFileExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
+  if SameText(ExtractExt(aFileName), ECCCERTIFICATESIGN_FILEEXT) then
     json := StringFromFile(aFileName)
   else
     json := StringFromFile(aFileName + ECCCERTIFICATESIGN_FILEEXT);
@@ -4480,7 +4484,7 @@ begin
     crl := 0;
     for i := 0 to high(values) do
       if values[i] <> '' then
-        if PWord(values[i])^ = ord('/') + ord('/') shl 8 then
+        if cardinal(PWord(values[i])^) = SLASH_16 then
         begin
           // this is a base64-encoded TEccCertificateRevocation entry
           if crl = length(fCrl) then
@@ -4616,24 +4620,21 @@ end;
 
 function GetChainFileName(const jsonfile: TFileName): TFileName;
 begin
-  if ExtractFileExt(jsonfile) = '' then
+  if not HasExt(jsonfile) then
     result := jsonfile + ECCCERTIFICATES_FILEEXT
   else
     result := jsonfile;
 end;
 
-function TEccCertificateChain.SaveToFile(const jsonfile: TFileName): boolean;
-var
-  json: RawUtf8;
+function TEccCertificateChain.SaveToFile(const jsonfile: TFileName;
+  fmt: TTextWriterJsonFormat): boolean;
 begin
   if (Count = 0) or
      (jsonfile = '') then
     result := false
   else
-  begin
-    json := SaveToFileContent;
-    result := JsonBufferReformatToFile(pointer(json), GetChainFileName(jsonfile));
-  end;
+    result := JsonBufferReformatToFile(
+      pointer(SaveToFileContent), GetChainFileName(jsonfile), fmt);
 end;
 
 function TEccCertificateChain.LoadFromFile(const jsonfile: TFileName): boolean;
@@ -5005,7 +5006,7 @@ begin
 end;
 
 const
-  ED: array[boolean] of string[7] = (
+  ED: array[boolean] of TShort7 = (
     'Decrypt', 'Encrypt');
 
 procedure TEcdheProtocol.SetIVAndMacNonce(aEncrypt: boolean);
@@ -6044,8 +6045,8 @@ end;
 
 function TCryptCertInternal.GetPeerInfo: RawUtf8;
 begin
-  if fEcc <> nil then
-    JsonBufferReformat(pointer(fEcc.ToJson({withbase64=}false)), result)
+  if fEcc <> nil then // in Hjson readable format - close enough to X509_print()
+    JsonBufferReformat(pointer(fEcc.ToJson({withbase64=}false)), result, jsonH)
   else
     result := '';
 end;

@@ -50,6 +50,7 @@ uses
   mormot.core.datetime,
   mormot.core.rtti,
   mormot.core.data, // for TRawUtf8List
+  mormot.core.fmt,
   mormot.core.variants;
 
 
@@ -600,10 +601,15 @@ type
     /// finalize this parser instance
     destructor Destroy; override;
 
-    /// parse a JSON Swagger/OpenAPI file content
-    procedure ParseFile(const aJsonFile: TFileName);
+    /// parse a Swagger/OpenAPI spec from a file
+    // - auto-detects JSON (default) or YAML (.yaml / .yml extension)
+    procedure ParseFile(const aSpecFile: TFileName);
     /// parse a JSON Swagger/OpenAPI content
     procedure ParseJson(const aJson: RawUtf8);
+    /// parse a YAML Swagger/OpenAPI content
+    procedure ParseYaml(const aYaml: RawUtf8);
+    /// parse a YAML Swagger/OpenAPI spec file
+    procedure ParseYamlFile(const aYamlFile: TFileName);
     /// parse a Swagger/OpenAPI content tree from an existing TDocVariant
     procedure ParseData(const aSpecs: TDocVariantData);
     /// clear all internal information of this parser instance
@@ -1566,7 +1572,7 @@ begin
 end;
 
 const
-  _CONST: array[boolean] of string[7] = ('const ', '');
+  _CONST: array[boolean] of TShort7 = ('const ', '');
 
 procedure TPascalOperation.Declaration(W: TTextWriter; const ClassName: RawUtf8;
   InImplementation: boolean);
@@ -1829,7 +1835,7 @@ begin
       Append(line, ', ');
       CamelCase(ToUtf8(fChoices.Values[i]), item);
       if item <> '' then
-        item[1] := UpCase(item[1]);
+        item[1] := NormToUpperAnsi7[item[1]]; // ensure PascalCase identifier
       if (item = '') or
          (FindPropName(pointer(items), item, itemscount) >= 0) then
         Append(item, [i]); // duplicated, or no ascii within -> make unique
@@ -2001,7 +2007,7 @@ begin
     begin
       if result[1] <> 'T' then
       begin
-        result[1] := UpCase(result[1]);
+        result[1] := NormToUpperAnsi7[result[1]];
         insert('T', result, 1);
       end;
       Append(result, 'DynArray'); // use mormot.core.base arrays
@@ -2263,6 +2269,11 @@ begin
     fName := fErrorType.CustomType.Name
   else if fErrorType.BuiltInType = obtRawUtf8 then
     fName := 'TextResponse'
+  else if fErrorType.BuiltInType = obtVariant then
+    // empty-object schema ({type:object, properties:{}}) or untyped response
+    // body: fall back to a generic variant-backed exception class.
+    // Seen e.g. in GitHub REST spec for 304 "Not Modified" responses.
+    fName := 'VariantResponse'
   else
     EOpenApi.RaiseUtf8('%.Create: unsupported schema for %', [self, aResponse^.Data.ToJson]);
   fErrorTypeName := fErrorType.ToPascalName;
@@ -2318,7 +2329,7 @@ constructor TOpenApiParser.Create(const aName: RawUtf8; aOptions: TOpenApiParser
 begin
   fName := aName;
   if fName <> '' then
-    fName[1] := UpCase(fName[1]);
+    fName[1] := NormToUpperAnsi7[fName[1]];
   fOptions := aOptions;
   // create internal lists - fNoDuplicate will use O(1) hash table
   fRecords    := TRawUtf8List.CreateEx([fObjectsOwned, fCaseSensitive, fNoDuplicate]);
@@ -2395,14 +2406,38 @@ end;
 procedure TOpenApiParser.ParseJson(const aJson: RawUtf8);
 begin
   Clear;
-  fSpecs.Data.InitJson(aJson, JSON_FAST + [dvoInternNames]);
+  fSpecs.Data.InitJson(aJson, JSON_YAML);
   ParseSpecs;
 end;
 
-procedure TOpenApiParser.ParseFile(const aJsonFile: TFileName);
+procedure TOpenApiParser.ParseYaml(const aYaml: RawUtf8);
 begin
   Clear;
-  fSpecs.Data.InitJsonFromFile(aJsonFile, JSON_FAST + [dvoInternNames]);
+  if not TryYamlToVariant(aYaml, fSpecs.Data) then
+    EOpenApi.RaiseUtf8('%.ParseYaml: invalid YAML payload', [self]);
+  ParseSpecs;
+end;
+
+procedure TOpenApiParser.ParseYamlFile(const aYamlFile: TFileName);
+begin
+  Clear;
+  if not TryYamlFileToVariant(aYamlFile, fSpecs.Data) then
+    EOpenApi.RaiseUtf8('%.ParseYamlFile: invalid YAML file %',
+      [self, aYamlFile]);
+  ParseSpecs;
+end;
+
+procedure TOpenApiParser.ParseFile(const aSpecFile: TFileName);
+begin
+  Clear;
+  if IsYamlFileName(aSpecFile) then
+  begin
+    if not TryYamlFileToVariant(aSpecFile, fSpecs.Data) then
+      EOpenApi.RaiseUtf8('%.ParseFile: invalid YAML file %',
+        [self, aSpecFile]);
+  end
+  else
+    fSpecs.Data.InitJsonFromFile(aSpecFile, JSON_YAML);
   ParseSpecs;
 end;
 

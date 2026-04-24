@@ -4,7 +4,7 @@
 
 ![Happy mORMot](doc/happymormot.png)
 
-(c) 2008-2025 Synopse Informatique - Arnaud Bouchez
+(c) 2008-2026 Synopse Informatique - Arnaud Bouchez
 
 https://synopse.info  - http://mORMot.net
 
@@ -15,9 +15,9 @@ Thanks to all [Contributors](CONTRIBUTORS.md)!
 ## Resources
 
 You can find more about *mORMot 2* in:
-- its [Official Documentation](https://synopse.info/files/doc/mORMot2.html) (work in progress);
+- its [Official Documentation](https://synopse.info/files/doc/mORMot2.html) (work in progress) and [AI Generated Documentation](docs);
 - the [Samples Folder](ex);
-- the [Thomas Tutorials](https://github.com/synopse/mORMot2/tree/master/ex/ThirdPartyDemos/tbo);
+- the [Thomas Tutorials](ex/ThirdPartyDemos/tbo);
 - the [Synopse Forum](https://synopse.info/forum/viewforum.php?id=24);
 - the [Synopse Blog](https://blog.synopse.info);
 - the [Source Code `src` sub-folder](src);
@@ -35,7 +35,7 @@ If you find it worth using, please consider [sponsoring mORMot 2 dev](https://gi
 
 ### mORMot What?
 
-Synopse *mORMot 2* is the ultimate Open Source ToolBox for modern Object Pascal. It is a fully featured Client-Server ORM SOA MVC framework for Delphi 7 up to Delphi 12.2 Athenes and FPC 3.2/trunk, targeting Windows/Linux/BSD/MacOS for servers, and any platform for clients (including mobile or AJAX).
+Synopse *mORMot 2* is the ultimate Open Source ToolBox for modern Object Pascal. It is a fully featured Client-Server ORM SOA MVC framework for Delphi 7 up to Delphi 12.3 Florence and FPC 3.2/trunk, targeting Windows/Linux/BSD/MacOS for servers, and any platform for clients (including mobile or AJAX).
 
 ![mORMot map](doc/IamLost.png)
 
