@@ -60,7 +60,6 @@ uses
   mormot.crypt.openssl,
   mormot.tools.ecc         in '..\src\tools\ecc\mormot.tools.ecc.pas',
   test.core.base           in '.\test.core.base.pas',
-  test.core.yaml           in '.\test.core.yaml.pas',
   test.core.data           in '.\test.core.data.pas',
   test.core.crypt          in '.\test.core.crypt.pas',
   test.core.ecc            in '.\test.core.ecc.pas',
@@ -149,6 +148,7 @@ begin
   AddCase([
     TTestCoreBase,
     TTestCoreProcess,
+    TTestCoreXml,
     TTestCoreYaml,
     {$ifdef HASGENERICS} // do-nothing on oldest compilers (e.g. <= Delphi XE7)
     TTestCoreCollections,

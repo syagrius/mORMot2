@@ -43,7 +43,6 @@ uses
   mormot.core.json,
   mormot.core.fmt,
   mormot.core.threads,
-  mormot.core.perf,
   mormot.core.zip,     // for ODS export
   mormot.crypt.secure, // for TSynUniqueIdentifierBits
   mormot.db.core;
@@ -814,28 +813,11 @@ var
 { ************ TOrmWriter Class for TOrm Serialization }
 
 type
-  /// several options to customize how TOrm will be serialized
-  // - e.g. if properties storing JSON should be serialized as an object, and not
-  // escaped as a string (which is the default, matching ORM column storage)
-  // - if an additional "ID_str":"12345" field should be added to the standard
-  // "ID":12345 field, which may exceed 53-bit integer precision of JavaScript
-  // - to generate JS-friendly "id" (and "idStr") instead of "ID" or "RowID"
-  // - to generate JS-friendly "propName": from a PropName pascal property
-  TOrmWriterOption = (
-    owoAsJsonNotAsString,
-    owoID_str,
-    owoLowCaseID,
-    owoLowCaseFirstPropChar);
-
-  /// options to customize how TOrm will be written by TOrmWriter
-  TOrmWriterOptions = set of TOrmWriterOption;
-
   /// simple writer to a Stream, specialized for writing TOrm as JSON
   // - in respect to the standard TResultsWriter as defined in mormot.db.core,
   // this class has some options dedicated to our TOrm serialization
   TOrmWriter = class(TResultsWriter)
   protected
-    fOrmOptions: TOrmWriterOptions;
     procedure SetOrmOptions(Value: TOrmWriterOptions);
   public
     /// customize TOrm.GetJsonValues serialization process
@@ -1928,7 +1910,7 @@ type
     /// release internal list items
     destructor Destroy; override;
     /// add a TOrmPropInfo to the list
-    function Add(aItem: TOrmPropInfo): integer;
+    function Add(aItem: TOrmPropInfo): PtrInt;
     /// set the length of the internal List[] array and the sorted names
     procedure AfterAdd;
     /// find an item in the list using O(log(n)) binary search
@@ -2790,11 +2772,10 @@ type
   TOrmLocks = object
   {$endif USERECORDWITHMETHODS}
   private
-    fSafe: TRWLock; // thread-safe and not blocking concurrent IsLocked()
-    fID: TIDDynArray;        // array[0..Count-1] of locked TID
-    fTix: TCardinalDynArray; // GetTickSec values at the Lock() time
-    fCount: PtrInt;
-    fLastPurge: integer;
+    fSafe: TRWLock;              // thread-safe and not blocking IsLocked()
+    fID: TIDDynArray;            // array[0..Count-1] of locked TID
+    fTix: TCardinalDynArray;     // GetTickSec values at the Lock() time
+    fCount, fLastPurge: integer; // no need of PtrInt here and better alignment
   public
     /// lock a record, specified by its TID
     // - returns true on success, false if was already locked
@@ -2812,7 +2793,7 @@ type
     // - could be used to release locked records e.g. if some client(s) crashed
     procedure PurgeOlderThan(MinutesFromNow: cardinal);
     /// the current number of locked TID
-    property Count: PtrInt
+    property Count: integer
       read fCount;
   end;
   POrmLocks = ^TOrmLocks;
@@ -4431,8 +4412,8 @@ var
     res.fNameUnflattened := result.Name;
     max := high(aFlattenedProps);
     for i := max downto 0 do
-      res.fNameUnflattened :=
-        ToUtf8(aFlattenedProps[i]^.Name^) + '.' + result.NameUnflattened;
+      res.fNameUnflattened := Make([
+        aFlattenedProps[i]^.Name^, '.', result.fNameUnflattened]);
     if (max >= 0) and
        (aFlattenedProps[max]^.TypeInfo^.ClassFieldCount(
          {withoutgetter=}pilIgnoreIfGetter in aOptions) = 1) then
@@ -4444,7 +4425,7 @@ var
     end;
     for i := max downto 0 do
     begin
-      res.fName := ToUtf8(aFlattenedProps[i]^.Name^) + '_' + result.Name;
+      res.fName := Make([aFlattenedProps[i]^.Name^, '_', result.fName]);
       res.fJsonName := res.fName;
     end;
   end;
@@ -5437,7 +5418,7 @@ end;
 procedure TOrmPropInfoRttiMany.GetValueVar(Instance: TObject; ToSql: boolean;
   var result: RawUtf8; wasSqlString: PBoolean);
 begin
-  result := '';
+  FastAssignNew(result);
 end;
 
 procedure TOrmPropInfoRttiMany.SetValue(Instance: TObject; Value: PUtf8Char;
@@ -5683,13 +5664,10 @@ begin
       end;
     end
     else
-    begin
-      p := @up;
       if fEngine.CodePage = CP_WINANSI then
-        l := UpperCopyWin255(p, RawUtf8(tmp)) - p
+        l := UpperCopyWin255(@up, RawUtf8(tmp)) - PAnsiChar(@up)
       else
-        l := UpperCopy255Buf(p, tmp, l) - p;
-    end;
+        l := UpperCopy255Buf(@up, tmp, l) - PAnsiChar(@up);
   end;
   result := DefaultHasher(OrmHashSeed, p, l);
   if fGetterIsFieldPropOffset = 0 then
@@ -7366,22 +7344,18 @@ begin
 end;
 
 procedure TOrmPropInfoList.AfterAdd;
-var
-  i: PtrInt;
 begin
   SetLength(fList, fCount);
-  if fCount = 0 then
-    fLast := nil
-  else
+  fLast := nil;
+  if fCount <> 0 then
     fLast := fList[fCount - 1];
   // initialize once the ordered lookup indexes, for binary search
   SetLength(fOrderedByName, fCount);
-  for i := 0 to fCount - 1 do
-    fOrderedByName[i] := i;
+  FillIncreasingB(pointer(fOrderedByName), 0, fCount - 1);
   QuickSortByName(0, fCount - 1);
 end;
 
-function TOrmPropInfoList.Add(aItem: TOrmPropInfo): integer;
+function TOrmPropInfoList.Add(aItem: TOrmPropInfo): PtrInt;
 var
   f: PtrInt;
 begin
@@ -7789,7 +7763,7 @@ begin
       inc(len, length(List[f].Name) + 1);
   if len = 0 then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   p := FastSetString(result, len - 1); // allocate once for all
@@ -8787,8 +8761,11 @@ begin
 end;
 
 function TOrmTableAbstract.GetAsCurrency(Row, Field: PtrInt): currency;
+var
+  curr: currency; // safer with an explicit local variable
 begin
-  PInt64(@result)^ := StrToCurr64(Get(Row, Field), nil);
+  PInt64(@curr)^ := StrToCurr64(Get(Row, Field), nil);
+  result := curr;
 end;
 
 function TOrmTableAbstract.GetAsCurrency(Row: PtrInt; const FieldName: RawUtf8): currency;
@@ -11127,10 +11104,10 @@ function TOrmPropertiesAbstract.OrmFieldTypeToSql(FieldIndex: integer): RawUtf8;
 begin
   if (self = nil) or
     (cardinal(FieldIndex) >= cardinal(Fields.Count)) then
-    result := ''
+    FastAssignNew(result)
   else if (FieldIndex < length(fCustomCollation)) and
           (fCustomCollation[FieldIndex] <> '') then
-    result := ' TEXT COLLATE ' + fCustomCollation[FieldIndex] + ', '
+    Join([' TEXT COLLATE ', fCustomCollation[FieldIndex], ', '], result)
   else
     result := DEFAULT_ORMFIELDTYPETOSQL[Fields.List[FieldIndex].OrmFieldTypeStored];
 end;
@@ -11149,9 +11126,9 @@ begin
     begin
       Attributes := Attributes - [aBinaryCollation, aUnicodeNoCaseCollation];
       if PropNameEquals(aCollationName, 'BINARY') then
-        Attributes := Attributes + [aBinaryCollation]
+        Include(fAttributes, aBinaryCollation)
       else if PropNameEquals(aCollationName, 'UNICODENOCASE') then
-        Attributes := Attributes + [aUnicodeNoCaseCollation];
+        Include(fAttributes, aUnicodeNoCaseCollation);
     end;
   end;
 end;
@@ -11396,9 +11373,9 @@ end;
 
 function TOrmPropertiesAbstract.IsFieldNameOrFunction(const PropName: RawUtf8): boolean;
 var
-  L: integer;
+  L: PtrInt;
   P, P2: PUtf8Char;
-  tmp: ShortString; // no heap allocation
+  tmp: TByteToAnsiChar; // no heap allocation
 begin
   result := false;
   L := length(PropName);
@@ -11409,12 +11386,12 @@ begin
   if P[L - 1] = ')' then
   begin
     case IdemPCharSep(P, FUNCS) of
-      0..3:
+      0 .. 3: // MAX MIN AVG SUM
         begin
           inc(P, 4);
           P2 := PosChar(P, ')');
         end;
-      4..5:
+      4 .. 5: // JSONGET JSONHAS
         begin
           inc(P, 8);
           P2 := PosChar(P, ',');
@@ -11422,15 +11399,16 @@ begin
     else
       exit; // unknown function name
     end;
-    if P2 <> nil then
-    begin
-      SetString(tmp, PAnsiChar(P), P2 - P); // extract NAME from func(NAME)
-      tmp[ord(tmp[0]) + 1] := #0;
-      result := IsFieldName(@tmp[1]);
-    end;
-  end
-  else
-    result := IsFieldName(P);
+    if P2 = nil then
+      exit;
+    L := P2 - P;
+    if L > high(tmp) then
+      exit;
+    MoveFast(P^, tmp, L); // extract NAME from func(NAME)
+    tmp[L] := #0;
+    P := @tmp;
+  end;
+  result := IsFieldName(P);
 end;
 
 function TOrmPropertiesAbstract.FieldBitsFromBlobField(aBlobField: PRttiProp;
@@ -11684,7 +11662,7 @@ function TOrmPropertiesAbstract.MainFieldName(ReturnFirstIfNoUnique: boolean): R
 begin
   if (self = nil) or
      (MainField[ReturnFirstIfNoUnique] < 0) then
-    result := ''
+    FastAssignNew(result)
   else
     result := Fields.List[MainField[ReturnFirstIfNoUnique]].Name;
 end;
@@ -11737,11 +11715,11 @@ begin
   pointer(@OrmFieldTypeComp[oftVariant])    := @StrComp;
   pointer(@OrmFieldTypeComp[oftNullable])   := @StrComp;
   // refresh ORM types RTTI with actual type definitions
-  PTC_INFO[pctRecordReference] := TypeInfo(TRecordReference);
+  PTC_INFO[pctRecordReference]            := TypeInfo(TRecordReference);
   PTC_INFO[pctRecordReferenceToBeDeleted] := TypeInfo(TRecordReferenceToBeDeleted);
-  PTC_INFO[pctCreateTime]      := TypeInfo(TCreateTime);
-  PTC_INFO[pctModTime]         := TypeInfo(TModTime);
-  PTC_INFO[pctRecordVersion]   := TypeInfo(TRecordVersion);
+  PTC_INFO[pctCreateTime]                 := TypeInfo(TCreateTime);
+  PTC_INFO[pctModTime]                    := TypeInfo(TModTime);
+  PTC_INFO[pctRecordVersion]              := TypeInfo(TRecordVersion);
   for ptc := succ(low(ptc)) to high(ptc) do
     PTC_RTTI[ptc] := Rtti.RegisterType(PTC_INFO[ptc]);
 end;

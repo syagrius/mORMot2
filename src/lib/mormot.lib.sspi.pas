@@ -777,10 +777,6 @@ function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aPassword: SpiUtf8;  const aSecKerberosSpn: RawUtf8;
   out aOutData: RawByteString): boolean;
 
-/// check if the password is a local keytab/ccache file with a FILE: prefix
-// - always return false with SSPI which does not support those keytabs
-function ClientSspiPasswordIsFile(const aPassword: SpiUtf8): boolean;
-
 /// check if a binary request packet from a client is using NTLM
 function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
 
@@ -852,6 +848,8 @@ const
   /// HTTP header pattern received for authentication
   SECPKGNAMEHTTPAUTHORIZATION = 'AUTHORIZATION: NEGOTIATE ';
 
+  /// by default, no GSSAPI is to be loaded with the Windows SSPI
+  GssApi_LastLoadError = '';
 
 
 { ****************** Lan Manager Access Functions }
@@ -1300,7 +1298,7 @@ var
   status: integer;
   res: PByte;
 begin
-  result := '';
+  FastAssignNew(result);
   // sizes.cbSecurityTrailer is size of the trailer (signature + padding) block
   if QueryContextAttributesW(
        @aSecContext.CtxHandle, SECPKG_ATTR_SIZES, @sizes) <> 0 then
@@ -1385,7 +1383,7 @@ var
   nfo: TSecPkgConnectionInfo;
   cip: TSecPkgCipherInfo; // Vista+ attribute
 begin
-  result := '';
+  FastAssignNew(result);
   FillCharFast(nfo, SizeOf(nfo), 0);
   if QueryContextAttributesW(
       @Ctxt, SECPKG_ATTR_CONNECTION_INFO, @nfo) <> SEC_E_OK then
@@ -1424,7 +1422,7 @@ function TlsCertRaw(var Ctxt: TCtxtHandle; SignOid: PRawUtf8): RawByteString;
 var
   nfo: PCCERT_CONTEXT;
 begin
-  result := '';
+  FastAssignNew(result);
   if SignOid <> nil then
     SignOid^ := '';
   nfo := nil;
@@ -1485,7 +1483,7 @@ var
   i, j, o: PtrInt;
   t: RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   o := 1;
   repeat
     i := PosEx(Pattern, Text, o);
@@ -1518,7 +1516,7 @@ end;
 
 function ParseAltNames(P: PByteArray; L: PtrInt): RawUtf8;
 begin // rough parsing, but works with most simple content
-  result := '';
+  FastAssignNew(result);
   { 2.5.29.17 = 30:20:
                   82:0c: 73:79:6e:6f:70:73:65:2e:69:6e:66:6f:
                   82:10: 77:77:77:2e:73:79:6e:6f:70:73:65:2e:69:6e:66:6f
@@ -1690,8 +1688,8 @@ begin
     '  Signature Algorithm: ', c.AlgorithmName, #13#10 +
     '  Issuer: ', c.IssuerName, #13#10 +
     '  Validity:'#13#10 +
-    '    Not Before: ', DoDateTimeToText(c.NotBefore), #13#10 +
-    '    Not After : ', DoDateTimeToText(c.NotAfter), #13#10 +
+    '    Not Before: ', OsDateTimeToText(c.NotBefore), #13#10 +
+    '    Not After : ', OsDateTimeToText(c.NotAfter), #13#10 +
     '  Subject: ', c.SubjectName, #13#10 +
     '  Subject Public Key Info:'#13#10 +
     '    Public Key Algorithm: ', c.PublicKeyAlgorithmName, #13#10 +
@@ -1853,15 +1851,10 @@ begin
   //FillCharFast(pointer(password)^, length(password) * 2, 0); // anti-forensic
 end;
 
-function ClientSspiPasswordIsFile(const aPassword: SpiUtf8): boolean;
-begin
-  result := false;
-end;
-
 function ServerSspiDataNtlm(const aInData: RawByteString): boolean;
 begin
   result := (aInData <> '') and
-            (PCardinal(aInData)^ or $20202020 = NTLM_LOW);
+            (PCardinal(aInData)^ or $20202020 = NTLM_LO);
 end;
 
 function ServerSspiAuth(var aSecContext: TSecContext;
@@ -2110,7 +2103,7 @@ begin
       for i := 0 to integer(dwEntriesRead) - 1 do
       begin
         Win32PWideCharToUtf8(g^.name, result[i]);
-        sid^[i] := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, sid^[i]);
         inc(g);
       end;
       NetAPIBufferFree(v);
@@ -2129,7 +2122,7 @@ var
   name: RawUtf8;
   srv: TSynTempBuffer;
 begin
-  result := '';
+  FastAssignNew(result);
   if GroupName = '' then
     exit;
   s := Utf8ToWin32PWideChar(Server, srv);
@@ -2147,7 +2140,7 @@ begin
       Win32PWideCharToUtf8(g^.name, Name);
       if PropNameEquals(Name, GroupName) then
       begin
-        result := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, result);
         break;
       end;
       inc(g);
@@ -2211,8 +2204,8 @@ function MsiGetFileSignatureInformationW; external msidll;
 
 function MsiGetString(hRecord: TMsiHandle; index: integer; var str: RawUtf8): boolean;
 var
-  tmp: TSynTempBuffer;
   sz, res: cardinal;
+  tmp: TSynTempBuffer;
 begin
   result := false;
   sz := tmp.Init shr 1; // size in WideChar

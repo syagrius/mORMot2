@@ -100,6 +100,8 @@ type
     function DoRequest4(Ctxt: THttpServerRequestAbstract): cardinal;
     // this is the main method called by RtspOverHttp[BufferedWrite]
     procedure DoRtspOverHttp(options: TAsyncConnectionsOptions);
+    // helper invoked from OpenAPI to verify YAML dispatch
+    procedure OpenApiYamlDispatch;
   published
     /// Engine.IO and Socket.IO regression tests
     procedure _SocketIO;
@@ -121,17 +123,16 @@ type
     procedure RTSPOverHTTPBufferedWrite;
     /// validate mormot.net.tunnel
     procedure Tunnel;
+    {$ifdef OSPOSIX}
+    /// validate mormot.net.tftp.server using libcurl (so only POSIX by now)
+    procedure TFTPServer;
+    /// validate Unix domain socket server bind and stale .socket file cleanup
+    procedure UnixDomainSocket;
+    {$endif OSPOSIX}
     /// validate IP processing functions
     procedure IPAddresses;
     /// validate mormot.net.openapi unit
     procedure OpenAPI;
-    {$ifdef OSPOSIX}
-    /// validate mormot.net.tftp.server using libcurl (so only POSIX by now)
-    procedure TFTPServer;
-    {$endif OSPOSIX}
-  protected
-    // helper invoked from OpenAPI to verify YAML dispatch
-    procedure _OpenApiYamlDispatch;
   end;
 
 
@@ -311,7 +312,10 @@ begin
   for i := 0 to high(OpenApiName) do
     if OpenApiName[i] <> '' then
     begin
-      fn := FormatString('%OpenApi%.json', [WorkDir, OpenApiName[i]]);
+      fn := '';
+      if PosExChar('.', OpenApiName[i]) = 0 then
+        fn := '.json';
+      fn := FormatString('%OpenApi%%', [WorkDir, OpenApiName[i], fn]);
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
         continue; // already downloaded
@@ -335,6 +339,8 @@ begin
         //oa.Options := oa.Options + [opoGenerateOldDelphiCompatible];
         //oa.Options := oa.Options + [opoClientOnlySummary];
         //oa.Options := oa.Options + [opoDtoNoDescription, opoClientNoDescription];
+        //oa.Options := oa.Options + [opoDtoNoReduce];
+        //oa.Options := oa.Options + [opoDtoReduceNamed];
         oa.ParseJson(api[i]);
         // ensure there was something properly parsed
         Check(oa.Version <> oavUnknown, 'version');
@@ -359,10 +365,10 @@ begin
   // for a YAML spec and its JSON counterpart when consumed via ParseYaml/
   // ParseFile. Covers the spec-approved invariant behind mopenapi's .yaml
   // support.
-  _OpenApiYamlDispatch;
+  OpenApiYamlDispatch;
 end;
 
-procedure TNetworkProtocols._OpenApiYamlDispatch;
+procedure TNetworkProtocols.OpenApiYamlDispatch;
 const
   YAML_SPEC: RawUtf8 =
     'openapi: 3.0.0'#10 +
@@ -391,45 +397,43 @@ const
     '"components":{"schemas":{"Info":{"type":"object",' +
     '"properties":{"name":{"type":"string"}}}}}}';
 var
-  oaYaml, oaJson, oaFile: TOpenApiParser;
+  oaY, oaJ, oaF: TOpenApiParser;
   dtoY, dtoJ, dtoF, clientY, clientJ, clientF: RawUtf8;
   fn: TFileName;
 begin
-  oaYaml := TOpenApiParser.Create('DispatchYaml');
-  oaJson := TOpenApiParser.Create('DispatchJson');
-  oaFile := TOpenApiParser.Create('DispatchFile');
+  oaY := TOpenApiParser.Create('DispatchTest');
+  oaJ := TOpenApiParser.Create('DispatchTest');
+  oaF := TOpenApiParser.Create('DispatchTest');
   try
-    oaYaml.ParseYaml(YAML_SPEC);
-    oaJson.ParseJson(JSON_SPEC);
-    dtoY := oaYaml.GenerateDtoUnit;
-    dtoJ := oaJson.GenerateDtoUnit;
-    clientY := oaYaml.GenerateClientUnit;
-    clientJ := oaJson.GenerateClientUnit;
-    // the spec's actual names differ (DispatchYaml vs DispatchJson), so we
-    // only check that both produced identical shape with the name swapped
+    oaY.ParseYaml(YAML_SPEC);
+    oaJ.ParseJson(JSON_SPEC);
+    dtoY := oaY.GenerateDtoUnit;
+    dtoJ := oaJ.GenerateDtoUnit;
+    CheckEqual(dtoY, dtoJ);
     Check(dtoY <> '', 'yaml dto');
     Check(dtoJ <> '', 'json dto');
+    clientY := oaY.GenerateClientUnit;
+    clientJ := oaJ.GenerateClientUnit;
+    CheckEqual(clientY, clientJ);
     Check(clientY <> '', 'yaml client');
     Check(clientJ <> '', 'json client');
-    CheckEqual(length(dtoY), length(dtoJ), 'dto length yaml vs json');
-    CheckEqual(length(clientY), length(clientJ), 'client length yaml vs json');
     // ParseFile with .yaml extension must dispatch to the YAML path
     fn := WorkDir + 'test.openapi.dispatch.yaml';
     FileFromString(YAML_SPEC, fn);
     try
-      oaFile.Name := 'DispatchYaml'; // match oaYaml so outputs are comparable
-      oaFile.ParseFile(fn);
-      dtoF := oaFile.GenerateDtoUnit;
-      clientF := oaFile.GenerateClientUnit;
+      oaF.Name := 'DispatchTest'; // match oaY so outputs are comparable
+      oaF.ParseFile(fn);
+      dtoF := oaF.GenerateDtoUnit;
+      clientF := oaF.GenerateClientUnit;
       CheckEqual(dtoF, dtoY, 'ParseFile(.yaml) dto must equal ParseYaml');
       CheckEqual(clientF, clientY, 'ParseFile(.yaml) client must equal ParseYaml');
     finally
       DeleteFile(fn);
     end;
   finally
-    oaYaml.Free;
-    oaJson.Free;
-    oaFile.Free;
+    oaY.Free;
+    oaJ.Free;
+    oaF.Free;
   end;
 end;
 
@@ -1093,6 +1097,47 @@ begin
   c := 0;
   Check(NetIsIP4('1.2.3.4', @c));
   CheckEqual(c, $04030201);
+  // validate host name in DNS or general name resolution context
+  Check(not IsHostName(nil));
+  Check(IsHostName('a'));
+  Check(IsHostName('ab'));
+  Check(IsHostName('a-b'));
+  Check(IsHostName('1.2.3.4'));
+  Check(IsHostName('xn--mnchen-3ya.de'));
+  Check(IsHostName('_sip._tcp.example.com'));
+  Check(IsHostName('_acme-challenge.example.com'));
+  Check(IsHostName('localhost'));
+  Check(IsHostName('my_server'));
+  Check(IsHostName('nas$'));
+  Check(IsHostName('db~backup'));
+  Check(IsHostName('test+lab'));
+  Check(not IsHostName('a b'));
+  Check(not IsHostName(' ab'));
+  Check(not IsHostName('ab '));
+  Check(not IsHostName('1..2.3.4'));
+  Check(IsHostName('.'));
+  Check(not IsHostName('..'));
+  Check(not IsHostName('...'));
+  Check(not IsDnsName(nil));
+  Check(IsDnsName('a'));
+  Check(IsDnsName('ab'));
+  Check(IsDnsName('a-b'));
+  Check(IsDnsName('1.2.3.4'));
+  Check(IsDnsName('xn--mnchen-3ya.de'));
+  Check(IsDnsName('_sip._tcp.example.com'));
+  Check(IsDnsName('_acme-challenge.example.com'));
+  Check(IsDnsName('localhost'));
+  Check(IsDnsName('my_server'));
+  Check(not IsDnsName('nas$'));
+  Check(not IsDnsName('db~backup'));
+  Check(not IsDnsName('test+lab'));
+  Check(not IsDnsName('a b'));
+  Check(not IsDnsName(' ab'));
+  Check(not IsDnsName('ab '));
+  Check(not IsDnsName('1..2.3.4'));
+  Check(IsDnsName('.'));
+  Check(not IsDnsName('..'));
+  Check(not IsDnsName('..'));
   // validate DNS client with some known values
   CheckEqual(ord(drrOPT), 41);
   CheckEqual(ord(drrHTTPS), 65);
@@ -1649,7 +1694,7 @@ begin
             one.Settings.TargetUri := clients[j];
             //one.Settings.UserName := usr;        // user from keytab
             //one.Settings.KerberosDN := dns[i];   // DN from keytab
-            one.Settings.Password := Make(['FILE:', keytabfile]);
+            one.Settings.KerberosLocal := keytabfile;
             ku := '';
             Check(one.BindSaslKerberos('', @ku), 'Bind keytab');
             AddConsole('connected via keytab to % with specific user % = %',
@@ -2797,7 +2842,7 @@ var
 begin
   exec := Sender as TTunnelExecute;
   // one of the two handshakes should be done in another thread
-  if not CheckFailed(exec <> nil) then
+  if Check(exec <> nil) then
   try
     check(exec.local <> nil);
     check(exec.session <> 0);
@@ -2847,14 +2892,12 @@ begin
   Check(serverinstance.LocalPort <> clientinstance.LocalPort, 'ports');
   if Assigned(log) then
     log.Log(sllTrace, 'TunnelTest: sockets start', self);
-  nr := NewSocket('127.0.0.1', clientinstance.LocalPort, nlTcp, {bind=}false,
-    1000, 1000, 1000, 0, clientsock);
+  nr := NewTcpClientSocket('127.0.0.1', clientinstance.LocalPort, 1000, clientsock);
   CheckUtf8(nr = nrOk, 'clientsock=%', [_NR[nr]]);
-  nr := NewSocket('127.0.0.1', serverinstance.LocalPort, nlTcp, {bind=}false,
-    1000, 1000, 1000, 0, serversock);
+  nr := NewTcpClientSocket('127.0.0.1', serverinstance.LocalPort, 1000, serversock);
   CheckUtf8(nr = nrOk, 'serversock=%', [_NR[nr]]);
-  if not CheckFailed(Assigned(clientinstance.Thread), 'no client thread') and
-     not CheckFailed(Assigned(serverinstance.Thread), 'no server thread') then
+  if Check(Assigned(clientinstance.Thread), 'no client thread') and
+     Check(Assigned(serverinstance.Thread), 'no server thread') then
   try
     // validate raw TCP tunnelling
     if Assigned(log) then
@@ -3216,11 +3259,49 @@ var
   i, n, n2: PtrInt;
   s: ShortString;
   txt, uri: RawUtf8;
-  ip: THash128Rec;
+  ip: TNetIP6;
   sn: TIp4SubNet;
   sub: TIp4SubNets;
   bin, bin2: RawByteString;
   timer: TPrecisionTimer;
+
+  procedure TestIP6(const expected: ShortString);
+  var
+    ip2, ip3: TNetIP6;
+  begin
+    IP6Short(@ip, s);
+    CheckEqualShort(s, expected);
+    AppendShortChar(#0, @s);
+    Check(not IsHostName(@s[1]));
+    Check(not IsDnsName(@s[1]));
+    RandomGuid(ip2.guid);
+    Check(not IsEqual(ip.b, ip2.b));
+    IP6Text(@ip2, txt);
+    Check(txt <> '');
+    FillZero(ip3.b);
+    Check(not IsEqual(ip3.b, ip2.b));
+    Check(ToIP6(txt, ip3));
+    Check(IsEqual(ip3.b, ip2.b));
+    FillZero(ip3.b);
+    Check(ToIP6(Join(['[', txt, ']']), ip3));
+    Check(IsEqual(ip3.b, ip2.b));
+    Check(NetIsIP6(@s[1], @ip2));
+    Check(NetIsIP6(@s[1]));
+    Check(IsEqual(ip.b, ip2.b));
+    IP6Text(@ip, txt);
+    if (txt = '') or
+       (txt = '127.0.0.1') then
+      exit;
+    Check(not IsHostName(pointer(txt)));
+    Check(not IsDnsName(pointer(txt)));
+    FillZero(ip2.b);
+    Check(not IsEqual(ip.b, ip2.b));
+    Check(not IsEqual(ip3.b, ip2.b));
+    Check(ToIP6(txt, ip2));
+    Check(IsEqual(ip.b, ip2.b));
+    Check(NetIsIP6(pointer(txt)));
+  end;
+
 begin
   CheckEqual(SizeOf(TNetIP4), 4);
   CheckEqual(SizeOf(TNetIP6), 16);
@@ -3231,39 +3312,48 @@ begin
   Check(s = '0.0.0.0');
   IP4Text(@ip, txt);
   CheckEqual(txt, '');
-  IP6Short(@ip, s);
-  Check(s = '::', '::');
+  TestIP6('::');
   IP6Text(@ip, txt);
   CheckEqual(txt, '');
   ip.b[15] := 1;
-  IP6Short(@ip, s);
-  Check(s = '::1', '::1');
+  TestIP6('::1');
   IP6Text(@ip, txt);
   CheckEqual(txt, '127.0.0.1', 'IPv6 loopback');
+  ip.b[15] := 2;
+  TestIP6('::2');
+  ip.b[15] := 9;
+  TestIP6('::9');
+  ip.b[15] := 15;
+  TestIP6('::f');
+  ip.b[15] := 255;
+  TestIP6('::ff');
   ip.b[0] := 1;
-  IP6Text(@ip, txt);
-  CheckEqual(txt, '100::1');
+  TestIP6('100::ff');
+  ip.b[15] := 1;
+  TestIP6('100::1');
   ip.b[15] := 0;
-  IP6Text(@ip, txt);
-  CheckEqual(txt, '100::');
+  TestIP6('100::');
   ip.b[6] := $70;
-  IP6Text(@ip, txt);
-  CheckEqual(txt, '100:0:0:7000::');
+  TestIP6('100:0:0:7000::');
   for i := 0 to 7 do
     ip.b[i] := i;
   IP6Text(@ip, txt);
   CheckEqual(txt, '1:203:405:607::');
+  TestIP6('1:203:405:607::');
   for i := 8 to 15 do
     ip.b[i] := i;
   IP6Text(@ip, txt);
   CheckEqual(txt, '1:203:405:607:809:a0b:c0d:e0f');
+  TestIP6('1:203:405:607:809:a0b:c0d:e0f');
   for i := 0 to 15 do
     ip.b[i] := i or $70;
   IP6Text(@ip, txt);
   CheckEqual(txt, '7071:7273:7475:7677:7879:7a7b:7c7d:7e7f');
+  TestIP6('7071:7273:7475:7677:7879:7a7b:7c7d:7e7f');
   Check(mormot.core.text.HexToBin('200100B80A0B12F00000000000000001', PByte(@ip), 16));
   IP6Text(@ip, txt);
   CheckEqual(txt, '2001:b8:a0b:12f0::1');
+  TestIP6('2001:b8:a0b:12f0::1');
   CheckEqual(IP4Netmask(1), $00000080);
   CheckEqual(IP4Netmask(8), $000000ff);
   CheckEqual(IP4Netmask(24), $00ffffff);
@@ -3808,7 +3898,7 @@ begin
           FillCharFast(msg2, SizeOf(msg2), 0);
           Check(msg2.Hash.Algo <> hfSHA256);
           Check(not CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
-          Check(not HashDigestEqual(msg.Hash, msg2.Hash), 'hde0');
+          Check(not HashDigestEqual(@msg.Hash, @msg2.Hash), 'hde0');
           res := hpc2.BearerDecode(dBearer, pcfBearerDirect, msg2);
           Check(res = mdBParam, 'directB64');
           dTok := '';
@@ -3821,12 +3911,12 @@ begin
           Check(res = mdOk, 'directOk');
           Check(not CompareMem(@msg, @msg2, SizeOf(msg)), 'cm');
           Check(CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
-          Check(HashDigestEqual(msg.Hash, msg2.Hash), 'hde1');
+          Check(HashDigestEqual(@msg.Hash, @msg2.Hash), 'hde1');
           Check(msg2.Kind = pcfBearerDirect);
           CheckEqual(msg2.Opaque, 7142701337754149600, 'Opaque');
           Check(msg2.Hash.Algo = hfSHA256);
           Check(CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
-          Check(HashDigestEqual(msg.Hash, msg2.Hash), 'hde2');
+          Check(HashDigestEqual(@msg.Hash, @msg2.Hash), 'hde2');
           FillCharFast(msg2, SizeOf(msg2), 0);
           inc(dTok[10]);
           res := hpc2.BearerDecode(dTok, pcfBearer, msg2);
@@ -3853,9 +3943,11 @@ begin
         // in a background thread due to remote http://ictuswin.com access
         // (will also validate rfProgressiveStatic process of our web server)
         if hasinternet then // checked by above DNSAndLDAP method
+        begin
           Run(RunPeerCacheDirect, hpc, 'peercachedirect', true, false, false);
-        hpc := nil; // will be owned and freed by RunPeerCacheDirect from now on
-        hps := nil;
+          hpc := nil; // will be owned and freed by RunPeerCacheDirect from now on
+          hps := nil;
+        end;
       finally
         hpc.Free;
       end;
@@ -3886,6 +3978,7 @@ var
   h, v: PUtf8Char;
   l: PtrInt;
   dig: THashDigest;
+  s32: TShort32;
 
   procedure Check4;
   begin
@@ -4041,7 +4134,38 @@ begin
   CheckEqual(U.Password, '');
   CheckEqual(U.Address, s);
   CheckEqual(U.Uri, 'mailto://example.com/' + s);
-  U.Clear; // TUri may be used to create an URI from some parameters
+  Check(U.From('https://1.2.3.4:123/tata/tutu'));
+  Check(U.UriScheme = usHttps);
+  CheckEqual(U.Server, '1.2.3.4');
+  CheckEqual(U.PortInt, 123);
+  CheckEqual(U.Address, 'tata/tutu');
+  CheckEqual(U.Uri, 'https://1.2.3.4:123/tata/tutu');
+  Check(U.From('  https://localhost:123/tata/tutu  '));
+  Check(U.UriScheme = usHttps);
+  CheckEqual(U.Server, 'localhost');
+  CheckEqual(U.PortInt, 123);
+  CheckEqual(U.Address, 'tata/tutu');
+  CheckEqual(U.Uri, 'https://localhost:123/tata/tutu');
+  Check(U.From('https://[::1]:123/tata/tutu'));
+  Check(U.UriScheme = usHttps);
+  CheckEqual(U.Server, '[::1]');
+  CheckEqual(U.PortInt, 123);
+  CheckEqual(U.Address, 'tata/tutu');
+  CheckEqual(U.Uri, 'https://[::1]:123/tata/tutu');
+  Check(U.From('https://[ff02::1]:123/tata/tutu'));
+  Check(U.UriScheme = usHttps);
+  CheckEqual(U.Server, '[ff02::1]');
+  CheckEqual(U.PortInt, 123);
+  CheckEqual(U.Address, 'tata/tutu');
+  CheckEqual(U.Uri, 'https://[ff02::1]:123/tata/tutu');
+  Check(U.From('http://UniX:/path/to/socket.sock:/url/path'));
+  Check(U.UriScheme = usHttp);
+  CheckEqual(U.Server, '/path/to/socket.sock');
+  CheckEqual(U.PortInt, 0);
+  CheckEqual(U.Address, 'url/path');
+  CheckEqual(U.Uri, 'http://unix:/path/to/socket.sock:/url/path');
+  // TUri may be used to create an URI from some parameters
+  U.Clear;
   U.Server := '127.0.0.1';
   U.Port := '991';
   U.Address := 'endpoint';
@@ -4128,21 +4252,35 @@ begin
   CheckEqual(l, SizeOf(THash256));
   Check(dig.Algo = hfSHA256);
   CheckEqual(Sha256DigestToString(dig.Bin.Lo),
-    'cc991f15d823e419ef45f8b94e6759c4f992056c1c1a64cc79338c49f9720273');
+    '19b9f18055bc3307c80f58159938f4e6bd0eb583f672fe7793e1b0df50e60bb2');
+  FillCharFast(dig, SizeOf(dig), 0);
+  CheckEqual(ord(dig.Algo), 0);
+  l := HttpRequestHash(hfSHA256, U, 'etag: "1234"'#13#10, dig, {upper=}true);
+  CheckEqual(l, SizeOf(THash256));
+  Check(dig.Algo = hfSHA256);
+  CheckEqual(Sha256DigestToString(dig.Bin.Lo),
+    '5b355c973ac5542e7348831eaf439fb0fc0e61fa7f86f45b541c6d2d206ade42');
   FillCharFast(dig, SizeOf(dig), 0);
   l := HttpRequestHash(hfSHA256, U,
     'Content-Length: 100'#13#10'Last-Modified: 2025', dig);
   CheckEqual(l, SizeOf(THash256));
   Check(dig.Algo = hfSHA256);
   CheckEqual(Sha256DigestToString(dig.Bin.Lo),
-    '9b23e3b9894578f2709eca35aa9afad277ab5aa4afe9344192f59535719ac734');
-  CheckEqual(HttpRequestHashBase32(
-    U, 'Content-Length: 100'#13#10'Last-Modified: 2025'),
-    'tmr6homjiv4pe4e6zi22vgx22j32wwve');
-  CheckEqual(HttpRequestHashBase32(
-    U, 'Content-Length: 101'#13#10'Last-Modified: 2025'),
-    '5umuom5hoh7sohesrs3fqse4rweeum7d');
-  CheckEqual(HttpRequestHashBase32(U, nil), 'bq4n2dkrduzo2v3arzy2lafegac3wmbw');
+    'dd36778462987d817a662b4a602accde058d26f4247aa55ca70bf476a9a442e7');
+  Check(HttpRequestHashBase32(U, @s32,
+    'Content-Length: 100'#13#10'Last-Modified: 2025'));
+  CheckEqualShort(s32, '3u3hpbdctb6yc6tgfnfgakwm3ycy2jxu');
+  Check(HttpRequestHashBase32(U, @s32,
+    'Content-Length: 101'#13#10'Last-Modified: 2025'));
+  CheckEqualShort(s32, 'utip3vleydamax5oayo7tjfyaoub6y5w');
+  Check(HttpRequestHashBase32(U, @s32, nil));
+  CheckEqualShort(s32, 'na3q2n4gw6cly5fvf5da4frmek667zk2');
+  s32[0] := #0;
+  checkEqual(U.Address, 'toto/titi');
+  U.Address := U.Address + '#ignore=10';
+  checkEqual(U.Address, 'toto/titi#ignore=10');
+  Check(HttpRequestHashBase32(U, @s32, nil));
+  CheckEqualShort(s32, 'na3q2n4gw6cly5fvf5da4frmek667zk2');
 end;
 
 procedure TNetworkProtocols._THttpProxyCache;
@@ -4203,12 +4341,50 @@ begin
 end;
 
 {$ifdef OSPOSIX}
+procedure TNetworkProtocols.UnixDomainSocket;
+var
+  fn: TFileName;
+  un: RawUtf8;
+  sock: TCrtSocket;
+begin
+  // regression test for Unix domain socket server bind and stale file cleanup
+  // - on Delphi POSIX, the FpUnlink() called to remove a stale .socket file
+  // was a UTF-16 shim fed an UTF-8 RawUtf8, so it silently did nothing: stale
+  // socket files were left behind, and any server re-bind failed with
+  // EADDRINUSE - see UnixSocketFileDelete() in mormot.net.sock
+  fn := WorkDir + 'test-unixdomain.socket';
+  DeleteFile(fn);
+  Check(not FileExists(fn), 'no leftover .socket file');
+  FormatUtf8('unix:%', [fn], un);
+  // 1. a plain server bind should create the .socket file, and close remove it
+  sock := TCrtSocket.Bind(un);
+  try
+    Check(sock.SockIsDefined, 'unix bind');
+    Check(sock.SocketLayer = nlUnix, 'nlUnix');
+    Check(FileExists(fn), 'socket file created');
+  finally
+    sock.Free; // closing the socket should delete its .socket file
+  end;
+  Check(not FileExists(fn), 'socket file removed on close');
+  // 2. a stale .socket file (e.g. after a killed process) must not block bind
+  FileFromString('stale', fn);
+  Check(FileExists(fn), 'stale file created');
+  sock := TCrtSocket.Bind(un); // raises ENetSock if the stale file is not purged
+  try
+    Check(sock.SockIsDefined, 'unix bind over stale file');
+  finally
+    sock.Free;
+  end;
+  Check(not FileExists(fn), 'stale file cleaned on close');
+end;
+
 procedure TNetworkProtocols.TFTPServer;
 var
   srv: TTftpServerThread;
+  http: THttpServer;
   res: TCurlResult;
-  tmp: TFileName;
-  uri: RawUtf8;
+  fn: TFileName;
+  uri, httpuri, tftpuri, s: RawUtf8;
   timer: TPrecisionTimer;
   orig, rd: RawByteString;
 begin
@@ -4221,40 +4397,89 @@ begin
     AddConsole('libcurl is not available on this system -> skip test');
     exit;
   end;
-  // create a temporary file to server
-  orig := RandomAnsi7(256 shl 10 + Random32(100)); // 256.1KB of random data
-  tmp := TemporaryFileName; // e.g. '/tmp/mormot2tests_28F3D8C5.tmp'
-  if not CheckFailed(FileFromString(orig, tmp), 'tmp file') then
+  // create a 256KB temporary file to serve via TFTP
+  orig := RandomAnsi7(256 shl 10 + Random32(100));
+  fn := TemporaryFileName; // e.g. '/tmp/mormot2tests_28F3D8C5.tmp'
+  if CheckFailed(FileFromString(orig, fn), 'fn file') then
+    exit;
+  // start an ephemeral HTTP server to validate HTTP over TFTP proxy
+  http := EphemeralHttpServer(TSynLogTestLog, orig);
   try
+    CheckEqual(StringFromFile(fn), orig);
     // start the TFTP server
-    srv := TTftpServerThread.Create(ExtractFilePath(tmp),
-      [ttoRrq , {ttoLowLevelLog,} ttoCaseInsensitiveFileName, ttoAllowSubFolders],
+    srv := TTftpServerThread.Create(ExtractFilePath(fn),
+      [ttoRrq {, ttoLowLevelLog}, ttoHttpVerboseLog,
+       ttoCaseInsensitiveFileName, ttoAllowSubFolders],
       TSynLogTestLog, '127.0.0.1', '6969', '');
     try
       // request the temporary file using the libcurl client
       timer.Start;
-      StringToUtf8(ExtractFileName(tmp), uri); // 'mormot2tests_28F3D8C5.tmp'
+      StringToUtf8(ExtractFileName(fn), uri); // 'mormot2tests_28F3D8C5.tmp'
+      rd := '';
       res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd);
       CheckUtf8(res = crOK, 'tftp exact case %', [ToText(res)^]);
       if res <> crOk then
         exit;
       CheckEqual(length(rd), length(orig), 'tftp1a');
       CheckEqual(rd, orig, 'tftp1b');
-      // validate case-insensitive URI as e.g. 'MORMOT2TESTS_28F3D8C5.TMP'
+      // validate case-insensitive URI as e.g. 'MORMOT2TESTS_28F3D8C5.tmp'
       UpperCaseSelf(uri);
-      rd := ''; // paranoid
-      res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd, 1000, nil,
+      rd := '';
+      res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd, 5000, nil,
         {tftpblocksize=}1468);
       Check(res = crOK, 'tftp uppercase and custom blocksize');
       if res = crOk then
         CheckEqual(rd, orig, 'tftp2');
-      NotifyTestSpeed('TFTP request', 2, length(rd) * 2, @timer);
+      // alternate HTTP over TFTP proxy validation
+      http.WaitStarted;
+      Join(['http://127.0.0.1:', http.Sock.Port], httpuri); // ephemeral port
+      Check(not EndWith(httpuri, ':'), 'ephemeral port');
+      s := HttpGet(httpuri);
+      CheckEqual(s, orig, 'validate ephemeral http server');
+      CheckEqual(srv.RedirectUri('http/cache', httpuri), 0);
+      Check(srv.RedirectUri('http/cache', httpuri) < 0, 'dup1');
+      Check(srv.RedirectUri('http/cache/two', httpuri) < 0, 'dup2');
+      CheckEqual(srv.RedirectUri('http/backgrd', httpuri, 4096), 1);
+      Check(srv.RedirectUri('http/cache/new', httpuri) < 0, 'dup3');
+      Check(srv.RedirectUri('http/backgrd/new', httpuri) < 0, 'dup4');
+      tftpuri := Join(['tftp://127.0.0.1:6969/http/cache/', uri]);
+      rd := '';
+      res := CurlPerform(tftpuri, rd);
+      Check(res = crOK, 'http cached over tftp');
+      if res = crOk then
+        CheckEqual(rd, orig, 'http cache');
+      tftpuri := Join(['tftp://127.0.0.1:6969/http/backgrd/sub/', uri]);
+      rd := '';
+      res := CurlPerform(tftpuri, rd);
+      Check(res = crOK, 'http background over tftp');
+      if res = crOk then
+        CheckEqual(rd, orig, 'http background');
+      // wrong resource location with no RedirectUri() confusion
+      tftpuri := Join(['tftp://127.0.0.1:6969/http/cachewrong/uri']);
+      rd := '';
+      res := CurlPerform(tftpuri, rd, {timeout=}5000);
+      Check(res = crTFtpNotFound, 'tftp not found');
+      // redirect root to HTTP
+      rd := '';
+      res := CurlPerform('tftp://127.0.0.1:6969/pxelinux.0', rd, 100000);
+      Check(res = crTFtpNotFound, 'http background over tftp');
+      CheckEqual(srv.RedirectUri('/', httpuri), 2);
+      rd := '';
+      res := CurlPerform('tftp://127.0.0.1:6969/pxelinux.0', rd, 100000);
+      Check(res = crOK, 'http background over tftp');
+      if res = crOk then
+        CheckEqual(rd, orig, 'http root');
+      // final checks and global performance benchmark
+      CheckEqual(srv.ConnectionTotal, 5, 'srv.ConnectionTotal');
+      NotifyTestSpeed('TFTP request', srv.ConnectionTotal,
+        length(orig) * srv.ConnectionTotal, @timer);
     finally
       srv.Free;
     end;
   finally
-    // remove the temporary file to serve
-    Check(DeleteFile(tmp), 'delete tmp');
+    // remove the temporary local file served via TFTP
+    Check(DeleteFile(fn), 'delete tmp');
+    http.Free;
   end;
 end;
 {$endif OSPOSIX}

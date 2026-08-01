@@ -791,7 +791,20 @@ begin
           ftCurrency:
             farrParams[i].SetAsCurrency(PCurrency(@VInt64)^);
           ftUtf8:
-            farrParams[i].SetAsString(VData);
+            begin
+              case farrParams[i].SQLType of
+               SQL_TIMESTAMP,
+               SQL_TIMESTAMP_TZ_EX,
+               SQL_TIME_TZ_EX,
+               SQL_TIMESTAMP_TZ,
+               SQL_TIME_TZ,
+               SQL_TYPE_TIME,
+               SQL_TYPE_DATE:
+                 farrParams[i].SetAsDateTime(Iso8601ToDateTime(VData))
+              else
+                farrParams[i].SetAsString(VData);
+              end;
+            end;
           ftBlob:
             farrParams[i].SetAsString(VData);
         else
@@ -808,7 +821,6 @@ begin
       else
         fResultSet := fStatement.OpenCursor(con.fTransaction);
       fResults := fResultSet;
-      fResultSet.SetRetainInterfaces(true);
       if not fResultSet.IsEof then
         fCurrentRow:=0;
       if fResultSet = nil then
@@ -927,12 +939,14 @@ var
   nul: boolean;
   len: smallint;
   data: PByte;
+  curr: currency; // safer with an explicit variable
 begin
   CheckColAndRowset(Col);
   if fColumnsMeta[Col].Scale = -4 then
   begin
     fResults.GetData(Col, nul, len, data);
-    PInt64(@result)^ := PInt64(data)^;
+    PInt64(@curr)^ := PInt64(data)^;
+    result := curr;
   end
   else
     result := fResults[Col].GetAsCurrency;
@@ -1036,7 +1050,7 @@ begin
         end;
       SQL_BLOB:
         begin
-          if ForceBlobAsNull then
+          if dsfForceBlobAsNull in fFlags then
             W.AddNull
           else
           begin
@@ -1399,6 +1413,7 @@ begin
     ThreadingMode := tmMainConnection;
   UseCache := true;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
+  fDateTimeFirstChar := ' ';
 end;
 
 destructor TSqlDBIbxConnectionProperties.Destroy;
@@ -1421,7 +1436,7 @@ var
   AddPrimaryKey: RawUtf8;
 begin
   // use 'ID' instead of 'RowID' here since some DB (e.g. Oracle) use it
-  result := '';
+  FastAssignNew(result);
   if high(aFields) < 0 then
     exit; // nothing to create
   if aAddID then

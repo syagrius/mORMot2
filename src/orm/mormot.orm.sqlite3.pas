@@ -26,7 +26,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -40,7 +39,7 @@ uses
   mormot.core.threads,
   mormot.crypt.core,
   mormot.crypt.jwt,
-  mormot.core.perf,
+  mormot.core.perf,   // for TSynMonitor + timers in TRestOrmServerDB
   mormot.core.search, // for TRestStorageShardDB FindFiles()
   mormot.crypt.secure,
   mormot.core.log,
@@ -258,7 +257,9 @@ type
     fStatementSql: RawUtf8;
     fStatementLastException: RawUtf8;
     fStatementTruncateSqlLogLen: integer;
+    fBatch: PRestOrmServerDBBatch;
     fStatementDecoder: TExtractInlineParameters;
+    fJsonDecoder: TJsonObjectDecoder; // protected by execOrmWrite lock
     /// check if a VACUUM statement is possible
     // - VACUUM in fact DISCONNECT all virtual modules (sounds like a SQLite3
     // design problem), so calling it during process could break the engine
@@ -268,8 +269,6 @@ type
     // in this case, VACUUM will be a no-op
     function PrepareVacuum(const aSql: RawUtf8): boolean;
   protected
-    fBatch: PRestOrmServerDBBatch;
-    fJsonDecoder: TJsonObjectDecoder; // protected by execOrmWrite lock
     /// retrieve a TSqlRequest instance in fStatement
     // - will set @fStaticStatement if no :(%): internal parameters appear:
     // in this case, the TSqlRequest.Close method must be called
@@ -544,7 +543,7 @@ begin
     modname := module.ModuleName;
   if (module = nil) or
      (module.DB.DB <> DB) or
-     (StrIComp(pointer(modname), argv[0]) <> 0) then
+     not StrIEqual(pointer(modname), argv[0]) then
   begin
     Notify('vt_Create(%<>%)', [argv[0], modname]);
     result := SQLITE_ERROR;
@@ -818,24 +817,10 @@ var
 begin
   result := SQLITE_ERROR;
   if TOrmVirtualTableCursor(pVtabCursor.pInstance).Column(-1, res) then
-  begin
-    case res.VType of
-      ftInt64:
-        pRowid := res.VInt64;
-      ftDouble:
-        pRowid := trunc(res.VDouble);
-      ftCurrency:
-        pRowid := trunc(res.VCurrency);
-      ftUtf8:
-        pRowid := GetInt64(res.VText);
+    if SqlVarToInt64(res, pRowID) then
+      result := SQLITE_OK
     else
-      begin
-        Notify('vt_Rowid res=%', [ord(res.VType)]);
-        exit;
-      end;
-    end;
-    result := SQLITE_OK;
-  end
+      Notify('vt_Rowid res=%', [ord(res.VType)])
   else
     Notify('vt_Rowid Column', []);
 end;
@@ -963,7 +948,7 @@ begin
   if FilePath <> '' then
     // if a file path is specified (e.g. by SynDBExplorer) -> always use this
     result := inherited FileName(aTableName)
-  else if SameText(DB.FileName, SQLITE_MEMORY_DATABASE_NAME) then
+  else if SameTextS(DB.FileName, SQLITE_MEMORY_DATABASE_NAME) then
     // in-memory databases virtual tables should remain in memory
     result := ''
   else
@@ -1153,7 +1138,7 @@ begin
     if fShardOffset < 0 then
       fShardOffset := num;
     dec(num, fShardOffset);
-    if not SameText(DBFileName(num), db[f].Name) then
+    if not SameTextS(DBFileName(num), db[f].Name) then
       EOrmException.RaiseUtf8('%.InitShards(%)', [self, db[f].Name]);
     if f = high(db) then
       fInitShardsIsLast := true;
@@ -1362,6 +1347,7 @@ end;
 function TRestOrmServerDB.TableMaxID(Table: TOrmClass): TID;
 var
   sql: RawUtf8;
+  res: Int64;
 begin
   if GetStorage(Table) <> nil then
     // select(max(RowID)) with proper SQL detection e.g. for ext/MongoDB
@@ -1370,7 +1356,9 @@ begin
   begin
     sql := 'select rowid from ' + Table.SqlTableName +
            ' order by rowid desc limit 1'; // faster than max(RowID) on SQLite3
-    if not InternalExecute(sql, true, PInt64(@result)) then
+    if InternalExecute(sql, true, @res) then
+      result := res
+    else
       result := 0;
   end;
 end;
@@ -1909,7 +1897,7 @@ var
   rows: integer;
   msg: ShortString;
 begin
-  result := '';
+  FastAssignNew(result);
   rows := 0;
   if (self <> nil) and
      (DB <> nil) and
@@ -1955,7 +1943,7 @@ var
   msg: ShortString absolute tmp;
 begin
   // faster direct access with no ID inlining
-  result := '';
+  FastAssignNew(result);
   if (ID < 0) or
      (TableModelIndex < 0) or
      (DB = nil) then
@@ -2017,8 +2005,8 @@ end;
 
 function TRestOrmServerDB.RetrieveBlobFields(Value: TOrm): boolean;
 var
-  s: TRestOrm;
   sql: RawUtf8;
+  s: TRestOrm;
   f: PtrInt;
   size: Int64;
   data: TSqlVar;
@@ -2035,8 +2023,8 @@ begin
     with Value.Orm do
       if BlobFields <> nil then
       begin
-        sql := FormatSql('SELECT % FROM % WHERE ROWID=?',
-          [SqlTableRetrieveBlobFields, SqlTableName], [Value.ID]);
+        FormatSqlVar('SELECT % FROM % WHERE ROWID=?',
+          [SqlTableRetrieveBlobFields, SqlTableName], [Value.ID], sql);
         DB.Lock(sql);
         try
           GetAndPrepareStatement(sql, true);
@@ -2890,7 +2878,7 @@ begin
      (n > 0) then
   try
     // direct SQL execution, using the JSON cache if available
-    sql := fModel.SqlFromSelectWhere(Tables, SqlSelect, SqlWhere);
+    fModel.SqlFromSelectWhere(Tables, SqlSelect, SqlWhere, sql);
     if n = 1 then
       // InternalListJson will handle both static and DB tables
       result := fServer.ExecuteList(Tables, sql)

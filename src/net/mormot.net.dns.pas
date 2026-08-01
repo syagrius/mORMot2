@@ -163,10 +163,14 @@ type
     function GetTC: boolean;
       {$ifdef FPC} inline; {$endif}
     function GetZ: byte;
-    procedure SetOpCode(AValue: byte);
-    procedure SetQR(AValue: boolean);
-    procedure SetRD(AValue: boolean);
-    procedure SetZ(AValue: byte);
+    procedure SetOpCode(const AValue: byte);
+      {$ifdef FPC} inline; {$endif}
+    procedure SetQR(const AValue: boolean);
+      {$ifdef FPC} inline; {$endif}
+    procedure SetRD(const AValue: boolean);
+      {$ifdef FPC} inline; {$endif}
+    procedure SetZ(const AValue: byte);
+      {$ifdef FPC} inline; {$endif}
   public
     Xid: word;
     Flags: byte;
@@ -418,26 +422,26 @@ begin
   result := (Flags and QF_Z) shr 4;
 end;
 
-procedure TDnsHeader.SetOpCode(AValue: byte);
+procedure TDnsHeader.SetOpCode(const AValue: byte);
 begin
   Flags := (Flags and not(QF_OPCODE)) or ((AValue and $f) shl 3);
 end;
 
-procedure TDnsHeader.SetQR(AValue: boolean);
+procedure TDnsHeader.SetQR(const AValue: boolean);
 begin
   Flags := Flags and not(QF_QR);
   if AValue then
     Flags := Flags or QF_QR;
 end;
 
-procedure TDnsHeader.SetRD(AValue: boolean);
+procedure TDnsHeader.SetRD(const AValue: boolean);
 begin
   Flags := Flags and not(QF_RD);
   if AValue then
     Flags := Flags or QF_RD;
 end;
 
-procedure TDnsHeader.SetZ(AValue: byte);
+procedure TDnsHeader.SetZ(const AValue: byte);
 begin
   Flags := (Flags2 and not(QF_Z)) or ((AValue and $7) shl 4);
 end;
@@ -556,37 +560,32 @@ end;
 function DnsBuildQuestion(const QName: RawUtf8; RR: TDnsResourceRecord;
   QClass: cardinal): RawByteString;
 var
-  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
-  w: TBufferWriter;
-  h: TDnsHeader;
-  n: PUtf8Char;
-  one: ShortString;
+  h: PDnsHeader;
+  n, v: PUtf8Char;
+  l: PtrInt;
+  tmp: TSynTempAdder;
 begin
-  w := TBufferWriter.Create(tmp{%H-});
-  try
-    FillCharFast(h, SizeOf(h), 0);
-    repeat
-      h.Xid := Random32; // truncated to 16-bit
-    until h.XId <> 0;
-    h.RecursionDesired := true;
-    h.QuestionCount := 1 shl 8;
-    w.Write(@h, SizeOf(h));
-    n := pointer(QName);
-    while n <> nil do
-    begin
-      GetNextItemShortString(n, @one, '.');
-      if one[0] = #0 then
-        break;
-      w.Write1(ord(one[0]));
-      w.Write(@one[1], ord(one[0]));
-    end;
-    w.Write1(0); // final #0
-    w.Write2(bswap16(ord(RR)));
-    w.Write2(bswap16(QClass));
-    result := w.FlushTo;
-  finally
-    w.Free;
+  tmp.Init;
+  h := tmp.Add(SizeOf(h^));
+  FillCharFast(h^, SizeOf(h^), 0);
+  repeat
+    h^.Xid := Random32; // truncated to 16-bit
+  until h^.XId <> 0;
+  h^.RecursionDesired := true;
+  h^.QuestionCount := 1 shl 8;
+  n := pointer(QName);
+  while n <> nil do
+  begin
+    l := GetNextItemTrimedBuffer(n, '.', v);
+    if l = 0 then
+      break;
+    tmp.AddDirect(AnsiChar(l));
+    tmp.Add(v, l);
   end;
+  tmp.AddDirect(#0); // final #0
+  tmp.Add16BigEndian(ord(RR));
+  tmp.Add16BigEndian(QClass);
+  tmp.Done(result, CP_RAWBYTESTRING);
 end;
 
 var
@@ -606,8 +605,8 @@ var
   start, stop: Int64;
   tix16: cardinal;
   lenw: word;
-  tmp: TBuffer4K;
   hdr: PDnsHeader;
+  tmp: TBuffer4K;
 begin
   result := false;
   TimeElapsed := 0;
@@ -752,7 +751,7 @@ var
 begin
   result := false;
   if (QName = '') or
-     not IsAnsiCompatible(QName) then
+     not IsAnsiCompatible(QName) then // more relaxed than IsDnsName()
     exit;
   // send the DNS request to the DNS server(s)
   Finalize(Res);
@@ -818,7 +817,8 @@ var
   res: TDnsResult;
   i: PtrInt;
 begin
-  if not DnsLookupKnown(HostName, result) then // e.g. 'localhost' or '1.2.3.4'
+  if not DnsLookupKnown(HostName, result) and // e.g. 'localhost' or '1.2.3.4'
+     IsDnsName(pointer(HostName)) then
     if DnsQuery(HostName, res, drrA, NameServers, TimeoutMS) then
       for i := 0 to high(res.Answer) do
         if res.Answer[i].QType = drrA then
@@ -837,10 +837,11 @@ begin
   result := nil;
   if DnsLookupKnown(HostName, known) then // e.g. 'localhost' or '1.2.3.4'
     AddRawUtf8(result, known)
-  else if DnsQuery(HostName, res, drrA, NameServers, TimeoutMS) then
-    for i := 0 to high(res.Answer) do
-      if res.Answer[i].QType = drrA then
-        AddRawUtf8(result, res.Answer[i].Text); // return all A records
+  else if IsDnsName(pointer(HostName)) then
+    if DnsQuery(HostName, res, drrA, NameServers, TimeoutMS) then
+      for i := 0 to high(res.Answer) do
+        if res.Answer[i].QType = drrA then
+          AddRawUtf8(result, res.Answer[i].Text); // return all A records
 end;
 
 function DnsReverseLookup(const IP4, NameServers: RawUtf8; TimeoutMS: integer): RawUtf8;
@@ -849,7 +850,7 @@ var
   res: TDnsResult;
   i: PtrInt;
 begin
-  result := '';
+  FastAssignNew(result);
   if ReverseIP4(IP4, rev) and
      DnsQuery(rev, res, drrPTR, NameServers, TimeoutMS) then
     for i := 0 to high(res.Answer) do
@@ -866,7 +867,8 @@ var
   i: PtrInt;
 begin
   result := nil;
-  if DnsQuery(HostName, res, drrSRV, NameServers, TimeoutMS) then
+  if IsDnsName(pointer(HostName)) and
+     DnsQuery(HostName, res, drrSRV, NameServers, TimeoutMS) then
     for i := 0 to high(res.Answer) do
       if res.Answer[i].QType = drrSRV then
         AddRawUtf8(result, res.Answer[i].Text, {nodup=}true, {casesens=}false);
@@ -874,7 +876,7 @@ end;
 
 function DnsLdapServices(const DomainName, NameServers: RawUtf8): TRawUtf8DynArray;
 begin
-  result := DnsServices('_ldap._tcp.' + DomainName, NameServers);
+  result := DnsServices(Join(['_ldap._tcp.', DomainName]), NameServers);
 end;
 
 function DnsLdapControllers(const NameServers: RawUtf8; UsePosixEnv: boolean;

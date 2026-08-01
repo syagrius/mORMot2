@@ -1048,18 +1048,21 @@ function UncompressMem(src, dst: pointer; srcLen, dstLen: PtrInt;
 var
   dec: PLibDeflateDecompressor; // note: instances should not be cached/reused
   res: TLibDeflateResult;
+  n: PtrInt; // safer with a local transient variable
 begin
   dec := libdeflate_alloc_decompressor; // alloc when needed
   if dec = nil then
     raise EZLib.Create('UncompressMem: libdeflate_alloc_decompressor failed');
+  n := 0;
   if ZlibFormat then
-    res := libdeflate_zlib_decompress(dec, src, srcLen, dst, dstLen, @result)
+    res := libdeflate_zlib_decompress(dec, src, srcLen, dst, dstLen, @n)
   else
-    res := libdeflate_deflate_decompress(dec, src, srcLen, dst, dstLen, @result);
+    res := libdeflate_deflate_decompress(dec, src, srcLen, dst, dstLen, @n);
   libdeflate_free_decompressor(dec);
   if res <> LIBDEFLATE_SUCCESS  then
     raise EZLib.CreateFmt('UncompressMem: libdeflate=%s',
       [GetEnumNameRtti(TypeInfo(TLibDeflateResult), ord(res))^]);
+  result := n;
 end;
 
 {$else}
@@ -1149,7 +1152,7 @@ begin
   if (src = nil) or
      (srcLen <= 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   s := TRawByteStringStream.Create;
@@ -1177,7 +1180,7 @@ begin
   if (src = nil) or
      (srcLen <= 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   s := TRawByteStringStream.Create;

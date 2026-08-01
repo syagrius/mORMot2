@@ -271,7 +271,7 @@ type
   /// Section Table
   _IMAGE_SECTION_HEADER = object
   public
-    Name8: array[0..7] of AnsiChar;
+    Name8: TTemp8;
     VirtualSize: cardinal;
     VirtualAddress: cardinal;
     SizeOfRawData: cardinal;
@@ -477,8 +477,6 @@ function AlignPos(Offset: cardinal; PW: pointer; Base: cardinal): cardinal;
 
 
 { ************ High-Level PE (.exe, .dll...) File Reader }
-
-{ TSynPELoader }
 
 type
   /// Cross platform PE (Portable Executable) file parser
@@ -689,7 +687,7 @@ begin
   if (@self = nil) or
      ((FileVersionMS = 0) and
       (FileVersionLS = 0)) then // '0.0.0.0' is meaningless
-    result := ''
+    FastAssignNew(result)
   else
     FormatUtf8('%.%.%.%', [FileMajorVersion, FileMinorVersion,
                            FilePatchVersion, FileBuildVersion], result);
@@ -780,9 +778,9 @@ end;
 function _IMAGE_SECTION_HEADER.NameLen: integer;
 begin
   if Name8[7] = #0 then
-    result := 8 // max size
+    result := StrLen(@Name8)
   else
-    result := StrLen(@Name8);
+    result := 8; // max size
 end;
 
 function _IMAGE_SECTION_HEADER.Name: RawUtf8;
@@ -802,8 +800,7 @@ function AlignPos(Offset: cardinal; PW: pointer; Base: cardinal): cardinal;
 begin
   if PW <> nil then
     inc(Offset, (StrLenW(PW) + 1) * SizeOf(WideChar));
-  result := ((Offset + Base + 3) and $fffffffc) -
-            (Base and $fffffffc);
+  result := ((Offset + Base + 3) and cardinal(-4)) - (Base and cardinal(-4));
 end;
 
 
@@ -956,7 +953,7 @@ var
   tab, tabEnd, ent, entEnd, P: PAnsiChar;
   lang, key, value: pointer;
   offset, i: integer;
-  lnghex: array[0..7] of AnsiChar;
+  lnghex: TTemp8;
   lngint: LongRec;
   lng: TLanguage;
 begin
@@ -1146,7 +1143,7 @@ var
   firstbuf: boolean;
   buf: array[0 .. 128 shl 10 - 1] of byte; // 128KB of temp copy buffer on stack
 begin
-  result := '';
+  FastAssignNew(result);
   firstbuf := true;
   M := TFileStreamEx.Create(MainFile, fmOpenReadShared);
   try
@@ -1293,7 +1290,7 @@ var
   fixme: array[0..6] of PAnsiChar;
 begin
   // limitation: CertName is ignored and 'Dummy Cert' is forced
-  result := '';
+  FastAssignNew(result);
   pointer(dummy) := FastNewString(_DUMMYLEN);
   if RleUnCompress(@_DUMMY, pointer(dummy), SizeOf(_DUMMY)) <> _DUMMYLEN then
     exit;
@@ -1418,7 +1415,7 @@ var
   P: PAnsiChar;
   cert: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   cert := FindExeCertificate(FileName, nil, wc, nil, nil);
   i := PosEx(_CERTNAME_, cert);
   if i = 0 then
@@ -1446,6 +1443,7 @@ end;
 
 initialization
   InitializeUnit;
+
 
 end.
 

@@ -21,7 +21,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -32,8 +31,6 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.threads,
-  mormot.core.perf,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
@@ -511,7 +508,7 @@ var
   state: cardinal;
 begin
   if not ClientRetrieve(TableModelIndex, ID, false, state, result) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrmClient.Retrieve(aID: TID; Value: TOrm; ForUpdate: boolean): boolean;
@@ -623,8 +620,11 @@ end;
 function TRestOrmClient.ListFmt(const Tables: array of TOrmClass;
   const SqlSelect, SqlWhereFormat: RawUtf8;
   const Args, Bounds: array of const): TOrmTable;
+var
+  where: RawUtf8;
 begin
-  result := List(Tables, SqlSelect, FormatSql(SqlWhereFormat, Args, Bounds));
+  FormatSqlVar(SqlWhereFormat, Args, Bounds, where);
+  result := List(Tables, SqlSelect, where);
 end;
 
 function TRestOrmClient.TransactionBeginRetry(aTable: TOrmClass;
@@ -722,7 +722,7 @@ begin
      (SQL = '') or
      // GET on 'root' URI with SQL as body (not standard HTTP)
      (Uri(fModel.Root, 'GET', @result, nil, @SQL) <> HTTP_SUCCESS) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrmClientUri.EngineExecute(const SQL: RawUtf8): boolean;
@@ -970,7 +970,7 @@ begin
   if high(Tables) < 0 then
   exit;
   // GET Collection
-  sql := Model.SqlFromSelectWhere(Tables, SqlSelect, SqlWhere);
+  Model.SqlFromSelectWhere(Tables, SqlSelect, SqlWhere, sql);
   if high(Tables) = 0 then
   begin
     // one Table -> use REST protocol (sql as parameters)
@@ -1002,11 +1002,15 @@ begin
 end;
 
 function TRestOrmClientUri.ServerInternalState: cardinal;
+var
+  status: cardinal;
 begin
   if (self = nil) or
      (fModel = nil) or // avoid GPF
-     (Uri(fModel.Root, 'STATE', nil, nil, nil, @result) <> HTTP_SUCCESS) then
-    result := cardinal(-1);
+     (Uri(fModel.Root, 'STATE', nil, nil, nil, @status) <> HTTP_SUCCESS) then
+    result := cardinal(-1)
+  else
+    result := status;
 end;
 
 function TRestOrmClientUri.UpdateFromServer(const Data: array of TObject;

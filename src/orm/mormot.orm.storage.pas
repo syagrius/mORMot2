@@ -27,7 +27,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -38,11 +37,6 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.threads,
-  mormot.crypt.core,
-  mormot.crypt.jwt,
-  mormot.core.perf,
-  mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
   mormot.orm.base,
@@ -495,10 +489,9 @@ type
 
   /// REST class with direct access to an external database engine
   // - you can set an alternate per-table database engine by using this class
-  // - this abstract class is to be overridden with a proper implementation
-  // (e.g. TRestStorageInMemory in this unit, or TRestStorageExternal
-  // from mormot.orm.sql unit, or TRestStorageMongoDB from
-  // mormot.orm.mongodb.pas unit)
+  // - this abstract class is to be overridden with a proper implementation,
+  // e.g. TRestStorageInMemory in this unit, or TRestStorageExternal from
+  // mormot.orm.sql.pas unit, or TRestStorageMongoDB from mormot.orm.mongodb.pas
   TRestStorage = class(TRestOrm)
   protected
     fStoredClass: TOrmClass;
@@ -710,7 +703,7 @@ type
       read fHasher;
   end;
 
-  /// REST storage with direct access to a TObjectList memory-stored table
+  /// REST storage with direct access to a TOrmObjArray memory-stored table
   // - store the associated TOrm values in memory
   // - handle one TOrm per TRestStorageInMemory instance
   // - must be registered individualy in a TRestOrmServer to access data from a
@@ -729,13 +722,14 @@ type
   // the TRestStorageInMemory instance
   // - our TRestStorageInMemory database engine is very optimized and is a lot
   // faster than SQLite3 for such queries - but its values remain in RAM,
-  // therefore it is not meant to deal with more than 100,000 rows or if
-  // ACID commit on disk is required
+  // therefore it is not meant to deal with more than 100,000 rows or if ACID
+  // commit on disk is required
+  // - another benefit is that you can access the TOrm array directly in memory
+  // so you can apply very fast search or process on Value[] in native code
   TRestStorageInMemory = class(TRestStorageTOrm)
   protected
     fValue: TOrmObjArray;
     fCount: integer;
-    fCommitShouldNotUpdateFile: boolean;
     fBinaryFile: boolean;
     fExpandedJson: boolean;
     fUnSortedID: boolean;
@@ -745,11 +739,12 @@ type
     fBasicUpperSqlSelect: array[boolean] of RawUtf8;
     fUnique, fUniquePerField: array of TRestStorageInMemoryUnique;
     fMaxID: TID;
-    fValues: TDynArrayHashed; // hashed by ID
+    fValues: TDynArrayHashed; // fValue[] hashed by ID
     fTrackChangesFieldBitsOffset: PtrUInt;
     fTrackChangesPersistence: IRestOrm;
     fTrackChangesDeleted: TInt64DynArray; // TIDDynArray
     fTrackChangesDeletedCount: integer;
+    fCommitShouldNotUpdateFile: boolean;
     function UniqueFieldsUpdateOK(aRec: TOrm; aUpdateIndex: integer;
       aFields: PFieldBits): boolean;
     procedure RaiseGetItemOutOfRange(Index: integer);
@@ -1094,7 +1089,7 @@ type
   // - used e.g. by TRestOrmServerFullMemory
   TRestStorageInMemoryDynArray = array of TRestStorageInMemory;
 
-  /// class-reference type (metaclass) of our TObjectList memory-stored table storage
+  /// class-reference type (metaclass) of our TOrmObjArray memory-stored table storage
   // - may be TRestStorageInMemory or TRestStorageInMemoryExternal
   TRestStorageInMemoryClass = class of TRestStorageInMemory;
 
@@ -1596,7 +1591,7 @@ end;
 
 function TOrmVirtualTableModule.FileName(const aTableName: RawUtf8): TFileName;
 begin
-  result := Utf8ToString(aTableName) + '.' + FileExtension;
+  result := MakeString([aTableName, '.', FileExtension]);
   if fFilePath = '' then
     result := Executable.ProgramFilePath + result
   else
@@ -1725,7 +1720,7 @@ const
     4); // 'TORM'
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     ClassToText(self, result);
@@ -1743,7 +1738,7 @@ end;
 
 function TOrmVirtualTable.Structure: RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if self <> nil then
     if static <> nil then
       // e.g. for TOrmVirtualTableJson or TOrmVirtualTableExternal
@@ -1861,7 +1856,7 @@ begin
   if VirtualTableClass.InheritsFrom(TOrmVirtualTable) then
     result := TOrmVirtualTableClass(VirtualTableClass).ModuleName
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 
@@ -2041,7 +2036,7 @@ end;
 function TRestStorage.GetStoredClassName: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
     ClassToText(fStoredClass, result);
 end;
@@ -2080,7 +2075,7 @@ begin
     end;
   finally
     if result <= 0 then
-      rec.Free; // on success, rec is owned by fValue: TObjectList
+      rec.Free; // on success, rec is owned by fValue: TOrmObjArray
   end;
 end;
 
@@ -2149,7 +2144,7 @@ begin
   finally
     if (Encoding = encPutHexID) or
        (result <= 0) then
-      rec.Free; // on AddOne success, rec is owned by fValue: TObjectList
+      rec.Free; // on AddOne success, rec is owned by fValue: TOrmObjArray
   end;
 end;
 
@@ -2708,7 +2703,7 @@ begin
     exit;
   if FoundLimit <= 0 then
     FoundLimit := maxInt;
-  if WhereField = 0 then
+  if WhereField = 0 then // WhereField=RTTIfield+1
   begin
     // search ID
     if FoundOffset <= 0 then // omit first FoundOffset rows
@@ -2730,8 +2725,8 @@ begin
   end
   else if cardinal(WhereField) > cardinal(fStoredClassRecordProps.Fields.Count) then
     exit;
-  // handle WHERE WhereField=WhereValue (WhereField=RTTIfield+1)
-  dec(WhereField);
+  // handle WHERE WhereField=WhereValue
+  dec(WhereField); // = RTTIfield from now on
   P := fStoredClassRecordProps.Fields.List[WhereField];
   if not (P.OrmFieldType in COPIABLE_FIELDS) then
     // nothing to search (e.g. oftUnknown or oftMany)
@@ -2853,8 +2848,9 @@ function TRestStorageInMemory.FindWhere(WhereField: integer;
 var
   P: TOrmPropInfo;
   cmp: integer;
-  id: Int64;
   i: integer;
+  id: Int64;
+  comp: set of (cNeg, cZero, cPos); // from WhereOp
   found: boolean;
   v: POrm;
 begin
@@ -2872,12 +2868,17 @@ begin
           FoundLimit, FoundOffset, CaseInsensitive);
         exit;
       end;
-    opNotEqualTo,
-    opLessThan,
-    opLessThanOrEqualTo,
-    opGreaterThan,
+    // CompareValue() operations
+    opNotEqualTo:
+      comp := [cNeg, cPos];
+    opLessThan:
+      comp := [cNeg];
+    opLessThanOrEqualTo:
+      comp := [cNeg, cZero];
+    opGreaterThan:
+      comp := [cPos];
     opGreaterThanOrEqualTo:
-      ; // CompareValue() operations
+      comp := [cPos, cZero];
   else
     exit; // unsupported operation
   end;
@@ -2902,12 +2903,12 @@ begin
     else
       cmp := P.CompareValue(v^, fSearchRec, CaseInsensitive); // fast override
     if cmp < 0 then
-      found := WhereOp in [opNotEqualTo, opLessThan, opLessThanOrEqualTo]
+      found := cNeg in comp
     else if cmp > 0 then
-      found := WhereOp in [opNotEqualTo, opGreaterThan, opGreaterThanOrEqualTo]
+      found := cPos in comp
     else
       // cmp = 0 -> opEqualTo has been handled above
-      found := WhereOp in [opLessThanOrEqualTo, opGreaterThanOrEqualTo];
+      found := cZero in comp;
     if found then
       if FoundOffset > 0 then
         // omit first FoundOffset rows
@@ -3275,7 +3276,7 @@ var
   end;
 
 begin
-  result := '';
+  FastAssignNew(result);
   ResCount := 0;
   if PropNameEquals(fBasicSqlCount, SQL) then
     // SELECT COUNT(*) FROM tablename
@@ -3385,26 +3386,25 @@ end;
 procedure TRestStorageInMemory.DropValues(andUpdateFile: boolean);
 var
   f: PtrInt;
-  timer: TPrecisionTimer;
+  start: Int64;
 begin
   StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'DropValues' {$endif});
   try
     fUnSortedID := false;
     fMaxID := 0;
-    if fCount > 0 then
+    if fCount <= 0 then
+      exit;
+    QueryPerformanceMicroSeconds(start);
+    fValues.Clear;
+    for f := 0 to length(fUnique) - 1 do
+      fUnique[f].Hasher.ForceReHash;
+    fValues.Hasher.ForceReHash;
+    if andUpdateFile then
     begin
-      timer.Start;
-      fValues.Clear;
-      for f := 0 to length(fUnique) - 1 do
-        fUnique[f].Hasher.ForceReHash;
-      fValues.Hasher.ForceReHash;
-      if andUpdateFile then
-      begin
-        fModified := true;
-        UpdateFile;
-      end;
-      fRest.InternalLog('DropValues % in %', [fStoredClass, timer.Stop]);
+      fModified := true;
+      UpdateFile;
     end;
+    fRest.InternalLog('DropValues % in %', [fStoredClass, MicroSecFrom(start)]);
   finally
     StorageUnLock;
   end;
@@ -3430,22 +3430,23 @@ const
 var
   f: PtrInt;
   dup: integer; // should be an integer and not a PtrInt for ForceRehash(@dup)
-  dupfield: RawUtf8;
+  dupfield: PUtf8Char;
   start: Int64;
 begin
   // now fValue[] contains the just loaded data
   QueryPerformanceMicroSeconds(start);
   fCount := length(fValue);
   fValues.Hasher.ForceReHash(@dup);
+  dupfield := nil;
   if dup > 0 then
-    dupfield := ID_TXT
+    dupfield := pointer(ID_TXT)
   else
     for f := 0 to length(fUnique) - 1 do
     begin
       fUnique[f].Hasher.ForceReHash(@dup);
       if dup > 0 then
       begin
-        dupfield := fUnique[f].PropInfo.Name;
+        dupfield := pointer(fUnique[f].PropInfo.Name);
         break;
       end;
     end;
@@ -3544,7 +3545,7 @@ var
   MS: TRawByteStringStream;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     MS := TRawByteStringStream.Create;
@@ -3562,7 +3563,7 @@ var
   MS: TRawByteStringStream;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     MS := TRawByteStringStream.Create;
@@ -3822,7 +3823,7 @@ begin
   try
     i := IDToIndex(ID);
     if i < 0 then
-      result := ''
+      FastAssignNew(result)
     else
       GetJsonValue(fValue[i], {withID=}false, [], result);
   finally
@@ -4278,13 +4279,13 @@ end;
 procedure TRestStorageInMemory.UpdateFile;
 var
   F: TStream;
-  timer: TPrecisionTimer;
+  start: Int64;
 begin
   if (self = nil) or
      not fModified or
      (FileName = '') then
     exit;
-  timer.Start;
+  QueryPerformanceMicroSeconds(start);
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'UpdateFile' {$endif});
   try
     DeleteFile(FileName); // always overwrite previous file
@@ -4304,7 +4305,7 @@ begin
   finally
     StorageUnLock;
   end;
-  fRest.InternalLog('UpdateFile % in %', [fStoredClass, timer.Stop], sllDB);
+  fRest.InternalLog('UpdateFile % in %', [fStoredClass, MicroSecFrom(start)], sllDB);
 end;
 
 procedure TRestStorageInMemory.SetFileName(const aFileName: TFileName);
@@ -4422,37 +4423,53 @@ end;
 function TRestStorageInMemory.SearchCopy(
   const FieldName, FieldValue: RawUtf8;
   CaseInsensitive: boolean; Op: TSelectStatementOperator): pointer;
+var
+  res: pointer; // DoCopyEvent() result parameter
 begin
   if SearchEvent(FieldName, FieldValue, DoCopyEvent,
-      @result, 1, 0, CaseInsensitive, Op) = 0 then
-    result := nil;
+       @res, 1, 0, CaseInsensitive, Op) = 0 then
+    result := nil
+  else
+    result := res;
 end;
 
 function TRestStorageInMemory.SearchInstance(
   const FieldName, FieldValue: RawUtf8;
   CaseInsensitive: boolean; Op: TSelectStatementOperator): pointer;
+var
+  res: pointer; // DoInstanceEvent() result parameter
 begin
   if SearchEvent(FieldName, FieldValue, DoInstanceEvent,
-      @result, 1, 0, CaseInsensitive, Op) = 0 then
-    result := nil;
+      @res, 1, 0, CaseInsensitive, Op) = 0 then
+    result := nil
+  else
+    result := res;
 end;
 
 function TRestStorageInMemory.SearchInstance(
   FieldIndex: integer; const FieldValue: RawUtf8;
   CaseInsensitive: boolean; Op: TSelectStatementOperator): pointer;
+var
+  res: pointer; // DoInstanceEvent() result parameter
 begin
   if SearchEvent(FieldIndex, FieldValue, DoInstanceEvent,
-      @result, 1, 0, CaseInsensitive, Op) = 0 then
-    result := nil;
+      @res, 1, 0, CaseInsensitive, Op) = 0 then
+    result := nil
+  else
+    result := res;
 end;
 
 function TRestStorageInMemory.SearchIndex(
   const FieldName, FieldValue: RawUtf8;
   CaseInsensitive: boolean; Op: TSelectStatementOperator): integer;
+var
+  res: integer; // for DoIndexEvent - not PtrInt
 begin
   if SearchEvent(FieldName, FieldValue, DoIndexEvent,
-      @result, 1, 0, CaseInsensitive, Op) = 0 then
-    result := -1;
+      @res, 1, 0, CaseInsensitive, Op) = 0 then
+    result := -1
+  else
+    result := res;
 end;
 
 function TRestStorageInMemory.SearchCount(
@@ -5222,7 +5239,7 @@ function TRestStorageShard.EngineList(TableModelIndex: integer;
 var
   ResCount: PtrInt;
 begin
-  result := ''; // indicates error occurred
+  FastAssignNew(result); // indicates error occurred
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardList' {$endif});
   try
     ResCount := 0;
@@ -5264,7 +5281,7 @@ begin
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardRetrieve' {$endif});
   try
     if not ShardFromID(ID, tableIndex, rest) then
-      result := ''
+      FastAssignNew(result)
     else
       result := rest.EngineRetrieve(tableIndex, ID);
   finally
@@ -5556,7 +5573,7 @@ function TRestStorageMultiOnDisk.GetDBPassword(
   aID: TRestStorageMultiDatabaseID): SpiUtf8;
 begin
   // no encryption by default
-  result := '';
+  FastAssignNew(result);
 end;
 
 function TRestStorageMultiOnDisk.GetDBFileName(

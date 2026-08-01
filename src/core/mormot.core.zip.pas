@@ -58,6 +58,8 @@ type
     {$endif FPC}
     function GetSize: Int64; override;
   public
+    /// release associated DestStream if DestStreamOwned was set
+    destructor Destroy; override;
     /// this method will raise an error: it's a compression-only stream
     function Read(var Buffer; Count: Longint): Longint; override;
     /// used to return the current position, i.e. the real byte written count
@@ -76,6 +78,12 @@ type
     /// the current crc32 of the read or written data, i.e. the uncompressed CRC
     property Crc: cardinal
       read fCrc;
+    /// access to the raw associated destination TStream
+    property DestStream: TStream
+      read fDestStream;
+    /// by default, true for TSynZipCompressor and false for TSynZipDecompressor
+    property DestStreamOwned: boolean
+      read fDestStreamOwned write fDestStreamOwned;
   end;
 
   /// a TStream descendant for compressing data into a stream using Zip/Deflate
@@ -972,6 +980,12 @@ begin
   result := 0; // make compiler happy
 end;
 
+destructor TSynZipStream.Destroy;
+begin
+  inherited Destroy;
+  if fDestStreamOwned then
+    FreeAndNil(fDestStream);
+end;
 
 
 { TSynZipCompressor }
@@ -1014,9 +1028,7 @@ begin
     end;
     Z.CompressEnd;
   end;
-  inherited Destroy;
-  if fDestStreamOwned then
-    FreeAndNil(fDestStream);
+  inherited Destroy; // handle fDestStreamOwned
 end;
 
 function TSynZipCompressor.Write(const Buffer; Count: Longint): Longint;
@@ -1206,7 +1218,7 @@ begin
      ((uncomplen32 = 0) and
       (crc32 = 0)) or
      not ToBuffer(FastSetString(RawUtf8(result), uncomplen32)) then
-    result := ''; // invalid CRC or truncated uncomplen32
+    FastAssignNew(result); // invalid CRC or truncated uncomplen32
 end;
 
 function TGZRead.ToBuffer(dest: PAnsiChar; maxDest: PtrInt;
@@ -1335,7 +1347,7 @@ begin
   if gzr.Init(gz, gzLen) then
     result := gzr.ToMem
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function GZRead(const gzfile: TFileName): RawByteString;
@@ -1351,7 +1363,7 @@ begin
   if len > 0 then
     len := GZWrite(buf, FastNewRawByteString(result, GZWriteLen(len)), len, level);
   if len <= 0 then
-    result := '' // error
+    FastAssignNew(result) // error
   else
     FakeLength(result, len); // no realloc
 end;
@@ -1862,7 +1874,7 @@ begin
   result := false;
   for i := 0 to length(fOnCreateFromFilesIgnore) - 1 do
     // case-insensitive even on POSIX (no AnsiCompareFileName)
-    if CompareText(Entry.zipName, fOnCreateFromFilesIgnore[i]) = 0 then
+    if SameTextS(Entry.zipName, fOnCreateFromFilesIgnore[i]) then
       exit;
   result := true;
 end;
@@ -2536,10 +2548,10 @@ var
   lh32: PLastHeader;
   lh64: PLastHeader64;
 begin
-  if (BufZip = nil) or
-     (Size < SizeOf(TLastHeader)) then
-    lh32 := nil
-  else
+  lh32 := nil;
+  lh64 := nil;
+  if (BufZip <> nil) and
+     (Size >= SizeOf(TLastHeader)) then
     lh32 := LocateEndCentralDirectory(BufZip, Size, Offset, lh64);
   if lh32 = nil then
     ESynZip.RaiseUtf8(
@@ -2717,7 +2729,7 @@ constructor TZipRead.Create(Instance: TLibHandle;
   const ResName: string; ResType: PChar);
 // resources are memory maps of the executable -> direct access
 begin
-  if fResource.Open(ResName, ResType, Instance) then
+  if fResource.Open(PChar(ResName), ResType, Instance) then
     // warning: resources size may be aligned rounded up -> handled in Create()
     Create(fResource.Buffer, fResource.Size);
 end;
@@ -2850,7 +2862,7 @@ end;
 
 destructor TZipRead.Destroy;
 begin
-  fResource.Close;
+  fResource.Close; // do nothing if fResource.Open() was not called
   FreeAndNilSafe(fSource);
   inherited Destroy;
 end;
@@ -2865,7 +2877,7 @@ begin
     // TZipRead did ensure ZipNamePathDelim was stored in Entry[].zipName
     normalized := NormalizeZipName(aName);
     for result := 0 to Count - 1 do
-      if SameText(Entry[result].zipName, normalized) then
+      if SameTextS(Entry[result].zipName, normalized) then
         exit;
   end;
   result := -1;
@@ -2995,7 +3007,7 @@ var
   tmp: RawByteString;
   info: TFileInfoFull;
 begin
-  result := '';
+  FastAssignNew(result);
   if not RetrieveFileInfo(aIndex, info) or
      (info.f64.zfullSize = 0) or
      ((aMaxSize > 0) and
@@ -3272,7 +3284,7 @@ var
 begin
   aIndex := NameToIndex(aName);
   if aIndex < 0 then
-    result := ''
+    FastAssignNew(result)
   else
     result := UnZip(aIndex);
 end;
@@ -3650,12 +3662,12 @@ begin
        not failIfGrow ) then
     SetLength(result, 12 + len)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function UncompressString(const data: RawByteString): RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   if Length(data) > 12 then
   begin
     SetLength(result, PCardinal(data)^);
@@ -3664,7 +3676,7 @@ begin
       length(data) - 12, length(result)));
     if (result <> '') and
        ((Adler32(0, pointer(result), length(result))) <> PCardinalArray(data)^[2]) then
-      result := '';
+      FastAssignNew(result);
   end;
 end;
 
@@ -3718,7 +3730,7 @@ begin
     fAlgoID := COMPRESS_DEFLATE; // 2
   fAlgoFileExt := '.synz';
   inherited Create;
-  fDeflateLevel := Z_USUAL_COMPRESSION;
+  fDeflateLevel := Z_USUAL_COMPRESSION; // 6
 end;
 
 function TAlgoDeflate.RawProcess(src, dst: pointer; srcLen, dstLen,
@@ -3758,7 +3770,7 @@ begin
   fAlgoID := COMPRESS_DEFLATEFAST; // 3
   fAlgoFileExt := '.synz';
   inherited Create;
-  fDeflateLevel := Z_BEST_SPEED; // = 1
+  fDeflateLevel := Z_BEST_SPEED; // 1
 end;
 
 type
@@ -3919,7 +3931,7 @@ var
   h: array[0..4] of cardinal; // .gz file should be at least 20 bytes long
 begin
   result := BufferFromFile(Name, @h, SizeOf(h)) and
-            (h[0] and $ffffff = GZ_MAGIC); // only check the .gz magic
+            ({%H-}h[0] and $ffffff = GZ_MAGIC); // only check the .gz magic
 end;
 
 function TAlgoGZ.FileCompress(const Source, Dest: TFileName; Magic: cardinal;

@@ -8,7 +8,7 @@ unit mormot.rest.mvc;
 
    Model-View-Controller (MVC) pattern and Mustache over TRestServer and TOrm
    - MVC/MVVM Application over a TRestServer
-   - Expression Helpers for the ORM Data Model
+   - TSynMustache Expression Helpers for the ORM Data Model
 
   *****************************************************************************
 }
@@ -21,7 +21,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode,
@@ -114,7 +113,7 @@ var
   MVCINFO_URI: RawUtf8 = 'mvc-info';
 
 
-{ ************ Expression Helpers for the ORM Data Model }
+{ ************ TSynMustache Expression Helpers for the ORM Data Model }
 
 /// define Expression Helpers for some ORM tables
 // - e.g. to read a TMyOrm from its ID value and put its fields
@@ -304,7 +303,6 @@ function TMvcSessionWithRestServer.GetCookie(out Value: PUtf8Char): integer;
 var
   ctxt: TRestServerUriContext;
   cookie: PHttpCookie;
-  valueend: PUtf8Char;
 begin
   result := 0;
   ctxt := ServiceRunningContext.Request;
@@ -316,11 +314,7 @@ begin
     if Value <> nil then
     begin
       inc(Value);
-      valueend := PosChar(Value, ';'); // use fast SSE2 asm on x86_64
-      if valueend <> nil then
-        result := valueend - Value
-      else
-        result := StrLen(Value);
+      result := PosChar0(Value, ';') - Value; // use fast SSE2 asm on x86_64
       exit;
     end;
   end;
@@ -357,7 +351,7 @@ begin
 end;
 
 
-{ ************ Expression Helpers for the ORM Data Model }
+{ ************ TSynMustache Expression Helpers for the ORM Data Model }
 
 type
   TExpressionHelperForTable = class

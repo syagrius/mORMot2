@@ -603,7 +603,7 @@ begin
       with TOrmPeople.CreateAndFillPrepare(Client.Orm,
         'FirstName REGEXP ?', [EXPRESSIONS[i]]) do
       try
-        if not CheckFailed(FillContext <> nil) then
+        if Check(FillContext <> nil) then
         begin
           CheckEqual(FillContext.Table.RowCount, 1001);
           n := 0;
@@ -1019,7 +1019,7 @@ begin
     for i := 1 to high(dID) do
     begin
       check(MS.DestList.SourceGet(aClient, dID[i], res));
-      if not CheckFailed(length(res) = 1) then
+      if Check(length(res) = 1) then
         check(res[0] = sID[i]);
       check(MS.DestList.ManySelect(aClient, sID[i], dID[i]));
       check(MS.DestList.AssociationTime = i);
@@ -1037,7 +1037,7 @@ begin
       check(MS.DestList.AssociationTime = i);
       check(not MS.DestList.FillOne);
       check(MS.DestList.DestGetJoined(aClient, '', sID[i], res));
-      if not CheckFailed(length(res) = 1) then
+      if Check(length(res) = 1) then
         check(res[0] = dID[i]);
       check(MS.DestList.DestGetJoined(aClient, 'ADest.SignatureTime=:(0):', sID[i], res));
       check(length(res) = 0);
@@ -1566,7 +1566,7 @@ begin
         Client.Server.DB.LockingMode := lmExclusive;
         with Client.Server.Model do
           for i := 0 to high(Tables) do
-            if not CheckFailed(GetTableIndex(Tables[i]) = i) then
+            if Check(GetTableIndex(Tables[i]) = i) then
               check(GetTableIndex(Tables[i].SqlTableName) = i);
         // direct client access test
         Client.Server.Server.CreateMissingTables; // NEED Dest,Source,Dests,...
@@ -1620,7 +1620,7 @@ begin
           CheckEqual(Client.Orm.OneFieldValue(TOrmPeople, 'LastName', IntArray[i]), 'Dali');
         List := Client.Orm.RetrieveList(TOrmPeople, 'Lastname=?', ['Dali'],
           'ID,LastName');
-        if not CheckFailed(List <> nil) then
+        if Check(List <> nil) then
         begin
           CheckEqual(List.Count, Length(IntArray));
           for i := 0 to List.Count - 1 do
@@ -2136,17 +2136,17 @@ begin
         check(T.FieldIndex(J.Get(0, aF)) = aF);
       for aR := 0 to T.RowCount do
         for aF := 0 to T.FieldCount - 1 do // aF=3=Blob
-          check((aF = 3) or (StrIComp(T.Get(aR, aF), J.Get(aR, aF)) = 0));
+          check((aF = 3) or StrIEqual(T.Get(aR, aF), J.Get(aR, aF)));
       n := 0;
       while T.Step do
       begin
         for aF := 0 to T.FieldCount - 1 do // aF=3=Blob
-          check((aF = 3) or (StrIComp(T.FieldBuffer(aF), J.Get(T.StepRow, aF)) = 0));
+          check((aF = 3) or StrIEqual(T.FieldBuffer(aF), J.Get(T.StepRow, aF)));
         inc(n);
       end;
       check(n = J.RowCount);
       n := 0;
-      if not CheckFailed(T.Step(true, @row)) then
+      if Check(T.Step(true, @row)) then
         repeat
           check(row.ID = J.GetAsInteger(T.StepRow, fid));
           check(row.FirstName = J.GetU(T.StepRow, ffn));
@@ -2277,7 +2277,7 @@ begin
   J := TOrmTableJson.Create('', s);
   try
     check(J.fieldCount = 24);
-    if not checkfailed(J.rowCount = 3) then
+    if Check(J.rowCount = 3) then
       check(J.Get(2, J.FieldCount - 1) = nil);
     check(J.Get(J.rowCount, J.FieldCount - 1) = 'sjentonpg@senate.gov');
   finally

@@ -74,6 +74,8 @@ type
     procedure _AES_GCM;
     /// RC4 encryption function
     procedure _RC4;
+    /// BlowFish CTR mode + key-schedule regression checks
+    procedure _BlowFish;
     /// pure pascal RSA tests
     procedure _RSA;
     /// X509 Certificates
@@ -257,6 +259,8 @@ procedure TTestCoreCrypto._SHA1;
     CheckEqual(s, '4b007901b765489abead49d926f721d065a429c1');
   end;
 
+const
+  sec = '12345678901234567890';
 begin
   DoTest;
   {$ifdef ASMX64NOTPIC}
@@ -282,6 +286,16 @@ begin
   OpenSslTest(hfSHA1, '', '', 'fbdb1d1b18aa6c08324b7d64b71fb76370690e1d');
   OpenSslTest(hfSHA1, 'The quick brown fox jumps over the lazy dog', 'key',
     'de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9');
+  // RFC 6238 Appendix B - SHA1
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true,          59 div 30), '94287082');
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true,  1111111109 div 30), '07081804');
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true,  1111111111 div 30), '14050471');
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true,  1234567890 div 30), '89005924');
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true,  2000000000 div 30), '69279037');
+  CheckEqual(TotpGenerate(sec, 8, saSha1, true, 20000000000 div 30), '65353130');
+  CheckEqual(TotpGenerate(sec, 6, saSha1, true,          59 div 30), '287082');
+  CheckEqual(TotpGenerate(sec, 6, saSha1, true,  1111111109 div 30), '081804');
+  CheckEqual(TotpGenerate(sec, 6, saSha1, true,  1111111111 div 30), '050471');
 end;
 
 procedure TTestCoreCrypto._SHA256;
@@ -371,6 +385,8 @@ procedure TTestCoreCrypto._SHA256;
     OpenSslTest(hfSha224, 'The quick brown fox jumps over the lazy dog.', s);
   end;
 
+const
+  sec = '12345678901234567890123456789012';
 begin
   DoTest;
   {$ifdef ASMX64NOTPIC}
@@ -410,6 +426,15 @@ begin
   Kdf(saSha256, '3705D96080C17728A0E800EAB6E0D23C',
    '9FDA0E56AB2D85E1569A688696C26A6C',
    'Kc128', HexToBin('0000000255'));
+  // RFC 6238 Appendix B - SHA256
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true,          59 div 30), '46119246');
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true,  1111111109 div 30), '68084774');
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true,  1111111111 div 30), '67062674');
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true,  1234567890 div 30), '91819424');
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true,  2000000000 div 30), '90698825');
+  CheckEqual(TotpGenerate(sec, 8, saSha256, true, 20000000000 div 30), '77737706');
+  CheckEqual(TotpGenerate(sec, 6, saSha256, true,          59 div 30), '119246');
+  CheckEqual(TotpGenerate(sec, 4, saSha256, true,  1111111109 div 30), '4774');
 end;
 
 procedure TTestCoreCrypto._RC4;
@@ -464,6 +489,56 @@ begin
       rc4.EncryptBuffer(pointer(d), pointer(d), len); // decrypt
       check(s = d);
     end;
+  end;
+end;
+
+procedure TTestCoreCrypto._BlowFish;
+var
+  bf: TBlowFishCtr;
+  data, enc1, enc2: RawByteString;
+  salt, saltCopy: THash128Rec;
+begin
+  // regression for the rodata-salt corruption in BlowFishKeySetup() - see the
+  // commit that introduced this test. BlowFishPrepareKey() now returns the
+  // big-endian salt via an out-parameter, so the caller's Salt^ buffer
+  // (possibly @BLOWFISHCTR_DEFAULTSALT in .rodata on Delphi POSIX, or any
+  // read-only/const buffer) is never mutated.
+  data := 'mORMot2 BlowFish rodata-salt regression test vector payload';
+  // 1. two TBlowFishCtr.Create('secret') with no explicit Salt must produce
+  //    the same key schedule, i.e. encrypt identically: catches the silent
+  //    BLOWFISHCTR_DEFAULTSALT mutation that used to happen on Delphi
+  //    Windows (typed const in .data) and segfault on Delphi POSIX (typed
+  //    const in .rodata)
+  FastNewRawByteString(enc1, length(data));
+  FastNewRawByteString(enc2, length(data));
+  bf := TBlowFishCtr.Create('secret');
+  try
+    bf.EncryptBuffer(pointer(data), pointer(enc1), length(data));
+  finally
+    bf.Free;
+  end;
+  bf := TBlowFishCtr.Create('secret');
+  try
+    bf.EncryptBuffer(pointer(data), pointer(enc2), length(data));
+  finally
+    bf.Free;
+  end;
+  CheckEqual(enc1, enc2, 'BLOWFISHCTR_DEFAULTSALT stable');
+  // 2. a caller-supplied salt buffer must also remain byte-identical across
+  //    Create() (BCrypt path with Cost > 0 takes a different code branch)
+  RandomBytes(@salt, SizeOf(salt));
+  saltCopy := salt;
+  bf := TBlowFishCtr.Create('secret', 0, @salt);
+  try
+    Check(CompareMem(@salt, @saltCopy, SizeOf(salt)), 'caller salt unchanged');
+  finally
+    bf.Free;
+  end;
+  bf := TBlowFishCtr.Create('secret', 4, @salt); // BCrypt expensive setup
+  try
+    Check(CompareMem(@salt, @saltCopy, SizeOf(salt)), 'caller salt unchanged (bcrypt)');
+  finally
+    bf.Free;
   end;
 end;
 
@@ -599,6 +674,8 @@ procedure TTestCoreCrypto._SHA512;
     }
   end;
 
+const
+  sec = '1234567890123456789012345678901234567890123456789012345678901234';
 begin
   DoTest;
   {$ifdef ASMX86NOTPIC}
@@ -640,6 +717,15 @@ begin
   Kdf(saSha384, '6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52',
    '69B16514E3CD8E56B82010D5C73012B622C4D00FFC23ED1F',
    'Ki256', HexToBin('0000000255'));
+  // RFC 6238 Appendix B - SHA512
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true,          59 div 30), '90693936');
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true,  1111111109 div 30), '25091201');
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true,  1111111111 div 30), '99943326');
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true,  1234567890 div 30), '93441116');
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true,  2000000000 div 30), '38618901');
+  CheckEqual(TotpGenerate(sec, 8, saSha512, true, 20000000000 div 30), '47863826');
+  CheckEqual(TotpGenerate(sec, 6, saSha512, true,          59 div 30), '693936');
+  CheckEqual(TotpGenerate(sec, 4, saSha512, true,  1111111109 div 30), '1201');
 end;
 
 procedure TTestCoreCrypto._SHA3;
@@ -807,6 +893,7 @@ var
   b1, b2: TAesBlock;
   a1, a2: TAesPrngAbstract;
   s1, s2, split: RawByteString;
+  spi: SpiUtf8;
   c: cardinal;
   d: double;
   e: TSynExtended;
@@ -832,6 +919,27 @@ begin
   Check(not IsZero(b2));
   Check(not IsEqual(b1, b2));
   Check(not CompareMem(@b1, @b2, SizeOf(b1)));
+  // validate reusable MakeStrongPassWord() algorithm
+  Check(MakeStrongPassWord(spi));
+  spi := ' ';
+  Check(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'G');
+  spi := '  ';
+  Check(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'GG');
+  spi := '    ';
+  Check(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'GGGG');
+  spi := '     ';
+  CheckNot(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'GGGGG');
+  Check(not MakeStrongPassWord(spi));
+  CheckEqual(spi, 'jjjjj');
+  spi := '0123456789';
+  CheckNot(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'WXYZ012345');
+  Check(MakeStrongPassWord(spi));
+  CheckEqual(spi, 'z+BCWXYZ01');
   // validate this PRNG class
   clo := 0;
   chi := 0;
@@ -868,7 +976,9 @@ begin
       CheckEqual(length(s1), i * 2);
       check(mormot.core.text.HexToBin(pointer(s1), nil, i));
       s1 := a1.RandomPassword(i);
-      CheckEqual(length(s1), i);
+      CheckEqual(length(s1), i, 'rndpass len');
+      if i > 4 then
+        Check(not (IsUpper(s1) or IsLower(s1)), 'rndpass case');
       for j := 1 to i do
         check(s1[j] in [#33 .. #126]);
       // verify Random32 / RandomDouble / RandomDouble distribution
@@ -964,11 +1074,11 @@ begin
     {$ifdef OSWINDOWS}
     0:
       begin
-        if IsWow64Emulation then // PRISM seems inconsistent about this API
+        if wsWeakDpApi in WindowsSpecs then // PRISM seems inconsistent here
           exit;
         func := CryptDataForCurrentUserDPAPI;
         if OSVersion < wVista then
-          max := 100; // slow API on Windows XP
+          max := 100; // very slow API on Windows XP
       end;
     {$endif OSWINDOWS}
     1:
@@ -1428,7 +1538,7 @@ const
 
   OPENSSL_HASH: array[bSHA1O .. bSHA3_512O] of THashAlgo = (
     hfSHA1, hfSHA1, hfSHA256, hfSHA256, hfSHA384, hfSHA384, hfSHA512, hfSHA384,
-    hfSHA512, hfSHA3_256, hfSHA3_512
+    hfSHA512, hfSHA3_256, hfSHA3_512 // hfSHA256_128/160 are not supported
   {$endif USE_OPENSSL});
 var
   b: TBenchmark;
@@ -1823,11 +1933,11 @@ const
 
 var
   buf: RawByteString;
-  u, pw, nfo, nfo2, exp, db, proof, mech: RawUtf8;
+  u, pw, nfo, nfo2, exp, db, proof, mech, sec, pin: RawUtf8;
   iv: Int64;
   P: PAnsiChar;
   unalign: PtrInt;
-  n, rnd: integer;
+  n, rnd, dig: integer;
   i64: Int64;
   logN, blocksize, parallel, r,
   exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
@@ -2243,6 +2353,47 @@ begin
   finally
     sc.Free;
   end;
+  // validate multi-algorithm TOTP
+  for s := saSha1 to saSha512 do
+    for dig := 4 to 8 do
+    begin
+      sec := TotpGenerateSecret(16 + dig);
+      Check(sec <> '', 'TotpGenerateSecret');
+      pin := TotpGenerate(sec, dig, s);
+      Check(pin <> '', 'TotpGenerate');
+      CheckEqual(length(pin), dig);
+      Check(TotpValidate(sec, pin, 1, s), 'TotpValidate with current time');
+      Check(TotpValidate(Base32ToBin(sec), pin, 1, s, -1, true), 'Totp bin');
+      Check(TotpValidate(sec, pin, 0, s, 123) =
+            (TotpGenerate(sec, dig, s, false, 123) = pin),
+            'TotpValidate with time=123');
+      CheckEqual(TotpGenerate('', 6, s), '', 'no sec');
+      CheckEqual(TotpGenerate(sec, 3, s), '', 'dig=3<4');
+      CheckEqual(TotpGenerate(sec, 9, s), '', 'dig=9>8');
+      Check(not TotpValidate(sec, '', 1, s));
+      Check(not TotpValidate(sec, '123', 1, s));
+      Check(not TotpValidate(sec, '123456789', 1, s));
+    end;
+  CheckEqual(TotpUrl('Google', 'alice@google.com', 'JBSWY3DPEHPK3PXP'),
+    'otpauth://totp/Google:alice%40google.com?secret=JBSWY3DPEHPK3PXP&issuer=' +
+    'Google&digits=6&period=30');
+  CheckEqual(TotpUrl('GitHub', 'bob', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ======'),
+    'otpauth://totp/GitHub:bob?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=' +
+    'GitHub&digits=6&period=30');
+  CheckEqual(TotpUrl('Example', 'user', 'ABCDEF123456', 6, saSha256),
+    'otpauth://totp/Example:user?secret=ABCDEF123456&issuer=Example&digits=6&' +
+    'period=30&algorithm=SHA256');
+  CheckEqual(TotpUrl('MyService', 'john.doe', '1234567890', 8, saSha512),
+    'otpauth://totp/MyService:john.doe?secret=1234567890&issuer=MyService&' +
+    'digits=8&period=30&algorithm=SHA512');
+  CheckEqual(TotpUrl('Company & Co', 'user+test@domain.com', 'TESTSECRET1234'),
+    'otpauth://totp/Company%20%26%20Co:user%2Btest%40domain.com?' +
+    'secret=TESTSECRET1234&issuer=Company%20%26%20Co&digits=6&period=30');
+  CheckEqual(TotpUrl('Test', 'simple', 'GEZDGNBVGY3TQOJQ'),
+    'otpauth://totp/Test:simple?secret=GEZDGNBVGY3TQOJQ&issuer=Test&' +
+    'digits=6&period=30');
+  CheckEqual(TotpUrl('A', 'B', 'C'),
+    'otpauth://totp/A:B?secret=C&issuer=A&digits=6&period=30');
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
   CheckEqualHex(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 3), '1ac907');
@@ -2255,6 +2406,7 @@ begin
   CheckEqualHex(hasher.Mgf1(hfSHA256, pointer(buf), length(buf), 50),
     '382576a7841021cc28fc4c0948753fb8312090cea942ea4c4e73' +
     '5d10dc724b155f9f6069f289d61daca0cb814502ef04eae1');
+  // validate some OpenSSL specific functions
   {$ifdef USE_OPENSSL}
   if OpenSslIsAvailable then
   begin
@@ -2332,7 +2484,7 @@ begin
           if not withiv then
             aes.IV := iv;
           dec := aes.DecryptPkcs7(res, withiv, {raiseonerror=}false);
-          if not CheckFailed(length(dec) = i shl 3) then
+          if Check(length(dec) = i shl 3) then
             Check(CompareMem(pointer(dec), @data, length(dec)));
         finally
           aes.Free;
@@ -3384,12 +3536,11 @@ var
   h128, ref128: THash128;
   bak: THash512;
 begin
-  for i := 0 to high(bytes) do
-    bytes[i] := i;
   // validate AesNiHash128() against reference vectors
   // - should be done FIRST with no process in the background
+  FillIncreasingB(@bytes, 0, high(bytes));
   if Assigned(AesNiHash128) and
-     not CheckFailed(not fBackgroundRun.Waiting, 'no background run') then
+     Check(not fBackgroundRun.Waiting, 'no background run') then
   begin
     Move512(@bak, AesNiHashAntiFuzzTable);
     Move512(AesNiHashAntiFuzzTable, @bytes); // replace to get AESNIHASH_REF
@@ -3679,11 +3830,19 @@ const
     $18, $94, $1a, $0e, $92, $78, $d6, $d9, $78, $f3, $b5, $bb, $a7, $a1, $99,
     $50, $c6, $c1, $2c, $78, $6e, $26, $ba, $ec, $ac, $d9, $4d, $0b, $cb, $6f,
     $56, $87, $00, $00, $00, $01);
+  // $ klist
+  // Ticket cache: FILE:/tmp/krb5cc_1000
+  // Default principal: abouchez@AD.TRANQUIL.IT
+  CCACHE_REF: array[0 .. 63] of byte = ( // truncated for safety
+    $05, $04, $00, $0c, $00, $01, $00, $08, $00, $00, $00, $00, $00, $00, $00, $00,
+    $00, $00, $00, $01, $00, $00, $00, $01, $00, $00, $00, $0e, $41, $44, $2e, $54,
+    $52, $41, $4e, $51, $55, $49, $4c, $2e, $49, $54, $00, $00, $00, $08, $61, $62,
+    $6f, $75, $63, $68, $65, $7a, $00, $00, $00, $01, $00, $00, $00, $01, $00, $00);
 
 procedure TTestCoreCrypto._TKerberosKeyTab;
 var
   bin, bin2, password: RawByteString;
-  hex: RawUtf8;
+  hex, realm: RawUtf8;
   kt, kt2: TKerberosKeyTab;
   ktg: TKerberosKeyTabGenerator;
   a: TSignAlgo;
@@ -3856,6 +4015,12 @@ begin
   finally
     ktg.Free;
   end;
+  // validate ccache file parsing
+  CheckEqual(BufferCcachePrincipal('', @realm), '');
+  CheckEqual(realm, '');
+  FastSetRawByteString(bin, @CCACHE_REF, SizeOf(CCACHE_REF));
+  CheckEqual(BufferCcachePrincipal(bin, @realm), 'abouchez@AD.TRANQUIL.IT');
+  CheckEqual(realm, 'AD.TRANQUIL.IT');
 end;
 
 procedure TTestCoreCrypto.CatalogRunAsym(Context: TObject);
@@ -4117,10 +4282,11 @@ begin
     ConsoleWriteRaw(c2.Save(cccCertWithPrivateKey, '', ccfPem)); // for debug
   cv := c2.Verify(nil);
   CheckUtf8(cv = cvValidSelfSigned, 'self2=%', [ToText(cv)^]);
-  c2.Sign(c1); // change signature
+  c2.Sign(c1); // change signature using c1 as authority
   CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey);
   Check(not c2.IsSelfSigned);
-  Check(c2.Verify(c1) = cvValidSigned, 'self3');
+  cv := c2.Verify(c1);
+  CheckUtf8(cv = cvValidSigned, '%:self3=%', [crt.AlgoName, ToText(cv)^]);
   Check(c2.Verify(nil) = cvUnknownAuthority, 'self4');
   if crt.AlgoName = 'syn-es256-v1' then
     check(c1.SharedSecret(c3) = c3.SharedSecret(c1), 'c1.GetUsage=CU_ALL')
@@ -4239,7 +4405,7 @@ begin
   check(csr <> '', 'csr');
   check(priv <> '', 'priv');
   c2 := crt.GenerateFromCsr(csr);
-  if not CheckFailed(c2 <> nil, 'gen csr1') then
+  if Check(c2 <> nil, 'gen csr1') then
   begin
     if crt.AlgoName <> 'syn-es256-v1' then
       check(c2.GetUsage = [cuCA, cuDigitalSignature], 'csr usage1');
@@ -4248,7 +4414,7 @@ begin
     check(c2.IsSelfSigned, 'csr self1');
   end;
   c2 := crt.GenerateFromCsr(csr, c1);
-  if not CheckFailed(c2 <> nil, 'gen csr2') then
+  if Check(c2 <> nil, 'gen csr2') then
   begin
     if crt.AlgoName <> 'syn-es256-v1' then
       check(c2.GetUsage = [cuCA, cuDigitalSignature], 'csr usage2');
@@ -4373,7 +4539,7 @@ procedure TTestCoreCrypto.Catalog;
 var
   m: TAesMode;
   k, k2: integer;
-  a, i, rounds, bytes: PtrInt;
+  a, i, j, rounds, bytes: PtrInt;
   c32, cprev: cardinal;
   d, dprev: double;
   n, h, nprev, aead: RawUtf8;
@@ -4447,7 +4613,8 @@ begin
     dprev := 0;
     bytes := 0;
     rounds := 100;
-    if PosEx('blocking', rnd.AlgoName) > 0 then
+    if {$ifdef OSPOSIX} (PosEx('blocking', rnd.AlgoName) > 0) or {$endif}
+       (PosEx('entropy', rnd.AlgoName) > 0) then
       rounds := 10; // some system random generators may be slow/blocking
     for i := 1 to rounds do
     begin
@@ -4459,11 +4626,18 @@ begin
       d := rnd.GetDouble;
       check(d <> dprev);
       dprev := d;
-      n := rnd.Get(i); // up to 10 bytes is fine on slow/blocking OS random API
-      CheckEqual(length(n), i);
-      inc(bytes, 12 + i);
+      rnd.Get(s, i); // up to 10 bytes is fine on slow/blocking OS random API
+      CheckEqual(length(s), i);
+      n := rnd.GetPassword(i);
+      CheckEqual(length(n), i, 'getpass len');
+      if i > 4 then
+        Check(not (IsUpper(n) or IsLower(n)), 'getpass case');
+      for j := 1 to i do
+        check(n[j] in [#33 .. #126]);
+      inc(bytes, 12 + i * 2);
     end;
     NotifyTestSpeed('%', [rnd.AlgoName], 0, bytes, @timer, {onlylog=}true);
+    CheckEqual(rnd.GetPassword(0), '');
   end;
   // validate Hash() High-Level Algorithms Factory
   alg := TCryptHasher.Instances;
@@ -4969,7 +5143,7 @@ begin
           v := v.IntMultiply(1);
           CheckEqual(c.ActiveCount, 3);
           CheckEqual(v.Compare(b), 0);
-          CheckEqual(v.Compare(0), CompareBI(rnd, 0), 'bi0');
+          CheckEqual(v.Compare(0), CompareHalfUInt(rnd, 0), 'bi0');
           if rnd > 1 then
             CheckEqual(v.Trim.Compare(1), 1, 'bi1');
           // verify b * 0 = 0
@@ -5412,10 +5586,49 @@ const
     '-----END X509 CRL-----'#13#10;
 
 procedure TTestCoreCrypto._X509;
+
+  procedure CheckXNorm(const s, exp: RawUtf8);
+  var
+    ss: ShortString;
+  begin
+    CheckEqual(XNameNormalize(pointer(s), PUtf8Char(pointer(s)) + length(s),
+      @ss), length(exp) + 1);
+    Check(EqualBuf(exp, @ss[1], ord(ss[0])));
+  end;
+
+  procedure CheckX4514(const s, exp: RawUtf8);
+  var
+    tmp: TSynTempAdder;
+    res: RawUtf8;
+  begin
+    tmp.Init;
+    XNameRfc4514(tmp, pointer(s), PUtf8Char(pointer(s)) + length(s));
+    tmp.Done(res);
+    CheckEqual(res, exp);
+  end;
+
+  procedure CheckXName(const s: RawUtf8);
+  var
+    x, y: TXName;
+  begin
+    x.Init;
+    CheckUtf8(x.FromDNText(s), s);
+    CheckEqual(x.AsDNText, s);
+    y.Init;
+    Check(x.CompareBinary(y) <> 0, 'bin0');
+    Check(x.CompareCanonical(y) <> 0, 'can0');
+    CheckUtf8(y.FromAsn(x.ToBinary), 'asn:%', [s]);
+    Check(x.CompareBinary(y) = 0, 'bin');
+    Check(x.CompareCanonical(y) = 0, 'can');
+    CheckEqual(y.AsDNText, s);
+  end;
+
 var
   bin, der: RawByteString;
   pem, sav, sn: RawUtf8;
   x, a: TX509;
+  a1: TXAttr;
+  ocsp, issuers: TRawUtf8DynArray;
   i: integer;
   nfo: TX509Parsed;
   crl: TX509Crl;
@@ -5429,12 +5642,130 @@ var
   utc: TDateTime;
   timer: TPrecisionTimer;
 begin
+  // validate XName 500 normalization and escaping
+  Check(TextToXa('') = xaNone);
+  for a1 := succ(low(a1)) to high(a1) do
+    Check(TextToXa(XA_TEXT[a1]) = a1);
+  Check(TextToXa('der') = xaNone);
+  for a1 := succ(low(a1)) to high(a1) do
+    Check((TextToXa(LowerCase(XA_TEXT[a1]))) = a1);
+  CheckXNorm('', '');
+  CheckXNorm(' ', '');
+  CheckXNorm('   ', '');
+  CheckXNorm('a', 'a');
+  CheckXNorm(' a', 'a');
+  CheckXNorm('a ', 'a');
+  CheckXNorm(' a ', 'a');
+  CheckXNorm('  a  ', 'a');
+  CheckXNorm('abc', 'abc');
+  CheckXNorm(' abc ', 'abc');
+  CheckXNorm('a b c', 'a b c');
+  CheckXNorm('a  b  c', 'a b c');
+  CheckXNorm(' a  b  c ', 'a b c');
+  CheckXNorm('  a   b   c  ', 'a b c');
+  CheckXNorm('A', 'a');
+  CheckXNorm(' A', 'a');
+  CheckXNorm('A ', 'a');
+  CheckXNorm(' A ', 'a');
+  CheckXNorm('  A  ', 'a');
+  CheckXNorm('ABC', 'abc');
+  CheckXNorm(' ABC ', 'abc');
+  CheckXNorm('A B C', 'a b c');
+  CheckXNorm('A  B  c', 'a b c');
+  CheckXNorm(' A  B  c ', 'a b c');
+  CheckXNorm('  A   b   C  ', 'a b c');
+  CheckXNorm(RawUtf8OfChar('Z', 100), RawUtf8OfChar('z', 100));
+  CheckX4514('', '');
+  CheckX4514(' ', '\ ');
+  CheckX4514('  ', '\ \ ');
+  CheckX4514('a', 'a');
+  CheckX4514(' a', '\ a');
+  CheckX4514('a ', 'a\ ');
+  CheckX4514('  a  ', '\ \ a\ \ ');
+  CheckX4514('#a', '\#a');
+  CheckX4514(' #a', '\ #a');
+  CheckX4514('a#', 'a#');
+  CheckX4514('#', '\#');
+  CheckX4514('#  ', '\#\ \ ');
+  CheckX4514('abc', 'abc');
+  CheckX4514('a b c', 'a b c');
+  CheckX4514('a  b   c', 'a  b   c');
+  CheckX4514('a\bc', 'a\\bc');
+  CheckX4514('abc"', 'abc\"');
+  CheckX4514('a,bc', 'a\,bc');
+  CheckX4514(' a,bc', '\ a\,bc');
+  CheckX4514('a, bc', 'a\, bc');
+  CheckX4514('a+b', 'a\+b');
+  CheckX4514('a<b', 'a\<b');
+  CheckX4514('a>b', 'a\>b');
+  CheckX4514('a;b', 'a\;b');
+  CheckX4514('a\b', 'a\\b');
+  CheckX4514('\\', '\\\\');
+  CheckX4514('"', '\"');
+  CheckX4514('abc'#0, 'abc\00');
+  CheckX4514('abc'#2, 'abc\02');
+  CheckX4514('abc'#31, 'abc\1f');
+  CheckX4514('abc'#0'd', 'abc\00d');
+  CheckX4514('a'#13'b', 'a\0db');
+  CheckX4514('a'#10'b', 'a\0ab');
+  CheckXName('CN=Alice');
+  CheckXName('CN=www.example.com');
+  CheckXName('CN=R3,O=Let''s Encrypt,C=US');
+  CheckXName('CN=Cloudflare Inc ECC CA-3,O=Cloudflare\, Inc.,C=US');
+  CheckXName('CN=John Doe,OU=Engineering,O=Example Corp,L=Paris,ST=Ile-de-France,C=FR');
+  CheckXName('DC=com');
+  CheckXName('DC=example,DC=com');
+  CheckXName('CN=John Doe,OU=People,DC=example,DC=com');
+  CheckXName('CN=John Doe+UID=123456,O=Example Corp,C=US');
+  CheckXName('O=Example Corp,C=US,CN=John Doe+serialNumber=ABC123');
+  CheckXName('OU=Security+OU=PKI,O=Example Corp,C=US');
+  CheckXName('CN=John Doe+UID=42+serialNumber=ABC123,O=Example,C=US');
+  CheckXName('CN=Cloudflare\, Inc.,C=US');
+  CheckXName('CN=Alice\+Bob,O=Example,C=US');
+  CheckXName('CN=John \"Johnny\" Doe,O=Example,C=US');
+  CheckXName('CN=C:\\Windows,O=Example,C=US');
+  CheckXName('OU=Research\;Development,O=Example,C=US');
+  CheckXName('CN=Server \<Primary\>,O=Example,C=US');
+  CheckXName('CN=\ John,O=Example,C=US');
+  CheckXName('CN=John\ ,O=Example,C=US');
+  CheckXName('CN=\ John\ ,O=Example,C=US');
+  CheckXName('CN=\ \ John\ \ ,O=Example,C=US');
+  CheckXName('CN=\#12345,O=Example,C=US');
+  CheckXName('CN=\#,O=Example,C=US');
+  CheckXName('CN=abc\04def,O=Example,C=US');
+  CheckXName('CN=Line1\0aLine2,O=Example,C=US');
+  CheckXName('CN=Line1\0d\0aLine2,O=Example,C=US');
+  CheckXName('CN=Tab\09Character,O=Example,C=US');
+  CheckXName('1.2.3.4=Some Value,CN=Example');
+  CheckXName('1.2.840.113549.1.9.2=alice@example.com,CN=Alice');
+  CheckXName('CN=Alice+1.2.3.4=Employee,O=Example,C=US');
+  CheckXName('CN=R3,O=Let''s Encrypt,C=US');
+  CheckXName('CN=ISRG Root X1,O=Internet Security Research Group,C=US');
+  CheckXName('CN=DigiCert Global Root G2,OU=www.digicert.com,O=DigiCert Inc,C=US');
+  CheckXName('CN=GlobalSign Root CA,OU=Root CA,O=GlobalSign nv-sa,C=BE');
+  CheckXName('CN=Amazon Root CA 1,O=Amazon,C=US');
+  CheckXName('CN=');
+  CheckXName('CN=\ ');
+  CheckXName('CN=\#');
+  CheckXName('CN=\\');
+  CheckXName('CN=Quote\"');
+  CheckXName('CN=Plus\+');
+  CheckXName('CN=Semi\;');
+  CheckXName('CN=Less\<');
+  CheckXName('CN=Greater\>');
+  CheckXName('CN=Comma\,');
+  CheckXName('CN=\ John\, Jr.\ +UID=12345+1.2.3.4=R\0aD,OU=Research\;' +
+    'Development,O=Example\, Inc.,L=Montreal,ST=Quebec,C=CA');
+  CheckXName('CN=+UID=42');
+  CheckXName('CN=John+UID=');
+  CheckXName('1.2.3.4=Employee+CN=Alice,O=Example,C=US');
+  CheckXName('CN=\\\\');
+  // validate with one synopse.info RSA certificate from Let's Encrypt
   {$ifdef OSWINDOWS}
   Check(WinX509Parse(_synopseinfo_pem, nfo)); // validate our SSPI parser
   {$else}
   Check(X509Parse(_synopseinfo_pem, nfo)); // likely to be the OpenSSL parser
   {$endif OSWINDOWS}
-  // validate with the synopse.info RSA certificate from Let's Encrypt
   x := TX509.Create;
   try
     CheckEqual(x.SerialNumber, '');
@@ -5453,7 +5784,7 @@ begin
     CheckEqual(x.Issuer[xaC],   'US');
     CheckEqual(x.SubjectDN,     'CN=synopse.info');
     CheckEqual(x.SubjectDN, nfo.SubjectDN);
-    CheckEqual(x.IssuerDN,      'CN=R3, C=US, O=Let''s Encrypt');
+    CheckEqual(x.IssuerDN,      'C=US,O=Let''s Encrypt,CN=R3');
     Check(x.Usages =
       [cuDigitalSignature, cuKeyEncipherment, cuTlsServer, cuTlsClient]);
     Check(x.Usages = nfo.Usage, 'nfo u');
@@ -5467,9 +5798,19 @@ begin
       '14:2e:b3:17:b7:58:56:cb:ae:50:09:40:e6:1f:af:9d:8b:14:c2:c6');
     CheckEqual(x.Extension[xeAuthorityInformationAccess],
       'ocsp=http://r3.o.lencr.org,caIssuers=http://r3.i.lencr.org/');
+    if Check(x.Signed.CaIssuers <> nil) then
+      CheckEqual(x.Signed.CaIssuers[0], 'http://r3.i.lencr.org/');
+    if Check(x.Signed.Ocsp <> nil) then
+      CheckEqual(x.Signed.Ocsp[0], 'http://r3.o.lencr.org');
+    Check(AsnDecAia(x.Signed.ExtensionRaw[xeAuthorityInformationAccess],
+      ocsp, issuers), 'aia');
+    if CheckEqual(length(ocsp), 1) then
+      CheckEqual(ocsp[0], 'http://r3.o.lencr.org');
+    if CheckEqual(length(issuers), 1) then
+      CheckEqual(issuers[0], 'http://r3.i.lencr.org/');
     CheckSameTime(nfo.NotBefore, x.NotBefore, 'nfo nb');
     CheckSameTime(nfo.NotAfter, x.NotAfter, 'nfo na');
-    Check(FindOther(x.Signed.ExtensionOther, '1.3.6.1.5.5.7.1.1') = '');
+    Check(FindCustomExts(x.Signed.ExtensionOther, '1.3.6.1.5.5.7.1.1') = '');
     Check(x.Signed.ExtensionOther = nil);
     CheckEqual(x.Extension[xeCertificatePolicies], '2.23.140.1.2.1');
     CheckEqual(x.Extension[xeGoogleSignedCertificateTimestamp], '');
@@ -5484,9 +5825,9 @@ begin
       'ea0f4f07abb685f2aaf864a28d9f275ac1e9bb29e82d6a8dc9111cd9162da4e7');
     CheckEqual(x.SubjectPublicKeyAlgorithm, '2048-bit RSA encryption');
     //writeln(x.PeerInfo);
-    CheckHash(x.PeerInfo, $DF9578B9, 'peerinfo1a');
+    CheckHash(x.PeerInfo, $6F660240, 'peerinfo1a');
     Check(TX509Parse(_synopseinfo_pem, nfo), 'TX509Parse');
-    CheckHash(nfo.PeerInfo, $DF9578B9, 'peerinfo1b'); // very same parser
+    CheckHash(nfo.PeerInfo, $6F660240, 'peerinfo1b'); // very same parser
     a := TX509.Create;
     try
       // check synopse.info against Let's Encrypt authority certificate
@@ -5494,10 +5835,10 @@ begin
       CheckEqual(a.Signed.SerialNumberText,
         '192961496339968674994309121183282847578');
       CheckEqual(a.Subject[xaCN], 'R3');
-      CheckEqual(a.SubjectDN, 'CN=R3, C=US, O=Let''s Encrypt');
+      CheckEqual(a.SubjectDN, 'C=US,O=Let''s Encrypt,CN=R3');
       CheckEqual(a.SubjectDN, x.IssuerDN);
       CheckEqual(a.IssuerDN,
-        'CN=ISRG Root X1, C=US, O=Internet Security Research Group');
+        'C=US,O=Internet Security Research Group,CN=ISRG Root X1');
       CheckEqual(a.Extension[xeSubjectKeyIdentifier],
                  x.Extension[xeAuthorityKeyIdentifier]);
       Check(cuCa in a.Usages, 'ca2');
@@ -5515,9 +5856,10 @@ begin
         length(x.SignatureValue), length(bin), [], _synopse_date) =
           cvValidSigned, 'verbuf syn');
       CheckEqual(a.SubjectPublicKeyAlgorithm, '2048-bit RSA encryption');
-      CheckHash(a.PeerInfo, $FFE7466C, 'peerinfo2');
-      CheckHash(ObjectToJson(a), $F7A82903);
-      CheckHash(ObjectToJson(x), $7C73C7E0);
+      //writeln(a.PeerInfo);
+      CheckHash(a.PeerInfo, $19AB4A9E, 'peerinfo2');
+      CheckHash(ObjectToJson(a), $541F97B5);
+      CheckHash(ObjectToJson(x), $EBE4582E);
       CheckEqual(x.SignatureSecurityBits, 112, '2048=112');
     finally
       a.Free;
@@ -5542,7 +5884,7 @@ begin
     CheckEqual(x.Issuer[xaO],   'Synopse Info');
     CheckEqual(x.Issuer[xaC],   'FR');
     CheckEqual(x.IssuerDN,
-      'CN=synopse.info, C=FR, ST=Some-State, O=Synopse Info, OU=Administration');
+      'C=FR,ST=Some-State,O=Synopse Info,OU=Administration,CN=synopse.info');
     CheckEqual(x.Extension[xeSubjectAlternativeName], '');
     Check(x.SubjectAlternativeNames = nil);
     CheckEqual(x.Extension[xeSubjectKeyIdentifier],
@@ -5565,8 +5907,8 @@ begin
       length(x.SignatureValue), length(bin), [cvWrongUsage]) =
         cvValidSelfSigned, 'verbuf self');
     CheckEqual(x.SubjectPublicKeyAlgorithm, '256-bit prime256v1 ECDSA');
-    CheckHash(x.PeerInfo, $BCB82372, 'peerinfo3');
-    CheckHash(ObjectToJson(x), $BBCBCFEB);
+    CheckHash(x.PeerInfo, $D8E4E82D, 'peerinfo3');
+    CheckHash(ObjectToJson(x), $158D943B);
     Check(AsnDecChunk(x.SaveToDer), 'x.SaveToDer');
   finally
     x.Free;
@@ -5589,7 +5931,7 @@ begin
     Check(crl.IsRevoked('08efb79382c3c67f6fa59ed03c222fec') = crrUnspecified);
     Check(crl.IsRevoked('08efb79382c3c67f6fa59ed03c222feb') = crrNotRevoked);
     CheckEqual(crl.IssuerDN,
-      'CN=Cloudflare Inc ECC CA-3, C=US, O=Cloudflare, O=Inc.');
+      'C=US,O=Cloudflare\, Inc.,CN=Cloudflare Inc ECC CA-3');
     der := crl.SaveToDer;
     Check(AsnDecChunk(der), 'crl.SaveToDer');
     pem := DerToPem(der, pemCrl);

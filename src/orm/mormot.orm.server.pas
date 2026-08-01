@@ -20,8 +20,6 @@ interface
 uses
   sysutils,
   classes,
-  variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -1546,7 +1544,7 @@ begin
     // complex TOrmVirtualTableJson/External queries will rely on virtual table
     result := MainEngineList(SQL, {ajax=}false, nil);
   if result = '[]'#$A then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestOrmServer.InternalUpdateEvent(aEvent: TOrmEvent;

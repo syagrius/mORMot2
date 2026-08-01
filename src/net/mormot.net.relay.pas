@@ -109,7 +109,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.crypt.jwt,
-  mormot.core.perf,
+  mormot.core.perf, // for GetDiskPartitionsVariant/TSynMonitorMemory
   mormot.crypt.secure,
   mormot.net.sock,
   mormot.net.http,
@@ -572,7 +572,8 @@ begin
       focBinary:
         if fOwner.fServerConnected = nil then
           ERelayProtocol.RaiseUtf8(
-            '%.ProcessIncomingFrame: No server to relay to', [self]);
+           '%.ProcessIncomingFrame(%): No server to relay to',
+            [self, ToText(Frame.opcode)^]);
       focConnectionClose:
         if fOwner.fServerConnected = nil then
           exit;
@@ -1086,7 +1087,7 @@ begin
     else
       ip := fServerConnected.RemoteIP;
     fStatCache := JsonReformat(JsonEncode([
-      'version',     Executable.Version.Detailed,
+      'version',     Executable.Version.Main,
       'started',     Started,
       'memory',      TSynMonitorMemory.ToVariant,
       'diskfree',    GetDiskPartitionsVariant,

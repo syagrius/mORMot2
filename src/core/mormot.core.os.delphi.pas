@@ -112,14 +112,28 @@ const
   ESysEINTR         = Posix.Errno.EINTR;
   ESysEFAULT        = Posix.Errno.EFAULT;
   ESysEPERM         = Posix.Errno.EPERM;
+  ESysEBUSY         = Posix.Errno.EBUSY;
+  ESysENOENT        = Posix.Errno.ENOENT;
+  ESysEIO           = Posix.Errno.EIO;
+  ESysENXIO         = Posix.Errno.ENXIO;
+  ESysENODEV        = Posix.Errno.ENODEV;
+  ESysEBADF         = Posix.Errno.EBADF;
+  ESysENOTEMPTY     = Posix.Errno.ENOTEMPTY;
+  ESysENAMETOOLONG  = Posix.Errno.ENAMETOOLONG;
+  ESysENOTDIR       = Posix.Errno.ENOTDIR;
+  ESysEISDIR        = Posix.Errno.EISDIR;
+  ESysENOSPC        = Posix.Errno.ENOSPC;
   ESysESRCH         = Posix.Errno.ESRCH;
   ESysE2BIG         = Posix.Errno.E2BIG;
   ESysEAGAIN        = Posix.ErrNo.EAGAIN;
+  ESysENOMEM        = Posix.ErrNo.ENOMEM;
+  ESysEEXIST        = Posix.ErrNo.EEXIST;
   ESysEADDRNOTAVAIL = Posix.ErrNo.EADDRNOTAVAIL;
   ESysECONNABORTED  = Posix.ErrNo.ECONNABORTED;
   ESysECONNRESET    = Posix.ErrNo.ECONNRESET;
   ESysETIMEDOUT     = Posix.ErrNo.ETIMEDOUT;
   ESysEINVAL        = Posix.ErrNo.EINVAL;
+  ESysENFILE        = Posix.ErrNo.ENFILE;
   ESysEMFILE        = Posix.ErrNo.EMFILE;
   ESysECONNREFUSED  = Posix.ErrNo.ECONNREFUSED;
   ESysEINPROGRESS   = Posix.ErrNo.EINPROGRESS;
@@ -133,6 +147,7 @@ const
   StdOutputHandle   = 1;
   StdErrorHandle    = 2;
   RTLD_LAZY         = Posix.Dlfcn.RTLD_LAZY;
+  RTLD_NOW          = Posix.Dlfcn.RTLD_NOW;
   O_RDONLY          = O_RDONLY;
   O_NONBLOCK        = O_NONBLOCK;
   SEEK_CUR          = SEEK_CUR;
@@ -178,6 +193,9 @@ function fpsettimeofday(tp: ptimeval; tzp: pointer): cint;
 function fpnanosleep(t, rem: ptimespec): cint;
 function GetLocalTimeOffset: integer;
 function TZSeconds: integer;
+function ToLocalTime(const utc: TDateTime): TDateTime;
+function ToUtcTime(const local: TDateTime): TDateTime;
+function EpochToLocal(I64: TUnixTime): TUnixTime;
 function fpuname(var uts: UtsName): cint;
 
 function fpstat(path: PWideChar; var buf: _stat): cint;
@@ -190,6 +208,7 @@ function fpclose(fd: cint): cint;
 function fputime(path: PWideChar; times: putimbuf): cint;
 function fpaccess(path: PWideChar; mode: cint): cint;
 function fpunlink(path: PWideChar): cint;
+function fpunlinka(path: PAnsiChar): cint; // when the path is already UTF-8
 function fpchdir(path: PWideChar): cint;
 function fprename(old, new: PWideChar): cint;
 function fpsymlink(old, new: PWideChar): cint;
@@ -211,6 +230,7 @@ function FpS_ISLNK(m: cint): boolean;
 
 function fpkill(pid, sig: cint): cint; cdecl;
   external clib name 'kill';
+
 function fpfork: TPid; cdecl;
   external clib name 'fork';
 
@@ -233,6 +253,7 @@ const
 function fpsysctl(name: pcint; namelen: cuint; oldp: pointer;
     oldlenp: psize_t; newp: pointer; newlen: size_t): cint; cdecl;
   external clib name 'sysctl';
+
 function fpsysctlbyname(name: PAnsiChar; oldp: pointer; oldlenp: psize_t;
     newp: pointer; newlen: size_t): cint; cdecl;
   external clib name 'sysctlbyname';
@@ -250,7 +271,7 @@ procedure fpexit(code: cint);
 function WaitProcess(pid: cint): cint;
 
 function fpmmap(start: pointer; len: PtrUInt; prot, flags, fd: cint; offst: Int64): pointer;
-function fpmunmap(start: pointer; len: PtrUint): cint;
+function fpmunmap(start: pointer; len: PtrUInt): cint;
 
 type
   Dir     = Posix.DirEnt.Dir;
@@ -262,6 +283,7 @@ function fpreaddir(var dirp: Dir): pDirent;
 function fpclosedir(var dirp: Dir): cint;
 
 {$ifdef OSLINUX}
+
 type
   TStatfs = record
     fstype, bsize: clong;
@@ -271,28 +293,33 @@ type
   end;
 
   TSysInfo = record
-    uptime: clong;                     //* Seconds since boot */
-    loads: array[0..2] of culong;      //* 1, 5, and 15 minute load averages */
-    totalram: culong;                  //* Total usable main memory size */
-    freeram: culong;                   //* Available memory size */
-    sharedram: culong;                 //* Amount of shared memory */
-    bufferram: culong;                 //* Memory used by buffers */
-    totalswap: culong;                 //* Total swap space size */
-    freeswap: culong;                  //* swap space still available */
-    procs: cushort;                    //* Number of current processes */
-    pad: cushort;                      //* explicit padding for m68k */
-    totalhigh: culong;                 //* Total high memory size */
-    freehigh: culong;                  //* Available high memory size */
-    mem_unit: cuint;                   //* Memory unit size in bytes */
+    uptime: clong;                     // Seconds since boot
+    loads: array[0..2] of culong;      // 1, 5, and 15 minute load averages
+    totalram: culong;                  // Total usable main memory size
+    freeram: culong;                   // Available memory size
+    sharedram: culong;                 // Amount of shared memory
+    bufferram: culong;                 // Memory used by buffers
+    totalswap: culong;                 // Total swap space size
+    freeswap: culong;                  // swap space still available
+    procs: cushort;                    // Number of current processes
+    pad: cushort;                      // explicit padding for m68k
+    totalhigh: culong;                 // Total high memory size
+    freehigh: culong;                  // Available high memory size
+    mem_unit: cuint;                   // Memory unit size in bytes
 {$ifndef cpu64}
     { the upper bound of the array below is negative for 64 bit cpus }
-    _f: array[0..19-2*sizeof(clong)-sizeof(cint)] of cChar;  //* Padding: libc5 uses this.. */
+    _f: array[0..19-2*sizeof(clong)-sizeof(cint)] of cChar;  // Padding as libc5
 {$endif cpu64}
   end;
   PSysInfo = ^TSysInfo;
 
 function SysInfo(Info: PSysinfo): cInt; cdecl;
   external clib name 'sysinfo';
+
+function sched_getaffinity(pid: integer;
+    cpusetsize: PtrUInt; cpuset: pointer): integer; cdecl
+  external clib name 'sched_getaffinity';
+
 {$endif OSLINUX}
 
 function fpstatfs(path: PWideChar; nfo: pointer): cint;
@@ -302,35 +329,41 @@ function IsAtty(fd: cint): cint;
 { ****************** Network POSIX Operating Systems API for Delphi }
 
 const
-  IPPROTO_TCP  = IPPROTO_TCP;
-  IPPROTO_UDP  = IPPROTO_UDP;
-  TCP_NODELAY  = 1;
-  TCP_CORK     = 3; // Linux specific
-  TCP_NOPUSH   = 4; // BSD specific
-  MSG_PEEK     = Posix.SysSocket.MSG_PEEK;
-  SHUT_RD      = Posix.SysSocket.SHUT_RD;
-  SHUT_WR      = Posix.SysSocket.SHUT_WR;
-  SHUT_RDWR    = Posix.SysSocket.SHUT_RDWR;
-
-  SOCK_RAW     = Posix.SysSocket.SOCK_RAW;
-  SOCK_STREAM  = Posix.SysSocket.SOCK_STREAM;
-  SOCK_DGRAM   = Posix.SysSocket.SOCK_DGRAM;
-  AF_INET      = Posix.SysSocket.AF_INET;
-  AF_INET6     = Posix.SysSocket.AF_INET6;
-  AF_UNIX      = Posix.SysSocket.AF_UNIX;
-  AF_PACKET    = 17; // Linux specific
-  SOMAXCONN    = Posix.SysSocket.SOMAXCONN;
-  SOL_SOCKET   = Posix.SysSocket.SOL_SOCKET;
-  SO_SNDTIMEO  = Posix.SysSocket.SO_SNDTIMEO;
-  SO_RCVTIMEO  = Posix.SysSocket.SO_RCVTIMEO;
-  SO_REUSEADDR = Posix.SysSocket.SO_REUSEADDR;
-  SO_LINGER    = Posix.SysSocket.SO_LINGER;
-  SO_KEEPALIVE = Posix.SysSocket.SO_KEEPALIVE;
-  SO_SNDBUF    = Posix.SysSocket.SO_SNDBUF;
-  SO_RCVBUF    = Posix.SysSocket.SO_RCVBUF;
-  SO_BROADCAST = Posix.SysSocket.SO_BROADCAST;
+  IPPROTO_TCP   = IPPROTO_TCP;
+  IPPROTO_UDP   = IPPROTO_UDP;
+  TCP_NODELAY   = 1;
+  TCP_CORK      = 3; // Linux specific
+  TCP_NOPUSH    = 4; // BSD specific
   {$ifdef OSLINUXANDROID}
-  SO_PRIORITY  = Posix.SysSocket.SO_PRIORITY;
+  // Delphi POSIX/Android headers do not expose those Linux <netinet/tcp.h> values
+  TCP_KEEPIDLE  = 4;
+  TCP_KEEPINTVL = 5;
+  TCP_KEEPCNT   = 6;
+  {$endif OSLINUXANDROID}
+  MSG_PEEK      = Posix.SysSocket.MSG_PEEK;
+  SHUT_RD       = Posix.SysSocket.SHUT_RD;
+  SHUT_WR       = Posix.SysSocket.SHUT_WR;
+  SHUT_RDWR     = Posix.SysSocket.SHUT_RDWR;
+
+  SOCK_RAW      = Posix.SysSocket.SOCK_RAW;
+  SOCK_STREAM   = Posix.SysSocket.SOCK_STREAM;
+  SOCK_DGRAM    = Posix.SysSocket.SOCK_DGRAM;
+  AF_INET       = Posix.SysSocket.AF_INET;
+  AF_INET6      = Posix.SysSocket.AF_INET6;
+  AF_UNIX       = Posix.SysSocket.AF_UNIX;
+  AF_PACKET     = 17; // Linux specific
+  SOMAXCONN     = Posix.SysSocket.SOMAXCONN;
+  SOL_SOCKET    = Posix.SysSocket.SOL_SOCKET;
+  SO_SNDTIMEO   = Posix.SysSocket.SO_SNDTIMEO;
+  SO_RCVTIMEO   = Posix.SysSocket.SO_RCVTIMEO;
+  SO_REUSEADDR  = Posix.SysSocket.SO_REUSEADDR;
+  SO_LINGER     = Posix.SysSocket.SO_LINGER;
+  SO_KEEPALIVE  = Posix.SysSocket.SO_KEEPALIVE;
+  SO_SNDBUF     = Posix.SysSocket.SO_SNDBUF;
+  SO_RCVBUF     = Posix.SysSocket.SO_RCVBUF;
+  SO_BROADCAST  = Posix.SysSocket.SO_BROADCAST;
+  {$ifdef OSLINUXANDROID}
+  SO_PRIORITY   = Posix.SysSocket.SO_PRIORITY;
   {$endif OSLINUXANDROID}
 
 
@@ -386,8 +419,10 @@ type
 
 function epoll_create(size: cint): cint; cdecl;
   external clib name 'epoll_create';
+
 function epoll_ctl(epfd, op, fd: cint; event: PEPoll_Event): cint; cdecl;
   external clib name 'epoll_ctl';
+
 function epoll_wait(epfd: cint; events: PEPoll_Event;
     maxevents, timeout: cint): cint; cdecl;
   external clib name 'epoll_wait';
@@ -455,7 +490,8 @@ end;
 
 function RTLEventCreate: TEvent;
 begin
-  result := TEvent.Create;
+  // auto-reset event, to match FPC PRTLEvent and Windows CreateEvent() semantic
+  result := TEvent.Create(nil, {ManualReset=}false, {InitialState=}false, '');
 end;
 
 procedure RTLEventDestroy(state: TEvent);
@@ -516,7 +552,10 @@ end;
 
 function GetLocalTimeOffset: integer;
 begin
-  result := Round(TTimeZone.Local.UtcOffset.TotalSeconds);
+  // return the offset in MINUTES, positive west of UTC (e.g. +240 for EDT) -
+  // i.e. the FPC RTL convention, as expected by TZSeconds and TimeZoneLocalBias
+  // (TTimeZone.UtcOffset is local-minus-UTC, so negative west of UTC: negate it)
+  result := -round(TTimeZone.Local.UtcOffset.TotalMinutes);
 end;
 
 function TZSeconds: integer;
@@ -524,10 +563,26 @@ begin
   result := -GetLocalTimeOffset * 60; // GetLocalTimeOffset = -TZseconds div 60
 end;
 
+function ToLocalTime(const utc: TDateTime): TDateTime;
+begin
+  result := TTimeZone.Local.ToLocalTime(utc);
+end;
+
+function ToUtcTime(const local: TDateTime): TDateTime;
+begin
+  result := TTimeZone.Local.ToUniversalTime(local);
+end;
+
+function EpochToLocal(I64: TUnixTime): TUnixTime;
+begin
+  result := DateTimeToUnix(TTimeZone.Local.ToLocalTime(UnixToDateTime(I64)));
+end;
+
 function fpuname(var uts: UtsName): cint;
 begin
   result := uname(uts);
 end;
+
 function fpstat(path: PWideChar; var buf: _stat): cint;
 var
   tmp: TSynTempBuffer;
@@ -591,6 +646,11 @@ var
 begin
   result := unlink(Unicode_ToUtf8(path, tmp));
   tmp.Done;
+end;
+
+function fpunlinka(path: PAnsiChar): cint;
+begin
+  result := unlink(path); // path is already UTF-8: no conversion needed
 end;
 
 function fpchdir(path: PWideChar): cint;
@@ -763,7 +823,7 @@ begin
   result := mmap(start, len, prot, flags, fd, offst);
 end;
 
-function fpmunmap(start: pointer; len: PtrUint): cint;
+function fpmunmap(start: pointer; len: PtrUInt): cint;
 begin
   result := munmap(start, len);
 end;

@@ -25,7 +25,6 @@ interface
 
 uses
   classes,
-  contnrs,
   sysutils,
   mormot.core.base,
   mormot.core.os,
@@ -56,6 +55,13 @@ function NeedsHtmlEscape(text: PUtf8Char; fmt: TTextWriterHtmlFormat): boolean;
 
 /// low-level conversion of an &amp; HTML entity into 32-bit Unicode Code Point
 function EntityToUcs4(entity: PUtf8Char; len: byte): Ucs4CodePoint;
+
+/// low-level decoding of a '#nnn' or '#xhh' numeric character reference
+// - entity should point at the '#' char, len being the reference length
+// (excluding any trailing ';')
+// - returns 0 on invalid input - as used by AddHtmlUnescape/AddXmlUnescape
+function NumCharToUcs4(entity: PUtf8Char; len: PtrUInt): Ucs4CodePoint;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// escape some UTF-8 text into HTML
 // - just a wrapper around TTextWriter.AddHtmlEscape() process,
@@ -144,14 +150,176 @@ procedure AddXmlEscape(W: TTextWriter; Text: PUtf8Char);
 function AddJsonToXml(W: TTextWriter; Json: PUtf8Char; ArrayName: PUtf8Char = nil;
   EndOfObject: PUtf8Char = nil): PUtf8Char;
 
+type
+  /// exception raised by TXmlParser on invalid or unsupported XML input
+  EXmlException = class(ESynException);
+
+  /// the kind of tokens returned by TXmlParser.Next
+  // - xtEof is set once the end of the input buffer has been reached
+  // - xtElementStart is returned for each opening <name> or <name ...> tag,
+  // with the parser Name filled - any attribute following as xtAttribute
+  // - xtElementEnd is returned for each </name> or self-closing '/>' mark,
+  // with the parser Name filled
+  // - xtAttribute is returned for each name="value" pair, Name/Value filled
+  // - xtText is returned for any text content between markup, Value filled
+  // with the raw (possibly escaped) text - see ValueToUtf8 to unescape it
+  // - xtCData is returned for each <![CDATA[...]]> section, Value filled
+  // with the verbatim content
+  // - xtComment is returned for each <!--...--> section, if xpoKeepComments
+  // option was defined at Init - silently skipped otherwise
+  // - xtPI is returned for each <?name ...?> processing instruction, if the
+  // xpoKeepPI option was defined at Init - silently skipped otherwise
+  TXmlToken = (
+    xtEof,
+    xtElementStart,
+    xtElementEnd,
+    xtAttribute,
+    xtText,
+    xtCData,
+    xtComment,
+    xtPI);
+
+  /// option to refine TXmlParser process
+  // - xpoStripNamespacePrefix would remove any 'ns:' prefix from the reported
+  // element and attribute names - the prefix is part of the name otherwise
+  // (this "basic" parser does no URI namespace binding by design)
+  // - xpoKeepComments and xpoKeepPI would return xtComment / xtPI tokens,
+  // which are silently skipped by default
+  // - xpoKeepWhiteSpace would return xtText tokens made only of whitespace,
+  // which are silently skipped by default
+  TXmlParserOption = (
+    xpoStripNamespacePrefix,
+    xpoKeepComments,
+    xpoKeepPI,
+    xpoKeepWhiteSpace);
+
+  /// options to refine TXmlParser process
+  TXmlParserOptions = set of TXmlParserOption;
+
+  /// zero-allocation SAX-like parser over an XML UTF-8 memory buffer
+  // - a "basic" parser, from actual simple needs: no DTD support (which makes
+  // it immune to entity expansion attacks by design), only the five XML
+  // predefined entities and numeric character references, prefixes kept as
+  // part of the names with no URI namespace binding
+  // - the input buffer is expected to be UTF-8 encoded and to remain available
+  // in memory during the whole parsing: Name and Value do point within it,
+  // with no memory allocation during the scan - see NameToUtf8/ValueToUtf8
+  // - well-formedness of the tags nesting is verified, and any syntax or
+  // nesting error would raise an EXmlException with the faulty line number
+  // - usage: call Init() then Next in a loop, e.g. as
+  // ! x.Init(pointer(xml), length(xml));
+  // ! while x.Next do
+  // !   case x.Kind of
+  // !     ...
+  {$ifdef USERECORDWITHMETHODS}
+  TXmlParser = record
+  {$else}
+  TXmlParser = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    fCur, fBegin, fAfter, fToken, fNameOrigin: PUtf8Char;
+    fOptions: TXmlParserOptions;
+    fInElement: boolean; // scanning attributes, up to '>' or '/>'
+    // opened element names, as packed 25-bit offsets from fNameOrigin and
+    // 7-bit lengths - a static 1KB stack, favoring the common SAX use case:
+    // up to 256 nesting levels and 127-byte names, with the offsets origin
+    // reset each time the nesting level returns to 0 (so no 32MB limit for
+    // any consecutive documents/fragments, but only within a single root)
+    fStack: array[byte] of cardinal;
+    procedure ParseError(pos: PUtf8Char; const reason: RawUtf8);
+    function ParseName(var p: PUtf8Char): TValuePUtf8Char;
+    procedure SetName(const raw: TValuePUtf8Char);
+  public
+    /// the current token kind, as set by the last Next call
+    Kind: TXmlToken;
+    /// how many elements are currently opened
+    // - incremented after a xtElementStart, decremented after a xtElementEnd
+    Depth: PtrInt;
+    /// the current token name, pointing within the input buffer
+    // - set for xtElementStart, xtElementEnd, xtAttribute and xtPI tokens
+    Name: TValuePUtf8Char;
+    /// the current token raw value, pointing within the input buffer
+    // - set for xtAttribute, xtText, xtCData, xtComment and xtPI tokens
+    // - may still contain XML entities: use ValueToUtf8 to decode them
+    Value: TValuePUtf8Char;
+    /// prepare the parsing of a given XML UTF-8 buffer
+    // - any UTF-8 BOM would be ignored
+    // - the buffer is expected to remain available during the whole parsing
+    procedure Init(Text: PUtf8Char; TextLen: PtrInt;
+      Options: TXmlParserOptions = []);
+    /// iterate to the next token of the input, returning false at xtEof
+    // - raises an EXmlException on any malformed or unsupported input
+    function Next: boolean;
+    /// returns the current Name as an allocated UTF-8 string
+    procedure NameToUtf8(out result: RawUtf8);
+      {$ifdef HASINLINE}inline;{$endif}
+    /// returns the current Value as an allocated UTF-8 string
+    // - decoding any XML entity, unless the current token is a verbatim
+    // xtCData/xtComment section
+    procedure ValueToUtf8(out result: RawUtf8);
+    /// the offset of the current token in the input buffer
+    // - could be used to store a position, then resume a scan from it
+    function Position: PtrInt;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
+
+/// unescape some XML text into a TTextWriter instance
+// - decode the five XML predefined entities and numeric character references,
+// i.e.   &lt; &gt; &amp; &apos; &quot;   and   &#nnn; &#xhh;   patterns
+// - as AddHtmlUnescape(), the first '&' position could be supplied in amp,
+// if the caller did already search for it
+// - raises EXmlException on any other (i.e. undefined) entity
+procedure AddXmlUnescape(W: TTextWriter; p, amp: PUtf8Char; plen: PtrUInt);
+
+/// decode the five XML predefined entities and numeric character references
+// - just a wrapper around AddXmlUnescape(), with no allocation if no '&'
+// entity appears in the input text
+// - as used by TXmlParser.ValueToUtf8, or to be called directly
+// - raises EXmlException on any other (i.e. undefined) entity
+procedure XmlUnescape(Text: PUtf8Char; TextLen: PtrInt; out result: RawUtf8);
+
+const
+  /// TDocVariant options used by default for XmlToVariant()
+  // - no number type inference is done: XML content is text by nature, so
+  // all values are stored as (lossless) strings
+  JSON_XML = JSON_FAST;
+
+/// parse XML UTF-8 content into a TDocVariant document
+// - a late-binding-friendly mapping, following common XML-to-JSON conventions:
+// each element becomes an object field named after it; repeated sibling
+// elements of the same name are gathered into an array; attributes appear as
+// fields with a '@' prefix; an element with no attribute and only text becomes
+// a plain string value; mixed content stores its text as a '#text' field;
+// CDATA sections are handled as text; comments and PI are ignored
+// - all values are stored as strings - XML is untyped text by nature
+// - only xpoStripNamespacePrefix is used from ParseOptions
+// - raises EXmlException on any malformed or unsupported input (e.g. DTD)
+procedure XmlToVariant(const Xml: RawUtf8; out Doc: TDocVariantData;
+  ParseOptions: TXmlParserOptions = [];
+  Options: TDocVariantOptions = JSON_XML);
+
+/// convenient wrapper around XmlToVariant() with no EXmlException
+// - will catch internally any EXmlException and return false on failure
+function TryXmlToVariant(const Xml: RawUtf8; out Doc: TDocVariantData;
+  ParseOptions: TXmlParserOptions = [];
+  Options: TDocVariantOptions = JSON_XML): boolean;
+
+/// convert XML UTF-8 content into a JSON object
+// - just a wrapper around XmlToVariant() + TDocVariantData.ToJson
+// - see JsonToXml() for the reverse process
+function XmlToJson(const Xml: RawUtf8;
+  ParseOptions: TXmlParserOptions = []): RawUtf8;
+
 
 { ************* YAML 1.2 core-schema to JSON or TDocVariant Support }
+
+{ main high-level YAML conversion functions }
 
 type
   /// exception raised by YAML parser on unsupported or invalid input
   EYamlException = class(ESynException);
 
-  /// customize YAML serialization output
+  /// customize YAML serialization output - NOT IMPLEMENTED YET
   // - ywoFlowCompact: emit flow style ([] / {}) for short / leaf containers
   // - ywoNoComments: placeholder; this parser does not preserve comments
   TYamlWriterOption = (
@@ -160,12 +328,10 @@ type
   TYamlWriterOptions = set of TYamlWriterOption;
 
 const
-  /// TDocVariant flavor for YAML, enabling floating numbers and name interning
-  JSON_YAML =
-    [dvoReturnNullForUnknownProperty,
-     dvoValueCopiedByReference,
-     dvoAllowDoubleValue,
-     dvoInternNames];
+  /// TDocVariant flavor for YAML, enabling floating numbers
+  // - we don't enable name interning by default because it is actually slower
+  // for typical YAML small content
+  JSON_YAML = JSON_FAST_FLOAT;
 
 /// parse YAML UTF-8 text into a TDocVariantData
 // - accepts YAML 1.2 core-schema subset (see unit header)
@@ -175,17 +341,17 @@ procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
   Options: TDocVariantOptions = JSON_YAML);
 
 /// convenient wrapper called e.g. by TOpenApiParser.ParseYaml()
+// - will catch internally any EYamlException and return false on failure
 function TryYamlToVariant(const Yaml: RawUtf8;
-  out Doc: TDocVariantData): boolean;
+  out Doc: TDocVariantData; Options: TDocVariantOptions = JSON_YAML): boolean;
 
 /// parse a YAML file into a TDocVariantData
 // - file is expected to be UTF-8 (BOM tolerated); see YamlToVariant
+// - will catch internally any EYamlException and return false on failure
 function TryYamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
   Options: TDocVariantOptions = JSON_YAML): boolean;
 
 /// serialize a TDocVariant as YAML 1.2 UTF-8 text
-// - result is block-style by default; ywoFlowCompact switches leaf containers
-//   to flow style
 function VariantToYaml(const Doc: variant;
   Options: TYamlWriterOptions = []): RawUtf8;
 
@@ -203,11 +369,15 @@ function IsYamlFileName(const FileName: TFileName): boolean;
 // - returns '' on parse failure (inspect EYamlException for details)
 function YamlToJson(const Yaml: RawUtf8): RawUtf8;
 
+/// convert YAML 1.2 UTF-8 text directly into a JSON RawUtf8
+// - will catch internally any EYamlException and return false on failure
+function TryYamlToJson(const Yaml: RawUtf8; out Json: RawUtf8): boolean;
+
 /// convert JSON UTF-8 text into YAML 1.2 UTF-8 text
 // - pipes the JSON through TDocVariantData then VariantToYaml
 // - useful for converting existing JSON settings files or API payloads to YAML
-function JsonToYaml(const Json: RawUtf8;
-  Options: TYamlWriterOptions = []): RawUtf8;
+function JsonToYaml(const Json: RawUtf8; Options: TYamlWriterOptions = [];
+  DocOptions: TDocVariantOptions = JSON_YAML): RawUtf8;
 
 var
   /// maximum YAML nesting depth before the parser raises EYamlException
@@ -216,6 +386,23 @@ var
   // - converts would-be EStackOverflow into a clean EYamlException with
   // line info; guards both block and flow recursive descent
   YamlMaxDepth: integer = 512;
+
+
+{ low-level functions which may be handy in some scenarios }
+
+/// YAML 1.2 core-schema decimal/hexa/octal integer with safe overflow detection
+// - return false on signed 64-bit overflow so caller falls back to string
+function TryYamlInt(p: PUtf8Char; out V: Int64): boolean;
+
+/// strip an unquoted trailing "# ..." YAML comment from a scalar fragment
+// - accounts for single/double quoted spans where # is literal
+procedure YamlStripLineComment(var S: RawUtf8);
+
+/// emit some text as YAML string, with JSON-escaped double-quotes if needed
+procedure WriteYamlString(W: TJsonWriter; P: PUtf8Char; L: PtrInt);
+
+/// emit some variant as YAML string, with JSON-escaped double-quotes if needed
+procedure WriteYamlVariant(W: TJsonWriter; const V: variant);
 
 
 { ************* Markup (e.g. Markdown or Emoji) process }
@@ -264,7 +451,7 @@ function HtmlEscapeMarkdown(const md: RawUtf8;
 
 type
   /// map the first Unicode page of Emojis, from U+1F600 to U+1F64F
-  // - naming comes from github/Markdown :identifiers:
+  // - naming comes from github/Markdown :identifiers: and copied in EMOJI_RTTI[]
   TEmoji = (
     eNone,
     eGrinning,
@@ -365,6 +552,10 @@ var
 
   /// to recognize simple :) :( :| :/ :D :o :p :s characters as smilleys
   EMOJI_AFTERDOTS: array['('..'|'] of TEmoji;
+
+/// setup the Emoji internal structures, e.g. all EMOJI_*[] global variables
+// - delayed to reduce process startup time for this seldom-used feature
+procedure EmojiInit;
 
 /// recognize github/Markdown compatible text of Emojis
 // - for instance 'sunglasses' text buffer will return eSunglasses
@@ -573,44 +764,68 @@ type
   // - fsoDisableSaveIfNeeded will disable SaveIfNeeded method process
   // - fsoReadIni will disable JSON loading, and expect INI file format
   // - fsoWriteIni/fsoWriteHjson will force SaveIfNeeded to use INI/HJson format
-  // - fsoReadYaml/fsoWriteYaml will force SaveIfNeeded to use YAML encoding
+  // - fsoWriteYaml will force SaveIfNeeded to use YAML encoding; there is no
+  // fsoReadYaml since our YAML parser raise exceptions so explicit LoadFromYaml
+  // LoadFromFile methods are cleaner for this new feature
   // - fsoNoEnumsComment will customize SaveIfNeeded output
   TSynJsonFileSettingsOption = (
     fsoDisableSaveIfNeeded,
     fsoReadIni,
     fsoWriteIni,
-    fsoReadYaml,
     fsoWriteYaml,
     fsoWriteHjson,
     fsoNoEnumsComment);
   TSynJsonFileSettingsOptions = set of TSynJsonFileSettingsOption;
 
-  /// abstract parent class able to store settings as JSON file
-  // - would fallback and try to read as INI file if no valid JSON is found
+  /// abstract parent class able to store settings as JSON / INI / YAML file
+  // - supports standard JSON, but also JSON5, JSONC or HJson variations
+  // - fallback and try to read as INI or YAML file if no valid JSON is found
   TSynJsonFileSettings = class(TSynAutoCreateFields)
   protected
-    fInitialJsonContent, fSectionName: RawUtf8;
+    fCurrentContent, fSectionName: RawUtf8;
     fFileName: TFileName;
     fLoadedAsIni: boolean;
     fSettingsOptions: TSynJsonFileSettingsOptions;
     fIniOptions: TIniFeatures;
-    fInitialFileHash: cardinal;
+    fCurrentHash: cardinal;
     // could be overriden to validate the content coherency and/or clean fields
-    function AfterLoad: boolean; virtual;
+    function AfterLoad(const aText: RawUtf8): boolean; virtual;
   public
     /// initialize this instance and all its published fields
     constructor Create; override;
-    /// read existing settings from a JSON content
-    // - if the input is no JSON object, then a .INI structure is tried
-    function LoadFromJson(const aJson: RawUtf8;
+    /// read existing settings from a JSON or INI (not YAML) content
+    // - if the input is no JSON object, then .INI structure is tried
+    // - if fsoReadIni options are set, only .INI format is tried, and no JSON
+    // - since our YAML parser raise exceptions, we don't try YAML by default:
+    // call explicitly the new LoadFromYaml() method or use .yaml/.yml explicit
+    // extension for LoadFromFile()
+    function LoadFromText(const aContent: RawUtf8;
       const aSectionName: RawUtf8 = 'Main'): boolean;
-    /// read existing settings from a JSON or INI file file
+    {$ifndef PUREMORMOT2}
+    /// read existing settings from a JSON or INI (not YAML) content
+    // - backward compatibility method - do not use any more but LoadFromText()
+    // or the explicit LoadFromJsonText/LoadFromIniText/LoadFromYamlText methods
+    function LoadFromJson(const aContent: RawUtf8;
+      const aSectionName: RawUtf8 = 'Main'): boolean;
+    {$endif PUREMORMOT2}
+    /// read existing settings from a JSON content
+    // - misleading LoadFromJson() is kept for backward compatibility purposes
+    function LoadFromJsonText(const aJson: RawUtf8): boolean;
+    /// read existing settings from a INI content
+    function LoadFromIniText(const aIni, aSectionName: RawUtf8): boolean;
+    /// read existing settings from a YAML content
+    // - since YAML
+    function LoadFromYamlText(const aYaml: RawUtf8): boolean;
+    /// read existing settings from a JSON or INI or YAML file
+    // - will guess the format for the .json .ini .yaml file extension, or
+    // fallback to LoadFromText() to recognize JSON variants and INI format
     function LoadFromFile(const aFileName: TFileName;
       const aSectionName: RawUtf8 = 'Main'): boolean; virtual;
     /// just a wrapper around ExtractFilePath(FileName);
     function FolderName: TFileName;
     /// persist the settings as a JSON file, named from LoadFromFile() parameter
     // - will use the INI format if it was used at loading, or fsoWriteIni is set
+    // - will use the YAML format if it was used at loading, or fsoWriteYaml is set
     // - return TRUE if file has been modified, FALSE if was not needed or failed
     function SaveIfNeeded: boolean; virtual;
     /// optional persistence file name, as set by LoadFromFile()
@@ -623,9 +838,9 @@ type
     property IniOptions: TIniFeatures
       read fIniOptions write fIniOptions;
     /// can be used to compare two instances original file content
-    // - will use DefaultHasher, so hash could change after process restart
+    // - will use DefaultHashTrim() so value could change after process restart
     property InitialFileHash: cardinal
-      read fInitialFileHash write fInitialFileHash;
+      read fCurrentHash write fCurrentHash;
   end;
   /// meta-class definition of TSynJsonFileSettings
   TSynJsonFileSettingsClass = class of TSynJsonFileSettings;
@@ -823,12 +1038,25 @@ begin
     inc(p); // ignore '&'
     dec(plen);
     l := 0;
-    while (l < plen) and
-          (p[l] in ['a'..'z', 'A'..'Z', '1'..'4']) do
+    if (plen <> 0) and
+       (p^ = '#') then
+    begin
+      // numeric character reference, e.g. &#233; or &#xE9;
       inc(l);
+      while (l < plen) and
+            (p[l] in ['0'..'9', 'x', 'X', 'a'..'f', 'A'..'F']) do
+        inc(l);
+    end
+    else
+      while (l < plen) and
+            (p[l] in ['a'..'z', 'A'..'Z', '1'..'4']) do
+        inc(l);
     if p[l] = ';' then
     begin
-      c := EntityToUcs4(p, l); // &lt; -> ord('<')
+      if p^ = '#' then
+        c := NumCharToUcs4(p, l)
+      else
+        c := EntityToUcs4(p, l); // &lt; -> ord('<')
       if c <> 0 then
       begin
         if c = $00a0 then             // &nbsp;
@@ -838,16 +1066,16 @@ begin
         else if c = $2026 then
           W.AddShort4(DOT_24, 3)      // &hellip;
         else
-          W.AddWideChar(WideChar(c)); // &Eacute;
-        inc(p, l + 1);
-        dec(plen, l + 1);
+          W.AddUcs4(c);               // &Eacute; or any code point
+        inc(l); // consume ending ;
+        inc(p, l);
+        dec(plen, l);
         continue;
       end;
     end;
     W.AddDirect('&');
   until plen = 0;
 end;
-
 
 function NeedsHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat): boolean;
 var
@@ -937,12 +1165,12 @@ begin
 end;
 
 const // rough but efficient storage of all &xxx; entities for fast SSE2 search
-  HTML_UNESCAPE: array[1 .. 102] of array[0 .. 3] of AnsiChar = (
-    'amp',  'lt',   'gt',   'quot', 'rsqu', {6=}'ndas', {7=}'trad', {8=}'hell',
+  HTML_UNESCAPE: array[1 .. 100] of array[0 .. 3] of AnsiChar = (
+    'amp',  'quot', 'rsqu', {4=}'ndas', {5=}'trad', {6=}'hell',
     'nbsp', 'iexc', 'cent', 'poun', 'curr', 'yen',  'brvb', 'sect', 'uml',
     'copy', 'ordf', 'laqu', 'not',  'shy',  'reg',  'macr', 'deg',  'plus',
     'sup2', 'sup3', 'acut', 'micr', 'para', 'midd', 'cedi', 'sup1', 'ordm',
-    'raqu',  {37=}'frac',   'ique', 'Agra', 'Aacu', 'Acir', 'Atil',
+    'raqu',  {35=}'frac',   'ique', 'Agra', 'Aacu', 'Acir', 'Atil',
     'Auml', 'Arin', 'AEli', 'Cced', 'Egra', 'Eacu', 'Ecir', 'Euml', 'Igra',
     'Iacu', 'Icir', 'Iuml', 'ETH',  'Ntil', 'Ogra', 'Oacu', 'Ocir', 'Otil',
     'Ouml', 'time', 'Osla', 'Ugra', 'Uacu', 'Ucir', 'Uuml', 'Yacu', 'THOR',
@@ -950,38 +1178,110 @@ const // rough but efficient storage of all &xxx; entities for fast SSE2 search
     'egra', 'eacu', 'ecir', 'euml', 'igra', 'iacu', 'icir', 'iuml', 'eth',
     'ntil', 'ogra', 'oacu', 'ocir', 'otil', 'ouml', 'divi', 'osla', 'ugra',
     'uacu', 'ucir', 'uuml', 'yacu', 'thor', 'yuml');
-  HTML_UNESCAPED: array[1 .. 8] of word = (
-    ord('&'), ord('<'), ord('>'), ord('"'), ord(''''), ord('-'), 153, $2026);
+  HTML_UNESCAPED: array[1 .. 6] of word = (
+    ord('&'), ord('"'), ord(''''), ord('-'), 153, $2026);
 
 function EntityToUcs4(entity: PUtf8Char; len: byte): Ucs4CodePoint;
 var
   by4: cardinal;
+  ndx: PtrInt;
+label
+  ok;
 begin
-  result := 0;
-  if (len < 2) or (len > 6) then
-    exit;
-  by4 := 0;
-  MoveByOne(entity, @by4, MinPtrUInt(4, len));
-  result := IntegerScanIndex(@HTML_UNESCAPE, length(HTML_UNESCAPE), by4) + 1;
-  if result >= 37 then // adjust 'frac' as frac14', 'frac12' or 'frac34'
-    if result > 37 then
-      inc(result, 2)
+  case len of
+    2:
+      begin
+        case cardinal(PWord(entity)^) of
+          ord('l') + ord('t') shl 8:
+            ndx := ord('<');
+          ord('g') + ord('t') shl 8:
+            ndx := ord('>');
+        else
+          ndx := 0;
+        end;
+        goto ok;
+      end;
+    3:
+      by4 := PCardinal(entity)^ and $ffffff;
+    4 .. 6:
+      by4 := PCardinal(entity)^;
+  else
+    begin
+      ndx := 0;
+      goto ok;
+    end;
+  end;
+  ndx := IntegerScanIndex(@HTML_UNESCAPE, length(HTML_UNESCAPE), by4) + 1;
+  if ndx >= 35 then // adjust 'frac' as frac14', 'frac12' or 'frac34'
+    if ndx > 35 then
+      inc(ndx, 2)
     else
       case cardinal(PWord(entity + 4)^) of
         ord('1') + ord('4') shl 8:
           ;
         ord('1') + ord('2') shl 8:
-          inc(result);
+          inc(ndx);
         ord('3') + ord('4') shl 8:
-          inc(result, 2);
+          inc(ndx, 2);
       else
-        result := 0;
+        ndx := 0;
       end;
-  if result <> 0 then
-    if result <= high(HTML_UNESCAPED) then
-      result := ord(HTML_UNESCAPED[result]) // non linear entities
+  if ndx <> 0 then
+    if ndx <= high(HTML_UNESCAPED) then
+      ndx := HTML_UNESCAPED[ndx] // non linear entities
      else
-       inc(result, $00a0 - 9); // &nbsp; = U+00A0, &iexcl; = U+00A1, ...
+       inc(ndx, $00a0 - 7); // &nbsp; = U+00A0, &iexcl; = U+00A1, ...
+ok:result := ndx;
+end;
+
+function NumCharToUcs4(entity: PUtf8Char; len: PtrUInt): Ucs4CodePoint;
+var
+  c: cardinal;
+begin
+  result := 0; // 0 = invalid
+  inc(entity); // ignore leading '#'
+  dec(len);
+  if len = 0 then
+    exit;
+  c := 0;
+  if entity^ in ['x', 'X'] then
+  begin
+    inc(entity);
+    dec(len);
+    if len = 0 then
+      exit;
+    repeat
+      case entity^ of
+        '0' .. '9':
+          c := c shl 4 + cardinal(ord(entity^) - ord('0'));
+        'a' .. 'f':
+          c := c shl 4 + cardinal(ord(entity^) - (ord('a') - 10));
+        'A' .. 'F':
+          c := c shl 4 + cardinal(ord(entity^) - (ord('A') - 10));
+      else
+        exit;
+      end;
+      if c > $10ffff then
+        exit;
+      inc(entity);
+      dec(len);
+    until len = 0;
+  end
+  else
+    repeat
+      if entity^ in ['0' .. '9'] then
+        c := c * 10 + cardinal(ord(entity^) - ord('0'))
+      else
+        exit;
+      if c > $10ffff then
+        exit;
+      inc(entity);
+      dec(len);
+    until len = 0;
+  if (c >= $d800) and
+     (c <= $dfff) then
+    exit; // reject UTF-16 surrogates
+  result := c;
 end;
 
 function HtmlUnescape(const text: RawUtf8): RawUtf8;
@@ -1026,7 +1326,6 @@ begin
   end;
 end;
 
-
 function HtmlTagNeedsCRLF(tag: PUtf8Char): boolean;
 var
   taglen: PtrUInt;
@@ -1059,7 +1358,6 @@ begin
       result := PCardinal(tag)^ and $00dfdfdf =
                   ord('D') + ord('I') shl 8 + ord('V') shl 16;
   end;
-
 end;
 
 procedure AddHtmlAsText(W: TTextWriter; p, tag: PUtf8Char; plen: PtrUInt);
@@ -1335,6 +1633,587 @@ begin
 end;
 
 
+{ TXmlParser }
+
+procedure TXmlParser.ParseError(pos: PUtf8Char; const reason: RawUtf8);
+var
+  line: PtrInt;
+  p: PUtf8Char;
+begin
+  line := 1;
+  p := fBegin;
+  if p <> nil then
+    while p < pos do
+    begin
+      if p^ = #10 then
+        inc(line);
+      inc(p);
+    end;
+  EXmlException.RaiseUtf8('XML error at line %: %', [line, reason]);
+end;
+
+function TXmlParser.ParseName(var p: PUtf8Char): TValuePUtf8Char;
+var
+  s, e: PUtf8Char; // scan on locals (i.e. registers), not the var parameter
+begin
+  s := p;
+  e := fAfter;
+  result.Text := s;
+  while (s < e) and
+        not (s^ in [#0..' ', '<', '>', '/', '=', '?', '"', '''']) do
+    inc(s);
+  result.Len := s - p;
+  p := s;
+  if result.Len = 0 then
+    ParseError(s, 'void or invalid name');
+end;
+
+procedure TXmlParser.SetName(const raw: TValuePUtf8Char);
+var
+  i: PtrInt;
+begin
+  Name := raw;
+  if xpoStripNamespacePrefix in fOptions then
+  begin
+    i := ByteScanIndex(pointer(raw.Text), raw.Len, ord(':'));
+    if i >= 0 then
+    begin
+      inc(Name.Text, i + 1);
+      dec(Name.Len, i + 1);
+    end;
+  end;
+end;
+
+procedure TXmlParser.Init(Text: PUtf8Char; TextLen: PtrInt;
+  Options: TXmlParserOptions);
+begin
+  if (Text <> nil) and
+     (TextLen >= 3) and
+     (PCardinal(Text)^ and $00ffffff = $00bfbbef) then
+  begin
+    inc(Text, 3); // ignore any UTF-8 BOM
+    dec(TextLen, 3);
+  end;
+  fBegin := Text;
+  fCur := Text;
+  fToken := Text;
+  fNameOrigin := Text;
+  fAfter := Text + TextLen;
+  fOptions := Options;
+  fInElement := false;
+  Depth := 0;
+  Kind := xtEof;
+  Name.Text := nil;
+  Name.Len := 0;
+  Value.Text := nil;
+  Value.Len := 0;
+end;
+
+function TXmlParser.Position: PtrInt;
+begin
+  result := fToken - fBegin;
+end;
+
+function TXmlParser.Next: boolean;
+var
+  p, e, s: PUtf8Char;
+  q: AnsiChar;
+  i: PtrInt;
+  n: TValuePUtf8Char;
+begin
+  result := true;
+  Name.Text := nil;
+  Name.Len := 0;
+  Value.Text := nil;
+  Value.Len := 0;
+  p := fCur;
+  e := fAfter;
+  repeat
+    if fInElement then
+    begin
+      // within <name ... : expect attributes until '>' or '/>'
+      while (p < e) and
+            (p^ <= ' ') do
+        inc(p);
+      if p = e then
+        ParseError(p, 'unexpected end of input within a tag');
+      fToken := p;
+      case p^ of
+        '>':
+          begin
+            inc(p);
+            fInElement := false;
+            continue; // parse the following content
+          end;
+        '/':
+          begin
+            inc(p);
+            if (p = e) or
+               (p^ <> '>') then
+              ParseError(p, 'invalid "/" within a tag');
+            inc(p);
+            fInElement := false;
+            dec(Depth);
+            n.Text := fNameOrigin + (fStack[Depth] shr 7);
+            n.Len := fStack[Depth] and 127;
+            SetName(n);
+            Kind := xtElementEnd;
+            break;
+          end;
+      else
+        begin
+          // name="value" attribute pair
+          n := ParseName(p);
+          while (p < e) and
+                (p^ <= ' ') do
+            inc(p);
+          if (p = e) or
+             (p^ <> '=') then
+            ParseError(p, 'attribute expects "="');
+          inc(p);
+          while (p < e) and
+                (p^ <= ' ') do
+            inc(p);
+          if (p = e) or
+             not (p^ in ['"', '''']) then
+            ParseError(p, 'attribute value expects quotes');
+          q := p^;
+          inc(p);
+          i := ByteScanIndex(pointer(p), e - p, ord(q));
+          if i < 0 then
+            ParseError(p, 'unfinished attribute value');
+          SetName(n);
+          Value.Text := p;
+          Value.Len := i;
+          inc(p, i + 1);
+          Kind := xtAttribute;
+          break;
+        end;
+      end;
+    end
+    else if p = e then
+    begin
+      // end of input
+      if Depth > 0 then
+        ParseError(p, 'unexpected end of input: unclosed element');
+      fToken := p;
+      Kind := xtEof;
+      result := false;
+      break;
+    end
+    else if p^ = '<' then
+    begin
+      fToken := p;
+      inc(p);
+      if p = e then
+        ParseError(p, 'unexpected end of input after "<"');
+      case p^ of
+        '/':
+          begin
+            // </name> end tag
+            inc(p);
+            n := ParseName(p);
+            while (p < e) and
+                  (p^ <= ' ') do
+              inc(p);
+            if (p = e) or
+               (p^ <> '>') then
+              ParseError(p, 'end tag expects ">"');
+            inc(p);
+            if Depth = 0 then
+              ParseError(n.Text, 'unexpected end tag');
+            dec(Depth);
+            if ((fStack[Depth] and 127) <> cardinal(n.Len)) or
+               not CompareMemSmall(fNameOrigin + (fStack[Depth] shr 7),
+                 n.Text, n.Len) then
+              ParseError(n.Text, 'mismatched end tag');
+            SetName(n);
+            Kind := xtElementEnd;
+            break;
+          end;
+        '!':
+          begin
+            inc(p);
+            if (e - p >= 2) and
+               (PWord(p)^ = ord('-') + ord('-') shl 8) then
+            begin
+              // <!-- comment -->
+              inc(p, 2);
+              s := p;
+              while (e - p >= 3) and
+                    ((p^ <> '-') or
+                     (p[1] <> '-') or
+                     (p[2] <> '>')) do
+                inc(p);
+              if e - p < 3 then
+                ParseError(s, 'unfinished comment');
+              if xpoKeepComments in fOptions then
+              begin
+                Value.Text := s;
+                Value.Len := p - s;
+                inc(p, 3);
+                Kind := xtComment;
+                break;
+              end;
+              inc(p, 3);
+              continue;
+            end;
+            if (e - p >= 7) and
+               CompareMemSmall(p, PAnsiChar('[CDATA['), 7) then
+            begin
+              // <![CDATA[ ... ]]> verbatim section
+              inc(p, 7);
+              s := p;
+              while (e - p >= 3) and
+                    ((p^ <> ']') or
+                     (p[1] <> ']') or
+                     (p[2] <> '>')) do
+                inc(p);
+              if e - p < 3 then
+                ParseError(s, 'unfinished CDATA');
+              Value.Text := s;
+              Value.Len := p - s;
+              inc(p, 3);
+              Kind := xtCData;
+              break;
+            end;
+            ParseError(p, 'DTD and <!..> markup are not supported');
+          end;
+        '?':
+          begin
+            // <?name ...?> processing instruction
+            inc(p);
+            n := ParseName(p);
+            while (p < e) and
+                  (p^ <= ' ') do
+              inc(p);
+            s := p;
+            while (e - p >= 2) and
+                  ((p^ <> '?') or
+                   (p[1] <> '>')) do
+              inc(p);
+            if e - p < 2 then
+              ParseError(s, 'unfinished processing instruction');
+            if xpoKeepPI in fOptions then
+            begin
+              SetName(n);
+              Value.Text := s;
+              Value.Len := p - s;
+              while (Value.Len > 0) and
+                    (Value.Text[Value.Len - 1] <= ' ') do
+                dec(Value.Len); // right trim
+              inc(p, 2);
+              Kind := xtPI;
+              break;
+            end;
+            inc(p, 2);
+            continue;
+          end;
+      else
+        begin
+          // <name> element start
+          n := ParseName(p);
+          if Depth = 0 then
+            // no more opened element: reset the packed offsets origin
+            fNameOrigin := n.Text
+          else if Depth > high(fStack) then
+            ParseError(n.Text, 'too much nesting');
+          if n.Len > 127 then
+            ParseError(n.Text, 'unexpectedly long name');
+          if n.Text - fNameOrigin >= 1 shl 25 then
+            ParseError(n.Text, 'single root spanning over 32MB');
+          fStack[Depth] := cardinal(n.Text - fNameOrigin) shl 7 +
+                           cardinal(n.Len);
+          inc(Depth);
+          fInElement := true;
+          SetName(n);
+          Kind := xtElementStart;
+          break;
+        end;
+      end;
+    end
+    else
+    begin
+      // text content until the next markup
+      fToken := p;
+      s := p;
+      i := ByteScanIndex(pointer(p), e - p, ord('<'));
+      if i < 0 then
+        p := e
+      else
+        inc(p, i);
+      if not (xpoKeepWhiteSpace in fOptions) then
+      begin
+        while (s < p) and
+              (s^ <= ' ') do
+          inc(s);
+        if s = p then
+          continue; // ignore any pure-whitespace text
+        s := fToken;
+      end;
+      Value.Text := s;
+      Value.Len := p - s;
+      Kind := xtText;
+      break;
+    end;
+  until false;
+  fCur := p;
+end;
+
+procedure TXmlParser.NameToUtf8(out result: RawUtf8);
+begin
+  FastSetString(result, Name.Text, Name.Len);
+end;
+
+procedure TXmlParser.ValueToUtf8(out result: RawUtf8);
+begin
+  if Kind in [xtCData, xtComment] then
+    FastSetString(result, Value.Text, Value.Len) // verbatim sections
+  else
+    XmlUnescape(Value.Text, Value.Len, result);
+end;
+
+procedure AddXmlUnescape(W: TTextWriter; p, amp: PUtf8Char; plen: PtrUInt);
+var
+  l: PtrUInt;
+  c: Ucs4CodePoint;
+  ent: RawUtf8;
+begin
+  repeat
+    if amp = nil then
+    begin
+      amp := PosChar(p, plen, '&');
+      if amp = nil then
+      begin
+        W.AddNoJsonEscape(p, plen); // no more entity to decode
+        exit;
+      end;
+    end;
+    l := amp - p;
+    if l <> 0 then
+    begin
+      W.AddNoJsonEscape(p, l);
+      dec(plen, l);
+      p := amp;
+    end;
+    amp := nil; // call PosChar() on next iteration
+    inc(p); // ignore '&'
+    dec(plen);
+    // scan up to ';' (references are short - cap the search)
+    l := 0;
+    while (l < plen) and
+          (l < 12) and
+          (p[l] <> ';') do
+      inc(l);
+    c := 0;
+    if (l < plen) and
+       (p[l] = ';') then
+      // cascaded case of the five predefined entities + numeric references
+      case p^ of
+        '#':
+          c := NumCharToUcs4(p, l);
+        'l':
+          if (l = 2) and
+             (p[1] = 't') then
+            c := ord('<');
+        'g':
+          if (l = 2) and
+             (p[1] = 't') then
+            c := ord('>');
+        'a':
+          if (l = 3) and
+             (PCardinal(p)^ and $00ffffff =
+              ord('a') + ord('m') shl 8 + ord('p') shl 16) then
+            c := ord('&')
+          else if (l = 4) and
+             (PCardinal(p)^ =
+              ord('a') + ord('p') shl 8 + ord('o') shl 16 + ord('s') shl 24) then
+            c := ord('''');
+        'q':
+          if (l = 4) and
+             (PCardinal(p)^ =
+              ord('q') + ord('u') shl 8 + ord('o') shl 16 + ord('t') shl 24) then
+            c := ord('"');
+      end;
+    if c = 0 then
+    begin
+      l := plen + 1;
+      if l > 16 then
+        l := 16;
+      FastSetString(ent, p - 1, l);
+      EXmlException.RaiseUtf8('XmlUnescape: invalid entity in "%"', [ent]);
+    end;
+    if c <= $7f then
+      W.AddDirect(AnsiChar(c))
+    else
+      W.AddUcs4(c);
+    inc(l); // consume ending ';'
+    inc(p, l);
+    dec(plen, l);
+  until plen = 0;
+end;
+
+procedure XmlUnescape(Text: PUtf8Char; TextLen: PtrInt; out result: RawUtf8);
+var
+  amp: PUtf8Char;
+  W: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  amp := nil;
+  if TextLen > 0 then
+    amp := PosChar(Text, TextLen, '&');
+  if amp = nil then
+  begin
+    FastSetString(result, Text, TextLen); // no allocation if no entity
+    exit;
+  end;
+  W := TTextWriter.CreateOwnedStream(tmp);
+  try
+    AddXmlUnescape(W, Text, amp, TextLen);
+    W.SetText(result);
+  finally
+    W.Free;
+  end;
+end;
+
+procedure XmlDocAddOrAppend(var doc: TDocVariantData; const name: RawUtf8;
+  const v: variant; const opt: TDocVariantOptions);
+var
+  i: PtrInt;
+  arr: PDocVariantData;
+  a: TDocVariantData;
+  prev: variant;
+begin
+  // gather repeated sibling elements of the same name into an array
+  i := doc.GetValueIndex(name);
+  if i < 0 then
+    doc.AddValue(name, v)
+  else
+  begin
+    arr := _Safe(doc.Values[i]);
+    if arr^.IsArray then
+      arr^.AddItem(v)
+    else
+    begin
+      prev := doc.Values[i];
+      a.Init(opt, dvArray);
+      a.AddItem(prev);
+      a.AddItem(v);
+      doc.Value[name] := variant(a);
+    end;
+  end;
+end;
+
+procedure XmlElementToVariant(var x: TXmlParser;
+  const opt: TDocVariantOptions; out result: variant);
+var
+  obj: TDocVariantData;
+  n, txt, seg: RawUtf8;
+  v: variant;
+begin
+  // fill from attributes and content, until the matching xtElementEnd
+  // (nesting is bounded by the TXmlParser 256 levels static stack)
+  obj.Init(opt, dvObject);
+  txt := '';
+  while x.Next do
+    case x.Kind of
+      xtAttribute:
+        begin
+          x.NameToUtf8(n);
+          x.ValueToUtf8(seg);
+          RawUtf8ToVariant(seg, v);
+          obj.AddValue('@' + n, v);
+        end;
+      xtElementStart:
+        begin
+          x.NameToUtf8(n);
+          XmlElementToVariant(x, opt, v);
+          XmlDocAddOrAppend(obj, n, v, opt);
+        end;
+      xtText,
+      xtCData:
+        begin
+          x.ValueToUtf8(seg);
+          txt := txt + seg;
+        end;
+      xtElementEnd:
+        break;
+    end;
+  if obj.Count = 0 then
+  begin
+    // no attribute nor child element: as a plain string value
+    RawUtf8ToVariant(txt, result);
+    obj.Clear;
+  end
+  else
+  begin
+    if txt <> '' then
+    begin
+      RawUtf8ToVariant(txt, v);
+      obj.AddValue('#text', v);
+    end;
+    result := variant(obj);
+  end;
+end;
+
+procedure XmlToVariant(const Xml: RawUtf8; out Doc: TDocVariantData;
+  ParseOptions: TXmlParserOptions; Options: TDocVariantOptions);
+var
+  x: TXmlParser;
+  n, txt, seg: RawUtf8;
+  v: variant;
+begin
+  Doc.Init(Options, dvObject);
+  x.Init(pointer(Xml), length(Xml),
+    ParseOptions * [xpoStripNamespacePrefix]);
+  txt := '';
+  while x.Next do
+    case x.Kind of
+      xtElementStart:
+        begin
+          x.NameToUtf8(n);
+          XmlElementToVariant(x, Options, v);
+          XmlDocAddOrAppend(Doc, n, v, Options);
+        end;
+      xtText,
+      xtCData:
+        begin
+          x.ValueToUtf8(seg);
+          txt := txt + seg;
+        end;
+    end;
+  if txt <> '' then
+  begin
+    RawUtf8ToVariant(txt, v);
+    Doc.AddValue('#text', v);
+  end;
+end;
+
+function TryXmlToVariant(const Xml: RawUtf8; out Doc: TDocVariantData;
+  ParseOptions: TXmlParserOptions; Options: TDocVariantOptions): boolean;
+begin
+  try
+    XmlToVariant(Xml, Doc, ParseOptions, Options);
+    result := true;
+  except
+    on EXmlException do
+    begin
+      Doc.Clear;
+      result := false;
+    end;
+  end;
+end;
+
+function XmlToJson(const Xml: RawUtf8;
+  ParseOptions: TXmlParserOptions): RawUtf8;
+var
+  doc: TDocVariantData;
+begin
+  XmlToVariant(Xml, doc, ParseOptions);
+  result := doc.ToJson;
+end;
+
+
 { ************* YAML 1.2 core-schema to JSON or TDocVariant Support
 
   - plain / double-quoted / single-quoted scalars with core-schema type
@@ -1353,106 +2232,54 @@ end;
    Writer strategy: walk the TDocVariantData via TTextWriter and emit
    block-style YAML (flow-style when ywoFlowCompact is set).
 
-   This code was initialy proposed by zen010101, using Claude AI, with minimum
-   refactoring for integration into mORMot: performance is not the goal here.
+   This code was initialy proposed by zen010101, using Claude AI, with manual
+   refactoring for integration into mORMot: best performance is not the goal
+   here, even if we reach more than 100MB/s which seems fast enough for YAML.
 }
 
 type
   TYamlLine = record
     Indent: PtrInt;   // count of leading space characters
     Content: RawUtf8; // trimmed of leading spaces and trailing \r
-    Raw: RawUtf8;     // original line with trailing \r stripped
   end;
   TYamlLines = array of TYamlLine;
   PYamlLine = ^TYamlLine;
 
-function CountLeadingSpaces(p: PUtf8Char): PtrInt;
-begin
-  result := 0;
-  if p <> nil then
-    while p[result] = ' ' do
-      inc(result);
-end;
-
-// split Yaml into lines with indent metadata
-// - accepts both LF and CRLF terminators; trailing \r is stripped
-procedure SplitYamlLines(const Yaml: RawUtf8; out Lines: TYamlLines);
+procedure YamlStripLineComment(var S: RawUtf8);
 var
-  p, lineStart, stop: PUtf8Char;
-  n, len: PtrInt;
-  current: PYamlLine;
-begin
-  p := pointer(Yaml);
-  if p = nil then
-    exit;
-  n := 0;
-  stop := p + length(Yaml);
-  lineStart := p;
-  while p <= stop do
-  begin
-    if (p = stop) or
-       (p^ = #10) then
-    begin
-      if n >= length(Lines) then
-        SetLength(Lines, NextGrow(n));
-      current := @Lines[n];
-      len := p - lineStart;
-      if (len > 0) and
-         (p[-1] = #13) then
-        dec(len); // strip trailing \r if present
-      FastSetString(current^.Raw, lineStart, len);
-      current^.Indent := CountLeadingSpaces(pointer(current^.Raw));
-      while (len > 0) and
-            (lineStart[len - 1] = ' ') do
-        dec(len);
-      current^.Content := copy(current^.Raw,
-        current^.Indent + 1, len - current^.Indent);
-      inc(n);
-      if p = stop then
-        break;
-      lineStart := p + 1;
-    end;
-    inc(p);
-  end;
-  if length(Lines) <> n then
-    SetLength(Lines, n);
-end;
-
-// strip an unquoted trailing "# ..." comment from a scalar fragment
-// - accounts for single/double quoted spans where # is literal
-procedure StripLineComment(var S: RawUtf8);
-var
-  p, stop: PUtf8Char;
-  inSingle, inDouble: boolean;
+  p: PUtf8Char;
   cut: PtrInt;
 begin
   if S = '' then
     exit;
   p := pointer(S);
-  stop := p + length(S);
-  inSingle := false;
-  inDouble := false;
   cut := -1;
-  while p < stop do
-  begin
+  repeat
     case p^ of
+      #0:
+        break;
       '''':
-        if not inDouble then
-          inSingle := not inSingle;
+        begin
+          p := GotoEndOfQuotedString(p);
+          if p^ <> '''' then
+            exit;
+        end;
       '"':
-        if not inSingle then
-          inDouble := not inDouble;
+        begin
+          p := GotoEndOfJsonString(p);
+          if p^ <> '"' then
+            exit;
+        end;
       '#':
-        if not inSingle and not inDouble then
-          if (p = pointer(S)) or
-             ((p - 1)^ in [' ', #9]) then
-          begin
-            cut := p - PUtf8Char(pointer(S));
-            break;
-          end;
+        if (p = pointer(S)) or
+           ((p - 1)^ in [' ', #9]) then
+        begin
+          cut := p - PUtf8Char(pointer(S));
+          break;
+        end;
     end;
     inc(p);
-  end;
+  until false;
   if cut < 0 then
     exit;
   while (cut > 0) and
@@ -1461,193 +2288,199 @@ begin
   SetLength(S, cut);
 end;
 
-function IsYamlNull(const S: RawUtf8): boolean;
+function IsYamlNull(p: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
 begin
   // YAML 1.2 core schema: null has three case-insensitive spellings,
   // the '~' shortcut, or the empty string
-  result := (S = '') or
-            (S = '~') or
-            IdemPropNameU(S, 'null');
+  result := (PWord(p)^ = ord('~')) or
+            ((PInteger(p)^ and $DFDFDFDF = NULL_HI) and
+             (p[4] = #0));
 end;
 
-function IsYamlBool(const S: RawUtf8; out V: boolean): boolean;
-begin
-  // YAML 1.2 core schema accepts any case for the boolean literal
-  result := true;
-  if IdemPropNameU(S, 'true') then
-    V := true
-  else if IdemPropNameU(S, 'false') then
-    V := false
-  else
-    result := false;
-end;
-
-function IsYamlInt(const S: RawUtf8; out V: Int64): boolean;
-// YAML 1.2 core-schema integer with safe overflow detection
-// - overflow silently rejects so caller falls back to string emission
-const
-  MAX_POS: QWord = QWord($7FFFFFFFFFFFFFFF); // Delphi 7 compatible +MaxInt64
+function TryYamlInt(p: PUtf8Char; out V: Int64): boolean;
 var
-  p: PUtf8Char;
   neg: boolean;
-  n: integer;
   b: byte;
   u, prev: QWord;
 begin
   result := false;
-  p := pointer(S);
-  n := length(S);
-  if n = 0 then
+  if p = nil then
     exit;
   neg := false;
-  if (p^ = '-') or
-     (p^ = '+') then
+  if p^ in ['-', '+'] then
   begin
     neg := p^ = '-';
     inc(p);
-    dec(n);
   end;
-  if n = 0 then
-    exit;
-  if (n > 2) and
-     (p^ = '0') and
-     ((p + 1)^ in ['x', 'X']) then
+  u := 0;
+  if (p[0] = '0') and
+     (p[1] in ['x', 'X']) then
   begin
     // hex (YAML 1.2 core schema: 0x[0-9a-fA-F]+)
     inc(p, 2);
-    dec(n, 2);
-    if (n = 0) or
-       (n > 16) then // > 64-bit
+    if p^ = #0 then
       exit;
-    u := 0;
-    while n > 0 do
-    begin
+    repeat
       b := ConvertHexToBin[p^];
       if b = 255 then
-        exit;
+        if p^ = #0 then
+          break
+        else
+          exit;
+      prev := u;
       u := (u shl 4) or b;
+      if Int64(u) < Int64(prev) then
+        exit; // Delphi 7 compatible 63-bit overflow
       inc(p);
-      dec(n);
-    end;
+    until false;
   end
-  else if (n > 2) and
-          (p^ = '0') and
-          ((p + 1)^ = 'o') then
+  else if (p[0] = '0') and
+          (p[1] = 'o') then
   begin
     // octal 0o... (YAML 1.2)
     inc(p, 2);
-    dec(n, 2);
-    if n > 22 then
+    if p^ = #0 then
       exit;
-    u := 0;
-    while n > 0 do
-    begin
+    repeat
       if not (p^ in ['0'..'7']) then
-        exit;
+        if p^ = #0 then
+          break
+        else
+          exit;
       prev := u;
       u := (u shl 3) or QWord(ord(p^) - ord('0'));
-      if u < prev then
-        exit; // overflow wrapped
+      if Int64(u) < Int64(prev) then
+        exit; // 63-bit overflow
       inc(p);
-      dec(n);
-    end;
+    until false;
   end
   else
   begin
-    // decimal
-    if n > 20 then
+    // decimal - 0123 is valid YAML even if not in JSON standard
+    if p^ = #0 then
       exit;
-    u := 0;
-    while n > 0 do
-    begin
+    repeat
       if not (p^ in ['0'..'9']) then
-        exit;
+        if p^ = #0 then
+          break
+        else
+          exit;
       prev := u;
       u := u * 10 + QWord(ord(p^) - ord('0'));
-      if u < prev then
-        exit; // overflow
+      if Int64(u) < Int64(prev) then
+        exit; // 63-bit overflow
       inc(p);
-      dec(n);
-    end;
+    until false;
   end;
-  if u > MAX_POS then
-    exit;
   if neg then
     u := -u;
   V := u;
   result := true;
 end;
 
-function IsYamlFloat(const S: RawUtf8): boolean;
-// Recognizes ONLY the JSON number grammar so the lexeme can be emitted raw
-// to the JSON buffer: -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)? with at least one
-// of (dot|exponent) to distinguish from integer.
-// - rejects YAML-only forms: leading '+', bare ".5", trailing "1." — callers
-//   fall back to string emission (safer than letting InitJson reject raw JSON)
+function YamlLineKeyEnd(const S: RawUtf8): PtrInt;
+// returns the 0-based index of the ':' that ends the key (followed by space or
+// EOL), or -1 if not a mapping line; the key itself may be quoted
 var
-  p, stop: PUtf8Char;
-  digitsInt, digitsFrac, digitsExp: integer;
-  sawDot, sawExp: boolean;
+  p: PUtf8Char;
+begin
+  p := pointer(S);
+  if p <> nil then
+    repeat
+      case p^ of
+        #0:
+          break;
+        '''':
+          begin
+            p := GotoEndOfQuotedString(p);
+            if p^ = #0 then
+              break;
+          end;
+        '"':
+          begin
+            p := GotoEndOfJsonString(p);
+            if p^ = #0 then
+              break;
+          end;
+        '#':
+          if (p = pointer(S)) or
+             ((p - 1)^ in [' ', #9]) then
+            break; // comment - no colon before it
+        ':':
+          if p[1] <= ' ' then
+          begin
+            result := p - PUtf8Char(pointer(S));
+            exit;
+          end;
+      end;
+      inc(p);
+    until false;
+  result := -1;
+end;
+
+function YamlLineIsDashItem(const S: RawUtf8; out afterDash: RawUtf8): boolean;
+var
+  i: PtrInt;
 begin
   result := false;
-  p := pointer(S);
-  if p = nil then
+  if (S = '') or
+     (S[1] <> '-') then
     exit;
-  stop := p + length(S);
-  if p = stop then
-    exit;
-  if p^ = '-' then
-    inc(p);
-  // integer part: one or more digits; "01" is not JSON but YAML allows it,
-  // we accept permissively (the value round-trips fine)
-  digitsInt := 0;
-  while (p < stop) and
-        (p^ in ['0'..'9']) do
+  if length(S) <> 1 then
   begin
-    inc(p);
-    inc(digitsInt);
-  end;
-  if digitsInt = 0 then
-    exit;
-  sawDot := false;
-  digitsFrac := 0;
-  if (p < stop) and
-     (p^ = '.') then
-  begin
-    sawDot := true;
-    inc(p);
-    while (p < stop) and
-          (p^ in ['0'..'9']) do
-    begin
-      inc(p);
-      inc(digitsFrac);
-    end;
-    if digitsFrac = 0 then
-      exit; // "1." is not JSON
-  end;
-  sawExp := false;
-  digitsExp := 0;
-  if (p < stop) and
-     (p^ in ['e', 'E']) then
-  begin
-    sawExp := true;
-    inc(p);
-    if (p < stop) and
-       (p^ in ['+', '-']) then
-      inc(p);
-    while (p < stop) and
-          (p^ in ['0'..'9']) do
-    begin
-      inc(p);
-      inc(digitsExp);
-    end;
-    if digitsExp = 0 then
+    i := 2;
+    if S[i] > ' ' then // YAML requires '- '
       exit;
+    repeat
+      inc(i);
+    until not (S[i] in [' ', #9]);
+    afterDash := copy(S, i, MaxInt);
   end;
-  if p <> stop then
-    exit; // trailing junk
-  result := sawDot or sawExp; // must be float-shaped, not just int
+  result := true;
 end;
+
+function YamlDashLine(p: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin // fast check, no afterDash extraction
+  result := (p <> nil) and
+            (p[0] = '-') and
+            (p[1] <= ' ');
+end;
+
+function YamlSpecialChars(p: PUtf8Char): boolean;
+begin
+  result := true;
+  repeat
+    case p^ of
+      #0:
+        break;
+      #1 .. #31, // but ' ' in texts are allowed
+      '"',
+      '\':
+        exit; // special char requires quotes
+      ':':
+        if p[1] in [' ' , #9] then
+          exit; // avoid YAML "key: value" confusion
+      '#':
+        if p[-1] in [' ' , #9] then
+          exit; // avoid YAML "# comment" confusion
+    end;
+    inc(p);
+  until false;
+  result := false;
+end;
+
+function YamlMultiDocument(p: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  c: cardinal;
+begin // caller should have ensured length=3
+  c := PCardinal(p)^ and $ffffff;
+  result := (c = ord('-') + ord('-') shl 8 + ord('-') shl 16) or
+            (c = ord('.') + ord('.') shl 8 + ord('.') shl 16);
+end;
+
 
 
 { ----- YAML -> JSON converter --------------------------------------------- }
@@ -1658,20 +2491,17 @@ type
     fLines: TYamlLines;
     fCount: integer;
     fIdx: integer;
-    fDepth: integer;
-    fMaxDepth: integer;
+    fDepth, fMaxDepth: integer;
     fOut: TJsonWriter;
     procedure Error(LineIdx: integer; const Msg: ShortString);
     procedure ErrorFmt(LineIdx: integer; const Fmt: RawUtf8;
       const Args: array of const);
+    procedure FillLines(const Yaml: RawUtf8);
     function SkipBlankLines: PYamlLine;
+    function SkipQuoted(LineIdx: integer; p: PUtf8Char): PUtf8Char;
     function AtEnd: boolean;
       {$ifdef HASINLINE} inline; {$endif}
-    function LineIsDashItem(const S: RawUtf8; out afterDash: RawUtf8): boolean;
-    function IsDashLine(const S: RawUtf8): boolean;
-      {$ifdef HASINLINE} inline; {$endif}
-    function LineKeyEnd(const S: RawUtf8): PtrInt;
-    procedure CheckUnsupportedScalar(LineIdx: integer; const S: RawUtf8);
+    procedure CheckUnsupportedScalar(LineIdx: integer; p: PUtf8Char);
     procedure MergeMultilineQuoted(var rest: RawUtf8; firstLineIdx: integer);
     procedure FoldPlainScalar(var rest: RawUtf8; MapIndent: integer);
     procedure ParseValue(MinIndent: integer);
@@ -1679,16 +2509,16 @@ type
     procedure ParseBlockSeq(Indent: integer);
     procedure ParseImplicitMapFromDash(MapIndent: integer;
       const firstEntry: RawUtf8; firstLineIdx: integer);
-    procedure ParseFlow(var p, stop: PUtf8Char; LineIdx: integer);
-    procedure ParseFlowMap(var p, stop: PUtf8Char; LineIdx: integer);
-    procedure ParseFlowSeq(var p, stop: PUtf8Char; LineIdx: integer);
+    procedure ParseFlow(var p: PUtf8Char; LineIdx: integer);
+    procedure ParseFlowMap(var p: PUtf8Char; LineIdx: integer);
+    procedure ParseFlowSeq(var p: PUtf8Char; LineIdx: integer);
+    function ParseFlowExtract(p: PUtf8Char; EndChar: AnsiChar;
+      LineIdx: integer; var Text: RawUtf8): PUtf8Char;
     procedure EmitFlowScalar(const Frag: RawUtf8; LineIdx: integer);
     procedure EmitScalarFragment(const Frag: RawUtf8; LineIdx: integer);
-    procedure EmitJsonString(const S: RawUtf8);
-      {$ifdef HASINLINE} inline; {$endif}
     procedure EmitKey(const K: RawUtf8);
-    function CollectBlockScalar(MinIndent: integer; Folded: boolean;
-      Chomp: AnsiChar; ExplicitIndent: integer = 0): RawUtf8;
+    procedure EmitCollectBlockScalar(MinIndent, ExplicitIndent: integer;
+      Folded, Chomp: AnsiChar);
     procedure EmitBlockScalar(const rest: RawUtf8; BaseIndent: integer);
   public
     constructor Create;
@@ -1735,147 +2565,49 @@ function TYamlToJson.SkipBlankLines: PYamlLine;
 begin
   result := @fLines[fIdx];
   while fIdx < fCount do
-  begin
     if (result^.Content = '') or
        (result^.Content[1] = '#') then
-      inc(fIdx)
+    begin
+      inc(fIdx);
+      inc(result);
+    end
     else
       break;
-    inc(result);
+end;
+
+function TYamlToJson.SkipQuoted(LineIdx: integer; p: PUtf8Char): PUtf8Char;
+begin
+  if p^ = '''' then // p^ = " or ' at calling
+    result := GotoEndOfQuotedString(p)  // escaped as ''
+  else
+    result := GotoEndOfJsonString(p);   // escaped as \"
+  if result^ <> p^ then
+    ErrorFmt(LineIdx, 'missing ending % quote', [p^]);
+  inc(result); // return the position after ending quote
+end;
+
+procedure TYamlToJson.CheckUnsupportedScalar(LineIdx: integer; p: PUtf8Char);
+begin
+  if p = nil then
+    exit;
+  // per YAML 1.2 §5.3, anchor/alias/tag indicators are only meaningful
+  // at the start of a NODE fragment (which is what CheckUnsupportedScalar
+  // is called with - a key's rest or a dash item's afterDash).
+  // Mid-fragment occurrences are literal text in plain scalars. This avoids
+  // firing on real-world OpenAPI descriptions: URL query "?a=1&b=2"
+  // (27 hits in GitHub REST), markdown "**bold**" (182 hits) and
+  // markdown inline images "![img](url)" (215 hits)
+  case p^ of
+    '&':
+      Error(LineIdx, 'YAML anchors (&name) are not supported');
+    '*':
+      Error(LineIdx, 'YAML aliases (*name) are not supported');
+    '!':
+      Error(LineIdx, 'explicit YAML tags (!...) are not supported');
   end;
-end;
-
-function TYamlToJson.LineIsDashItem(const S: RawUtf8;
-  out afterDash: RawUtf8): boolean;
-var
-  i: PtrInt;
-begin
-  result := false;
-  if (S = '') or
-     (S[1] <> '-') then
-    exit;
-  if length(S) = 1 then
-  begin
-    result := true;
-    exit;
-  end;
-  i := 2;
-  if not (S[i] in [' ', #9]) then // YAML requires '- '
-    exit;
-  repeat
-    inc(i);
-  until not (S[i] in [' ', #9]);
-  afterDash := copy(S, i, MaxInt);
-  result := true;
-end;
-
-function TYamlToJson.IsDashLine(const S: RawUtf8): boolean;
-// fast check, no afterDash extraction
-begin
-  result := (S <> '') and
-            (S[1] = '-') and
-            ((length(S) = 1) or (S[2] in [' ', #9]));
-end;
-
-function TYamlToJson.LineKeyEnd(const S: RawUtf8): PtrInt;
-// returns the 0-based index of the ':' that ends the key (followed by space or EOL),
-// or -1 if not a mapping line; the key itself may be quoted.
-var
-  p, stop: PUtf8Char;
-  inSingle, inDouble: boolean;
-begin
-  result := -1;
-  if S = '' then
-    exit;
-  p := pointer(S);
-  stop := p + length(S);
-  inSingle := false;
-  inDouble := false;
-  while p < stop do
-  begin
-    case p^ of
-      '''':
-        if not inDouble then
-          inSingle := not inSingle;
-      '"':
-        if not inSingle then
-          inDouble := not inDouble;
-      ':':
-        if not inSingle and
-           not inDouble then
-        begin
-          if (p + 1 = stop) or
-             ((p + 1)^ in [' ', #9]) then
-          begin
-            result := p - PUtf8Char(pointer(S));
-            exit;
-          end;
-        end;
-      '#':
-        if not inSingle and
-           not inDouble then
-          if (p = pointer(S)) or
-             ((p - 1)^ in [' ', #9]) then
-            exit; // comment - no colon before it
-    end;
-    inc(p);
-  end;
-end;
-
-procedure TYamlToJson.CheckUnsupportedScalar(LineIdx: integer; const S: RawUtf8);
-var
-  p, stop: PUtf8Char;
-  inSingle, inDouble: boolean;
-  c: AnsiChar;
-begin
-  if S = '' then
-    exit;
-  if (S = '---') or
-     (S = '...') then
+  if (PStrLen(p - _STRLEN)^ = 3) and
+     YamlMultiDocument(p) then
     Error(LineIdx, 'multi-document streams are not supported');
-  p := pointer(S);
-  stop := p + length(S);
-  inSingle := false;
-  inDouble := false;
-  while p < stop do
-  begin
-    c := p^;
-    case c of
-      '''':
-        if not inDouble then
-          inSingle := not inSingle;
-      '"':
-        if not inSingle then
-          inDouble := not inDouble;
-      '&',
-      '*',
-      '!':
-        // per YAML 1.2 §5.3, anchor/alias/tag indicators are only meaningful
-        // at the start of a NODE fragment (which is what CheckUnsupportedScalar
-        // is called with - a key's rest or a dash item's afterDash). Mid-
-        // fragment occurrences are literal text in plain scalars. This avoids
-        // firing on real-world OpenAPI descriptions: URL query "?a=1&b=2"
-        // (27 hits in GitHub REST), markdown "**bold**" (182 hits) and
-        // markdown inline images "![img](url)" (215 hits).
-        if not inSingle and
-           not inDouble then
-          if p = pointer(S) then
-            case c of
-              '&':
-                Error(LineIdx, 'YAML anchors (&name) are not supported');
-              '*':
-                Error(LineIdx, 'YAML aliases (*name) are not supported');
-              '!':
-                Error(LineIdx, 'explicit YAML tags (!...) are not supported');
-            end;
-    end;
-    inc(p);
-  end;
-end;
-
-procedure TYamlToJson.EmitJsonString(const S: RawUtf8);
-begin
-  fOut.AddJsonString(S);
 end;
 
 procedure TYamlToJson.EmitKey(const K: RawUtf8);
@@ -1883,25 +2615,26 @@ begin
   if K <> '' then
     case K[1] of
       '"':
-        fOut.AddNoJsonEscape(pointer(K), length(K)); // already JSON-escaped
+        fOut.AddString(K);              // already JSON-escaped
       '''':
-        fOut.AddQuotedStringAsJson(K);               // unquote and JSON-escape
+        fOut.AddQuotedStringAsJson(K);  // unquote and JSON-escape
     else
-      fOut.AddJsonString(K);                         // JSON-escape
+      fOut.AddJsonString(K);            // JSON-escape
     end
   else
-    fOut.AddShorter('""');
+    fOut.AddShort4(ord('"') + ord('"') shl 8, 2);
 end;
 
 procedure TYamlToJson.EmitScalarFragment(const Frag: RawUtf8; LineIdx: integer);
 var
   s: RawUtf8;
-  bval: boolean;
   ival: Int64;
 begin
   s := Frag;
-  StripLineComment(s);
-  s := TrimLeft(s);
+  YamlStripLineComment(s);
+  if (s <> '') and
+     (s[1] = ' ') then
+    s := TrimLeft(s);
   if s = '' then
   begin
     fOut.AddNull;
@@ -1912,17 +2645,16 @@ begin
     EmitKey(s);
     exit;
   end;
-  CheckUnsupportedScalar(LineIdx, s);
-  if IsYamlNull(s) then
+  CheckUnsupportedScalar(LineIdx, pointer(s));
+  if IsYamlNull(pointer(s)) then
     fOut.AddNull
-  else if IsYamlBool(s, bval) then
-    fOut.Add(bval)
-  else if IsYamlInt(s, ival) then
-    fOut.Add(ival)
-  else if IsYamlFloat(s) then
-    fOut.AddNoJsonEscape(pointer(s), length(s))
+  else if TryYamlInt(pointer(s), ival) then
+    fOut.Add(ival)                          // normalized 0x 0o integers
+  else if IsBooleanJson(pointer(s)) or
+          IsNumberJson(pointer(s)) then
+    fOut.AddString(s)                       // valid JSON number or boolean
   else
-    EmitJsonString(s);
+    fOut.AddJsonString(s);                  // as JSON "string"
 end;
 
 procedure TYamlToJson.EmitFlowScalar(const Frag: RawUtf8; LineIdx: integer);
@@ -1937,41 +2669,26 @@ begin
   EmitScalarFragment(s, LineIdx);
 end;
 
-function TYamlToJson.CollectBlockScalar(MinIndent: integer; Folded: boolean;
-  Chomp: AnsiChar; ExplicitIndent: integer): RawUtf8;
+procedure TYamlToJson.EmitCollectBlockScalar(MinIndent, ExplicitIndent: integer;
+  Folded, Chomp: AnsiChar);
 var
-  tmp: TTextWriter;
-  i, blockIndent, startIdx: PtrInt;
-  c: PYamlLine;
-  lineContent: RawUtf8;
-  blankRun: integer;
+  blockIndent, blankRun: integer;
   prevWasContent: boolean;
-  buf: TTextWriterStackBuffer;
+  c: PYamlLine;
+  buf: TSynTempAdder;
 begin
-  result := '';
-  startIdx := fIdx;
-  i := startIdx;
-  c := @fLines[startIdx];
+  // skip leading blank lines; stop at the first non-blank line.
+  c := SkipBlankLines;
   if ExplicitIndent > 0 then
   begin
     // YAML 1.2 §8.1.1.1 explicit indent indicator: the content indent is
     // fixed at parent_indent + ExplicitIndent, NOT auto-detected. MinIndent
-    // equals parent_indent + 1 at this point, so parent_indent = MinIndent-1.
+    // equals parent_indent + 1 at this point, so parent_indent = MinIndent-1
     blockIndent := MinIndent - 1 + ExplicitIndent;
-    // skip leading blank lines; stop at the first non-blank line. If that
-    // line is shallower than blockIndent, the block is empty (blockIndent
-    // reset to -1 so the existing "empty block" path below takes over).
-    while i < fCount do
-    begin
-      if c^.Content = '' then
-      begin
-        inc(i);
-        inc(c);
-        continue;
-      end;
-      break;
-    end;
-    if (i >= fCount) or
+    // if the first non-blank line is shallower than blockIndent, the block is
+    // empty (blockIndent reset to -1 so the existing "empty block" path below
+    // takes over)
+    if (fIdx >= fCount) or
        (c^.Indent < blockIndent) then
       blockIndent := -1;
   end
@@ -1979,144 +2696,111 @@ begin
   begin
     // detect block indent from the first non-blank line whose indent >= MinIndent
     blockIndent := -1;
-    while i < fCount do
-    begin
-      if c^.Content = '' then
-      begin
-        inc(i);
-        inc(c);
-        continue;
-      end;
-      if c^.Indent < MinIndent then
-        break;
+    if c^.Indent >= MinIndent then
       blockIndent := c^.Indent;
-      break;
-    end;
   end;
   if blockIndent < 0 then
-  begin
-    fIdx := i;
-    // empty block: honor chomping
-    case Chomp of
-      '-':
-        result := '';
-      '+':
-        result := '';
-      else
-        result := '';
-    end;
+    // empty block no chomping needed
     exit;
-  end;
-  tmp := TTextWriter.CreateOwnedStream(buf);
+  buf.Init;
   try
     blankRun := 0;
     prevWasContent := false;
-    while i < fCount do
+    while fIdx < fCount do
     begin
       if c^.Content = '' then
       begin
         inc(blankRun);
-        inc(i);
+        inc(fIdx);
         inc(c);
         continue;
       end;
       if c^.Indent < blockIndent then
         break;
       // block content line: strip blockIndent prefix
-      lineContent := copy(c^.Raw, blockIndent + 1, MaxInt);
       if prevWasContent then
         if blankRun = 0 then
-          if Folded then
-            tmp.Add(' ')
-          else
-            tmp.Add(#10)
+          buf.AddDirect(folded)
         else
           // preserve blank-line runs literally as \n * blankRun
-          while blankRun > 0 do
-          begin
-            tmp.Add(#10);
-            dec(blankRun);
-          end
+          buf.AddChars(#10, blankRun)
       else
         // leading blanks before first content: keep them
-        while blankRun > 0 do
-        begin
-          tmp.Add(#10);
-          dec(blankRun);
-        end;
-      tmp.AddNoJsonEscape(pointer(lineContent), length(lineContent));
+        buf.AddChars(#10, blankRun);
+      buf.AddChars(' ', c^.Indent - blockIndent);
+      buf.Add(c^.Content);
       prevWasContent := true;
       blankRun := 0;
-      inc(i);
+      inc(fIdx);
       inc(c);
     end;
-    tmp.SetText(result);
+    // apply chomping to the trailing content
+    case Chomp of
+      '-':
+        // strip all trailing newlines
+        while (buf.Store.added > 0) and
+              (PUtf8Char(buf.Buffer)[buf.Store.added - 1] in [#13, #10]) do
+          dec(buf.Store.added);
+      '+':
+        // keep trailing newlines exactly; ensure at least one
+        if (buf.Store.added = 0) or
+           not (PUtf8Char(buf.Buffer)[buf.Store.added - 1] in [#13, #10]) then
+        begin
+          PUtf8Char(buf.Buffer)[buf.Store.added] := #10; // append
+          inc(buf.Store.added);
+        end;
+      else
+        // clip: collapse trailing newlines to a single one
+        while (buf.Store.added >= 2) and
+              (PUtf8Char(buf.Buffer)[buf.Store.added - 1] = #10) and
+              (PUtf8Char(buf.Buffer)[buf.Store.added - 2] = #10) do
+          dec(buf.Store.added);
+        if (buf.Store.added <= 0) or
+           (PUtf8Char(buf.Buffer)[buf.Store.added - 1] <> #10) then
+         begin
+           PUtf8Char(buf.Buffer)[buf.Store.added] := #10; // append
+           inc(buf.Store.added);
+         end;
+    end;
+    fOut.AddJsonStringBuffer(buf.Buffer, buf.Store.added);
   finally
-    tmp.Free;
-  end;
-  fIdx := i;
-  // apply chomping to the trailing content
-  case Chomp of
-    '-':
-      // strip all trailing newlines
-      while (result <> '') and
-            (result[length(result)] in [#13, #10]) do
-        SetLength(result, length(result) - 1);
-    '+':
-      // keep trailing newlines exactly; ensure at least one
-      if (result = '') or
-         not (result[length(result)] in [#13, #10]) then
-        Append(result, #10);
-    else
-      // clip: collapse trailing newlines to a single one
-      while (length(result) >= 2) and
-            (result[length(result)] = #10) and
-            (result[length(result) - 1] = #10) do
-        SetLength(result, length(result) - 1);
-      if (result = '') or
-         (result[length(result)] <> #10) then
-        Append(result, #10);
+    buf.Store.Done; // almost never any allocation
   end;
 end;
 
 procedure TYamlToJson.EmitBlockScalar(const rest: RawUtf8; BaseIndent: integer);
 var
-  indicator: AnsiChar;
-  folded: boolean;
-  chomp: AnsiChar;
+  folded, chomp: AnsiChar;
   explicitIndent: integer;
-  content: RawUtf8;
-  i: integer;
+  i: PtrInt;
 begin
   // rest starts with '|' or '>' optionally followed by chomp ('-' or '+')
   // and/or an explicit indent indicator (single digit 1..9, YAML 1.2 §8.1.1.1)
-  indicator := rest[1];
-  folded := indicator = '>';
+  if rest[1] = '>' then
+    folded := ' '
+  else
+    folded := #10;
   chomp := ' '; // 'clip' default (no chomp indicator)
   explicitIndent := 0;
   for i := 2 to length(rest) do
     case rest[i] of
-      '-':
-        chomp := '-';
+      '-',
       '+':
-        chomp := '+';
-      '1'..'9':
+        chomp := rest[i];
+      '0':
+        // YAML 1.2 §8.1.1.1 forbids 0 as an explicit indent indicator
+        Error(fIdx, 'block-scalar indent indicator must be 1..9');
+      '1' .. '9':
         // first digit captured; a second digit is malformed (spec caps at 1..9)
         if explicitIndent = 0 then
           explicitIndent := ord(rest[i]) - ord('0')
         else
           Error(fIdx, 'malformed block-scalar header (double indent indicator)');
-      '0':
-        // YAML 1.2 §8.1.1.1 forbids 0 as an explicit indent indicator
-        Error(fIdx, 'block-scalar indent indicator must be 1..9');
-      ' ', #9, '#':
-        break;
     else
-      break; // unexpected
+      break; // #32 #9 '#' or unexpected
     end;
   inc(fIdx); // advance past the key-line marker
-  content := CollectBlockScalar(BaseIndent + 1, folded, chomp, explicitIndent);
-  EmitJsonString(content);
+  EmitCollectBlockScalar(BaseIndent + 1, explicitIndent, folded, chomp);
 end;
 
 procedure TYamlToJson.MergeMultilineQuoted(var rest: RawUtf8;
@@ -2130,27 +2814,24 @@ procedure TYamlToJson.MergeMultilineQuoted(var rest: RawUtf8;
 // (still wrapped in quotes, ready for EmitKey), and fIdx has been
 // advanced past any consumed continuation lines. The first (key) line is NOT
 // consumed here - callers are responsible for their own fIdx advance on the
-// first line, just as before the merge was introduced.
+// first line, just as before the merge was introduced
 var
   quote: AnsiChar;
   trailingEscape: boolean;
 
-  function ScanQuoteClosed(const s: RawUtf8; skipOpeningQuote: boolean): boolean;
+  function ScanQuoteClosed(p: PUtf8Char; skipOpeningQuote: boolean): boolean;
   var
-    p, stop: PUtf8Char;
     esc: boolean;
   begin
-    result := false;
     trailingEscape := false;
-    if s = '' then
+    result := p <> nil;
+    if not result then
       exit;
-    p := pointer(s);
-    stop := p + length(s);
     if skipOpeningQuote and
        (p^ = quote) then
       inc(p);
     esc := false;
-    while p < stop do
+    while p^ <> #0 do
     begin
       if quote = '"' then
       begin
@@ -2159,80 +2840,65 @@ var
         else if p^ = '\' then
           esc := true
         else if p^ = '"' then
-        begin
-          result := true;
           exit;
-        end;
       end
       else
       begin
         // single-quoted: '' is an escape; otherwise '' closes
         if p^ = '''' then
-        begin
-          if ((p + 1) < stop) and
-             ((p + 1)^ = '''') then
+          if p[1] = '''' then
             inc(p) // consume the first of the '' escape
           else
-          begin
-            result := true;
             exit;
-          end;
-        end;
       end;
       inc(p);
     end;
     // unterminated: remember if double-quoted ended with a trailing '\'
     trailingEscape := (quote = '"') and esc;
+    result := false;
   end;
 
 var
-  tmp: TTextWriter;
-  cur: RawUtf8; // we need a temp value since = rest first
-  buf: TTextWriterStackBuffer;
+  cur: PRawUtf8; // we need a temp value since = rest first
+  buf: TSynTempAdder;
 begin
   if rest = '' then
     exit;
   quote := rest[1];
   if not (quote in ['"', '''']) then
     exit;
-  if ScanQuoteClosed(rest, {skipOpeningQuote=}true) then
+  if ScanQuoteClosed(pointer(rest), {skipOpeningQuote=}true) then
     exit; // single-line, already closed
   // multi-line merge
-  tmp := TTextWriter.CreateOwnedStream(buf);
+  buf.Init;
   try
-    cur := rest;
-    while true do
-    begin
-      if trailingEscape then
-        // absorbed line break: drop the trailing '\' and emit no separator
-        tmp.AddNoJsonEscape(pointer(cur), length(cur) - 1)
-      else
-      begin
-        tmp.AddNoJsonEscape(pointer(cur), length(cur));
+    cur := @rest;
+    repeat
+      // absorbed line break: drop the trailing '\' and emit no separator
+      buf.Add(pointer(cur^), length(cur^) - ord(trailingEscape));
+      if not trailingEscape then
         // folded line break -> single space (per YAML 1.2 §7.5)
-        tmp.AddDirect(' ');
-      end;
+        buf.AddDirect(' ');
       inc(fIdx);
-      if fIdx >= fCount then
+      if AtEnd then
         Error(firstLineIdx, 'unterminated multi-line quoted scalar');
       // Content is already left-trimmed by SplitYamlLines via Indent metadata,
       // which is exactly the §7.5 requirement that leading ws is ignored
-      cur := fLines[fIdx].Content;
-      if cur = '' then
+      cur := @fLines[fIdx].Content;
+      if cur^ = '' then
         continue;
-      if ScanQuoteClosed(cur, {skipOpeningQuote=}false) then
+      if ScanQuoteClosed(pointer(cur^), {skipOpeningQuote=}false) then
       begin
         // last line closes the scalar; include everything up to and past the
         // closing quote (any trailing content is ignored - quoted scalars end
         // at the closing quote)
-        tmp.AddNoJsonEscape(pointer(cur), length(cur));
+        buf.Add(cur^);
         // leave fIdx pointing at this closing line; callers advance it
         break;
       end;
-    end;
-    tmp.SetText(rest);
+    until false;
   finally
-    tmp.Free;
+    buf.Done(rest);
   end;
 end;
 
@@ -2243,7 +2909,7 @@ procedure TYamlToJson.FoldPlainScalar(var rest: RawUtf8; MapIndent: integer);
 // at the first potential continuation line (the caller consumed the key
 // line). Advances fIdx past each folded line. A line break is NOT consumed
 // when the next line opens a nested structure (dash, flow, block-scalar
-// indicator, quoted scalar, or another "key: value" entry).
+// indicator, quoted scalar, or another "key: value" entry)
 var
   c: PYamlLine;
 begin
@@ -2251,23 +2917,20 @@ begin
   while fIdx < fCount do
   begin
     // blank line terminates folding (paragraph break in plain scalars)
-    if c^.Content = '' then
-      exit;
+    if (c^.Content = '') or
     // sibling or outer-scope line is not part of the folded scalar
-    if c^.Indent <= MapIndent then
-      exit;
+       (c^.Indent <= MapIndent) or
     // a real "- " dash item at the continuation indent starts a new seq entry
-    if IsDashLine(c^.Content) then
-      exit;
+       YamlDashLine(pointer(c^.Content)) or
     // a new "key:" line (quoted or plain) is a nested map, not continuation;
     // LineKeyEnd handles both "foo:" and '"foo":' forms
-    if LineKeyEnd(c^.Content) >= 0 then
+       (YamlLineKeyEnd(c^.Content) >= 0) then
       exit;
     // otherwise it's plain-scalar text; fold with a single space per §6.5.
     // once we are continuing a plain scalar, indicator chars at line start
     // (", ', {, [, |, >) are just literal text - the GitHub REST spec embeds
     // markdown ("[List selected ...](https://...)") and quoted phrases (e.g.
-    // «"My TEam Näme") mid-description
+    // "My TEam Name") mid-description
     Append(rest, ' ', c^.Content);
     inc(fIdx);
     inc(c);
@@ -2277,27 +2940,26 @@ end;
 procedure TYamlToJson.ParseBlockMap(Indent: integer);
 var
   first: boolean;
+  lineIdx: integer;
   keyEnd: PtrInt;
   keyText, rest: RawUtf8;
-  lineIdx: integer;
   c: PYamlLine;
 begin
   fOut.Add('{');
   first := true;
-  while true do
-  begin
+  repeat
     c := SkipBlankLines;
     if AtEnd then
       break;
     if c^.Indent <> Indent then
       break;
-    keyEnd := LineKeyEnd(c^.Content);
+    keyEnd := YamlLineKeyEnd(c^.Content);
     if keyEnd < 0 then
       break;
-    keyText := TrimRight(copy(c^.Content, 1, keyEnd));
+    TrimRightCopy(c^.Content, 1, keyEnd, keyText);
     rest := '';
     if keyEnd + 1 < length(c^.Content) then
-      rest := TrimLeft(copy(c^.Content, keyEnd + 2, MaxInt));
+      TrimLeftCopy(c^.Content, keyEnd + 2, MaxInt, rest);
     if not first then
       fOut.AddDirect(',');
     EmitKey(keyText);
@@ -2313,7 +2975,7 @@ begin
         ParseValue(c^.Indent)
       else if (not AtEnd) and
               (c^.Indent = Indent) and
-              IsDashLine(c^.Content) then
+              YamlDashLine(pointer(c^.Content)) then
         // YAML 1.2 compact block seq: "key:" followed by "- item" at the
         // same indent as the key (common in real-world OpenAPI specs)
         ParseBlockSeq(c^.Indent)
@@ -2327,13 +2989,13 @@ begin
       // YAML 1.2 §7.5: a quoted scalar may span multiple lines
       if rest[1] in ['"', ''''] then
         MergeMultilineQuoted(rest, lineIdx);
-      CheckUnsupportedScalar(lineIdx, rest);
+      CheckUnsupportedScalar(lineIdx, pointer(rest));
       if rest[1] in ['{', '['] then
       begin
         // inline flow collection as the value - rewrite Content so ParseValue
         // sees the flow fragment alone, not the full "key: {..}"/"key: [..]"
         // line (otherwise ParseValue would dispatch back to ParseBlockMap).
-        // Mirrors the same pattern in ParseImplicitMapFromDash.
+        // Mirrors the same pattern in ParseImplicitMapFromDash
         c^.Content := rest;
         ParseValue(Indent);
       end
@@ -2347,7 +3009,7 @@ begin
       end;
     end;
     first := false;
-  end;
+  until false;
   fOut.AddDirect('}');
 end;
 
@@ -2360,14 +3022,13 @@ var
 begin
   fOut.Add('[');
   first := true;
-  while true do
-  begin
+  repeat
     c := SkipBlankLines;
     if AtEnd then
       break;
     if c^.Indent <> Indent then
       break;
-    if not LineIsDashItem(c^.Content, afterDash) then
+    if not YamlLineIsDashItem(c^.Content, afterDash) then
       break;
     lineIdx := fIdx;
     if not first then
@@ -2386,11 +3047,11 @@ begin
     end
     else if afterDash[1] in ['|', '>'] then
       EmitBlockScalar(afterDash, Indent)
-    else if IsDashLine(afterDash) then
+    else if YamlDashLine(pointer(afterDash)) then
     begin
       // YAML 1.2 compact nested block-seq: "- - X" on one physical line.
       // The inner "- X" starts a nested seq at (outer Indent + 2); rewrite
-      // the current line to look like it starts at that indent and recurse.
+      // the current line to look like it starts at that indent and recurse
       c^.Content := afterDash;
       c^.Indent := implicitIndent;
       ParseBlockSeq(implicitIndent);
@@ -2398,7 +3059,7 @@ begin
     else if afterDash[1] in ['{', '['] then
     begin
       // flow collection inline
-      CheckUnsupportedScalar(lineIdx, afterDash);
+      CheckUnsupportedScalar(lineIdx, pointer(afterDash));
       // use flow parser directly on afterDash content
       // simplest: treat the rest of the line as a flow value
       // ParseValue at current indent will see the `- ` already consumed;
@@ -2408,22 +3069,20 @@ begin
       c^.Indent := implicitIndent;
       ParseValue(implicitIndent);
     end
-    else if LineKeyEnd(afterDash) >= 0 then
-    begin
+    else if YamlLineKeyEnd(afterDash) >= 0 then
       // implicit mapping item: "- key: value" [, "   key2: v2"]
-      ParseImplicitMapFromDash(implicitIndent, afterDash, lineIdx);
-    end
+      ParseImplicitMapFromDash(implicitIndent, afterDash, lineIdx)
     else
     begin
       if afterDash[1] in ['"', ''''] then
         MergeMultilineQuoted(afterDash, lineIdx);
-      CheckUnsupportedScalar(lineIdx, afterDash);
+      CheckUnsupportedScalar(lineIdx, pointer(afterDash));
       inc(fIdx);
       if not (afterDash[1] in ['"', '''']) then
         FoldPlainScalar(afterDash, Indent);
       EmitScalarFragment(afterDash, lineIdx);
     end;
-  end;
+  until false;
   fOut.AddDirect(']');
 end;
 
@@ -2437,16 +3096,17 @@ var
 begin
   fOut.Add('{');
   // emit the first entry from afterDash
-  keyEnd := LineKeyEnd(firstEntry);
+  keyEnd := YamlLineKeyEnd(firstEntry);
   if keyEnd < 0 then
-    Error(firstLineIdx, 'expected mapping entry after "- "');
-  keyText := TrimRight(copy(firstEntry, 1, keyEnd));
+    Error(firstLineIdx, 'missing mapping entry after "- "');
+  TrimRightCopy(firstEntry, 1, keyEnd, keyText);
   rest := '';
   if keyEnd + 1 < length(firstEntry) then
-    rest := TrimLeft(copy(firstEntry, keyEnd + 2, MaxInt));
+    TrimLeftCopy(firstEntry, keyEnd + 2, MaxInt, rest);
   EmitKey(keyText);
   fOut.AddDirect(':');
-  if (rest = '') or (rest[1] = '#') then
+  if (rest = '') or
+     (rest[1] = '#') then
   begin
     inc(fIdx);
     c := SkipBlankLines;
@@ -2455,20 +3115,20 @@ begin
       ParseValue(c^.Indent)
     else if (not AtEnd) and
             (c^.Indent = MapIndent) and
-            IsDashLine(c^.Content) then
+            YamlDashLine(pointer(c^.Content)) then
       ParseBlockSeq(c^.Indent)
     else
       fOut.AddNull;
   end
   else if rest[1] in ['|', '>'] then
-    // block-scalar min-indent must exceed the parent-key indent (MapIndent),
-    // so the EmitBlockScalar base = MapIndent matches ParseBlockMap/continuation
+    // block-scalar min-indent must exceed the parent-key indent (MapIndent), so
+    // the EmitBlockScalar base = MapIndent matches ParseBlockMap/continuation
     EmitBlockScalar(rest, MapIndent)
   else
   begin
     if rest[1] in ['"', ''''] then
       MergeMultilineQuoted(rest, firstLineIdx);
-    CheckUnsupportedScalar(firstLineIdx, rest);
+    CheckUnsupportedScalar(firstLineIdx, pointer(rest));
     if rest[1] in ['{', '['] then
     begin
       c := @fLines[fIdx];
@@ -2485,21 +3145,19 @@ begin
     end;
   end;
   // continuation: subsequent lines at MapIndent with key-colon
-  while true do
-  begin
+  repeat
     c := SkipBlankLines;
-    if AtEnd then
-      break;
-    if c^.Indent <> MapIndent then
+    if AtEnd or
+       (c^.Indent <> MapIndent) then
       break;
     lineContent := c^.Content;
-    keyEnd := LineKeyEnd(lineContent);
+    keyEnd := YamlLineKeyEnd(lineContent);
     if keyEnd < 0 then
       break;
-    keyText := TrimRight(copy(lineContent, 1, keyEnd));
+    TrimRightCopy(lineContent, 1, keyEnd, keyText);
     rest := '';
     if keyEnd + 1 < length(lineContent) then
-      rest := TrimLeft(copy(lineContent, keyEnd + 2, MaxInt));
+      TrimLeftCopy(lineContent, keyEnd + 2, MaxInt, rest);
     fOut.AddDirect(',');
     EmitKey(keyText);
     fOut.AddDirect(':');
@@ -2514,7 +3172,7 @@ begin
         ParseValue(c^.Indent)
       else if (not AtEnd) and
               (c^.Indent = MapIndent) and
-              IsDashLine(c^.Content) then
+              YamlDashLine(pointer(c^.Content)) then
         ParseBlockSeq(c^.Indent)
       else
         fOut.AddNull;
@@ -2525,7 +3183,7 @@ begin
     begin
       if rest[1] in ['"', ''''] then
         MergeMultilineQuoted(rest, curIdx);
-      CheckUnsupportedScalar(curIdx, rest);
+      CheckUnsupportedScalar(curIdx, pointer(rest));
       if rest[1] in ['{', '['] then
       begin
         fLines[fIdx].Content := rest;
@@ -2539,11 +3197,11 @@ begin
         EmitScalarFragment(rest, curIdx);
       end;
     end;
-  end;
+  until false;
   fOut.AddDirect('}');
 end;
 
-procedure TYamlToJson.ParseFlow(var p, stop: PUtf8Char; LineIdx: integer);
+procedure TYamlToJson.ParseFlow(var p: PUtf8Char; LineIdx: integer);
 begin
   inc(fDepth);
   try
@@ -2552,9 +3210,9 @@ begin
         'YAML nesting depth exceeds YamlMaxDepth (%)', [fMaxDepth]);
     // p points at '{' or '['
     if p^ = '{' then
-      ParseFlowMap(p, stop, LineIdx)
+      ParseFlowMap(p, LineIdx)
     else if p^ = '[' then
-      ParseFlowSeq(p, stop, LineIdx)
+      ParseFlowSeq(p, LineIdx)
     else
       Error(LineIdx, 'expected "{" or "[" in flow value');
   finally
@@ -2562,26 +3220,65 @@ begin
   end;
 end;
 
-procedure TYamlToJson.ParseFlowMap(var p, stop: PUtf8Char; LineIdx: integer);
+function TYamlToJson.ParseFlowExtract(p: PUtf8Char; EndChar: AnsiChar;
+  LineIdx: integer; var Text: RawUtf8): PUtf8Char;
+var
+  depth: integer;
+begin
+  result := p;
+  depth := 0;
+  repeat
+    case result^ of
+      #0:
+        break;
+      '''',
+      '"':
+        result := SkipQuoted(LineIdx, result);
+      '{',
+      '[':
+        inc(depth);
+      '}':
+        if depth = 0 then
+          if EndChar = '}' then
+            Error(LineIdx, 'unbalanced "}" in flow-seq value')
+          else
+            break
+        else
+          dec(depth);
+      ']':
+        if depth = 0 then
+          if EndChar = ']' then
+            Error(LineIdx, 'unbalanced "]" in flow-seq value')
+          else
+            break
+        else
+          dec(depth);
+      ',':
+        if depth = 0 then
+          break;
+    end;
+    inc(result);
+  until false;
+  FastSetString(Text, p, result);
+end;
+
+procedure TYamlToJson.ParseFlowMap(var p: PUtf8Char; LineIdx: integer);
 var
   first: boolean;
-  keyStart, keyEnd, valStart, valEnd: PUtf8Char;
+  keyStart, keyEnd: PUtf8Char;
   keyText, valText: RawUtf8;
-  inSingle, inDouble: boolean;
-  depth: integer;
 begin
   if p^ <> '{' then
     Error(LineIdx, 'expected "{"');
   inc(p);
   fOut.Add('{');
   first := true;
-  while p < stop do
+  while p^ <> #0 do
   begin
     // skip whitespace
-    while (p < stop) and
-          (p^ in [' ', #9]) do
+    while p^ in [' ', #9] do
       inc(p);
-    if p >= stop then
+    if p^ = #0 then
       Error(LineIdx, 'unterminated flow mapping');
     if p^ = '}' then
     begin
@@ -2599,137 +3296,50 @@ begin
     keyStart := p;
     if p^ in ['"', ''''] then
     begin
-      // skip quoted
-      inSingle := p^ = '''';
-      inDouble := p^ = '"';
-      inc(p);
-      while p < stop do
-      begin
-        if inSingle then
-        begin
-          if p^ = '''' then
-          begin
-            if (p + 1 < stop) and
-               ((p + 1)^ = '''') then
-              inc(p, 2)
-            else
-            begin
-              inc(p);
-              break;
-            end;
-          end
-          else
-            inc(p);
-        end
-        else if inDouble then
-        begin
-          if p^ = '\' then
-          begin
-            inc(p);
-            if p < stop then
-              inc(p); // skip the escaped char (guarded against buffer end)
-          end
-          else if p^ = '"' then
-          begin
-            inc(p);
-            break;
-          end
-          else
-            inc(p);
-        end;
-      end;
+      p := SkipQuoted(LineIdx, p);
       keyEnd := p;
-      while (p < stop) and
-            (p^ in [' ', #9]) do
+      while p^ in [' ', #9] do
         inc(p);
-      if (p >= stop) or
-         (p^ <> ':') then
+      if p^ <> ':' then
         Error(LineIdx, 'expected ":" after flow key');
       inc(p);
     end
     else
     begin
-      while (p < stop) and
-            not (p^ in [':', ',', '}', #10]) do
+      while not (p^ in [':', ',', '}', #0, #10]) do
         inc(p);
-      if (p >= stop) or
-         (p^ <> ':') then
+      if p^ <> ':' then
         Error(LineIdx, 'expected ":" after flow key');
       keyEnd := p;
       inc(p);
     end;
-    FastSetString(keyText, keyStart, keyEnd - keyStart);
+    FastSetString(keyText, keyStart, keyEnd);
     TrimSelf(keyText);
-    CheckUnsupportedScalar(LineIdx, keyText);
+    CheckUnsupportedScalar(LineIdx, pointer(keyText));
     if not first then
       fOut.Add(',');
     EmitKey(keyText);
     fOut.AddDirect(':');
     first := false;
     // skip whitespace before value
-    while (p < stop) and
-          (p^ in [' ', #9]) do
+    while p^ in [' ', #9] do
       inc(p);
-    if p >= stop then
+    if p^ = #0 then
       Error(LineIdx, 'unterminated flow mapping (expected value)');
     if p^ in ['{', '['] then
-      ParseFlow(p, stop, LineIdx)
+      ParseFlow(p, LineIdx)
     else
     begin
-      valStart := p;
-      depth := 0;
-      inSingle := false;
-      inDouble := false;
-      while p < stop do
-      begin
-        case p^ of
-          '''':
-            if not inDouble then
-              inSingle := not inSingle;
-          '"':
-            if not inSingle then
-              inDouble := not inDouble;
-          '{', '[':
-            if not inSingle and
-               not inDouble then
-              inc(depth);
-          '}':
-            begin
-              if not inSingle and
-                 not inDouble then
-                if depth = 0 then
-                  break
-                else
-                  dec(depth);
-            end;
-          ']':
-            if not inSingle and
-               not inDouble then
-              if depth = 0 then
-                Error(LineIdx, 'unbalanced "]" in flow-map value')
-              else
-                dec(depth);
-          ',':
-            if not inSingle and
-               not inDouble and
-               (depth = 0) then
-              break;
-        end;
-        inc(p);
-      end;
-      valEnd := p;
-      FastSetString(valText, valStart, valEnd - valStart);
+      p := ParseFlowExtract(p, ']', LineIdx, valText);
       EmitFlowScalar(valText, LineIdx);
     end;
   end;
   Error(LineIdx, 'unterminated flow mapping');
 end;
 
-procedure TYamlToJson.ParseFlowSeq(var p, stop: PUtf8Char; LineIdx: integer);
+procedure TYamlToJson.ParseFlowSeq(var p: PUtf8Char; LineIdx: integer);
 var
-  first, inSingle, inDouble: boolean;
-  depth: integer;
-  valStart, valEnd: PUtf8Char;
+  first: boolean;
   valText: RawUtf8;
 begin
   if p^ <> '[' then
@@ -2737,12 +3347,11 @@ begin
   inc(p);
   fOut.Add('[');
   first := true;
-  while p < stop do
+  while p^ <> #0 do
   begin
-    while (p < stop) and
-          (p^ in [' ', #9]) do
+    while p^ in [' ', #9] do
       inc(p);
-    if p >= stop then
+    if p^ = #0 then
       Error(LineIdx, 'unterminated flow sequence');
     if p^ = ']' then
     begin
@@ -2760,53 +3369,11 @@ begin
     begin
       if not first then
         fOut.AddDirect(',');
-      ParseFlow(p, stop, LineIdx);
+      ParseFlow(p, LineIdx);
       first := false;
       continue;
     end;
-    valStart := p;
-    depth := 0;
-    inSingle := false;
-    inDouble := false;
-    while p < stop do
-    begin
-      case p^ of
-        '''':
-          if not inDouble then
-            inSingle := not inSingle;
-        '"':
-          if not inSingle then
-            inDouble := not inDouble;
-        '{', '[':
-          if not inSingle and
-             not inDouble then
-            inc(depth);
-        '}':
-          if not inSingle and
-             not inDouble then
-            if depth = 0 then
-              Error(LineIdx, 'unbalanced "}" in flow-seq value')
-            else
-              dec(depth);
-        ']':
-          begin
-            if not inSingle and
-               not inDouble then
-              if depth = 0 then
-                break
-              else
-                dec(depth);
-          end;
-        ',':
-          if not inSingle and
-             not inDouble and
-             (depth = 0) then
-            break;
-      end;
-      inc(p);
-    end;
-    valEnd := p;
-    FastSetString(valText, valStart, valEnd - valStart);
+    p := ParseFlowExtract(p, '}', LineIdx, valText);
     if not first then
       fOut.AddDirect(',');
     EmitFlowScalar(valText, LineIdx);
@@ -2817,8 +3384,7 @@ end;
 
 procedure TYamlToJson.ParseValue(MinIndent: integer);
 var
-  content, afterDash: RawUtf8;
-  p, stop: PUtf8Char;
+  p: PUtf8Char;
   lineIdx: integer;
   c: PYamlLine;
 begin
@@ -2839,90 +3405,110 @@ begin
       exit;
     end;
     lineIdx := fIdx;
-    CheckUnsupportedScalar(lineIdx, c^.Content);
+    CheckUnsupportedScalar(lineIdx, pointer(c^.Content));
     if c^.Content[1] in ['{', '['] then
     begin
       // single-line flow at this indent
       p := pointer(c^.Content);
-      stop := p + length(c^.Content);
-      ParseFlow(p, stop, lineIdx);
+      ParseFlow(p, lineIdx);
       inc(fIdx);
-      exit;
-    end;
-    if LineIsDashItem(c^.Content, afterDash) then
-    begin
-      ParseBlockSeq(c^.Indent);
-      exit;
-    end;
-    if LineKeyEnd(c^.Content) >= 0 then
-    begin
-      ParseBlockMap(c^.Indent);
-      exit;
-    end;
-    // plain top-level scalar line
-    if c^.Content[1] in ['|', '>'] then
-      EmitBlockScalar(c^.Content, fLines[fIdx].Indent)
-    else if c^.Content[1] in ['"', ''''] then
-    begin
-      content := c^.Content;
-      inc(fIdx);
-      MergeMultilineQuoted(content, lineIdx);
-      EmitScalarFragment(content, lineIdx);
     end
+    else if YamlDashLine(pointer(c^.Content)) then
+      ParseBlockSeq(c^.Indent)
+    else if YamlLineKeyEnd(c^.Content) >= 0 then
+      ParseBlockMap(c^.Indent)
     else
     begin
-      EmitScalarFragment(c^.Content, lineIdx);
-      inc(fIdx);
+      // plain top-level scalar line
+      if c^.Content[1] in ['|', '>'] then
+        EmitBlockScalar(c^.Content, fLines[fIdx].Indent)
+      else if c^.Content[1] in ['"', ''''] then
+      begin
+        inc(fIdx);
+        MergeMultilineQuoted(c^.Content, lineIdx); // merge in-place
+        EmitScalarFragment(c^.Content, lineIdx);
+      end
+      else
+      begin
+        EmitScalarFragment(c^.Content, lineIdx);
+        inc(fIdx);
+      end;
     end;
   finally
     dec(fDepth);
   end;
 end;
 
-function TYamlToJson.Run(const Yaml: RawUtf8): RawUtf8;
+// split Yaml into fLines[] with indent metadata
+// - accepts both LF and CRLF terminators; trailing \r is stripped
+procedure TYamlToJson.FillLines(const Yaml: RawUtf8);
 var
-  i: PtrInt;
-  p, stop: PUtf8Char;
+  lineStart, lineEnd, lineNext: PUtf8Char;
+  len, indent: PtrInt;
   c: PYamlLine;
 begin
-  SplitYamlLines(Yaml, fLines);
-  fCount := length(fLines);
-  // tolerate a single leading "---" directives-end marker: common in spec
-  // files (GitHub REST API, Kubernetes, etc.). Strip it so downstream line
-  // numbers stay stable with the original file. Any SUBSEQUENT column-0
-  // "---" or "..." still raises as multi-document.
-  if (fCount > 0) and
-     (fLines[0].Indent = 0) and
-     (fLines[0].Content = '---') then
-    fLines[0].Content := '';
-  // upfront scan: multi-doc separators, tab-indented lines, YAML directives
-  // - per YAML 1.2 spec, "---" and "..." markers are only structural when at
-  // column 0; inside indented content (block scalars, etc.) they're literal
-  c := pointer(fLines);
-  for i := 0 to fCount - 1 do
-  begin
-    if (c^.Indent = 0) and
-       ((c^.Content = '---') or (c^.Content = '...')) then
-      Error(i, 'multi-document streams are not supported');
-    // YAML directives (%YAML, %TAG, ...): start with '%' at column 0
-    if (c^.Indent = 0) and
-       (c^.Content <> '') and
-       (c^.Content[1] = '%') then
-      Error(i, 'YAML directives (%YAML / %TAG ...) are not supported');
-    // tabs in leading whitespace: YAML forbids tab indentation
-    p := pointer(c^.Raw);
-    if p <> nil then
+  fCount := 0;
+  fLines := nil;
+  c := nil; // for Delphi compiler
+  lineStart := pointer(Yaml);
+  if lineStart = nil then
+    exit;
+  lineEnd := lineStart + length(Yaml);
+  repeat
+    // detect line ending (using SSE2 asm if available)
+    len := BufferLineLength(lineStart, lineEnd); // both CRLF or LF
+    lineNext := lineStart + len;
+    // prepare a new entry in fLines[]
+    if fCount >= length(fLines) then
     begin
-      stop := p + length(c^.Raw);
-      while (p < stop) and (p^ in [' ', #9]) do
-      begin
-        if p^ = #9 then
-          Error(i, 'tab characters are not allowed for indentation');
-        inc(p);
-      end;
-    end;
-    inc(c);
-  end;
+      SetLength(fLines, NextGrow(fCount));
+      c := @fLines[fCount];
+    end
+    else
+      inc(c);
+    // compute indentation count
+    indent := 0; // direct c^.Indent use trigger invalid code on FPC arm32
+    while lineStart[indent] = ' ' do
+      inc(indent);
+    inc(lineStart, indent); // trim left
+    dec(len, indent);
+    c^.Indent := indent;
+    // upfront scan: reject multi-doc separators and YAML directives
+    if lineStart^ = #9 then
+      Error(fCount, 'tab characters are not allowed for indentation')
+    else if c^.Indent = 0 then
+      // per YAML 1.2 spec, --- and ... markers are only structural when at
+      // col 0; inside indented content (block scalars, etc.) they're literal
+      if lineStart^ = '%' then
+        Error(fCount, 'YAML directives (%YAML / %TAG ...) are not supported')
+      else if len = 3 then
+        if YamlMultiDocument(lineStart) then
+           if fCount = 0 then
+             len := 0 // tolerate a single leading "---" marker
+           else
+             Error(fCount, 'multi-document streams are not supported');
+    // store trimmed content
+    while (len > 0) and
+          (lineStart[len - 1] = ' ') do
+      dec(len); // trim right
+    FastSetString(c^.Content, lineStart, len);
+    inc(fCount);
+    // ignore a single CRLF/LF and go to next line
+    lineStart := lineNext;
+    if lineStart^ = #13 then
+      inc(lineStart);
+    if lineStart^ = #10 then
+      inc(lineStart);
+  until lineStart^ = #0;
+  if length(fLines) <> fCount then
+    DynArrayFakeLength(fLines, fCount);
+end;
+
+function TYamlToJson.Run(const Yaml: RawUtf8): RawUtf8;
+var
+  c: PYamlLine;
+begin
+  FillLines(Yaml);
   fIdx := 0;
   c := SkipBlankLines;
   if AtEnd then
@@ -2935,33 +3521,65 @@ begin
   // topIndent that was not consumed indicates an inconsistent-indent error
   SkipBlankLines;
   if not AtEnd then
-    Error(fIdx, 'unexpected line at this indentation');
+    ErrorFmt(fIdx, 'unexpected line at this indentation (idx=% count=%)',
+      [fIdx, fCount]);
   fOut.SetText(result);
 end;
 
+function IsYamlFileName(const FileName: TFileName): boolean;
+begin
+  result := SameExt(FileName, ['yaml', 'yml'], {withoutdot=}true) >= 0;
+end;
+
+function YamlToJson(const Yaml: RawUtf8): RawUtf8;
+var
+  conv: TYamlToJson;
+begin
+  conv := TYamlToJson.Create;
+  try
+    result := conv.Run(Yaml);
+  finally
+    conv.Free;
+  end;
+end;
+
+function TryYamlToJson(const Yaml: RawUtf8; out Json: RawUtf8): boolean;
+begin
+  try
+    Json := YamlToJson(Yaml); // may raise EYamlException
+    result := true;
+  except
+    result := false;
+  end;
+end;
+
+function JsonToYaml(const Json: RawUtf8; Options: TYamlWriterOptions;
+  DocOptions: TDocVariantOptions): RawUtf8;
+var
+  doc: TDocVariantData;
+begin
+  if doc.InitJson(Json, DocOptions) then
+    result := VariantToYaml(variant(doc), Options)
+  else
+    FastAssignNew(result);
+end;
 
 procedure YamlToVariant(const Yaml: RawUtf8; out Doc: TDocVariantData;
   Options: TDocVariantOptions);
 var
-  conv: TYamlToJson;
-  json: RawUtf8;
+  json: RawUtf8; // in two steps for FPC arm32
 begin
-  conv := TYamlToJson.Create;
-  try
-    json := conv.Run(Yaml);
-  finally
-    conv.Free;
-  end;
+  json := YamlToJson(Yaml);
   if Doc.InitJsonInPlace(pointer(json), Options) = nil then
     EYamlException.RaiseU('YamlToVariant: JSON output error');
 end;
 
 function TryYamlToVariant(const Yaml: RawUtf8;
-  out Doc: TDocVariantData): boolean;
+  out Doc: TDocVariantData; Options: TDocVariantOptions): boolean;
 // convenience alias preserving mormot.net.openapi's exact options set
 begin
   try
-    YamlToVariant(Yaml, Doc, JSON_FAST + [dvoInternNames]);
+    YamlToVariant(Yaml, Doc, Options);
     result := true;
   except
     result := false;
@@ -2971,19 +3589,13 @@ end;
 function TryYamlFileToVariant(const FileName: TFileName; out Doc: TDocVariantData;
   Options: TDocVariantOptions): boolean;
 var
-  content: RawUtf8;
+  yaml: RawUtf8;
 begin
-  content := RawUtf8FromFile(FileName);
-  if content = '' then
+  yaml := RawUtf8FromFile(FileName); // BOM stripping
+  if yaml = '' then
     EYamlException.RaiseUtf8('TryYamlFileToVariant: file not found: %',
       [FileName]);
-  // BOM stripping happens inside YamlToVariant now
-  try
-    YamlToVariant(content, Doc, Options);
-    result := true;
-  except
-    result := false;
-  end;
+  result := TryYamlToVariant(yaml, Doc, Options);
 end;
 
 
@@ -2993,15 +3605,12 @@ type
   TVariantToYaml = class
   private
     fOut: TJsonWriter;
-    fOptions: TYamlWriterOptions;
-    procedure WriteValue(const v: variant; Indent: PtrInt);
+    fOptions: TYamlWriterOptions; // not used yet
+    procedure WriteVarData(vd: PVarData; Indent: PtrInt);
     procedure WriteBlockMap(const dv: TDocVariantData; Indent: PtrInt);
     procedure WriteBlockSeq(const dv: TDocVariantData; Indent: PtrInt);
-    procedure WriteScalar(const v: variant);
-    procedure WriteYamlKey(const K: RawUtf8);
+    procedure WriteKey(const K: RawUtf8);
       {$ifdef HASINLINE} inline; {$endif}
-    procedure WriteYamlString(const S: RawUtf8);
-    procedure WriteYamlVariantAsString(const v: variant);
     procedure WriteIndent(N: PtrInt);
       {$ifdef HASINLINE} inline; {$endif}
   public
@@ -3028,248 +3637,122 @@ begin
   fOut.AddChars(' ', N);
 end;
 
-procedure TVariantToYaml.WriteYamlString(const S: RawUtf8);
-var
-  needsQuote, hasSpecial: boolean;
-  i, n: PtrInt;
-  c: AnsiChar;
+procedure TVariantToYaml.WriteKey(const K: RawUtf8);
 begin
-  n := length(S);
-  if n = 0 then
-  begin
-    fOut.AddShorter('""');
-    exit;
-  end;
-  hasSpecial := false;
-  needsQuote := false;
-  // leading chars that need quoting
-  if S[1] in [' ', #9, '!', '&', '*', '>', '|', '%', '@', '`', '"', '''',
-              '#', '-', '?', ':', '{', '[', '}', ']', ','] then
-    needsQuote := true;
-  // trailing whitespace triggers quotes
-  if (not needsQuote) and
-     (S[n] in [' ', #9]) then
-    needsQuote := true;
-  // reserved plain-scalar forms: null, bool, numbers - must be quoted to
-  // preserve string type on round-trip
-  if not needsQuote then
-  begin
-    if IsYamlNull(S) or
-       IdemPropNameU(S, 'true') or
-       IdemPropNameU(S, 'false') then
-      needsQuote := true
-    else if IsYamlFloat(S) then
-      needsQuote := true
-    else
-    begin
-      i := 1;
-      if S[1] in ['-', '+'] then
-        inc(i);
-      if (i <= n) and
-         (S[i] in ['0'..'9']) then
-      begin
-        needsQuote := true;
-        while i <= n do
-          if S[i] in ['0'..'9', 'x', 'o', 'a'..'f', 'A'..'F'] then
-            inc(i)
-          else
-          begin
-            needsQuote := false;
-            break;
-          end;
-      end;
-    end;
-  end;
-  // scan for chars that require escape
-  if not needsQuote then
-    for i := 1 to n do
-    begin
-      c := S[i];
-      if (c < #32) or
-         (c = '"') or
-         (c = '\') then
-      begin
-        needsQuote := true;
-        hasSpecial := true;
-        break;
-      end;
-      if (c = ':') and
-         (i < n) and
-         (S[i + 1] in [' ', #9]) then
-      begin
-        needsQuote := true;
-        break;
-      end;
-      if (c = '#') and
-         (i > 1) and
-         (S[i - 1] in [' ', #9]) then
-      begin
-        needsQuote := true;
-        break;
-      end;
-    end;
-  if not needsQuote then
-  begin
-    fOut.AddNoJsonEscape(pointer(S), n);
-    exit;
-  end;
-  // emit as JSON-escaped double-quoted string - valid YAML 1.2 §5.7
-  // since the JSON escape set is a subset of YAML's flow-scalar escapes
-  fOut.AddJsonString(S);
-  // hasSpecial is still computed for potential future heuristics
-  if hasSpecial then ;
-end;
-
-procedure TVariantToYaml.WriteYamlKey(const K: RawUtf8);
-begin
-  WriteYamlString(K);
-end;
-
-procedure TVariantToYaml.WriteYamlVariantAsString(const v: variant);
-var
-  s: RawUtf8;
-begin
-  VariantToUtf8(v, s);
-  WriteYamlString(s);
-end;
-
-procedure TVariantToYaml.WriteScalar(const v: variant);
-var
-  vd: TVarData absolute v;
-  vt: cardinal;
-begin
-  vt := vd.VType;
-  if (vt <= varOleUInt) and
-     (vt <> varOleStr) then
-    // simple and numeric types share the same text form in JSON and YAML, so
-    // let TJsonWriter.AddVariant emit them directly without any escaping
-    fOut.AddVariant(v, twNone)
-  else if vt = varString then
-    // in a TDocVariant, strings are usually normalized as RawUtf8
-    WriteYamlString(RawUtf8(vd.VAny))
-  else
-    // string-like or unknown: coerce to UTF-8 and apply YAML quoting rules
-    WriteYamlVariantAsString(v);
+  WriteYamlString(fOut, pointer(K), length(K));
 end;
 
 procedure TVariantToYaml.WriteBlockMap(const dv: TDocVariantData; Indent: PtrInt);
 var
   i: PtrInt;
+  v: PVariant;
   cd: PDocVariantData;
 begin
   if dv.Count = 0 then
   begin
-    fOut.AddShorter('{}');
+    fOut.AddShort4(ord('{') + ord('}') shl 8, 2);
     exit;
   end;
-  for i := 0 to dv.Count - 1 do
-  begin
-    if i > 0 then
-      WriteIndent(Indent);
-    WriteYamlKey(dv.Names[i]);
+  i := 0;
+  v := pointer(dv.Values);
+  repeat
+    WriteKey(dv.Names[i]);
     fOut.AddDirect(':');
-    if _Safe(dv.Values[i], cd) and
+    if _Safe(v^, cd) and
        (cd^.Count > 0) then
     begin
       fOut.Add(#10);
       WriteIndent(Indent + 2);
-      WriteValue(dv.Values[i], Indent + 2);
+      WriteVarData(PVarData(cd), Indent + 2);
     end
     else
     begin
       fOut.Add(' ');
-      WriteValue(dv.Values[i], Indent + 2);
+      WriteVarData(PVarData(v), Indent + 2);
     end;
-    if i < dv.Count - 1 then
-      fOut.Add(#10);
-  end;
+    inc(i);
+    if i = dv.Count then
+      break;
+    inc(v);
+    fOut.AddDirect(#10);
+    WriteIndent(Indent);
+  until false;
 end;
 
 procedure TVariantToYaml.WriteBlockSeq(const dv: TDocVariantData; Indent: PtrInt);
 var
   i: PtrInt;
+  v: PVariant;
   cd: PDocVariantData;
 begin
   if dv.Count = 0 then
   begin
-    fOut.AddShorter('[]');
+    fOut.AddShort4(ord('[') + ord(']') shl 8, 2);
     exit;
   end;
-  for i := 0 to dv.Count - 1 do
-  begin
-    if i > 0 then
-      WriteIndent(Indent);
-    fOut.AddShorter('- ');
-    if _Safe(dv.Values[i], cd) and (cd^.Count > 0) then
+  i := 0;
+  v := pointer(dv.Values);
+  repeat
+    fOut.AddShort4(ord('-') + ord(' ') shl 8, 2);
+    if _Safe(v^, cd) and
+       (cd^.Count > 0) then
     begin
       // put child map/seq inline after the dash
       if cd^.Kind = dvObject then
-      begin
-        WriteBlockMap(cd^, Indent + 2);
-      end
+        WriteBlockMap(cd^, Indent + 2)
       else
       begin
-        fOut.Add(#10);
+        fOut.AddDirect(#10);
         WriteIndent(Indent + 2);
         WriteBlockSeq(cd^, Indent + 2);
       end;
     end
     else
-    begin
-      WriteValue(dv.Values[i], Indent + 2);
-    end;
-    if i < dv.Count - 1 then
-      fOut.Add(#10);
-  end;
+      WriteVarData(PVarData(v), Indent + 2);
+    inc(i);
+    if i = dv.Count then
+      break;
+    inc(v);
+    fOut.AddDirect(#10);
+    WriteIndent(Indent);
+  until false;
 end;
 
-procedure TVariantToYaml.WriteValue(const v: variant; Indent: PtrInt);
+procedure TVariantToYaml.WriteVarData(vd: PVarData; Indent: PtrInt);
 var
-  cd: PDocVariantData;
+  vt: cardinal;
 begin
-  if _Safe(v, cd) and
-     (cd^.Kind <> dvUndefined) then
-  begin
-    if cd^.Count = 0 then
-    begin
-      if cd^.Kind = dvArray then
-        fOut.AddShorter('[]')
-      else
-        fOut.AddShorter('{}');
-      exit;
-    end;
-    if cd^.Kind = dvObject then
-      WriteBlockMap(cd^, Indent)
+  repeat
+    vt := vd^.VType;
+    if vt <> varVariantByRef then
+      break;
+    vd := vd^.VPointer;
+  until false;
+  if (vt <= varOleUInt) and
+     (vt <> varOleStr) then
+    // simple and numeric types share the same text form in JSON and YAML, so
+    // let TJsonWriter.AddVariant emit them directly without any escaping
+    fOut.AddVariant(PVariant(vd)^, twNone)
+  else if vt = varString then
+    // in a TDocVariant, varString are usually normalized as RawUtf8
+    WriteYamlString(fOut, vd^.VAny, length(RawUtf8(vd^.VAny)))
+  else if vt = DocVariantVType then
+    // nested object or array
+    if PDocVariantData(vd)^.IsObject then
+      WriteBlockMap(PDocVariantData(vd)^, Indent)
+    else if PDocVariantData(vd)^.IsArray then
+      WriteBlockSeq(PDocVariantData(vd)^, Indent)
     else
-      WriteBlockSeq(cd^, Indent);
-    exit;
-  end;
-  WriteScalar(v);
+      fOut.AddNull
+  else
+    // string-like or unknown: coerce to UTF-8 and apply YAML quoting rules
+    WriteYamlVariant(fOut, PVariant(vd)^);
 end;
 
 function TVariantToYaml.Run(const Doc: variant): RawUtf8;
-var
-  cd: PDocVariantData;
 begin
-  if _Safe(Doc, cd) and
-     (cd^.Kind <> dvUndefined) then
-  begin
-    if cd^.Count = 0 then
-    begin
-      if cd^.Kind = dvArray then
-        result := '[]' + #10
-      else
-        result := '{}' + #10;
-      exit;
-    end;
-    if cd^.Kind = dvObject then
-      WriteBlockMap(cd^, 0)
-    else
-      WriteBlockSeq(cd^, 0);
-    fOut.Add(#10);
-  end
-  else
-    WriteScalar(Doc);
+  WriteVarData(@Doc, {indent=}0);
+  fOut.AddDirect(#10);
   fOut.SetText(result);
 end;
 
@@ -3292,37 +3775,42 @@ begin
   FileFromString(VariantToYaml(Doc, Options), FileName);
 end;
 
-function IsYamlFileName(const FileName: TFileName): boolean;
+procedure WriteYamlString(W: TJsonWriter; P: PUtf8Char; L: PtrInt);
 begin
-  result := SameExt(FileName, ['yaml', 'yml'], {withoutdot=}true) >= 0;
-end;
-
-function YamlToJson(const Yaml: RawUtf8): RawUtf8;
-var
-  conv: TYamlToJson;
-  src: RawUtf8;
-begin
-  src := Yaml;
-  // strip optional UTF-8 BOM - accepted in files and in-memory buffers
-  if (length(src) >= 3) and
-     (PCardinal(pointer(src))^ and $00ffffff = BOM_UTF8) then
-    delete(src, 1, 3);
-  conv := TYamlToJson.Create;
-  try
-    result := conv.Run(src);
-  finally
-    conv.Free;
-  end;
-end;
-
-function JsonToYaml(const Json: RawUtf8; Options: TYamlWriterOptions): RawUtf8;
-var
-  doc: TDocVariantData;
-begin
-  if doc.InitJson(Json, JSON_YAML) then
-    result := VariantToYaml(variant(doc), Options)
+  if L <= 0 then
+    W.AddShort4(ord('"') + ord('"') shl 8, 2)
+  else if
+      // leading chars that need quoting
+      (P^ in [' ', #9, '!', '&', '*', '>', '|', '%', '@', '`', '"', '''',
+              '#', '-', '?', ':', '{', '[', '}', ']', ',']) or
+      // trailing whitespace triggers quotes
+      (P[L - 1] in [' ', #9]) or
+      // reserved plain-scalar forms: null, bool, numbers - must be quoted
+      // to preserve string type on round-trip
+      IsYamlNull(P) or
+      IsBooleanJson(P) or
+      IsNumberJson(P) or
+      // quick scan for chars that require escape
+      YamlSpecialChars(P) then
+    // emit as JSON-escaped double-quoted string - valid YAML 1.2 §5.7
+    // since the JSON escape set is a subset of YAML's flow-scalar escapes
+    W.AddJsonStringBuffer(P, L)
   else
-    result := '';
+    // we can directly output this text without quotes
+    W.AddNoJsonEscape(P, L);
+end;
+
+procedure WriteYamlVariant(W: TJsonWriter; const V: variant);
+var
+  tmp: TTempUtf8;
+begin
+  if VariantToTempUtf8(V, tmp) then
+    // wasString: apply YAML quoting rules
+    WriteYamlString(W, tmp.Text, tmp.Len)
+  else
+    // direct output of e.g. BSON content as JSON
+    W.AddNoJsonEscape(tmp.Text, tmp.Len);
+  TempUtf8Done(tmp);
 end;
 
 
@@ -3391,7 +3879,7 @@ function IsHttpOrHttps(P: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 begin
   result := (PCardinal(P)^ = HTTP__32) and
-            ((PCardinal(P + 4)^ and $ffffff = HTTP__24) or
+            ((PCardinal(P + 3)^ = ord('p') + HTTP__24 shl 8) or
              (PCardinal(P + 4)^ =
              ord('s') + ord(':') shl 8 + ord('/') shl 16 + ord('/') shl 24));
 end;
@@ -3803,6 +4291,46 @@ begin
   doesc.AddHtmlEscapeMarkdown(W, P, esc);
 end;
 
+var
+  _EMOJISET: boolean;
+  _EMOJI_UTF8: array[TEmoji] of TStrRecConst;
+
+procedure EmojiInit;
+var
+  e: TEmoji;
+begin
+  if _EMOJISET then
+    exit;
+  GlobalLock;
+  if not _EMOJISET then
+  begin
+    // Emoji Efficient Parsing
+    Assert(ord(high(TEmoji)) = $4f + 1);
+    EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0
+    GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, scLowerCase);
+    FastAssignNew(EMOJI_TEXT[eNone]);
+    for e := succ(low(e)) to high(e) do
+    begin
+      Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
+      // order matches U+1F600 to U+1F64F codepoints
+      Ucs4ToUtf8(ord(e) + $1f5ff, FastSetConst(EMOJI_UTF8[e], _EMOJI_UTF8[e], nil, 4));
+    end;
+    EMOJI_AFTERDOTS[')'] := eSmiley;
+    EMOJI_AFTERDOTS['('] := eFrowning;
+    EMOJI_AFTERDOTS['|'] := eExpressionless;
+    EMOJI_AFTERDOTS['/'] := eConfused;
+    EMOJI_AFTERDOTS['D'] := eLaughing;
+    EMOJI_AFTERDOTS['o'] := eOpen_mouth;
+    EMOJI_AFTERDOTS['O'] := eOpen_mouth;
+    EMOJI_AFTERDOTS['p'] := eYum;
+    EMOJI_AFTERDOTS['P'] := eYum;
+    EMOJI_AFTERDOTS['s'] := eScream;
+    EMOJI_AFTERDOTS['S'] := eScream;
+    _EMOJISET := true;
+  end;
+  GlobalUnLock;
+end;
+
 function EmojiFromText(P: PUtf8Char; len: PtrInt): TEmoji;
 begin
   // RTTI has shortstrings in adjacent L1 cache lines -> faster than EMOJI_TEXT[]
@@ -3815,6 +4343,8 @@ function EmojiParseDots(var P: PUtf8Char; W: TTextWriter): TEmoji;
 var
   c: PUtf8Char;
 begin
+  if not _EMOJISET then
+    EmojiInit;
   result := eNone;
   inc(P); // ignore trailing ':'
   c := P;
@@ -3835,7 +4365,7 @@ begin
     begin
       P := c + 1; // continue parsing after the Emoji text
       if W <> nil then
-        W.AddShort(pointer(EMOJI_UTF8[result]), 4);
+        W.AddShort4(_EMOJI_UTF8[result].TextLo);
       exit;
     end;
   end;
@@ -3848,6 +4378,8 @@ var
   B: PUtf8Char;
   c: cardinal;
 begin
+  if not _EMOJISET then
+    EmojiInit;
   if (P <> nil) and
      (W <> nil) then
     repeat
@@ -4169,9 +4701,9 @@ begin
   P := pointer(Content);
   PWord(UpperCopy255(@up, SectionName))^ := ord(']');
   if FindSectionFirstLine(P, @up, @PEnd) then
-    FastSetString(result, P, PEnd - P)
+    FastSetString(result, P, PEnd)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function DeleteSection(var Content: RawUtf8; const SectionName: RawUtf8;
@@ -4465,7 +4997,7 @@ var
       if FindSectionFirstLine(nested, @up, @nestedend) then
       begin
         // multi-line text value has been stored in its own section
-        FastSetString(v, nested, nestedend - nested);
+        FastSetString(v, nested, nestedend);
         if p^.Prop^.SetValueText(obj, v) then
           result := true;
       end;
@@ -4511,7 +5043,7 @@ var
             nestedend := PosChar(nested, ']');
             if nestedend <> nil then
             begin
-              FastSetString(n, nested, nestedend - nested);
+              FastSetString(n, nested, nestedend);
               item := p^.Value.ArrayRtti.ClassNewInstance;
               if item <> nil then
                 if IniToObject(Ini, item, n, DocVariantOptions, Level + 1,
@@ -4754,7 +5286,7 @@ var
   end;
 
 begin
-  result := '';
+  FastAssignNew(result);
   if Instance = nil then
     exit;
   nestedcount := 0;
@@ -4784,45 +5316,85 @@ begin
   fIniOptions := [ifClassSection, ifClassValue, ifMultiLineSections, ifArraySection];
 end;
 
-function TSynJsonFileSettings.AfterLoad: boolean;
+function TSynJsonFileSettings.AfterLoad(const aText: RawUtf8): boolean;
 begin
+  fCurrentContent := aText;
+  fCurrentHash := DefaultHashTrim(aText);
   result := true; // success
 end;
 
-function TSynJsonFileSettings.LoadFromJson(const aJson: RawUtf8;
+function TSynJsonFileSettings.LoadFromJsonText(const aJson: RawUtf8): boolean;
+begin
+  result := JsonSettingsToObject(aJson, self) and // recognize HJson/JSON5
+            AfterLoad(aJson);
+end;
+
+function TSynJsonFileSettings.LoadFromIniText(const aIni, aSectionName: RawUtf8): boolean;
+begin
+  fSectionName := aSectionName; // to be used when writing
+  result := IniToObject(aIni, self, aSectionName, @JSON_[mFastFloat], 0, fIniOptions);
+  if not result then
+    exit;
+  include(fSettingsOptions, fsoWriteIni); // save back as INI
+  result := AfterLoad(aIni);
+end;
+
+function TSynJsonFileSettings.LoadFromYamlText(const aYaml: RawUtf8): boolean;
+var
+  json: RawUtf8;
+begin
+  result := TryYamlToJson(aYaml, json) and
+            JsonSettingsToObject(json, self);
+  if not result then
+    exit;
+  include(fSettingsOptions, fsoWriteYaml); // save back as YAML
+  result := AfterLoad(aYaml);
+end;
+
+function TSynJsonFileSettings.LoadFromText(const aContent: RawUtf8;
   const aSectionName: RawUtf8): boolean;
 begin
   if fsoReadIni in fSettingsOptions then
   begin
-    fSectionName := aSectionName;
-    result := false;
+    result := LoadFromIniText(aContent, aSectionName); // only INI
+    include(fSettingsOptions, fsoWriteIni); // save back as INI
   end
   else
-    result := JsonSettingsToObject(aJson, self); // supports also json5/jsonH
-  if not result then
-  begin
-    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat], 0, fIniOptions);
-    if result then
-    begin
-      fSectionName := aSectionName;
-      include(fSettingsOptions, fsoWriteIni); // save back as INI
-    end;
-  end;
-  if result then
-    result := AfterLoad;
+    result := LoadFromJsonText(aContent) or
+              LoadFromIniText(aContent, aSectionName); // fallback to INI
 end;
+
+{$ifndef PUREMORMOT2}
+function TSynJsonFileSettings.LoadFromJson(const aContent: RawUtf8;
+  const aSectionName: RawUtf8): boolean;
+begin
+  result := LoadFromText(aContent, aSectionName);
+end;
+{$endif PUREMORMOT2}
 
 function TSynJsonFileSettings.LoadFromFile(const aFileName: TFileName;
   const aSectionName: RawUtf8): boolean;
+var
+  text: RawUtf8;
 begin
+  fCurrentContent := ''; // ignore file neither valid JSON nor INI/YAML
+  fCurrentHash := 0;
   fFileName := aFileName;
-  fInitialJsonContent := RawUtf8FromFile(aFileName); // may detect BOM
-  fInitialFileHash := DefaultHash(fInitialJsonContent);
-  result := LoadFromJson(fInitialJsonContent, aSectionName);
-  if result then
-    exit; // success
-  fInitialJsonContent := ''; // file was neither valid JSON nor INI: ignore
-  fInitialFileHash := 0;
+  text := RawUtf8FromFile(aFileName); // may detect BOM
+  if text = '' then
+    result := false
+  else
+    case SameExt(aFileName,
+        ['yaml', 'yml', 'ini', 'json', 'jsonc', 'json5', 'hjson'], true) of
+      0, 1:
+        result := LoadFromYamlText(text);
+      2:
+        result := LoadFromIniText(text, aSectionName);
+      3 .. 6:
+        result := LoadFromJsonText(text); // JsonSettingsToObject supports those
+    else
+      result := LoadFromText(text, aSectionName); // detect JSON or INI
+    end;
 end;
 
 function TSynJsonFileSettings.FolderName: TFileName;
@@ -4844,23 +5416,25 @@ begin
      (fsoDisableSaveIfNeeded in fSettingsOptions) then
     exit;
   opt := SETTINGS_WRITEOPTIONS;
-  if fsoNoEnumsComment in fSettingsOptions then
+  if fSettingsOptions * [fsoNoEnumsComment, fsoWriteYaml, fsoWriteIni] <> [] then
     exclude(opt, woHumanReadableEnumSetAsComment);
   if fsoWriteIni in fSettingsOptions then
     saved := ObjectToIni(self, fSectionName, opt, 0, fIniOptions)
   else
   begin
     saved := ObjectToJson(self, opt);
-    if fsoWriteHjson in fSettingsOptions then
+    if fsoWriteYaml in fSettingsOptions then
+      saved := JsonToYaml(saved)
+    else if fsoWriteHjson in fSettingsOptions then
       saved := JsonReformat(saved, jsonH); // very human friendly
   end;
-  if saved = fInitialJsonContent then
-    exit;
+  if saved = fCurrentContent then
+    exit; // don't rewrite the same content on disk
   result := FileFromString(saved, fFileName);
   if not result then
     exit;
-  fInitialJsonContent := saved;
-  fInitialFileHash := DefaultHash(saved);
+  fCurrentContent := saved;
+  fCurrentHash := DefaultHashTrim(saved);
 end;
 
 
@@ -4872,7 +5446,7 @@ const
 { TPreProc }
 
 type
-  TPreprocIfLevel = 0 .. 15; // 0 = outer level, 1..15 = nested levels
+  TPreprocIfLevel = 0 .. 31; // 0 = outer level, 1..31 = nested levels
   TPreprocIf = (
     piNone,
     piIf,
@@ -4884,10 +5458,10 @@ type
   TPreproc = class(TPreprocAbstract)
   protected
     Vars: TBinDictionary;
-    IfLevel: TPreprocIfLevel;
-    IfSkip: set of TPreprocIfLevel;
-    IncludeDepth: byte;
-    Options: TPreprocFlags;
+    IfLevel: TPreprocIfLevel;       // 8-bit
+    IncludeDepth: byte;             // 8-bit
+    Options: TPreprocFlags;         // 8-bit
+    IfSkip: set of TPreprocIfLevel; // 32-bit
     IncludeFolder: TFileName;
     procedure DoSkip(var P: PUtf8Char);
     function DoFind(Key: pointer; KeyLen: PtrInt; var ValueLen: PtrInt): pointer;
@@ -5041,22 +5615,22 @@ begin
         result := piIf;
         inc(P, 4);
       end;
-    ord('$') + ord('i') shl 8 + ord('f') shl 16 + ord('d') shl 24:
-      if PCardinal(P + 4)^ and $ffffff =
-           ord('e') + ord('f') shl 8 + ord(' ') shl 16 then         // '$ifdef '
+    ord('$') + ord('i') shl 8 + ord('f') shl 16 + ord('d') shl 24:  // '$ifdef '
+      if PCardinal(P + 3)^ = ord('d') + ord('e') shl 8 + ord('f') shl 16 +
+                             ord(' ') shl 24 then
       begin
         inc(P, 7);
         result := piIfDef;
       end;
-    ord('$') + ord('e') shl 8 + ord('l') shl 16 + ord('s') shl 24:
-      if cardinal(PWord(P + 4)^) = ord('e') + ord('$') shl 8 then   // '$else$'
+    ord('$') + ord('e') shl 8 + ord('l') shl 16 + ord('s') shl 24:  // '$else$'
+      if cardinal(PWord(P + 4)^) = ord('e') + ord('$') shl 8 then
       begin
         inc(P, 6);
         result := piElse;
       end;
-    ord('$') + ord('e') shl 8 + ord('n') shl 16 + ord('d') shl 24:
-      if PCardinal(P + 4)^ and $ffffff =
-           ord('i') + ord('f') shl 8 + ord('$') shl 16 then         // '$endif$'
+    ord('$') + ord('e') shl 8 + ord('n') shl 16 + ord('d') shl 24:  // '$endif$'
+      if PCardinal(P + 3)^ = ord('d') + ord('i') shl 8 + ord('f') shl 16 +
+                             ord('$') shl 24 then
       begin
         inc(P, 7);
         result := piEnd;
@@ -5066,41 +5640,38 @@ end;
 
 procedure TPreproc.DoSkip(var P: PUtf8Char);
 begin
-  while true do
-    if P^ = #0 then
-      exit
-    else if P^ <> '$' then
-      inc(P) // most common case
-    else
-      case ParseIfDollar(P) of
-        piNone:
-          inc(P);
-        piIf:
-          begin
-            dec(P, 4); // caller should detect and execute DslIf()
-            exit;
-          end;
-        piIfDef:
-          begin
-            dec(P, 7);
-            exit;
-          end;
-        piEnd:
-          begin
-            DoEndif(P);
-            exit;
-          end;
-        piElse:
-          if IfLevel = 0 then // paranoid
-            exit
-          else if IfLevel in IfSkip then
-          begin
-            exclude(IfSkip, IfLevel); // include until $end$
-            exit;
-          end
-          else
-            include(IfSkip, IfLevel);  // and continue skip loop
-      end;
+  repeat
+    P := PosChar(P, '$'); // use SSE2 on x86_64
+    case ParseIfDollar(P) of
+      piNone:
+        inc(P);
+      piIf:
+        begin
+          dec(P, 4); // caller should detect and execute DslIf()
+          exit;
+        end;
+      piIfDef:
+        begin
+          dec(P, 7);
+          exit;
+        end;
+      piEnd:
+        begin
+          DoEndif(P);
+          exit;
+        end;
+      piElse:
+        if IfLevel = 0 then // paranoid
+          exit
+        else if IfLevel in IfSkip then
+        begin
+          exclude(IfSkip, IfLevel); // include until $end$
+          exit;
+        end
+        else
+          include(IfSkip, IfLevel);  // and continue skip loop
+    end;
+  until false;
 end;
 
 function TPreproc.DoIf(P: PUtf8Char): PUtf8Char;
@@ -5701,7 +6272,7 @@ var
   W: TTextWriter;
   temp: TTextWriterStackBuffer;
 begin
-  result := '';
+  FastAssignNew(result);
   if (Data = nil) or
      (Len <= 0) or
      (PerLine <= 0) then
@@ -5814,7 +6385,7 @@ var
   W: TTextWriter;
   temp: TTextWriterStackBuffer;
 begin
-  result := '';
+  FastAssignNew(result);
   if Text = '' then
     exit;
   W := TTextWriter.CreateOwnedStream(temp);
@@ -5837,8 +6408,6 @@ end;
 
 procedure InitializeUnit;
 var
-  c: AnsiChar;
-  e: TEmoji;
   esc: PAnsiCharToByte;
 begin
   // HTML Efficient Parsing
@@ -5859,42 +6428,18 @@ begin
   esc['"'] := 4;
   _AddHtmlEscape := __AddHtmlEscape;
   // XML Efficient Parsing
+  FillCharFast(XML_ESC, 31, 9); // ignore invalid #1 .. #31 control char
   esc := @XML_ESC; // XML_ESCAPED[] = &#x09 &#x0a &#x0d &lt &gt &amp &quot &apos
-  for c := #1 to #31 do
-    esc[c] := 9; // ignore invalid control char
-  esc[#0]  := 1; // go out of loop to abort
-  esc[#9]  := 1;
-  esc[#10] := 2;
-  esc[#13] := 3;
-  esc['<'] := 4;
-  esc['>'] := 5;
-  esc['&'] := 6;
-  esc['"'] := 7;
+  esc[#0]   := 1;   // go out of loop to abort
+  esc[#9]   := 1;
+  esc[#10]  := 2;
+  esc[#13]  := 3;
+  esc['<']  := 4;
+  esc['>']  := 5;
+  esc['&']  := 6;
+  esc['"']  := 7;
   esc[''''] := 8;
-  // Emoji Efficient Parsing
-  Assert(ord(high(TEmoji)) = $4f + 1);
-  EMOJI_RTTI := GetEnumName(TypeInfo(TEmoji), 1); // ignore eNone=0
-  GetEnumTrimmedNames(TypeInfo(TEmoji), @EMOJI_TEXT, scLowerCase);
-  FastAssignNew(EMOJI_TEXT[eNone]);
-  for e := succ(low(e)) to high(e) do
-  begin
-    Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
-    // order matches U+1F600 to U+1F64F codepoints
-    Ucs4ToUtf8(ord(e) + $1f5ff, FastSetString(EMOJI_UTF8[e], 4));
-  end;
-  EMOJI_AFTERDOTS[')'] := eSmiley;
-  EMOJI_AFTERDOTS['('] := eFrowning;
-  EMOJI_AFTERDOTS['|'] := eExpressionless;
-  EMOJI_AFTERDOTS['/'] := eConfused;
-  EMOJI_AFTERDOTS['D'] := eLaughing;
-  EMOJI_AFTERDOTS['o'] := eOpen_mouth;
-  EMOJI_AFTERDOTS['O'] := eOpen_mouth;
-  EMOJI_AFTERDOTS['p'] := eYum;
-  EMOJI_AFTERDOTS['P'] := eYum;
-  EMOJI_AFTERDOTS['s'] := eScream;
-  EMOJI_AFTERDOTS['S'] := eScream;
-end;
-
+end; // EMOJI_*[] constants are delayed via explicit EmojiInit
 
 initialization
   InitializeUnit;

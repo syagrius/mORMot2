@@ -146,7 +146,7 @@ type
     // - with appended time resolution (us,ms,s) - from MicroSecToString()
     // - is just a wrapper around Pause + Time
     // - you can call Resume to continue adding time to this timer
-    function Stop: TShort16;
+    function Stop: TShort15;
       {$ifdef HASINLINE}inline;{$endif}
     /// stop the timer, returning the total time elapsed as microseconds
     // - is just a wrapper around Pause + Time
@@ -194,20 +194,20 @@ type
     /// compute the per second count
     function PerSec(const Count: QWord): QWord;
     /// compute the time elapsed by count, with appened time resolution (us,ms,s)
-    function ByCount(Count: QWord): TShort16;
+    function ByCount(Count: QWord): TShort15;
     /// returns e.g. '16.9 MB in 102.20ms i.e. 165.5 MB/s'
     function SizePerSec(Size: QWord): ShortString;
     /// textual representation of total time elapsed
     // - with appened time resolution (us,ms,s) - from MicroSecToString()
     // - not to be used in normal code (which could rather call the Stop method),
     // but e.g. for custom performance analysis
-    function Time: TShort16;
+    function Time: TShort15;
     /// textual representation of last process timing after counter stopped
     // - Time returns a total elapsed time, whereas this method only returns
     // the latest resumed time
     // - with appened time resolution (us,ms,s) - from MicroSecToString()
     // - not to be used in normal code, but e.g. for custom performance analysis
-    function LastTime: TShort16;
+    function LastTime: TShort15;
     /// check if Start/Resume were called at least once
     function Started: boolean;
     /// time elapsed in micro seconds after counter stopped
@@ -230,7 +230,7 @@ type
     /// start the high resolution timer
     procedure Start;
     /// stop the timer, returning the time elapsed, with appened time resolution (us,ms,s)
-    function Stop: TShort16;
+    function Stop: TShort15;
     /// stop the timer, ready to continue its time measure
     procedure Pause;
     /// resume a paused timer, or start it if it hasn't be started
@@ -259,7 +259,7 @@ type
     /// start the high resolution timer
     procedure Start;
     /// stop the timer, returning the time elapsed, with appened time resolution (us,ms,s)
-    function Stop: TShort16;
+    function Stop: TShort15;
     /// stop the timer, ready to continue its time measure
     procedure Pause;
     /// resume a paused timer, or start the timer
@@ -280,7 +280,7 @@ type
   TSynMonitorTime = class(TSynPersistent)
   protected
     fMicroSeconds: TSynMonitorTotalMicroSec;
-    function GetAsText: TShort16;
+    function GetAsText: TShort15;
   public
     /// increase the internal time elapsed counter
     procedure AddTime(MicroSeconds: TSynMonitorTotalMicroSec);
@@ -293,7 +293,7 @@ type
     property MicroSec: TSynMonitorTotalMicroSec
       read fMicroSeconds write fMicroSeconds;
     /// micro seconds time elapsed, as '... us-ns-ms-s' text
-    property Text: TShort16
+    property Text: TShort15
       read GetAsText;
   end;
 
@@ -302,7 +302,7 @@ type
   TSynMonitorOneTime = class(TSynPersistent)
   protected
     fMicroSeconds: TSynMonitorOneMicroSec;
-    function GetAsText: TShort16;
+    function GetAsText: TShort15;
   public
     /// compute a number per second, of the current value
     function PerSecond(const Count: QWord): QWord;
@@ -312,7 +312,7 @@ type
     property MicroSec: TSynMonitorOneMicroSec
       read fMicroSeconds write fMicroSeconds;
     /// micro seconds time elapsed, as '... us-ns-ms-s' text
-    property Text: TShort16
+    property Text: TShort15
       read GetAsText;
   end;
 
@@ -329,7 +329,7 @@ type
   TSynMonitorSize = class(TSynMonitorSizeParent)
   protected
     fBytes: TSynMonitorTotalBytes;
-    function GetAsText: TShort16;
+    function GetAsText: TShort15;
   public
     /// increase the internal size counter
     procedure AddSize(Size: TSynMonitorTotalBytes);
@@ -339,7 +339,7 @@ type
     property Bytes: TSynMonitorTotalBytes
       read fBytes write fBytes;
     /// number of bytes, as '... B-KB-MB-GB' text
-    property Text: TShort16
+    property Text: TShort15
       read GetAsText;
   end;
 
@@ -349,13 +349,13 @@ type
   TSynMonitorOneSize = class(TSynMonitorSizeParent)
   protected
     fBytes: TSynMonitorOneBytes;
-    function GetAsText: TShort16;
+    function GetAsText: TShort15;
   published
     /// number of bytes, as raw number
     property Bytes: TSynMonitorOneBytes
       read fBytes write fBytes;
     /// number of bytes, as '... B-KB-MB-GB' text
-    property Text: TShort16
+    property Text: TShort15
       read GetAsText;
   end;
 
@@ -365,13 +365,13 @@ type
   TSynMonitorThroughput = class(TSynMonitorSizeParent)
   protected
     fBytesPerSec: QWord;
-    function GetAsText: TShort16;
+    function GetAsText: TShort15;
   published
     /// number of bytes per second, as raw number
     property BytesPerSec: QWord
       read fBytesPerSec write fBytesPerSec;
     /// number of bytes per second, as '... B-KB-MB-GB/s' text
-    property Text: TShort16
+    property Text: TShort15
       read GetAsText;
   end;
 
@@ -380,10 +380,8 @@ type
   // process is to be monitored
   // - this class is thread-safe for its methods, but you should call explicitly
   // non-reentrant Lock/UnLock to access its individual properties
-  TSynMonitor = class(TObjectWithRttiMethods)
+  TSynMonitor = class(TSynMonitorAbstract)
   protected
-    fSafe: TLightLock; // our fast non-reentrant lock
-    fName: RawUtf8;
     fTaskCount: TSynMonitorCount64;
     fTotalTime: TSynMonitorTime;
     fLastTime: TSynMonitorOneTime;
@@ -409,10 +407,6 @@ type
     /// low-level high-precision timer instance
     InternalTimer: TPrecisionTimer;
     /// initialize the instance nested class properties
-    // - you can specify identifier associated to this monitored resource
-    // which would be used for TSynMonitorUsage persistence
-    constructor Create(const aName: RawUtf8); reintroduce; overload; virtual;
-    /// initialize the instance nested class properties
     constructor Create; overload; override;
     /// finalize the instance
     destructor Destroy; override;
@@ -431,7 +425,7 @@ type
     // - similar to ProcessStart + ProcessDoTask
     // - this method is not thread-safe, due to the shared InternalTimer: use
     // an external TPrecisionTimer then FromExternalMicroSeconds()
-    procedure ProcessStartTask; virtual;
+    procedure ProcessStartTask; override;
     /// should be called when an error occurred
     // - typical use is with ObjectToVariant(E,...) kind of information
     // - thread-safe method
@@ -445,11 +439,11 @@ type
     procedure ProcessErrorFmt(const Fmt: RawUtf8; const Args: array of const);
     /// should be called when an Exception occurred
     // - just a wraper around overloaded ProcessError(), so a thread-safe method
-    procedure ProcessErrorRaised(E: Exception);
+    procedure ProcessErrorRaised(E: Exception); override;
     /// should be called when the process stops, to pause the internal timer
     // - this method is not thread-safe, due to the shared InternalTimer: use
     // an external TPrecisionTimer then FromExternalMicroSeconds()
-    procedure ProcessEnd; virtual;
+    procedure ProcessEnd; override;
     /// could be used to manage information average or sums
     // - thread-safe method calling LockedSum protected virtual method
     procedure Sum(another: TSynMonitor);
@@ -458,7 +452,7 @@ type
     function ComputeDetailsJson: RawUtf8;
     /// appends a JSON content with all published properties information
     // - thread-safe method
-    procedure ComputeDetailsTo(W: TTextWriter); virtual;
+    procedure ComputeDetailsTo(W: TTextWriter); override;
     /// returns a TDocVariant with all published properties information
     // - thread-safe method
     function ComputeDetails: variant;
@@ -630,9 +624,6 @@ type
 
   /// a list of incoming/outgoing data process statistics
   TSynMonitorInputOutputObjArray = array of TSynMonitorInputOutput;
-
-  /// class-reference type (metaclass) of a process statistic information
-  TSynMonitorClass = class of TSynMonitor;
 
 
 { ************ TSynMonitorUsage Process Information Database Storage }
@@ -950,6 +941,7 @@ type
     function HistoryVariant(aProcessID: integer = 0; aDepth: integer = 0): variant;
     /// access to a global instance, corresponding to the current process
     // - its HistoryDepth will be of 60 items
+    // - used e.g. by TRestRunThreads.SystemUseTrack
     class function Current(aCreateIfNone: boolean = true): TSystemUse;
     /// returns detailed CPU and RAM usage history as text of the supplied process
     // - fallback to RetrieveLoadAvg if the ProcessID was not registered
@@ -1012,7 +1004,7 @@ type
     class function FreeAsText(nospace: boolean = false;
       processfree: PRawUtf8 = nil): ShortString;
     /// how many physical memory is currently installed, as text (e.g. '32 GB');
-    class function PhysicalAsText(nospace: boolean = false): TShort16;
+    class function PhysicalAsText(nospace: boolean = false): TShort15;
     /// returns a JSON object with the current system memory information
     // - numbers would be given in KB (Bytes shl 10)
     class function ToJson: RawUtf8;
@@ -1116,8 +1108,7 @@ function ToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // - computed from CpuFeatures set for Intel/AMD or ARM 32-bit/64-bit
 // - contains the Flags: or Features: value of Linux /proc/cpuinfo otherwise
 // (less accurate than our CpuFeatures set on older kernel)
-var
-  CpuFeaturesText: RawUtf8;
+function CpuFeaturesText: RawUtf8;
 
 /// retrieve information about all mounted disk partitions as single line of text
 // - returns e.g. under Linux
@@ -2425,11 +2416,11 @@ begin
   result := fLastTime;
 end;
 
-function TPrecisionTimer.Stop: TShort16;
+function TPrecisionTimer.Stop: TShort15;
 begin
   if fStart <> 0 then
     Pause;
-  MicroSecToString(fTime, result);
+  MicroSecToStringVar(fTime, result);
 end;
 
 function TPrecisionTimer.StopInMicroSec: TSynMonitorTotalMicroSec;
@@ -2439,30 +2430,30 @@ begin
   result := fTime;
 end;
 
-function TPrecisionTimer.Time: TShort16;
+function TPrecisionTimer.Time: TShort15;
 begin
   if fStart <> 0 then
     Pause;
-  MicroSecToString(fTime, result);
+  MicroSecToStringVar(fTime, result);
 end;
 
-function TPrecisionTimer.LastTime: TShort16;
+function TPrecisionTimer.LastTime: TShort15;
 begin
   if fStart <> 0 then
     Pause;
-  MicroSecToString(fLastTime, result);
+  MicroSecToStringVar(fLastTime, result);
 end;
 
-function TPrecisionTimer.ByCount(Count: QWord): TShort16;
+function TPrecisionTimer.ByCount(Count: QWord): TShort15;
 begin
   if Count = 0 then // avoid div per 0 exception
-    result := '0'
+    PCardinal(@result)^ := 1 + ord('0')
   else
   begin
     if fStart <> 0 then
       Pause;
     if Int64(fTime) <= 0 then
-      result := '0'
+      PCardinal(@result)^ := 1 + ord('0')
     else
       NanoSecToString((fTime * 1000) div Count, result);
   end;
@@ -2541,9 +2532,11 @@ begin
   fTimer.Start;
 end;
 
-function TLocalPrecisionTimer.Stop: TShort16;
+function TLocalPrecisionTimer.Stop: TShort15;
 begin
-  result := fTimer.Stop;
+  if fTimer.fStart <> 0 then
+    fTimer.Pause;
+  MicroSecToStringVar(fTimer.fTime, result);
 end;
 
 constructor TLocalPrecisionTimer.CreateAndStart;
@@ -2557,9 +2550,9 @@ end;
 
 { TSynMonitorTime }
 
-function TSynMonitorTime.GetAsText: TShort16;
+function TSynMonitorTime.GetAsText: TShort15;
 begin
-  MicroSecToString(fMicroSeconds, result);
+  MicroSecToStringVar(fMicroSeconds, result);
 end;
 
 procedure TSynMonitorTime.AddTime(MicroSeconds: TSynMonitorTotalMicroSec);
@@ -2582,9 +2575,9 @@ end;
 
 { TSynMonitorOneTime }
 
-function TSynMonitorOneTime.GetAsText: TShort16;
+function TSynMonitorOneTime.GetAsText: TShort15;
 begin
-  MicroSecToString(fMicroSeconds, result);
+  MicroSecToStringVar(fMicroSeconds, result);
 end;
 
 function TSynMonitorOneTime.PerSecond(const Count: QWord): QWord;
@@ -2610,7 +2603,7 @@ end;
 
 { TSynMonitorSize }
 
-function TSynMonitorSize.GetAsText: TShort16;
+function TSynMonitorSize.GetAsText: TShort15;
 begin
   result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
@@ -2623,7 +2616,7 @@ end;
 
 { TSynMonitorOneSize }
 
-function TSynMonitorOneSize.GetAsText: TShort16;
+function TSynMonitorOneSize.GetAsText: TShort15;
 begin
   result[0] := #0;
   AppendKB(fBytes, result, not fTextNoSpace);
@@ -2631,11 +2624,11 @@ end;
 
 { TSynMonitorThroughput }
 
-function TSynMonitorThroughput.GetAsText: TShort16;
+function TSynMonitorThroughput.GetAsText: TShort15;
 begin
   result[0] := #0;
   AppendKB(fBytesPerSec, result, not fTextNoSpace);
-  AppendShortTwoChars(ord('/') + ord('s') shl 8, @result);
+  AppendShortTwoCharsSafe(ord('/') + ord('s') shl 8, result);
 end;
 
 
@@ -2649,12 +2642,6 @@ begin
   fMinimalTime := TSynMonitorOneTime.Create;
   fAverageTime := TSynMonitorOneTime.Create;
   fMaximalTime := TSynMonitorOneTime.Create;
-end;
-
-constructor TSynMonitor.Create(const aName: RawUtf8);
-begin
-  Create;
-  fName := aName;
 end;
 
 destructor TSynMonitor.Destroy;
@@ -3362,6 +3349,8 @@ var
   id: TSynMonitorUsageID;
   g: TSynMonitorUsageGranularity;
 begin
+  if fPrevious.Value = 0 then
+    exit; // nothing was tracked yet - nothing to save
   id.FromTimeLog(fPrevious.Value);
   Save(id, mugHour, Scope); // always save current minutes values
   for g := mugDay to mugYear do
@@ -3593,9 +3582,12 @@ begin
 end;
 
 function TSynMonitorUsageID.ToTimeLog: TTimeLog;
+var
+  bits: TTimeLogBits;
 begin
-  PTimeLogBits(@result)^.From(GetTime(mugYear), GetTime(mugMonth),
-    GetTime(mugDay), GetTime(mugHour), 0, 0);
+  bits.From(GetTime(mugYear), GetTime(mugMonth), GetTime(mugDay),
+            GetTime(mugHour), 0, 0);
+  result := bits.Value;
 end;
 
 
@@ -3608,7 +3600,7 @@ var
   f, min, max: integer;
   ps: PShortString;
 begin
-  result := '';
+  FastAssignNew(result);
   Info^.SetEnumType(ps, min, max);
   for f := min to max do
   begin
@@ -3645,6 +3637,30 @@ function ToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 begin
   result := FeaturesToText(
     TypeInfo(TArm64HwCaps), @aArm64CPUFeatures, Sep);
+end;
+
+var
+  _CpuFeaturesText: RawUtf8;
+
+procedure SetCpuFeaturesText;
+begin
+  {$ifdef HASCPUFEATURES}
+  // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
+  _CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
+  if _CpuFeaturesText = '' then
+  {$endif HASCPUFEATURES}
+    {$ifdef OSLINUXANDROID}
+    _CpuFeaturesText := LowerCase(CpuInfoFeatures); // from /proc/cpuinfo
+    {$endif OSLINUXANDROID}
+  if _CpuFeaturesText = '' then
+    _CpuFeaturesText := CPU_ARCH_TEXT; // not void
+end;
+
+function CpuFeaturesText: RawUtf8;
+begin
+  if _CpuFeaturesText = '' then
+    SetCpuFeaturesText;
+  result := _CpuFeaturesText;
 end;
 
 function SystemInfoJson: RawUtf8;
@@ -3924,7 +3940,7 @@ begin
 end;
 
 var
-  ProcessSystemUse: TSystemUse;
+  ProcessSystemUse: TSystemUse; // global hidden variable
 
 class function TSystemUse.Current(aCreateIfNone: boolean): TSystemUse;
 begin
@@ -3934,7 +3950,10 @@ begin
     GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
     try
       if ProcessSystemUse = nil then
+      begin
         ProcessSystemUse := RegisterGlobalShutdownRelease(TSystemUse.Create(60));
+        ProcessSystemUseTimer := @ProcessSystemUse.fTimer;
+      end;
     finally
       GlobalUnLock;
     end;
@@ -3959,7 +3978,7 @@ var
   mem: RawUtf8;
   i: integer;
 begin
-  result := '';
+  FastAssignNew(result);
   if self <> nil then
     data := HistoryData(aProcessID, aDepth);
   d := pointer(data);
@@ -4146,9 +4165,9 @@ begin
 end;
 
 var
-  PhysicalAsTextCache: TShort16; // this value doesn't change usually
+  PhysicalAsTextCache: TShort15; // this value doesn't change usually
 
-class function TSynMonitorMemory.PhysicalAsText(nospace: boolean): TShort16;
+class function TSynMonitorMemory.PhysicalAsText(nospace: boolean): TShort15;
 begin
   if PhysicalAsTextCache = '' then
     with TSynMonitorMemory.Create(nospace) do
@@ -4789,8 +4808,8 @@ begin
       12: // System Configuration options (type 12)
         if s[4] <> 0 then
         begin
-          i := length(info.Oem);
-          SetLength(info.Oem, i + s[4]);
+          c := length(info.Oem);
+          SetLength(info.Oem, c + s[4]);
           // we just parse the strings table here
           s := @s[s[1]];
           if s[0] = 0 then
@@ -4799,17 +4818,17 @@ begin
             repeat
               len := StrLen(s);
               if (len <> 0) and
-                 (i < length(info.Oem)) then
+                 (c < length(info.Oem)) and
+                 not IsDefaultString(s, len) then
               begin
-                FastSetString(info.Oem[i], s, len);
-                if info.Oem[i] <> 'Default string' then // see mormot.core.os
-                  inc(i);
+                FastSetString(info.Oem[c], s, len);
+                inc(c);
               end;
               s := @s[len + 1]; // next string
             until s[0] = 0;
           inc(PByte(s));
-          if length(info.Oem) <> i then
-            SetLength(info.Oem, i);
+          if length(info.Oem) <> c then
+            SetLength(info.Oem, c); // skipped 'Default string' or ''
           continue;
         end;
       16: // Physical Memory Array (type 16)
@@ -5039,23 +5058,6 @@ begin
   result := obj;
 end;
 
-
-procedure InitializeUnit;
-begin
-  {$ifdef HASCPUFEATURES}
-  // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
-  CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
-  if CpuFeaturesText = '' then
-  {$endif HASCPUFEATURES}
-  begin
-    {$ifdef OSLINUXANDROID}
-    CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
-    {$endif OSLINUXANDROID}
-  end;
-end;
-
-initialization
-  InitializeUnit;
 
 end.
 

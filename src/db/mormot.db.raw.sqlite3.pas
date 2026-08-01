@@ -5287,7 +5287,7 @@ type
     // - if a result set exceeds this limit, an ESQLDBException is raised
     // - default is 512 shl 20, i.e. 512MB which is very high
     // - avoid unexpected OutOfMemory errors when incorrect statement is run
-    property StatementMaxMemory: PtrUint
+    property StatementMaxMemory: PtrUInt
       read fStatementMaxMemory write fStatementMaxMemory;
     /// access to the log class associated with this SQLite3 database engine
     // - can be customized, e.g. by overriden TRestServerDB.SetLogClass()
@@ -5587,7 +5587,7 @@ implementation
 function SqlVarToSQlite3Context(const Res: TSqlVar;
   Context: TSqlite3FunctionContext): boolean;
 var
-  tmp: array[0 .. 31] of AnsiChar;
+  tmp: TTemp32;
 begin
   case Res.VType of
     ftNull:
@@ -6670,9 +6670,9 @@ var
   doc: TDocVariantData;
   json: PUtf8Char;
   info: TGetJsonField;
-  tmp: TSynTempBuffer;
   u: RawUtf8;
   v: PVariant;
+  tmp: TSynTempBuffer;
 begin
   // JsonSet(VariantField,'PropName','abc') to set a value
   // JsonSet(VariantField,'Obj1.Obj2.PropName','def') to set by path
@@ -6685,7 +6685,7 @@ begin
     json := sqlite3.value_text(argv[0]);
     doc.InitJsonInPlace(tmp.Init(json), JSON_FAST_FLOAT);
     tmp.Done;
-    v := doc.GetPVariantByPath(sqlite3.value_text(argv[1]));
+    v := doc.GetPVariantByPathP(sqlite3.value_text(argv[1]));
     if v <> nil then
     begin
       // update the field, then return whole JSON
@@ -6999,12 +6999,12 @@ function TSqlDataBase.ExecuteNoExceptionUtf8(const aSql: RawUtf8): RawUtf8;
 begin
   if (self = nil) or
      (DB = 0) then
-    result := ''
+    FastAssignNew(result)
   else
   try
     Execute(aSql, result, true);
   except
-    result := '';
+    FastAssignNew(result);
   end;
 end;
 
@@ -7017,7 +7017,7 @@ var
 begin
   if self = nil then
   begin
-    result := '';
+    FastAssignNew(result);
     exit; // avoid GPF in case of call from a static-only server
   end;
   QueryPerformanceMicroSeconds(start);
@@ -7051,7 +7051,7 @@ begin
   result := R.ExecuteJson(DB, 'explain query plan ' + aSql, true, @cnt, 4096,
     [twoForceJsonExtended, twoIgnoreDefaultInRecord]);
   if cnt = 0 then
-    result := ''; // no query plan
+    FastAssignNew(result); // no query plan
 end;
 
 function TSqlDataBase.ExplainQueryPlan(const aSql: RawUtf8): RawUtf8;
@@ -7235,7 +7235,7 @@ function TSqlDataBase.LockJson(const aSql: RawUtf8;
 begin
   if self = nil then
   begin
-    result := '';
+    FastAssignNew(result);
     exit; // avoid GPF in case of call from a static-only server
   end;
   fSafe.Lock; // cache access is also protected by fSafe
@@ -7257,7 +7257,7 @@ begin
     begin
       // UPDATE, INSERT or any non SELECT statement
       CacheFlush;
-      result := '';
+      FastAssignNew(result);
     end;
   except
     on Exception do
@@ -8308,7 +8308,7 @@ begin
       result := Stream.DataString;
     except
       on ESqlite3Exception do
-        result := '';
+        FastAssignNew(result);
     end;
     // Close has been called in Execute() above since aSql<>''
   finally
@@ -8397,7 +8397,7 @@ var
   P: PUtf8Char;
   L, L2: integer;
 begin
-  result := '';
+  FastAssignNew(result);
   if cardinal(Col) >= cardinal(FieldCount) then
     sqlite3_failed(RequestDB, SQLITE_RANGE, 'FieldA');
   P := sqlite3.column_text(Request, Col);
@@ -8456,7 +8456,7 @@ begin
   if Request = 0 then
     sqlite3_failed(RequestDB, SQLITE_MISUSE, 'FieldIndex');
   for result := 0 to FieldCount - 1 do
-    if StrIComp(pointer(aColumnName), sqlite3.column_name(Request, result)) = 0 then
+    if StrIEqual(pointer(aColumnName), sqlite3.column_name(Request, result)) then
       exit;
   result := -1; // not found
 end;
@@ -8612,7 +8612,7 @@ begin
   if cardinal(Col) >= cardinal(FieldCount) then
     sqlite3_failed(RequestDB, SQLITE_RANGE, 'FieldW');
   P := sqlite3.column_text16(Request, Col);
-  SetString(result, PUtf8Char(pointer(P)), StrLenW(P) * 2 + 1);
+  FastSetRawUnicode(result, P, StrLenW(P) * 2);
 end;
 {$endif PUREMORMOT2}
 

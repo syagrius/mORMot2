@@ -21,7 +21,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -35,7 +34,6 @@ uses
   mormot.core.threads,
   mormot.crypt.core,
   mormot.crypt.jwt,
-  mormot.core.perf,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.orm.base,
@@ -943,7 +941,7 @@ begin
      (doc.Kind <> dvObject) or
      (doc.Count = 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   W := TJsonWriter.CreateOwnedStream(temp);
@@ -971,7 +969,7 @@ function TRestStorageMongoDB.EngineRetrieve(TableModelIndex: integer;
 var
   doc: variant;
 begin
-  result := '';
+  FastAssignNew(result);
   if (fCollection = nil) or
      (ID <= 0) then
     exit;
@@ -1473,7 +1471,7 @@ var
   Projection: variant;
 begin
   // same logic as in TRestStorageInMemory.EngineList()
-  result := ''; // indicates error occurred
+  FastAssignNew(result); // indicates error occurred
   ResCount := 0;
   if self = nil then
     exit;

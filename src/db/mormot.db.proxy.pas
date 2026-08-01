@@ -29,6 +29,7 @@ uses
   variants,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security, // for SymmetricEncrypt()
   mormot.core.buffers,
   mormot.core.data,
   mormot.core.unicode,
@@ -1620,7 +1621,7 @@ var
 begin
   case InternalColumnType(Col, data) of
     ftNull:
-      result := '';
+      FastAssignNew(result);
     ftDouble,
     ftCurrency,
     ftDate:
@@ -1640,7 +1641,7 @@ var
 begin
   case InternalColumnType(Col, data) of
     ftNull:
-      result := '';
+      FastAssignNew(result);
     ftInt64:
       result := Int64ToUtf8(FromVarInt64Value(data{%H-}));
     ftDouble:

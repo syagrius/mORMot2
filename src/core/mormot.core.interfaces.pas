@@ -128,6 +128,17 @@ type
     vIsOnStack,
     vIsHFA);
 
+  /// define how TInterfaceMethodExecuteRaw.RawExecute should handle a parameter
+  TInterfaceMethodRawExecute = (
+    reValReg,
+    reValRegs,
+    reValStack,
+    reRefReg,
+    reRefStack,
+    reValFpReg,
+    reValFpRegs,
+    reNone);
+
   /// a pointer to an interface-based service provider method description
   // - since TInterfaceFactory instances are shared in a global list, we
   // can safely use such pointers in our code to refer to a particular method
@@ -178,8 +189,7 @@ type
     // - may be -1 if pure register parameter with no backup on stack (x86)
     InStackOffset: SmallInt;
     /// how TInterfaceMethodExecuteRaw.RawExecute should handle this value
-    RawExecute: (reValReg, reValRegs, reValStack, reRefReg, reRefStack,
-                 reValFpReg, reValFpRegs, reNone);
+    RawExecute: TInterfaceMethodRawExecute;
     /// 64-bit aligned position in TInterfaceMethod.ArgsSizeAsValue memory
     OffsetAsValue: cardinal;
     /// true if is a const/var input argument
@@ -1842,6 +1852,18 @@ SYSV aarch64:
  https://c9x.me/compile/bib/abi-arm64.pdf
 }
 
+{$ifdef ISDELPHI}
+  {$ifdef ABISYSVX64}
+    // Delphi's LLVM Linux x64 compiler returns a by-ref result (managed
+    // record, string, dynarray, variant...) following the Itanium C++ ABI:
+    // the hidden result pointer is the 1st integer register (RDI) and Self
+    // is pushed to the 2nd (RSI). FPC and Delphi-Win64 do the opposite (Self
+    // first), which is what the register layout in this unit assumes. This
+    // symbol enables the small fixups that bridge that ABI difference.
+    {$define DELPHI_SYSVX64_RESULT_FIRST}
+  {$endif ABISYSVX64}
+{$endif ISDELPHI}
+
 const
 {$ifdef ABIX86}
   MAX_EXECSTACK = 1024;
@@ -3419,7 +3441,14 @@ begin
     else
     {$endif HAS_FPREG}
       if a^.RegisterIdent > 0 then
-        V := @ctxt.Stack.ParamRegs[a^.RegisterIdent + (PARAMREG_FIRST - 1)];
+        {$ifdef DELPHI_SYSVX64_RESULT_FIRST}
+        if a^.ValueDirection = imdResult then
+          // Delphi LLVM Linux x64: the hidden result pointer travels in the
+          // 1st integer register, not the 2nd as FPC/Delphi-Win64 do
+          V := @ctxt.Stack.ParamRegs[REGRDI]
+        else
+        {$endif DELPHI_SYSVX64_RESULT_FIRST}
+          V := @ctxt.Stack.ParamRegs[a^.RegisterIdent + (PARAMREG_FIRST - 1)];
     if a^.RegisterIdent = PARAMREG_FIRST then
       FakeCallRaiseError(ctxt, 'unexpected self', []);
     if V = nil then
@@ -3454,6 +3483,13 @@ asm
 end;
 {$endif HASINLINE}
 
+{$ifndef ABIX86}
+var
+  // reuse the very same JITted stubs for all interfaces (declared early so
+  // FakeCall() below can use it to validate a fake interface Self pointer)
+  _FAKEVMT: TPointerDynArray;
+{$endif ABIX86}
+
 procedure FakeCallRaise(Fake: TInterfacedObjectFakeRaw; MethodIndex: PtrUInt);
 begin
   EInterfaceFactory.RaiseUtf8('%.FakeCall(%) failed: out of range %',
@@ -3471,6 +3507,17 @@ begin
      forged to call a remote SOA server or mock/stub an interface
   *)
   me := SelfFromInterface;
+  {$ifdef DELPHI_SYSVX64_RESULT_FIRST}
+  // for a by-ref-result method, Delphi's LLVM Linux x64 ABI passes the hidden
+  // result pointer in the 1st integer register, so the shared x64fakestub
+  // trampoline forwarded @Result (not the interface) to us as Self. A genuine
+  // fake interface has fVTable = _FAKEVMT; if it does not, the real Self was
+  // pushed into the 2nd register (RSI), saved on the stack: recover it there.
+  if (self = nil) or
+     (me.fVTable <> pointer(_FAKEVMT)) then
+    me := TInterfacedObjectFakeRaw(PAnsiChar(stack^.ParamRegs[REGRSI]) -
+      PtrUInt(@TInterfacedObjectFakeRaw(nil).fVTable));
+  {$endif DELPHI_SYSVX64_RESULT_FIRST}
   // setup context
   ctxt.Stack := stack;
   if stack.MethodIndex >= PtrUInt(me.fFactory.MethodsCount) then
@@ -4283,7 +4330,7 @@ begin
         imvDouble,
         imvDateTime:
           if not (vPassedByReference in a^.ValueKindAsm) then
-            SizeInFPR := 1; // stored in one double
+            SizeInFPR := 1; // stored in one FP register
         {$endif HAS_FPREG}
         imvDynArray:
           if (a^.ArgRtti.ArrayRtti <> nil) and
@@ -4306,13 +4353,13 @@ begin
                 'should be at least % bytes (i.e. bigger than a pointer) to be on stack',
                 [self, a^.ArgTypeName^, fInterfaceName, m^.URI,
                  a^.ParamName^, POINTERBYTES + 1]);
-              // to be fair, both ABIWINX64 and ABISYSVX64 could handle those and
-              // transmit them within a register
+              // to be fair, both ABIWINX64 and ABISYSVX64 could handle those
+              // and transmit them within a register
             if RecordIsHfa(a^.ArgRtti.Props) then
             begin
               include(a^.ValueKindAsm, vIsHFA); // e.g. record x, y: double end;
               {$ifdef HAS_FPREG}
-              SizeInFPR := a^.ArgRtti.Size shr 3;
+              SizeInFPR := a^.ArgRtti.Size shr 3; // how many FP registers
               {$endif HAS_FPREG}
             end;
          end;
@@ -4455,15 +4502,16 @@ begin
       if vPassedByReference in a^.ValueKindAsm then
         if vIsOnStack in a^.ValueKindAsm then
           if a^.SizeInStack <> POINTERBYTES then
-            EInterfaceFactory.RaiseUtf8('Unexpected I% % ref with no pointer',
-              [m^.InterfaceDotMethodName, a^.ParamName^])
+            EInterfaceFactory.RaiseUtf8('Unexpected I% %:% with size=% <> % ' +
+              '- missing var or const?', [m^.InterfaceDotMethodName,
+              a^.ParamName^, a^.ArgTypeName^, a^.SizeInStack, POINTERBYTES])
           else
             a^.RawExecute := reRefStack
         else if a^.RegisterIdent > 0 then
           a^.RawExecute := reRefReg
         else
-          EInterfaceFactory.RaiseUtf8('Unexpected I% % reference with no slot',
-            [m^.InterfaceDotMethodName, a^.ParamName^])
+          EInterfaceFactory.RaiseUtf8('Unexpected I% %:% reference with no slot',
+            [m^.InterfaceDotMethodName, a^.ParamName^, a^.ArgTypeName^])
       else // pass by value
         if vIsOnStack in a^.ValueKindAsm then
           a^.RawExecute := reValStack
@@ -4657,7 +4705,7 @@ function TInterfaceFactory.GetMethodName(aMethodIndex: integer): RawUtf8;
 begin
   if (aMethodIndex < 0) or
      (self = nil) then
-    result := ''
+    FastAssignNew(result)
   else if aMethodIndex < SERVICE_PSEUDO_METHOD_COUNT then
     result := SERVICE_PSEUDO_METHOD[TServiceInternalMethod(aMethodIndex)]
   else
@@ -4666,14 +4714,14 @@ begin
     if cardinal(aMethodIndex) < cardinal(fMethodsCount) then
       result := fMethods[aMethodIndex].Uri
     else
-      result := '';
+      FastAssignNew(result);
   end;
 end;
 
 function TInterfaceFactory.GetFullMethodName(aMethodIndex: integer): RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     result := GetMethodName(aMethodIndex);
@@ -4976,10 +5024,6 @@ begin
 end;
 
 {$else}
-
-var
-  // reuse the very same JITted stubs for all interfaces
-  _FAKEVMT: TPointerDynArray;
 
 // JIT MAX_METHOD_COUNT VMT stubs for every method of any interface
 // - internal function protected by VmtSafe.Lock
@@ -5361,7 +5405,7 @@ function TInterfaceResolverForSingleInterface.GetImplementationName: RawUtf8;
 begin
   if (self = nil) or
      (fImplementation.ValueClass = nil) then
-    result := ''
+    FastAssignNew(result)
   else
     result := fImplementation.Name;
 end;
@@ -5798,7 +5842,7 @@ begin
   {$endif NOPATCHVMT}
   if (r = nil) or
      not (rcfAutoCreateFields in r.Flags) then
-    r := DoRegisterAutoCreateFields(self);
+    r := pointer(Rtti.RegisterAutoCreateFieldsClass(PClass(self)^));
   // resolve all published interface fields
   p := pointer(TRttiCustomWrapper(r).fAutoResolveInterfaces);
   if p = nil then
@@ -6083,7 +6127,7 @@ function TOnInterfaceStubExecuteParamsVariant.GetInUtf8(
 var
   wasString: boolean;
 begin
-  result := '';
+  FastAssignNew(result);
   VariantToUtf8(GetInNamed(ParamName), result, wasString);
 end;
 
@@ -6115,7 +6159,7 @@ var
   o: PVarData;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
-  fResult := '';
+  FastAssignNew(fResult);
   if fOutput = nil then
     exit;
   W := TJsonWriter.CreateOwnedStream(temp);
@@ -6703,7 +6747,7 @@ var
   log: ^TInterfaceStubLog;
 begin
   if fLogCount = 0 then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     WR := TJsonWriter.CreateOwnedStream(temp);
@@ -7340,7 +7384,7 @@ begin
   begin
     inc(arg);
     inc(pv);
-    case arg^.RawExecute of
+    case arg^.RawExecute of // use pre-computed parameter access modes
       reValReg:
         call.ParamRegs[arg^.RegisterIdent] := PPtrInt(pv^)^;
       reValRegs:
@@ -7361,6 +7405,14 @@ begin
       {$endif HAS_FPREG}
     end;
   end;
+  {$ifdef DELPHI_SYSVX64_RESULT_FIRST}
+  // the FPC-shaped layout above placed a by-ref result pointer in RSI
+  // (PARAMREG_RESULT); Delphi's LLVM Linux x64 ABI expects it in RDI, so
+  // move it there once. Self is assigned to RSI per-instance in the loop.
+  if (fMethod^.ArgsResultIndex >= 0) and
+     (fMethod^.Args[fMethod^.ArgsResultIndex].ValueType in ARGS_RESULT_BY_REF) then
+    call.ParamRegs[REGRDI] := call.ParamRegs[REGRSI];
+  {$endif DELPHI_SYSVX64_RESULT_FIRST}
   // execute the method
   for i := 0 to InstancesLast do
   begin
@@ -7378,6 +7430,13 @@ begin
       end;
     end;
     // prepare the low-level call context for the asm stub
+    {$ifdef DELPHI_SYSVX64_RESULT_FIRST}
+    if (fMethod^.ArgsResultIndex >= 0) and
+       (fMethod^.Args[fMethod^.ArgsResultIndex].ValueType in ARGS_RESULT_BY_REF) then
+      // Delphi LLVM Linux x64: Self travels in the 2nd integer register
+      call.ParamRegs[REGRSI] := PtrInt(Instances[i])
+    else
+    {$endif DELPHI_SYSVX64_RESULT_FIRST}
     call.ParamRegs[PARAMREG_FIRST] := PtrInt(Instances[i]); // pass self
     call.method := PPtrIntArray(PPointer(Instances[i])^)^[
       fMethod^.ExecutionMethodIndex];
@@ -7812,18 +7871,17 @@ type
   TSetWeakZero = class(TSynDictionary) // TClass / TPointerDynArray map
   protected
     fHookedFreeInstance: PtrUInt;
+    procedure HookedFreeInstance;
   public
     constructor Create(aClass: TClass); reintroduce;
   end;
 
-type
-  TFreeInstanceMethod = procedure(self: TObject);
-
-procedure HookedFreeInstance(self: TObject);
+procedure TSetWeakZero.HookedFreeInstance;
 var
   inst: TSetWeakZero;
   i: PtrInt;
   fields: PPointerArray; // holds a TPointerDynArray but avoid try..finally
+  next: TThreadMethod;
 begin
   inst := Rtti.FindClass(PClass(self)^).GetPrivateSlot(TSetWeakZero);
   fields := nil;
@@ -7835,7 +7893,10 @@ begin
       PPointer(fields[i])^ := nil;
     FastDynArrayClear(@fields, nil);
   end;
-  TFreeInstanceMethod(inst.fHookedFreeInstance)(self); // CleanupInstance + FreeMem()
+  // cascaded call up to TObject.FreeInstance = CleanupInstance + FreeMem()
+  TMethod(next).Code := pointer(inst.fHookedFreeInstance);
+  TMethod(next).Data := self;
+  next();
 end;
 
 constructor TSetWeakZero.Create(aClass: TClass);
@@ -7845,11 +7906,11 @@ begin
   // key = instance TObject, value = dynarray field(s) to be zeroed
   inherited Create(TypeInfo(TPointerDynArray), TypeInfo(TPointerDynArrayDynArray));
   P := pointer(PAnsiChar(aClass) + vmtFreeInstance);
-  if P^ = PtrUInt(@HookedFreeInstance) then
+  if PPointer(P)^ = @TSetWeakZero.HookedFreeInstance then
     // hook once - Create may be done twice in GetWeakZero() for SetPrivateSlot
     exit;
   fHookedFreeInstance := P^;
-  PatchCodePtrUInt(P, PtrUInt(@HookedFreeInstance), {leaveunprot=}false);
+  PatchPointer(P, PtrUInt(@TSetWeakZero.HookedFreeInstance));
 end;
 
 function GetWeakZero(aClass: TClass; CreateIfNonExisting: boolean): TSetWeakZero;
@@ -8086,7 +8147,7 @@ var
           begin
             info := ContextFromRtti(
               ClassToWrapperType(rtti.ObjArrayClass), rtti.ArrayRtti);
-            _Safe(info)^.AddValue('isObjArray', true);
+            _Safe(info)^.AddValue('isObjArray', varTrue);
           end
           else
           begin
@@ -8108,7 +8169,7 @@ var
             'camelName', LowerCamelCase(typName),
             'snakeName', SnakeCase(typName)], info);
           if rtti.Cache.ItemCount > 0 then
-            _Safe(info)^.AddValue('staticMaxIndex', rtti.Cache.ItemCount-1);
+            _Safe(info)^.AddValue('staticMaxIndex', rtti.Cache.ItemCount - 1);
         end;
     end;
     if not VarIsEmptyOrNull(info) then
@@ -8690,7 +8751,7 @@ begin
           // simple type (record, array, enumeration, set)
           if Descriptions.GetValueIndex(typeName) < 0 then
           begin
-            Descriptions.AddValue(typeName, RawUtf8ToVariant(desc));
+            Descriptions.AddValueText(typeName, desc);
             if typeName[1] = 'I' then
               interfaceName := Copy(typeName, 2, 128)
             else
@@ -8701,8 +8762,7 @@ begin
           if PropNameEquals(typeName, 'function') or
              PropNameEquals(typeName, 'procedure') then
             if GetNextFieldProp(P, typeName) then
-              Descriptions.AddValue(interfaceName + '.' + typeName,
-                RawUtf8ToVariant(desc));
+              Descriptions.AddValueText(Join([interfaceName, '.', typeName]), desc);
     end
     else
       P := GotoNextLineSmall(P);

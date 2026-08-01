@@ -50,7 +50,7 @@ type
   io_object_t = mach_port_t;
   io_registry_entry_t = io_object_t;
   io_service_t = io_object_t;
-  io_string_t = array[0..511] of AnsiChar;
+  io_string_t = TTemp512;
   IOOptionBits = UInt32;
  
 var
@@ -115,7 +115,7 @@ begin
         _Get('IOPlatformUUID', result);
         if PCardinal(result)^ =
              ord('F') + ord('F') shl 8 + ord('F') shl 16 + ord('F') shl 24 then
-          result := '' // fake ID e.g. on iOS 7+
+          FastAssignNew(result) // fake ID e.g. on iOS 7+
       end;
     sbiSerial:
       _Get('IOPlatformSerialNumber', result);
@@ -131,7 +131,7 @@ begin
     sbiFamily:
       _Get('target-type', result);
   else
-    result := '';
+    FastAssignNew(result);
   end;
 end;
 
@@ -143,7 +143,7 @@ var
   prop: CFMutableDictionaryRef;
 begin
   // by definition, won't return anything if there is no SMBIOS, e.g. on Mac M1
-  result := '';
+  FastAssignNew(result);
   try
     // first try the IORegistryEntryFromPath() way
     // - see https://github.com/acidanthera/dmidecode
@@ -194,7 +194,7 @@ begin
       // buggy Apple
     end;
   except
-    result := '';
+    FastAssignNew(result);
   end;
 end;
 

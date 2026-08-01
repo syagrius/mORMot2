@@ -539,11 +539,11 @@ type
       Level: TSynLogLevel = sllTrace); overload;
     /// ease logging of some response in the context of the current TRest
     procedure InternalLogResponse(const aContent: RawByteString;
-      const aContext: shortstring; Level: TSynLogLevel = sllServiceReturn); overload;
+      const aContext: ShortString; Level: TSynLogLevel = sllServiceReturn); overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// ease logging of some response in the context of the current TRest
     procedure InternalLogResponse(aContent: PUtf8Char; aContentLen: PtrInt;
-      const aContext: shortstring; Level: TSynLogLevel = sllServiceReturn); overload;
+      const aContext: ShortString; Level: TSynLogLevel = sllServiceReturn); overload;
     /// ease logging of method enter/leave in the context of the current TRest
     function Enter(TextFmt: PUtf8Char; const TextArgs: array of const;
       aInstance: TObject = nil): ISynLog;
@@ -1119,10 +1119,11 @@ type
     // - warning: you should re-call SetPassword(aMutualAuth=true) when this
     // LogonName field is changed, since PasswordHashHexa is bound to LogonName
     // - so in this field, you may encounter such values:
-    // $ 0123abc.....ffee = 256-bit hexa of mORMot 1 SHA256('salt'+password)
-    // $ bc01a89.....2b07 = HA0 = Hash(username:realm:password) for DIGEST
-    // $ $mcf$params$checkum = standard "Modular Crypt" hash
-    // $ #mcf$params$scramkeys = SCRAM-like "Modular" hash with mutual auth
+    // $ '0123abc.....ffee' = 256-bit hexa of mORMot 1 SHA256('salt'+password)
+    // $ 'bc01a89.....2b07' = HA0 = Hash(username:realm:password) for DIGEST
+    // $ '$mcf$params$checkum' = standard "Modular Crypt" hash
+    // $ '#mcf$params$scramkeys' = SCRAM-like "Modular" hash with mutual auth
+    // $ '' for password-less authentication e.g. with GSSAPI/SSPI Kerberos
     property PasswordHashHexa: RawUtf8
       index 192 read fPasswordHashHexa write fPasswordHashHexa;
     /// the associated access rights of this user
@@ -1260,8 +1261,7 @@ type
     procedure Init(const aUri, aMethod, aInHead, aInBody: RawUtf8); overload;
     /// retrieve the "Content-Type" value from InHead
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
-    procedure InBodyType(var ContentType: RawUtf8;
-      GuessJsonIfNoneSet: boolean = true);
+    procedure InBodyType(var ContentType: RawUtf8; GuessJsonIfNoneSet: boolean = true);
       {$ifdef HASINLINE}inline;{$endif}
     /// retrieve the "Content-Type" value from OutHead
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
@@ -2136,13 +2136,13 @@ begin
 end;
 
 procedure TRest.InternalLogResponse(const aContent: RawByteString;
-  const aContext: shortstring; Level: TSynLogLevel);
+  const aContext: ShortString; Level: TSynLogLevel);
 begin // caller checked that (self <> nil) and (Level in fLogLevel)
   InternalLogResponse(pointer(aContent), length(aContent), aContext, Level);
 end;
 
 procedure TRest.InternalLogResponse(aContent: PUtf8Char; aContentLen: PtrInt;
-  const aContext: shortstring; Level: TSynLogLevel);
+  const aContext: ShortString; Level: TSynLogLevel);
 var
   max: PtrInt;
 begin // caller checked that (self <> nil) and (Level in fLogLevel)
@@ -3962,7 +3962,7 @@ var
   up: TByteToAnsiChar;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else if fInHeaderLastName = HeaderName then
     result := fInHeaderLastValue
   else
@@ -4090,7 +4090,7 @@ begin
   if server = '' then
     server := crc32cUtf8ToHex(Call^.OutBody);
   server := Join(['"', server, '"']);
-  if client <> server then
+  if client <> server then // ETAG value is case sensitive by RFV 7232
     AppendLine(Call^.OutHead, ['ETag: ', server])
   else
   begin

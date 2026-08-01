@@ -1005,8 +1005,8 @@ begin
       {$ifdef WIN64}
       aDllFileName := ''; // Office is a 32 bit app with 32 bit dlls :)
       {$else}
-      aDllFileName := ReadRegString(HKEY_CLASSES_ROOT,
-        'Applications\Winword.exe\shell\edit\command', '');
+      aDllFileName := ReadRegString(wrClasses,
+        'Applications\Winword.exe\shell\edit\command', nil);
       if aDllFileName <> '' then
       begin
         delete(aDllFileName, 1, 1);
@@ -1227,7 +1227,7 @@ type
     DC: array[0..10] of TGdiplusEnumState;
     // if true, DrawText() will use DrawString and not DrawDriverString
     UseDrawString: boolean;
-    // a temporary buffer used to reduce memory allocations
+    // owned buffer to reduce memory allocations e.g. for Points16To32()
     Temp: TSynTempBuffer;
     procedure SaveDC;
     procedure RestoreDC;

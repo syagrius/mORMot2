@@ -48,6 +48,7 @@ uses
   {$endif NEEDVCLPREFIX}
   mormot.core.base,
   mormot.core.os,
+  mormot.core.unicode,
   mormot.lib.gdiplus;
 
 
@@ -549,17 +550,17 @@ begin
   ext := ExtractExt(FileName, {withoutdot=}true);
   if ext = '' then
     exit;
-  if SameText(ext, 'BMP') then
+  if SameTextS(ext, 'BMP') then
     result := TBitmap
-  else if SameText(ext, 'EMF') then
+  else if SameTextS(ext, 'EMF') then
     result := TMetafile
-  else if SameText(ext, 'WMF') then
+  else if SameTextS(ext, 'WMF') then
     result := TMetafile
-  else if SameText(ext, 'ICO') then
+  else if SameTextS(ext, 'ICO') then
     result := TIcon
   else
     for i := 0 to high(PicturesExt) do
-      if SameText(ext, PicturesExt[i]) then
+      if SameTextS(ext, PicturesExt[i]) then
       begin
         result := PictureClasses[i];
         exit;

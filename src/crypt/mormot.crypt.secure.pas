@@ -10,12 +10,14 @@ unit mormot.crypt.secure;
     - Password-Safe and TSynConnectionDefinition Classes
     - Reusable Authentication Classes
     - High-Level TSynSigner/TSynHasher Multi-Algorithm Wrappers
+    - HMAC/PBKDF2 MCF SCRAM SCRAM-MCF TOTP High-Level Protocols
     - Client and Server HTTP Access Authentication
     - 64-bit TSynUniqueIdentifier and its efficient Generator
     - IProtocol Safe Communication with Unilateral or Mutual Authentication
     - TBinaryCookieGenerator Simple Cookie Generator
     - Rnd/Hash/Sign/Cipher/Asym/Cert/Store High-Level Algorithms Factories
     - Minimal PEM/DER Encoding/Decoding
+    - TSynMustache Cryptographic Expression Helpers
 
    Uses optimized mormot.crypt.core.pas for its actual cryptographic process.
 
@@ -64,14 +66,14 @@ type
   // mormot.crypt.core.pas' CryptDataForCurrentUser()
   // - a published property should be defined as such in inherited class:
   // ! property PasswordPropertyName: RawUtf8 read fPassword write fPassword;
-  // - use the PassWordPlain property to access to its uncyphered value
+  // - use the PasswordPlain property to access to its uncyphered value
   TObjectWithPassword = class(TSynPersistent)
   protected
     fPassWord: SpiUtf8;
     fKey: cardinal;
     procedure XorKey(var Value: RawByteString);
-    function GetPassWordPlain: SpiUtf8;
-    procedure SetPassWordPlain(const Value: SpiUtf8);
+    function GetPasswordPlain: SpiUtf8;
+    procedure SetPasswordPlain(const Value: SpiUtf8);
   public
     /// finalize the instance
     destructor Destroy; override;
@@ -182,7 +184,7 @@ type
       read fUser write fUser;
     /// the associated Password, e.g. for storage or transmission encryption
     // - will be persisted encrypted with a private key
-    // - use the PassWordPlain property to access to its uncyphered value
+    // - use the PasswordPlain property to access to its uncyphered value
     property Password: SpiUtf8
       read fPassword write fPassword;
   end;
@@ -437,9 +439,8 @@ type
   // - identifiers may be obfuscated as hexadecimal text, using both encryption
   // and digital signature
   // - all its methods are thread-safe, even during obfuscation processing
-  TSynUniqueIdentifierGenerator = class(TSynPersistent)
+  TSynUniqueIdentifierGenerator = class(TObjectLightLock)
   protected
-    fSafe: TLightLock;
     fLastUnixCreateTime: cardinal;
     fIdentifier: TSynUniqueIdentifierProcess;
     fIdentifierShifted: cardinal;
@@ -508,9 +509,6 @@ type
     // - may be used e.g. as system-depending salt
     property CryptoCRC: cardinal
       read fCryptoCRC;
-    /// direct access to the associated mutex
-    property Safe: TLightLock
-      read fSafe;
   published
     /// the process identifier, associated with this generator
     property Identifier: TSynUniqueIdentifierProcess
@@ -541,8 +539,11 @@ type
   expects JSON support, which requires mormot.core.json }
 
 type
-  /// hash algorithms available for HashFile/HashFull functions
-  // and TSynHasher object
+  /// algorithms available for TSynHasher wrapper and HashFile/HashFull
+  // - hfSHA256_128 and hfSHA256_160 compute SHA-256 and return the leftmost
+  // 128 or 160 bits as non-standard convenience algorithms for shorter digests,
+  // offering a safer alternative to MD5 and SHA-1 while benefiting from SHA
+  // hardware acceleration on newer Intel/AMD or ARM processors
   THashAlgo = (
     hfMD5,
     hfSHA1,
@@ -556,11 +557,13 @@ type
     hfSHA3_224,
     hfSHA3_384,
     hfShake128,
-    hfShake256);
+    hfShake256,
+    hfSHA256_128,
+    hfSHA256_160);
   /// a pointer to one of our hash algorithms
   PHashAlgo = ^THashAlgo;
 
-  /// set of algorithms available for HashFile/HashFull functions and TSynHasher object
+  /// set of algorithms available for TSynHasher and HashFile/HashFull
   THashAlgos = set of THashAlgo;
 
   /// store a hash value and its algorithm, e.g. for THttpPeerCacheMessage.Hash
@@ -568,9 +571,9 @@ type
   // the hash, to avoid any potential attack about (unlikely) hash collisions
   // between algorithms, and allow any change of algo restrictions in the future
   THashDigest = packed record
-    /// the algorithm used for Hash
+    /// the algorithm used for hashing the input into Bin
     Algo: THashAlgo;
-    /// up to 512-bit of raw binary hash, according to Algo
+    /// up to 512-bit of raw binary hash, according to HASH_SIZE[Algo]
     Bin: THash512Rec;
   end;
   /// a pointer to one hash value and its algorithm
@@ -599,6 +602,8 @@ type
     function Init(aAlgo: THashAlgo): boolean;
     /// hash the supplied memory buffer
     procedure Update(aBuffer: pointer; aLen: integer); overload;
+    /// hash the supplied memory buffer with uppercase ASCII conversion
+    procedure UpdateUpper(aBuffer: pointer; aLen: PtrInt);
     /// hash the supplied string content
     procedure Update(const aBuffer: RawByteString); overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -690,6 +695,18 @@ type
     class function GetAlgo: THashAlgo; override;
   end;
 
+  /// TStreamRedirect with SHA-256/128 cryptographic hashing
+  TStreamRedirectSha256_128 = class(TStreamRedirectSynHasher)
+  public
+    class function GetAlgo: THashAlgo; override;
+  end;
+
+  /// TStreamRedirect with SHA-256/160 cryptographic hashing
+  TStreamRedirectSha256_160 = class(TStreamRedirectSynHasher)
+  public
+    class function GetAlgo: THashAlgo; override;
+  end;
+
   /// TStreamRedirect with SHA-256 cryptographic hashing
   TStreamRedirectSha256 = class(TStreamRedirectSynHasher)
   public
@@ -753,30 +770,32 @@ type
 const
   /// convert a THashAlgo into a TStreamRedirectSynHasher class
   HASH_STREAMREDIRECT: array[THashAlgo] of TStreamRedirectClass = (
-    TStreamRedirectMd5,        // hfMD5
-    TStreamRedirectSha1,       // hfSHA1
-    TStreamRedirectSha256,     // hfSHA256
-    TStreamRedirectSha384,     // hfSHA384
-    TStreamRedirectSha512,     // hfSHA512
-    TStreamRedirectSha512_256, // hfSHA512_256
-    TStreamRedirectSha3_256,   // hfSHA3_256
-    TStreamRedirectSha3_512,   // hfSHA3_512
-    TStreamRedirectSha224,     // hfSHA224
-    TStreamRedirectSha3_224,   // hfSHA3_224
-    TStreamRedirectSha3_384,   // hfSHA3_384
-    TStreamRedirectShake128,   // hfShake128
-    TStreamRedirectShake256);  // hfShake256)
+    TStreamRedirectMd5,         // hfMD5
+    TStreamRedirectSha1,        // hfSHA1
+    TStreamRedirectSha256,      // hfSHA256
+    TStreamRedirectSha384,      // hfSHA384
+    TStreamRedirectSha512,      // hfSHA512
+    TStreamRedirectSha512_256,  // hfSHA512_256
+    TStreamRedirectSha3_256,    // hfSHA3_256
+    TStreamRedirectSha3_512,    // hfSHA3_512
+    TStreamRedirectSha224,      // hfSHA224
+    TStreamRedirectSha3_224,    // hfSHA3_224
+    TStreamRedirectSha3_384,    // hfSHA3_384
+    TStreamRedirectShake128,    // hfShake128
+    TStreamRedirectShake256,    // hfShake256
+    TStreamRedirectSha256_128,  // hfSHA256_128
+    TStreamRedirectSha256_160); // hfSHA256_160
 
-  /// the standard text of a THashAlgo (in uppercase characters)
+  /// the NIST/FIPS standard text of a THashAlgo (in uppercase characters)
   HASH_TXT: array[THashAlgo] of RawUtf8 = (
     'MD5', 'SHA-1', 'SHA-256', 'SHA-384', 'SHA-512', 'SHA-512/256',
     'SHA3-256', 'SHA3-512', 'SHA-224', 'SHA3-224', 'SHA3-384',
-    'SHAKE128', 'SHAKE256');
+    'SHAKE128', 'SHAKE256', 'SHA-256/128', 'SHA-256/160');
   /// the standard text of a THashAlgo (in lowercase characters)
   HASH_TXT_LOWER: array[THashAlgo] of RawUtf8 = (
     'md5', 'sha-1', 'sha-256', 'sha-384', 'sha-512', 'sha-512/256',
     'sha3-256', 'sha3-512', 'sha-224', 'sha3-224', 'sha3-384',
-    'shake128', 'shake256');
+    'shake128', 'shake256', 'sha-256/128', 'sha-256/160');
 
 type
   /// the HMAC/SHA-1 HMAC/SHA-2 and SHA-3 algorithms known by TSynSigner
@@ -829,10 +848,14 @@ type
 const
   SIGN_SIZE: array[TSignAlgo] of byte = (
     20, 32, 48, 64, 28, 32, 48, 64, 32, 64, 28);
-  /// the standard text of a TSignAlgo
+  /// the NIST/FIPS standard text of each TSignAlgo
   SIGNER_TXT: array[TSignAlgo] of RawUtf8 = (
-    'SHA-1',    'SHA-256',  'SHA-384',  'SHA-512', 'SHA3-224', 'SHA3-256',
+    'SHA-1',    'SHA-256',  'SHA-384',  'SHA-512',  'SHA3-224', 'SHA3-256',
     'SHA3-384', 'SHA3-512', 'SHAKE128', 'SHAKE256', 'SHA-224');
+  /// alternative TSignAlgo identifiers as used at API level (e.g. OpenSSL)
+  SIGNER_API: array[TSignAlgo] of RawUtf8 = (
+    'SHA1',     'SHA256',   'SHA384',   'SHA512',   'SHA3-224', 'SHA3-256',
+    'SHA3-384', 'SHA3-512', 'SHAKE128', 'SHAKE256', 'SHA224');
   SIGNER_SHA3 = [saSha3224 .. saSha3S256];
   SIGNER_DEFAULT_SALT = 'I6sWioAidNnhXO9BK';
   SIGNER_DEFAULT_ALGO = saSha3S128;
@@ -967,10 +990,9 @@ type
   /// reference to a TSynSigner wrapper object
   PSynSigner = ^TSynSigner;
 
-
 const
   /// map the size in bytes (16..64) of any THashAlgo digest
-  // - note that SHA-3 or SHA512-256 share the same size with other algos
+  // - note that some algorithms share the same size with other algos
   HASH_SIZE: array[THashAlgo] of byte = (
     SizeOf(TMd5Digest),    // 16 bytes for hfMD5
     SizeOf(TSHA1Digest),   // 20 bytes for hfSHA1
@@ -984,24 +1006,28 @@ const
     SizeOf(THash224),      // 28 bytes for hfSHA3_224
     SizeOf(THash384),      // 48 bytes for hfSHA3_384
     SizeOf(THash128),      // 16 bytes for hfShake128
-    SizeOf(THash256));     // 32 bytes for hfShake256
+    SizeOf(THash256),      // 32 bytes for hfShake256
+    SizeOf(THash128),      // 16 bytes for hfSHA256_128
+    SizeOf(THash160));     // 20 bytes for hfSHA256_160
 
   /// map the file extension text of any THashAlgo digest
   // - TextToHashAlgo() is able to recognize those values
   HASH_EXT: array[THashAlgo] of RawUtf8 = (
-    '.md5',        // hfMD5
-    '.sha1',       // hfSHA1
-    '.sha256',     // hfSHA256
-    '.sha384',     // hfSHA384
-    '.sha512',     // hfSHA512
-    '.sha512-256', // hfSHA512_256
-    '.sha3-256',   // hfSHA3_256
-    '.sha3-512',   // hfSHA3_512
-    '.sha224',     // hfSHA224
-    '.sha3-224',   // hfSHA3_224
-    '.sha3-384',   // hfSHA3_384
-    '.shake128',   // hfShake128
-    '.shake256');  // hfShake256
+    '.md5',         // hfMD5
+    '.sha1',        // hfSHA1
+    '.sha256',      // hfSHA256
+    '.sha384',      // hfSHA384
+    '.sha512',      // hfSHA512
+    '.sha512-256',  // hfSHA512_256
+    '.sha3-256',    // hfSHA3_256
+    '.sha3-512',    // hfSHA3_512
+    '.sha224',      // hfSHA224
+    '.sha3-224',    // hfSHA3_224
+    '.sha3-384',    // hfSHA3_384
+    '.shake128',    // hfShake128
+    '.shake256',    // hfShake256
+    '.sha256-128',  // hfSHA256_128
+    '.sha256-160'); // hfSHA256_160
 
   /// convert a TSignAlgo / TSynSigner algorithm into a THashAlgo / TSynHasher
   SIGN_HASH: array[TSignAlgo] of THashAlgo = (
@@ -1061,8 +1087,10 @@ function TextToHashAlgo(P: PUtf8Char; Len: PtrInt; out Algo: THashAlgo): boolean
 function HashDetect(const Hash: RawUtf8; out Digest: THashDigest): boolean;
 
 /// fast compare two hash digest and their associated algorithm
-function HashDigestEqual(const a, b: THashDigest): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
+function HashDigestEqual(a, b: PPtrIntArray): boolean;
+
+/// anti-forensic method for a hash digest
+procedure FillZero(var Digest: THashDigest); overload;
 
 /// compute the hexadecimal hash of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
@@ -1119,6 +1147,65 @@ function HashFileSha3_256(const FileName: TFileName): RawUtf8;
 /// compute the SHA-3-512 checksum of a given file
 // - this function maps the THashFile signature as defined in mormot.core.buffers
 function HashFileSha3_512(const FileName: TFileName): RawUtf8;
+
+
+{ **************** HMAC/PBKDF2 MCF SCRAM SCRAM-MCF TOTP High-Level Protocols }
+
+{ some HMAC/PBKDF2 common wrappers defined here to redirect to TSynSigner }
+
+/// compute the HMAC message authentication code using any hash function
+procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
+  result: PHash512Rec);
+
+/// compute the PBKDF2 derivation of a password using HMAC over any hash function
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count: integer; digest: PHash512Rec): integer; overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over any hash function
+// - this overloaded function will return any size of the derived password
+function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
+  count, destlen: integer): RawByteString; overload;
+
+/// compute the HMAC message authentication code using SHA-1 as hash function
+procedure HmacSha1(const key, msg: RawByteString;
+  out result: TSha1Digest); overload;
+
+/// compute the HMAC message authentication code using SHA-1 as hash function
+procedure HmacSha1(const key: TSha1Digest; const msg: RawByteString;
+  out result: TSha1Digest); overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over SHA-1
+// - this function expect the resulting key length to match SHA-1 digest size
+procedure Pbkdf2HmacSha1(const password, salt: RawByteString;
+  count: integer; out result: TSha1Digest);
+
+/// compute the HMAC message authentication code using SHA-384 as hash function
+procedure HmacSha384(const key, msg: RawByteString;
+  out result: TSha384Digest); overload;
+
+/// compute the HMAC message authentication code using SHA-384 as hash function
+procedure HmacSha384(const key: TSha384Digest; const msg: RawByteString;
+  out result: TSha384Digest); overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over SHA-384
+// - this function expect the resulting key length to match SHA-384 digest size
+procedure Pbkdf2HmacSha384(const password, salt: RawByteString;
+  count: integer; out result: TSha384Digest);
+
+/// compute the HMAC message authentication code using SHA-512 as hash function
+procedure HmacSha512(const key, msg: RawByteString;
+  out result: TSha512Digest); overload;
+
+/// compute the HMAC message authentication code using SHA-512 as hash function
+procedure HmacSha512(const key: TSha512Digest; const msg: RawByteString;
+  out result: TSha512Digest); overload;
+
+/// compute the PBKDF2 derivation of a password using HMAC over SHA-512
+// - this function expect the resulting key length to match SHA-512 digest size
+procedure Pbkdf2HmacSha512(const password, salt: RawByteString;
+  count: integer; out result: TSha512Digest);
+
+{ Extended "Modular Crypt" support }
 
 const
   MCF_ALGO: array[TModularCryptFormat] of THashAlgo = (hfShake128, hfShake128,
@@ -1209,8 +1296,7 @@ function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
   LogN: PtrUInt = 16; BlockSize: PtrUInt = 8; Parallel: PtrUInt = 2;
   HashPos: PInteger = nil; Api: TSCriptRaw = nil): RawUtf8;
 
-
-{ Official SCRAM Client/Server mutual authentication }
+{ SCRAM Client/Server mutual authentication as defined in RFC 5802/7677 }
 
 type
   /// RFC 5802/7677 SCRAM client, as used e.g. by MongoDB
@@ -1255,8 +1341,10 @@ type
 { our own SCRAM-MCF client/server pattern, using ModularCryptHash() }
 
 /// compute the SCRAM challenge to be stored on DB for a given "Modular Crypt" hash
-// - the value is bound to the User logon, so that it can't be reassigned to
+// - expects a true KDF/MCF Hash in '$MCF prefix$hash' format as input
+// - the result is bound to the User logon, so that it can't be reassigned to
 // a more sensitive user on a compromised database ("key swap" attack)
+// - returns '#MCF prefix' + base64uri(StoredKey + ServerKey) as output
 function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8; overload;
 
 /// compute the SCRAM challenge to be stored for a given "Modular Crypt" hash
@@ -1268,6 +1356,9 @@ function ScramPersistedKey(Mcf: TModularCryptFormat;
 function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8; overload;
 
 /// compute the SCRAM client proof for a given "Modular Crypt" hash
+// - the Server should have returned a  ModularCryptIdentify(info^) MCF prefix
+// of the algorithm, parameters and salt, suitable for Hash computation via
+// ModularCryptHash()
 function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
   const Msg: array of RawByteString): RawUtf8;
 
@@ -1282,60 +1373,30 @@ function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
 function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
   var ClientSignature: THash256): boolean;
 
+{ User 2FA authentication via TOTP as defined in RFC 6238 }
 
-{ some HMAC/PBKDF2 common wrappers defined here to redirect to TSynSigner }
+const
+  TOTP_DIGITS = 6;      // 6 digits seems fine as default
+  TOTP_PERIOD = 30;     // our code fixes the period to default 30 seconds
+  TOTP_SECRET_MIN = 16; // 128-bit is the bare minimum
 
-/// compute the HMAC message authentication code using any hash function
-procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
-  result: PHash512Rec);
+/// compute the RFC 6238 TOTP user code from its base32 (or binary) secret
+// - supports digits in [4..8] and at least 128-bit = 16-byte of binary secret
+function TotpGenerate(const secret: RawUtf8; digits: integer = TOTP_DIGITS;
+  algo: TSignAlgo = saSha1; binary: boolean = false; timestep: Int64 = -1): RawUtf8;
 
-/// compute the PBKDF2 derivation of a password using HMAC over any hash function
-function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count: integer; digest: PHash512Rec): integer; overload;
+/// compute a base32-encoded RFC 6238 TOTP secret to share with the client
+// - any len < 16 bytes would be rounded up to 16 (i.e. 128-bit)
+function TotpGenerateSecret(len: PtrInt = 20): RawUtf8;
 
-/// compute the PBKDF2 derivation of a password using HMAC over any hash function
-// - this overloaded function will return any size of the derived password
-function Pbkdf2(algo: TSignAlgo; const password, salt: RawByteString;
-  count, destlen: integer): RawByteString; overload;
+/// verify a RFC 6238 TOTP user code from its base32 (or binary) secret
+function TotpValidate(const secret, usercode: RawUtf8; window: integer = 1;
+  algo: TSignAlgo = saSha1; timestep: Int64 = -1; binary: boolean = false): boolean;
 
-/// compute the HMAC message authentication code using SHA-1 as hash function
-procedure HmacSha1(const key, msg: RawByteString;
-  out result: TSha1Digest); overload;
-
-/// compute the HMAC message authentication code using SHA-1 as hash function
-procedure HmacSha1(const key: TSha1Digest; const msg: RawByteString;
-  out result: TSha1Digest); overload;
-
-/// compute the PBKDF2 derivation of a password using HMAC over SHA-1
-// - this function expect the resulting key length to match SHA-1 digest size
-procedure Pbkdf2HmacSha1(const password, salt: RawByteString;
-  count: integer; out result: TSha1Digest);
-
-/// compute the HMAC message authentication code using SHA-384 as hash function
-procedure HmacSha384(const key, msg: RawByteString;
-  out result: TSha384Digest); overload;
-
-/// compute the HMAC message authentication code using SHA-384 as hash function
-procedure HmacSha384(const key: TSha384Digest; const msg: RawByteString;
-  out result: TSha384Digest); overload;
-
-/// compute the PBKDF2 derivation of a password using HMAC over SHA-384
-// - this function expect the resulting key length to match SHA-384 digest size
-procedure Pbkdf2HmacSha384(const password, salt: RawByteString;
-  count: integer; out result: TSha384Digest);
-
-/// compute the HMAC message authentication code using SHA-512 as hash function
-procedure HmacSha512(const key, msg: RawByteString;
-  out result: TSha512Digest); overload;
-
-/// compute the HMAC message authentication code using SHA-512 as hash function
-procedure HmacSha512(const key: TSha512Digest; const msg: RawByteString;
-  out result: TSha512Digest); overload;
-
-/// compute the PBKDF2 derivation of a password using HMAC over SHA-512
-// - this function expect the resulting key length to match SHA-512 digest size
-procedure Pbkdf2HmacSha512(const password, salt: RawByteString;
-  count: integer; out result: TSha512Digest);
+/// encode Google Authenticator otpauth:// URI scheme value
+function TotpUrl(const issuer, account, b32secret: RawUtf8;
+  digits: integer = TOTP_DIGITS; algo: TSignAlgo = saSha1;
+  period: integer = TOTP_PERIOD): RawUtf8;
 
 
 { **************** Client and Server HTTP Access Authentication }
@@ -1835,9 +1896,8 @@ type
   // an (optional) associated record
   // - cookie is digitally signed, and any associated record is encrypted, using
   // the cryptographically secure AES-GCM-128 algorithm
-  TBinaryCookieGenerator = class(TSynPersistent)
+  TBinaryCookieGenerator = class(TObjectLightLock)
   protected
-    fSafe: TLightLock;
     fContext: TBinaryCookieContext;
     fCookieName: RawUtf8;
     fDefaultTimeOutMinutes: cardinal;
@@ -1976,15 +2036,23 @@ type
     /// retrieve some random bytes into a buffer
     procedure Get(dst: pointer; dstlen: PtrInt); overload; virtual; abstract;
     /// retrieve some random bytes into a RawByteString
-    function Get(len: PtrInt): RawByteString; overload; virtual;
+    // - defined as procedure to ensure RefCnt=1 so that FillZero(dst) works
+    procedure Get(var dst: RawByteString; len: PtrInt); overload; virtual;
     /// retrieve some random bytes into a TBytes
     function GetBytes(len: PtrInt): TBytes;
     /// retrieve a random 32-bit value
     function Get32: cardinal; overload; virtual;
     /// retrieve a random 32-bit value
     function Get32(max: cardinal): cardinal; overload;
+    /// returns a 64-bit unsigned random number
+    function Get64: QWord; virtual;
     /// retrieve a random floating point value in the [0..1) range calling Get32
     function GetDouble: double;
+    /// computes a random ASCII password following proper common safety rules
+    // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
+    // excluding ;,= to allow direct use in CSV content
+    // - won't return the letters O and I to avoid confusion with digits 0 and 1
+    function GetPassword(len: PtrInt): SpiUtf8;
   end;
 
   /// an abstract TCryptRandom class which will call Get32 as its random source
@@ -2420,6 +2488,27 @@ type
     ccfBase64,
     ccfBase64Uri);
 
+  /// used to store one unknown/unsupported attribute or extension
+  // - in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[]
+  // or TXname.Other[]
+  TCryptCustomExt = record
+    /// the OID of this value, in raw binary form - e.g. from AsnEncOid('1.2.3')
+    Oid: RawByteString;
+    /// the value associated with this OID
+    // - as ASN1_OCTSTR raw content for TCryptCertFields.CustomExts or
+    // TXTbsCertificate.ExtensionOther[]
+    // - as RawUtf8 for TXname.Other[]
+    Value: RawByteString;
+    /// true if this extension is defined as critical
+    Critical: boolean;
+  end;
+  PCryptCustomExt = ^TCryptCustomExt;
+
+  /// used to store some unknown attributes or extensions
+  // - in TCryptCertFields.CustomExts, TXTbsCertificate.ExtensionOther[]
+  // or TXname.Other[]
+  TCryptCustomExts = array of TCryptCustomExt;
+
   /// convenient wrapper of X.509 Certificate subject name X.501 fields
   // - not always implemented - mainly our 'syn-es256' certificate won't
   // - as defined in RFC 5280 Appendix A.1
@@ -2445,8 +2534,16 @@ type
     /// serialNumber field (OID 2.5.4.5)
     // - note that is not the main X.509 certificate serial, but e.g. a Tax Number
     SerialNumber: RawUtf8;
-    /// netscapeComment extension (not a field - OID 2.16.840.1.113730.1.13)
+    /// netscapeComment extension (not a name field - OID 2.16.840.1.113730.1.13)
     Comment: RawUtf8;
+    /// set all subject name X.501 fields as RFC 4514 Distinguished Name (DN) text
+    // - e.g. 'CN=John Doe+UID=123,O=Example\, Inc.,C=US' supporting multiple RDN
+    // - other fields like Country/State/...SerialNumber would be ignored
+    // - only currently supported by TXName.FromDNText from mormot.crypt.x509.pas
+    DistinguishedName: RawUtf8;
+    /// raw custom extensions (not name fields)
+    // - use AddCustomExts() to fill it, or e.g. FindAia() to resolve OCSP/Issuers
+    CustomExts: TCryptCustomExts;
   end;
   PCryptCertFields = ^TCryptCertFields;
 
@@ -2477,7 +2574,8 @@ type
     ccmUsage,
     ccmBinary,
     ccmSha1,
-    ccmSha256);
+    ccmSha256,
+    ccmIssuedBy);
 
   TCryptCert = class;
   TCryptCertAlgo = class;
@@ -2556,6 +2654,9 @@ type
     // or the authority serial number for syn-es256 (so equals GetSubjectKey
     // for a self-signed certificate)
     function GetAuthorityKey: RawUtf8;
+    /// fill TCryptCertFields information with internal certificates attributes
+    // - returns false if those fields are not supported e.g. for syn-es256
+    function GetFields(var fields: TCryptCertFields; withexts: boolean = false): boolean;
     /// check if this certificate has been self-signed
     function IsSelfSigned: boolean;
     /// check if this certificate has been issued by the specified certificate
@@ -2802,6 +2903,7 @@ type
     function GetIssuers: TRawUtf8DynArray; virtual; abstract;
     function GetSubjectKey: RawUtf8; virtual; abstract;
     function GetAuthorityKey: RawUtf8; virtual; abstract;
+    function GetFields(var fields: TCryptCertFields; withexts: boolean): boolean; virtual;
     function IsSelfSigned: boolean; virtual; abstract;
     function IsAuthorizedBy(const Authority: ICryptCert): boolean; virtual;
     function Compare(const Another: ICryptCert; Method: TCryptCertComparer): integer; virtual;
@@ -2924,11 +3026,27 @@ type
       read fCaa;
   end;
 
+  /// define the available source of trust for ICryptStore.IsValid/IsValidChain
+  // - cstOsRoot to lookup trusted roots from the OS
+  // - cstOsIntermediate to lookup OS intermediate CA cache/store
+  // - cstAiaIntermediate retrieve missing intermediates via AIA web requests
+  TCertStoreTrust = (
+    cstOsRoot,
+    cstOsIntermediate,
+    cstAiaIntermediate
+  );
+  /// define the source of trust for ICryptStore.IsValid/IsValidChain
+  // - [] would only search for certificates within the ICryptStore internal list
+  // - you could allow certificate lookup from OS or remote AIA sources
+  TCertStoreTrusts = set of TCertStoreTrust;
+
   TCryptCertCache = class;
 
   /// abstract interface to a Certificates Store, as returned by Store() factory
   // - may be X.509 or not, OpenSSL implemented or not
   ICryptStore = interface
+    procedure SetTrust(const Value: TCertStoreTrusts);
+    function GetTrust: TCertStoreTrusts;
     /// delete all stored Certificates or CRL information
     procedure Clear;
     /// load a Certificates Store from a ICryptStore.Save memory buffer content
@@ -3024,13 +3142,22 @@ type
     /// return the preferred algo to be used with this store
     // - call e.g. CertAlgo.New to prepare a new ICryptCert to add to this store
     function DefaultCertAlgo: TCryptCertAlgo;
+    /// customize the source of trust for IsValid/IsValidChain of this instance
+    // - if filled with global DefaultCryptStoreTrust variable by default
+    // - only supported by TCryptStore
+    property Trust: TCertStoreTrusts
+      read GetTrust write SetTrust;
   end;
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
   TCryptStore = class(TCryptInstance, ICryptStore)
   protected
     fCache: TCryptCertCache;
+    fTrust: TCertStoreTrusts;
+    procedure SetTrust(const Value: TCertStoreTrusts); virtual;
+    function GetTrust: TCertStoreTrusts;
   public
+    constructor Create(algo: TCryptAlgo); override;
     destructor Destroy; override;
     // ICryptStore methods
     procedure Clear; virtual; abstract;
@@ -3191,6 +3318,13 @@ type
     function NewList(const Pem: RawUtf8): TCryptCertList; overload;
   end;
 
+var
+  /// the default source of trust used for new ICryptStore instances
+  // - equals [cstOsRoot] on POSIX, as most libraries (e.g. OpenSSL) do
+  // - on Windows, contains [cstOsRoot, cstOsIntermediate, cstAiaIntermediate]
+  // unless IsAiaDisabledInWindowsRegistry result is true at startup
+  DefaultCryptStoreTrust: TCertStoreTrusts = [cstOsRoot]
+    {$ifdef OSWINDOWS} + [cstOsIntermediate, cstAiaIntermediate] {$endif};
 
 /// append a ICryptCert to a certificates chain
 procedure ChainAdd(var chain: ICryptCertChain; const cert: ICryptCert);
@@ -3205,6 +3339,24 @@ function ChainFind(var chain: ICryptCertChain; const cert: ICryptCert;
 // - returns the certificates in IsAuthorizedBy() order
 function ChainConsolidate(const chain: ICryptCertChain): ICryptCertChain;
 
+/// append a new entry as binary pair to a dynamic array of TCryptCustomExt
+// - use AsnEncOid() to compute the o binary from 'x.x.x.x.x' text OID
+procedure AddCustomExts(var exts: TCryptCustomExts; const o, v: RawByteString;
+  crit: boolean = false); overload;
+
+/// append a new entry as binary pair to a dynamic array of TCryptCustomExt
+// - use AsnEncOid() to compute the o binary from 'x.x.x.x.x' text OID
+procedure AddCustomExts(var exts: TCryptCustomExts; const o: TAsnBuffer;
+  const v: RawByteString; crit: boolean = false); overload;
+
+/// efficient search of a TCryptCustomExt.Value from a 'x.x.x.x.x' text OID
+function FindCustomExts(const Other: TCryptCustomExts; OidText: PUtf8Char): RawByteString;
+
+/// low-level search of a TCryptCustomExt.Value from a binary OID
+function FindCustomExtsAsn(o: PCryptCustomExt; n: integer; const b: TAsnObject): RawByteString;
+
+/// search and decode Authority Information Access (1.3.6.1.5.5.7.1.1) extension content
+function FindAia(const ext: TCryptCustomExts; var ocsp, issuers: TRawUtf8DynArray): boolean;
 
 type
   /// maintains a list of ICryptCert, easily reachable per TCryptCertUsage
@@ -3269,8 +3421,8 @@ const
   // - 2048-bit is today's norm, creating 112-bit of security
   // - 3072-bit is supposed to be supported up to 2030, with 128-bit of security
   // - 4096-bit has no security advantage, just slower process
-  // - 7680-bit is highly impractical (e.g. generation can be more than 30 secs)
-  // and offers only 192-bit of security, so other algorithms may be preferred
+  // - 7680-bit or 8192-bit are highly impractical (e.g. generation can be more
+  // than 30 secs) and offers only 192-bit of security
   // - see also OpenSslDefaultRsaBits() and RSA_INTERNAL_DEFAULT_GENERATION_BITS
   RSA_DEFAULT_GENERATION_BITS = 2048;
 
@@ -3431,7 +3583,8 @@ function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
 // follows the weak but known Delphi RTL Random(), and 'rnd-rdrand' which calls
 // the homonymous CPU HW opcode (if cfRAND in CpuFeatures)
 // - call Rnd('rnd-entropy').Get() to gather OS entropy (which may be slow),
-// optionally as 'rnd-entropysys', 'rnd-entropysysblocking', 'rnd-entropyuser'
+// optionally as 'rnd-entropy-full', 'rnd-entropy-sys', 'rnd-entropy-sysblocking'
+// and 'rnd-entropy-user'
 function Rnd(const name: RawUtf8 = 'rnd-default'): TCryptRandom;
 
 /// main resolver of the registered hashers
@@ -3611,6 +3764,10 @@ var
   // - but more standard CryptCertOpenSsl[] will be stored here if available
   CryptCert: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
+  /// global shared instances as set by InitNetTlsContextSelfSignedServer()
+  // - defined here to be properly released before the OpenSSL library unloading
+  CryptCertOpenSslSelfSigned: array[TCryptAsymAlgo] of ICryptCert;
+
 
   (* ICryptStore factories *)
 
@@ -3630,6 +3787,10 @@ var
   // - is currently nil because TCryptStoreOpenSsl is not stable yet
   // - call RegisterOpenSsl once to initialize this lookup table
   CryptStoreOpenSsl: TCryptStoreAlgo;
+
+  /// abstract function placeholder to retrieve an AIA remote resource
+  // - mormot.net.client would implement http:// and https:// protocols
+  CryptRemoteResource: function(const Uri: RawUtf8; var Res: RawByteString): boolean;
 
 
 
@@ -3741,11 +3902,17 @@ const
     '2.16.840.1.101.3.4.2.7',   // hfSHA3_224
     '2.16.840.1.101.3.4.2.9',   // hfSHA3_384
     '2.16.840.1.101.3.4.2.11',  // hfShake128
-    '2.16.840.1.101.3.4.2.12'); // hfShake256
+    '2.16.840.1.101.3.4.2.12',  // hfShake256
+    '2.16.840.1.101.3.4.2.1',   // hfSHA256_128 is SHA-256 truncated to 128-bit
+    '2.16.840.1.101.3.4.2.1');  // hfSHA256_160 is SHA-256 truncated to 160-bit
 
   /// the OID of all ECC public keys (X962)
   // - is stored as prefix to CKA_OID[ckaEcc256..ckaEcc256k] parameter
   ASN1_OID_X962_PUBLICKEY  = '1.2.840.10045.2.1';
+
+  ASN1_OID_AIA         = '1.3.6.1.5.5.7.1.1';
+  ASN1_OID_AIA_OCSP    = '1.3.6.1.5.5.7.48.1';
+  ASN1_OID_AIA_ISSUERS = '1.3.6.1.5.5.7.48.2';
 
   /// the OID of all supported ICryptPublicKey/ICryptPrivateKey algorithms
   CKA_OID: array[TCryptKeyAlgo] of RawUtf8 = (
@@ -3793,6 +3960,7 @@ function IsPem(const pem: RawUtf8): boolean;
 function IsPemEncrypted(const pem: TCertPem): boolean;
 
 /// extract pemCertificate and a private key concatenated in a PEM text file
+// - used e.g. by TCryptCertX509/TCryptCertOpenSsl.Load(cccCertWithPrivateKey)
 function PemToCertAndPrivKey(const MultiPartPem: RawUtf8;
   out Cert, PrivKey: RawByteString): boolean;
 
@@ -4002,12 +4170,15 @@ function AsnTime(dt: TDateTime): TAsnObject;
 function AsnNextTime(var Pos: integer; const Buffer: TAsnObject;
   out Value: TDateTime): boolean;
 
-/// decode an OID ASN.1 IP Address buffer into human-readable text
-function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
+/// parse the next GeneralName value within a ASN1_SEQ
+function AsnNextGeneralName(var Pos: integer; const Buffer: TAsnObject;
+  var Name: RawUtf8): boolean;
 
-/// human-readable display of a ASN.1 value binary
-// - used e.g. by the ASNDEBUG conditional
-function AsnDump(const Value: TAsnObject): RawUtf8;
+/// decode an OID ASN.1 IP Address buffer into human-readable text
+procedure AsnDecIp(p: PAnsiChar; len: integer; var text: RawUtf8);
+
+/// decode Authority Information Access (1.3.6.1.5.5.7.1.1) extension content
+function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray): boolean;
 
 /// serialize a TSecurityDescriptor instance into JSON
 function SecurityDescriptorToJson(const SD: TSecurityDescriptor): RawUtf8;
@@ -4015,6 +4186,25 @@ function SecurityDescriptorToJson(const SD: TSecurityDescriptor): RawUtf8;
 /// unserialize a TSecurityDescriptor instance from JSON
 function SecurityDescriptorFromJson(const Json: RawUtf8;
   out SD: TSecurityDescriptor): boolean;
+
+
+{ **************** TSynMustache Cryptographic Expression Helpers }
+
+type
+  /// the published properties of this class implement cryptographic expression
+  // helpers via TSynMustache.HelperAddMethods(helpers, TSynMustacheCryptoHelpers)
+  // - could be registered individually using TSynMustache.HelperAdd()
+  // - used e.g. by TMvcViewsMustache.RegisterExpressionHelpersForCrypto
+  // - would allow e.g. to compute a Gravatar URI via:
+  // ! <img src=http://www.gravatar.com/avatar/{{md5 email}}?s=200></img>
+  TSynMustacheCryptoHelpers = class(TSynPersistent)
+  published
+    class procedure Md5(const Value: variant; out Result: variant);
+    class procedure Sha1(const Value: variant; out Result: variant);
+    class procedure Sha256(const Value: variant; out Result: variant);
+    class procedure Sha512(const Value: variant; out Result: variant);
+    class procedure PasswordGenerate(const Value: variant; out Result: variant);
+  end;
 
 
 implementation
@@ -4039,7 +4229,9 @@ begin
     hfSHA1:
       PSha1(@ctxt)^.Init;
     hfSHA224:
-      PSha256(@ctxt)^.Init224;
+      PSha256(@ctxt)^.Init224; // specific init vectors
+    hfSHA256_128,
+    hfSHA256_160,
     hfSHA256:
       PSha256(@ctxt)^.Init;
     hfSHA384:
@@ -4061,7 +4253,7 @@ const
     SizeOf(TMd5),    SizeOf(TSha1),       SizeOf(TSha256), SizeOf(TSha384),
     SizeOf(TSha512), SizeOf(TSha512_256), SizeOf(TSha3),   SizeOf(TSha3),
     SizeOf(TSha256), SizeOf(TSha3),       SizeOf(TSha3),   SizeOf(TSha3),
-    SizeOf(TSha3));
+    SizeOf(TSha3),   SizeOf(TSha256),     SizeOf(TSha256));
 
 procedure TSynHasher.CopyTo(out aHasher: TSynHasher);
 begin
@@ -4082,6 +4274,8 @@ begin
         PMd5(@ctxt)^.Update(aBuffer^, aLen);
       hfSHA1:
         PSha1(@ctxt)^.Update(aBuffer, aLen);
+      hfSHA256_128,
+      hfSHA256_160,
       hfSHA224,
       hfSHA256:
         PSha256(@ctxt)^.Update(aBuffer, aLen);
@@ -4094,6 +4288,20 @@ begin
     else
       PSha3(@ctxt)^.Update(aBuffer, aLen);
     end;
+end;
+
+procedure TSynHasher.UpdateUpper(aBuffer: pointer; aLen: PtrInt);
+var
+  up: TByteToAnsiChar; // normalize aBuffer content into uppercase ASCII
+  l: PtrInt;
+begin
+  while aLen > 0 do // normalize on stack until all input buffer is hashed
+  begin
+    l := UpperCopy255Buf(@up, aBuffer, MinPtrInt(192, aLen)) - PAnsiChar(@up);
+    Update(@up, l);
+    inc(PByte(aBuffer), l);
+    dec(aLen, l);
+  end
 end;
 
 procedure TSynHasher.Update(const aBuffer: RawByteString);
@@ -4135,12 +4343,14 @@ begin
       PMd5(@ctxt)^.Final(aDigest.h0, aNoInit);
     hfSHA1:
       PSha1(@ctxt)^.Final(aDigest.b160, aNoInit);
-    hfSHA224: // SHA-224 is just a truncated SHA-256 result
+    hfSHA224: // SHA-224 is just a truncated SHA-256 result with other Init
       begin
         PSha256(@ctxt)^.Final(aDigest.Lo, {aNoInit=}true);
         if not aNoInit then
           PSha256(@ctxt)^.Init224; // but it needs its own re-initialization
       end;
+    hfSHA256_128, // plain SHA-256 truncated to 128/160-bit (no RFC existing)
+    hfSHA256_160,
     hfSHA256:
       PSha256(@ctxt)^.Final(aDigest.Lo, aNoInit);
     hfSHA384:
@@ -4177,7 +4387,7 @@ end;
 
 function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if Init(aAlgo) then
   begin
     Update(aBuffer, aLen);
@@ -4222,7 +4432,7 @@ var
   dig: PHash512Rec;
   diglen, counter: cardinal;
 begin
-  result := '';
+  FastAssignNew(result);
   if (aSeed = nil) or
      (aSeedLen <= 0) or
      (aDestLen <= 0) then
@@ -4327,7 +4537,7 @@ var
   prep: PRawByteString;
   alt: THash512Rec;
 begin
-  result := '';
+  FastAssignNew(result);
   if aAlgo <> hfMD5 then // fixed to 1000 rounds (sooo weak!) for MD5-CRYPT
     if aRounds = 0 then
       aRounds := MCF_ROUNDS[mcfSha256Crypt] // same default for mcfSha512Crypt
@@ -4504,91 +4714,77 @@ begin
   result := mormot.core.text.HexToBin(pointer(HexaHash), @Digest.Bin, HASH_SIZE[Digest.Algo]);
 end;
 
-{ TStreamRedirectShake256 }
+{ TStreamRedirect* inherited classes }
 
 class function TStreamRedirectShake256.GetAlgo: THashAlgo;
 begin
   result := hfShake256;
 end;
 
-{ TStreamRedirectShake128 }
-
 class function TStreamRedirectShake128.GetAlgo: THashAlgo;
 begin
   result := hfShake128;
 end;
-
-{ TStreamRedirectSha3_512 }
 
 class function TStreamRedirectSha3_512.GetAlgo: THashAlgo;
 begin
   result := hfSHA3_512;
 end;
 
-{ TStreamRedirectSha3_224 }
-
 class function TStreamRedirectSha3_224.GetAlgo: THashAlgo;
 begin
   result := hfSHA3_224;
 end;
-
-{ TStreamRedirectSha3_256 }
 
 class function TStreamRedirectSha3_256.GetAlgo: THashAlgo;
 begin
   result := hfSHA3_256;
 end;
 
-{ TStreamRedirectSha3_384 }
-
 class function TStreamRedirectSha3_384.GetAlgo: THashAlgo;
 begin
   result := hfSHA3_384;
 end;
-
-{ TStreamRedirectSha512 }
 
 class function TStreamRedirectSha512.GetAlgo: THashAlgo;
 begin
   result := hfSHA512;
 end;
 
-{ TStreamRedirectSha512_256 }
-
 class function TStreamRedirectSha512_256.GetAlgo: THashAlgo;
 begin
   result := hfSHA512_256;
 end;
-
-{ TStreamRedirectSha384 }
 
 class function TStreamRedirectSha384.GetAlgo: THashAlgo;
 begin
   result := hfSHA384;
 end;
 
-{ TStreamRedirectSha256 }
-
 class function TStreamRedirectSha256.GetAlgo: THashAlgo;
 begin
   result := hfSHA256;
 end;
 
-{ TStreamRedirectSha224 }
+class function TStreamRedirectSha256_128.GetAlgo: THashAlgo;
+begin
+  result := hfSHA256_128;
+end;
+
+class function TStreamRedirectSha256_160.GetAlgo: THashAlgo;
+begin
+  result := hfSHA256_160;
+end;
 
 class function TStreamRedirectSha224.GetAlgo: THashAlgo;
 begin
   result := hfSHA224;
 end;
 
-{ TStreamRedirectSha1 }
-
 class function TStreamRedirectSha1.GetAlgo: THashAlgo;
 begin
   result := hfSHA1;
 end;
-
-{ TStreamRedirectMd5 }
 
 class function TStreamRedirectMd5.GetAlgo: THashAlgo;
 begin
@@ -4736,7 +4932,7 @@ var
 begin
   h := HashFileRaw(aFileName, [aAlgo]);
   if h = nil then
-    result := ''
+    FastAssignNew(result)
   else
     result := h[0];
 end;
@@ -4805,576 +5001,6 @@ end;
 function HashFileSha3_512(const FileName: TFileName): RawUtf8;
 begin
   result := HashFile(FileName, hfSHA3_512);
-end;
-
-const
-  MCF_IDENT: array[mcfMd5Crypt.. high(TModularCryptFormat)] of RawUtf8 = (
-    '1', '5', '6', 'pbkdf2', 'pbkdf2-sha256', 'pbkdf2-sha512', 'pbkdf2-sha3',
-    '2b', 'bcrypt-sha256', 'scrypt');
-
-function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
-  var salt: RawUtf8): TModularCryptFormat;
-var
-  sLogN, sR, sP: cardinal;
-begin
-  result := mcfInvalid;
-  if (P = nil) or
-     not (P^ in ['$', '#']) then // allow # prefix for SCRAM-like auth
-    exit;
-  inc(P);
-  GetNextItem(P, '$', salt);
-  if salt = '' then
-    exit;
-  case GetCardinal(pointer(salt)) of
-    1:
-      result := mcfMd5Crypt;
-    2: // $2a$ $2b$ $2x$ $2y$ $2z$ ...
-      result := mcfBCrypt;
-    5:
-      result := mcfSha256Crypt;
-    6:
-      result := mcfSha512Crypt;
-    7:
-      result := mcfSCrypt; // as in Unix crypt utility (but not identical)
-  else
-    result := TModularCryptFormat(FindNonVoidRawUtf8(@MCF_IDENT,
-      pointer(salt), length(salt), length(MCF_IDENT)) + ord(low(MCF_IDENT)));
-  end;
-  case result of
-    mcfMd5Crypt:      // '$1${salt}${checksum}'
-      rounds := 1000; // fixed
-    mcfSha256Crypt .. mcfSha512Crypt:
-      begin // '$5$rounds={rounds}${salt}${checksum}'
-        if IdemPChar(P, 'ROUNDS=') then
-          begin
-            inc(P, 7);
-            rounds := GetNextItemCardinal(P, '$');
-          end
-          else
-            rounds := 5000; // default for SHA-256 Crypt and SHA-512 Crypt
-      end;
-    mcfPbkdf2Sha1 .. mcfBCrypt:
-      begin // '$pbkdf2{-digest}${rounds}${salt}${checksum}'
-        rounds := GetNextItemCardinal(P, '$');
-        if rounds = 0 then
-        begin
-          result := mcfInvalid;
-          exit;
-        end;
-      end; // for mcfBCrypt: '$2a$rounds$saltchecksum' - rounds = cost (4..31)
-    mcfBCryptSha256:
-      begin // '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uk...'
-        result := mcfInvalid;
-        if not IdemPChar(P, 'V=2,T=2') then // version 1 without HMAC was unsafe
-          exit;
-        inc(P, 7);
-        if P^ <> ',' then
-          if P^ in ['a'..'z'] then
-            inc(P)
-          else
-            exit;
-        if not IdemPChar(P, ',R=') then
-          exit;
-        inc(P, 3);
-        rounds := GetNextItemCardinal(P, '$');
-        if not (rounds in [4 .. 31]) then
-          exit;
-        result := mcfBCryptSha256;
-      end;
-    mcfSCrypt:
-      begin // '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>'
-        result := mcfInvalid;
-        if not IdemPChar(P, 'LN=') then
-          exit;
-        inc(P, 3);
-        sLogN := GetNextItemCardinal(P, ','); // logN in [1..31] - default 16
-        if (sLogN = 0) or
-           (sLogN > 31) or
-           not IdemPChar(P, 'R=') then
-          exit;
-        inc(P, 2);
-        sR := GetNextItemCardinal(P, ',');     // R in [1..16384] - default 8
-        if (sR = 0) or
-           (sR > 16384) or
-           not IdemPChar(P, 'P=') then
-          exit;
-        inc(P, 2);
-        sP := GetNextItemCardinal(P, '$');     // P in [1..8191] - default 2
-        if (sP = 0) or
-           (sP > 8192) then
-          exit;
-        // rounds := <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
-        rounds := SCryptRounds(sLogN, sR, sP);
-        GetNextItem(P, '$', salt);
-        if not Base64uriValid(pointer(salt), @ConvertBase64ToBin) then
-          exit;
-        result := mcfSCrypt;
-        exit; // $scrypt$ charset is standard base64 and not passlib b64valid()
-      end;
-  else
-    begin
-      result := mcfUnknown;
-      exit;
-    end;
-  end;
-  if result = mcfBCrypt then // mcfBCrypt: '$2a$rounds$saltchecksum'
-  begin
-    FastSetString(salt, P, 22); // fixed 22 chars salt
-    inc(P, 22);                 // fixed 31 chars checksum (may be > with OPRF)
-  end
-  else
-    GetNextItem(P, '$', salt);
-  if not b64valid(pointer(salt)) then
-    result := mcfInvalid;
-end; // on success, P^ points to the {checksum} part - its encoding is unchecked
-
-function ModularCryptIdentify(const hash: RawUtf8; info: PRawUtf8): TModularCryptFormat;
-var
-  dummyrounds: cardinal;
-  dummysalt: RawUtf8;
-  P: PUtf8Char;
-begin
-  P := pointer(hash);
-  result := ModularCryptParse(P, dummyrounds, dummysalt);
-  if (info <> nil) and
-     (result in mcfValid) and
-     (P <> nil) then
-    FastSetString(info^, pointer(hash), P - pointer(hash));
-end;
-
-function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
-  rounds, saltsize: cardinal; const salt: RawUtf8): RawUtf8;
-var
-  signer: TSynSigner;
-  logN, R, P: cardinal;
-  hasher: TSynHasher absolute signer;
-  dig: THash256 absolute signer;
-{%H-}begin
-  case format of
-    mcfMd5Crypt .. mcfSha512Crypt:
-      result := hasher.UnixCryptHash(MCF_ALGO[format], password, rounds, saltsize, salt);
-    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
-      result := signer.Pbkdf2ModularCrypt(format, password, rounds, saltsize, salt);
-    mcfBCrypt, mcfBCryptSha256:
-      if Assigned(BCrypt) then
-        result := BCrypt(password, salt, rounds, nil, format = mcfBCryptSha256);
-    mcfSCrypt:
-      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
-        SCryptRoundsDecode(rounds, logN, R, P);
-        result := SCryptHash(password, salt, logN, R, P);
-      end;
-  else
-    result := '';
-  end;
-end;
-
-function ModularCryptHash(const format, password: RawUtf8;
-  decodedFormat: PModularCryptFormat): RawUtf8;
-var
-  mcf: TModularCryptFormat;
-  P: PUtf8char;
-  rounds: cardinal;
-  salt: RawUtf8;
-begin
-  FastAssignNew(result);
-  P := pointer(format);
-  mcf := ModularCryptParse(P, rounds, salt);
-  if decodedFormat <> nil then
-    decodedFormat^ := mcf;
-  if mcf in mcfValid then
-    result := ModularCryptHash(mcf, password, rounds, 0, salt);
-end;
-
-function ModularCryptVerify(const password, hash: RawUtf8;
-  allowed: TModularCryptFormats; maxrounds: cardinal): TModularCryptFormat;
-var
-  rounds, pos, logN, R, P: cardinal;
-  salt, h: RawUtf8;
-  checksum: PUtf8Char;
-  signer: TSynSigner;
-  hasher: TSynHasher absolute signer;
-begin
-  checksum := pointer(hash);
-  result := ModularCryptParse(checksum, rounds, salt);
-  if not (result in mcfValid) then
-    exit;
-  if (allowed <> []) and
-     not (result in allowed) then
-  begin
-    result := mcfUnknown;
-    exit;
-  end;
-  if (maxrounds <> 0) and
-     (rounds > maxrounds) then
-  begin
-    result := mcfInvalid;
-    exit;
-  end;
-  pos := 0;
-  case result of
-    mcfMd5Crypt .. mcfSha512Crypt:
-      h := hasher.UnixCryptHash(MCF_ALGO[result], password, rounds, 0, salt, @pos);
-    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
-      h := signer.Pbkdf2ModularCrypt(result, password, rounds, 0, salt, @pos);
-    mcfBCrypt .. mcfBCryptSha256:
-      if (rounds in [4 .. 31]) and
-         (length(salt) = 22) then
-        h := BCrypt(password, salt, rounds, @pos, result = mcfBCryptSha256)
-      else
-        result := mcfInvalid;
-    mcfScrypt:
-      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
-        SCryptRoundsDecode(rounds, logN, R, P);
-        h := SCryptHash(password, salt, logN, R, P, @pos);
-      end;
-  else
-    begin
-      result := mcfUnknown;
-      exit;
-    end;
-  end;
-  if (pos = 0) or
-     (mormot.core.base.StrComp(checksum, PUtf8Char(pointer({%H-}h)) + pos - 1) <> 0) then
-    result := mcfInvalid;
-end;
-
-function ModularCryptFakeInfo(const id: RawUtf8; format: TModularCryptFormat): RawUtf8;
-var
-  h: THash256Rec; // always return the same fake content for the same id
-  enc: PChar64;
-  sha: TSha256;
-  salt: TShort23 absolute sha;
-const
-  RANGE = cardinal(high(TModularCryptFormat)) - cardinal(mcfMd5Crypt); // = 9
-begin
-  sha.Init;
-  sha.Update(@SystemEntropy.Startup, SizeOf(SystemEntropy.Startup));
-  sha.Update(id);
-  sha.Final(h.b, {noinit=}true);
-  if format <= mcfMd5Crypt then // compute consistent format if none supplied
-    format := TModularCryptFormat(h.b[0] mod RANGE + byte(succ(mcfMd5Crypt)));
-  Join(['$', MCF_IDENT[format], '$'], result);
-  enc := @HASH64_CHARS;
-  if format = mcfSCrypt then
-    enc := @ConvertToBase64;
-  salt[0] := #22;  // return consistent salt between calls for the same id
-  Base64uriEncode(@salt[1], @h.Hi, 16, enc);
-  case format of   // as if they were created with our default parameters
-    mcfSha256Crypt .. mcfSha512Crypt:
-      Append(result, ['rounds=', MCF_ROUNDS[format], '$', salt, '$']);
-    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
-     Append(result, [MCF_ROUNDS[format], '$', salt, '$']);
-    mcfBCrypt:
-      Append(result, ['12$', salt]);
-    mcfBCryptSha256:
-      Append(result, ['v=2,t=2b,r=12$', salt, '$']);
-    mcfSCrypt:
-      Append(result, ['ln=16,r=8,p=2$', salt, '$']);
-  end;
-end;
-
-function SCryptRounds(LogN, BlockSize, Parallel: cardinal): cardinal;
-begin // = <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
-  if LogN = 0 then
-    LogN := 16
-  else if LogN > 31 then
-    LogN := 31;
-  if BlockSize = 0 then
-    BlockSize := 8
-  else if BlockSize > 16384 then
-    BlockSize := 16384;
-  if Parallel = 0 then
-    Parallel := 1
-  else if Parallel > 8192 then
-    Parallel := 8192;
-  result := (LogN shl 27) + ((BlockSize - 1) shl 13) + (Parallel - 1);
-end;
-
-procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
-begin
-  if Rounds = 0 then
-  begin
-    LogN := 16;
-    BlockSize := 8;
-    Parallel := 2; // those default values uses 64MB and 140ms - close to BCrypt
-    exit;
-  end;
-  LogN := Rounds shr 27;
-  if LogN = 0 then
-    LogN := 16;     // LogN never 0, 5-bit up to 31
-  BlockSize :=  (Rounds shr 13) and 16383;
-  if BlockSize = 0 then
-    BlockSize := 8
-  else
-    inc(BlockSize); // R never 0, 14-bit up to 16384
-  Parallel := Rounds and 8191;
-  if Parallel = 0 then
-    Parallel := 1
-  else
-    inc(Parallel); // P never 0, 13-bit up to 8192
-end;
-
-const
-  SCRYPT_KEYLEN  = 32; // 32-byte output key = 43 chars
-  SCRYPT_SALTLEN = 16; // 16-byte default salt = 22 chars
-
-function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8; LogN: PtrUInt;
-  BlockSize: PtrUInt; Parallel: PtrUInt; HashPos: PInteger; Api: TSCriptRaw): RawUtf8;
-var
-  saltbin, saltb64, hash: RawByteString;
-begin
-  result := '';
-  if not Assigned(Api) then
-    Api := @SCrypt; // from mormot.crypt.other or mormot.crypt.openssl
-  if not Assigned(Api) or
-     (LogN <= 1) or
-     (LogN > 31) or
-     (BlockSize = 0) or
-     (Parallel = 0) then
-    exit;
-  if not TAesPrng.Main.RandomSalt(saltbin, saltb64, SCRYPT_SALTLEN, Salt,
-           @ConvertToBase64, @ConvertBase64ToBin) then
-    exit; // expects standard base64 but without trailing '='
-  hash := Api(Password, saltbin, 1 shl LogN, BlockSize, Parallel, SCRYPT_KEYLEN);
-  if hash = '' then
-    exit;
-  Make(['$scrypt$ln=', LogN, ',r=', BlockSize, ',p=', Parallel, '$',
-        saltb64, '$'], result);
-  if HashPos <> nil then
-    HashPos^ := length(result) + 1;
-  Append(result, BinToBase64uri(hash, @ConvertToBase64));
-end;
-
-
-// SCRAM-like mutual auth - see https://github.com/synopse/mORMot2/issues/405
-
-function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8;
-var
-  clientkey: THash256;
-  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
-begin
-  result := ''; // error
-  if (Hash = '') or
-     (Hash[1] <> '$') or // should be a true KDF/MCF result
-     not (ModularCryptIdentify(Hash, @result) in mcfValid) then
-    exit;
-  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
-  Sha256Digest(stored.Lo, clientkey); // store H(clientkey) for ScramClientProof
-  HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], stored.Hi, '|');
-  result[1] := '#'; // "#MCF prefix" + base64uri(StoredKey + ServerKey)
-  Append(result, BinToBase64uri(stored.b));
-  FillZero(clientkey);
-  FillZero(stored.b);
-end;
-
-function ScramPersistedKey(Mcf: TModularCryptFormat; const Password, User: RawUtf8;
-  Rounds: cardinal): RawUtf8;
-begin
-  result := ScramPersistedKey(ModularCryptHash(mcf, Password, Rounds), User);
-end;
-
-function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8;
-begin
-  result := ScramPersistedKey(ModularCryptHash(McfFormat, Password), User);
-end;
-
-function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
-  const Msg: array of RawByteString): RawUtf8;
-var
-  clientkey, storedkey: THash256;
-begin
-  result := ''; // error
-  if (Hash = '') or
-     (Hash[1] <> '$') or // should be a true KDF/MCF result
-     not (ModularCryptIdentify(Hash) in mcfValid) then
-    exit;
-  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
-  Sha256Digest(storedkey, clientkey);
-  HmacSha256U(@storedkey, SizeOf(storedkey), Msg, ClientSignature, '|');
-  Xor256(@clientkey, @ClientSignature);
-  result := BinToBase64uri(clientkey);
-  FillZero(clientkey);
-  FillZero(storedkey);
-end;
-
-function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
-  const Msg: array of RawByteString): RawUtf8;
-var
-  l: PtrInt;
-  k: PAnsiChar;
-  clientsig, clientkey: THash256;
-  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
-begin
-  result := ''; // error
-  if not Base64uriToBin(ClientProof, @clientkey, SizeOf(clientkey)) then
-    exit;
-  l := length(PersistedKey) - 86;
-  k := pointer(PersistedKey);
-  if (l < 0) or // should end with base64-uri encoded 2*256-bit = 86 chars
-     (k[0] <> '#') or
-     not Base64uriToBin(k + l, @stored, 86, SizeOf(stored)) then
-    exit;
-  HmacSha256U(@stored.Lo, SizeOf(stored.Lo), Msg, clientsig, '|');
-  Xor256(@clientkey, @clientsig);
-  Sha256Digest(clientkey, clientkey);
-  if IsEqual(clientkey, stored.Lo) then // H(candidate_ClientKey) = StoredKey
-  begin
-    Xor256(@stored.Hi, @clientsig);
-    result := BinToBase64uri(stored.Hi); // proof on success
-  end;
-  FillZero(clientkey);
-  FillZero(stored.b);
-end;
-
-function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
-  var ClientSignature: THash256): boolean;
-var
-  serverkey, proof: THash256;
-begin
-  result := false;
-  if (Hash <> '') and
-     (Hash[1] = '$') and // should be a true KDF/MCF result
-     Base64uriToBin(ServerProof, @proof, SizeOf(proof)) then
-  begin
-    HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], serverkey, '|');
-    Xor256(@proof, @ClientSignature);
-    result := IsEqual(proof, serverkey);
-    FillZero(proof);
-    FillZero(serverkey);
-  end;
-  FillZero(ClientSignature);
-end;
-
-
-{ TScramClient }
-
-constructor TScramClient.Create(aAlgo: TSignAlgo; aMcfSupport: boolean);
-begin
-  fAlgo := aAlgo;
-  fSize := SIGN_SIZE[aAlgo];
-  fMcfSupport := aMcfSupport;
-end;
-
-destructor TScramClient.Destroy;
-begin
-  FillZero(fAuthMessage);
-  FillZero(fServerProof);
-  inherited Destroy;
-end;
-
-function TScramClient.ComputeFirstMessage(const User: RawUtf8;
-  out Mechanism: RawUtf8; const TestForceNonce: RawUtf8): RawUtf8;
-var
-  usr: RawUtf8;
-begin
-  Join(['SCRAM-', SIGNER_TXT[fAlgo]], Mechanism);
-  if TestForceNonce <> '' then
-    fClientNonce := TestForceNonce // used against reference vectors
-  else
-  begin
-    Random128(@fSigner); // unpredictable - use fSigner as transient storage
-    fClientNonce := BinToBase64(@fSigner, SizeOf(THash128));
-  end;
-  usr := StringReplaceAll(User, ['=', '=3D', ',', '=2C']);
-  FormatUtf8('n=%,r=%', [usr, fClientNonce], fAuthMessage);
-  if fMcfSupport then
-    Append(fAuthMessage, ',f=y');
-  Join(['n,,', fAuthMessage], result);
-end;
-
-function TScramClient.ComputeFinalMessage(
-  const ServerResponse, Password: RawUtf8): RawUtf8;
-var
-  resp: TDocVariantData;
-  fullnonce, s, i, mcf, key, msg: RawUtf8;
-  salt: RawByteString;
-  iterations: integer;
-  salted, client, stored, server: THash512Rec;
-begin
-  // decode input parameters
-  result := '';
-  fServerProof := '';
-  if (fAuthMessage = '') or
-     (fClientNonce = '') then
-  begin
-    fLastError := 'out of order ComputeFinalMessage() usage';
-    exit;
-  end;
-  iterations := 0;
-  fLastError := 'invalid Server initial response';
-  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
-  if not resp.GetAsRawUtf8('r', fullnonce) or
-     not StartWithExact(fullnonce{%H-}, fClientNonce) then
-    exit;
-  if fMcfSupport and
-     resp.GetAsRawUtf8('f', mcf) then // SCRAM-MCF extension
-  begin
-    if fAlgo = saSha1 then
-      exit; // this weak algo is rejected by the draft RFC
-    mcf := ModularCryptHash(Base64ToBin(mcf), Password); // ignore i=..,s=..
-    if mcf = '' then
-      exit; // unsupported Modular Crypt algorithm or invalid prefix
-  end
-  else if not resp.GetAsRawUtf8('s', s) or
-          not Base64ToBin(pointer({%H-}s), length({%H-}s), salt) or
-          not resp.GetAsRawUtf8('i', i) or
-          not ToInteger(i{%H-}, iterations) or
-          (iterations <= 0) or
-          (iterations > MAX_PBKDF2_ROUNDS) then // avoid DoS attacks
-    // invalid s=... and i=... standard SCRAM parameters
-    exit;
-  // hash password according to server expectations and compute client signature
-  Join(['c=biws,r=', fullnonce], key);
-  Join([fAuthMessage, ',', ServerResponse, ',', key], msg);
-  if mcf = '' then
-  begin
-    fSigner.Pbkdf2(fAlgo, Password, salt{%H-}, iterations, @salted);
-    fSigner.Full(fAlgo, @salted, fSize, 'Client Key', @client);
-    fSigner.Full(fAlgo, @salted, fSize, 'Server Key', @server);
-    FillZero(salted, fSize);
-  end
-  else
-  begin
-    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Client Key', @client);
-    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Server Key', @server);
-    FillZero(mcf);
-  end;
-  // compute client and server proofs
-  fSigner.Hash(fAlgo, @client, fSize, stored);
-  fSigner.Full(fAlgo, @stored, fSize, msg, @stored);
-  XorMemory(@client, @stored, fSize);
-  Join([key, ',p=', BinToBase64(@client, fSize)], result); // client proof
-  fSigner.Full(fAlgo, @server, fSize, msg, @server);
-  fServerProof := BinToBase64(@server, fSize);             // server proof
-  fLastError := '';
-  FillZero(key);
-  FillZero(client, fSize);
-  FillZero(stored, fSize);
-  FillZero(server, fSize);
-end;
-
-function TScramClient.CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
-var
-  resp: TDocVariantData;
-  proof: RawUtf8;
-begin
-  result := false;
-  if fServerProof = '' then
-  begin
-    fLastError := 'out of order CheckFinalResponse() usage';
-    exit;
-  end;
-  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
-  if resp.GetAsRawUtf8('v', proof) then
-    if proof = fServerProof then
-    begin
-      fLastError := '';
-      result := true;
-    end
-    else
-      fLastError := 'invalid Server proof'
-  else
-    fLastError := 'invalid Server last response';
 end;
 
 
@@ -5543,8 +5169,8 @@ procedure TSynSigner.Pbkdf2(aParamsJson: PUtf8Char; aParamsJsonLen: integer;
   out aDerivatedKey: THash512Rec; const aDefaultSalt: RawUtf8;
   aDefaultAlgo: TSignAlgo);
 var
-  tmp: TSynTempBuffer;
   k: TSynSignerParams;
+  tmp: TSynTempBuffer;
 
   procedure SetDefault;
   begin
@@ -5597,7 +5223,7 @@ var
   p: PHash512Rec;
 begin
   // see https://www.rfc-editor.org/rfc/rfc2898#section-5.2
-  result := '';
+  FastAssignNew(result);
   if (aSecret = '') or
      (aSecretPbkdf2Round = 0) or
      (aSecretPbkdf2Round > 1 shl 20) or
@@ -5626,6 +5252,9 @@ begin
 end;
 
 const
+  MCF_IDENT: array[mcfMd5Crypt.. high(TModularCryptFormat)] of RawUtf8 = (
+    '1', '5', '6', 'pbkdf2', 'pbkdf2-sha256', 'pbkdf2-sha512', 'pbkdf2-sha3',
+    '2b', 'bcrypt-sha256', 'scrypt');
   MCF_SIGN: array[mcfPbkdf2Sha1 .. mcfPbkdf2Sha3] of TSignAlgo = (
     saSHA1, saSHA256, saSHA512, saSha3512);
   HASH64_ENC: TChar64 = // the current encoding used by "$pbkdf2" passlib
@@ -5641,7 +5270,7 @@ var
   bin, b64: RawByteString;
   dig: THash512;
 begin
-  result := '';
+  FastAssignNew(result);
   if (aPassword = '') or
      not (aAlgo in [low(MCF_SIGN) .. high(MCF_SIGN)]) then
     exit;
@@ -5652,7 +5281,7 @@ begin
   if aSaltSize = 0 then
     aSaltSize := 16;
   if HASH64_DEC[#255] = 0 then // check the last byte for thread-safe init
-    FillBaseDecoder(@HASH64_ENC, @HASH64_DEC, high(HASH64_ENC));
+    FillBaseDecoder(@HASH64_ENC, @HASH64_DEC);
   if not TAesPrng.Main.RandomSalt(bin, b64, aSaltSize, aSalt, @HASH64_ENC, @HASH64_DEC) then
     exit;
   Make(['$', MCF_IDENT[aAlgo], '$', aRounds, '$', b64, '$'], result);
@@ -5668,7 +5297,7 @@ var
   dig: PHash512Rec;
   diglen, counter: cardinal;
 begin
-  result := '';
+  FastAssignNew(result);
   if (aKey = '') or
      (aLabel = '') or
      (aDestLen = 0) then
@@ -5800,11 +5429,9 @@ begin
       '-', '/':
         if not onlyalphanum then
           if ((tmp[0] = #4) and // '.sha3-256' -> 'sha3_256'
-              (PCardinal(@tmp[1])^ and $ffdfdfdf =
-                ord('S') + ord('H') shl 8 + ord('A') shl 16 + ord('3') shl 24)) or
-             ((tmp[0] = #6) and // '.sha512-256' -> 'sha512_256'
-              (PCardinal(@tmp[1])^ and $ffdfdfdf =
-                ord('S') + ord('H') shl 8 + ord('A') shl 16 + ord('5') shl 24)) then
+              (PCardinal(@tmp[1])^ and $ffdfdfdf = SHA_HI + ord('3') shl 24)) or
+             ((tmp[0] = #6) and // '.sha512-256' or '.sha256-160'
+              (PCardinal(@tmp[1])^ and $80dfdfdf = SHA_HI)) then
             AppendShortChar('_', @tmp);
     end;
     inc(P);
@@ -5876,11 +5503,24 @@ begin
       end;
 end;
 
-function HashDigestEqual(const a, b: THashDigest): boolean;
+function HashDigestEqual(a, b: PPtrIntArray): boolean;
 begin
-  result := (a.Algo <= high(THashAlgo)) and
-            mormot.core.base.CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
+  result := (a[0] = b[0]) and // compare first 4/8 bytes (much faster in loops)
+            (PHashAlgo(a)^ <= high(THashAlgo)) and // avoid buffer overflow
+     (MemCmp(@a[1], @b[1], HASH_SIZE[PHashAlgo(a)^] - (SizeOf(a[0]) - 1)) = 0);
 end;
+
+procedure FillZero(var Digest: THashDigest);
+begin
+  if Digest.Algo <= high(THashAlgo) then // avoid buffer overflow
+    FillZero(Digest.Bin, HASH_SIZE[Digest.Algo]);
+  Digest.Algo := low(Digest.Algo);
+end;
+
+
+{ **************** HMAC/PBKDF2 MCF SCRAM SCRAM-MCF TOTP High-Level Protocols}
+
+{ some HMAC/PBKDF2 common wrappers defined here to redirect to TSynSigner }
 
 procedure Hmac(algo: TSignAlgo; key, msg: pointer; keylen, msglen: integer;
   result: PHash512Rec);
@@ -5960,6 +5600,657 @@ procedure Pbkdf2HmacSha512(const password, salt: RawByteString;
   count: integer; out result: TSha512Digest);
 begin
   Pbkdf2(saSha512, password, salt, count, @result);
+end;
+
+{ Extended "Modular Crypt" support }
+
+function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
+  var salt: RawUtf8): TModularCryptFormat;
+var
+  sLogN, sR, sP: cardinal;
+begin
+  result := mcfInvalid;
+  if (P = nil) or
+     not (P^ in ['$', '#']) then // allow # prefix for SCRAM-like auth
+    exit;
+  inc(P);
+  GetNextItem(P, '$', salt);
+  if salt = '' then
+    exit;
+  case GetCardinal(pointer(salt)) of
+    1:
+      result := mcfMd5Crypt;
+    2: // $2a$ $2b$ $2x$ $2y$ $2z$ ...
+      result := mcfBCrypt;
+    5:
+      result := mcfSha256Crypt;
+    6:
+      result := mcfSha512Crypt;
+    7:
+      result := mcfSCrypt; // as in Unix crypt utility (but not identical)
+  else
+    result := TModularCryptFormat(FindNonVoidRawUtf8(@MCF_IDENT,
+      pointer(salt), length(salt), length(MCF_IDENT)) + ord(low(MCF_IDENT)));
+  end;
+  case result of
+    mcfMd5Crypt:      // '$1${salt}${checksum}'
+      rounds := 1000; // fixed
+    mcfSha256Crypt .. mcfSha512Crypt:
+      begin // '$5$rounds={rounds}${salt}${checksum}'
+        if IdemPChar(P, 'ROUNDS=') then
+          begin
+            inc(P, 7);
+            rounds := GetNextItemCardinal(P, '$');
+          end
+          else
+            rounds := 5000; // default for SHA-256 Crypt and SHA-512 Crypt
+      end;
+    mcfPbkdf2Sha1 .. mcfBCrypt:
+      begin // '$pbkdf2{-digest}${rounds}${salt}${checksum}'
+        rounds := GetNextItemCardinal(P, '$');
+        if rounds = 0 then
+        begin
+          result := mcfInvalid;
+          exit;
+        end;
+      end; // for mcfBCrypt: '$2a$rounds$saltchecksum' - rounds = cost (4..31)
+    mcfBCryptSha256:
+      begin // '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uk...'
+        result := mcfInvalid;
+        if not IdemPChar(P, 'V=2,T=2') then // version 1 without HMAC was unsafe
+          exit;
+        inc(P, 7);
+        if P^ <> ',' then
+          if P^ in ['a'..'z'] then
+            inc(P)
+          else
+            exit;
+        if not IdemPChar(P, ',R=') then
+          exit;
+        inc(P, 3);
+        rounds := GetNextItemCardinal(P, '$');
+        if not (rounds in [4 .. 31]) then
+          exit;
+        result := mcfBCryptSha256;
+      end;
+    mcfSCrypt:
+      begin // '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>'
+        result := mcfInvalid;
+        if not IdemPChar(P, 'LN=') then
+          exit;
+        inc(P, 3);
+        sLogN := GetNextItemCardinal(P, ','); // logN in [1..31] - default 16
+        if (sLogN = 0) or
+           (sLogN > 31) or
+           not IdemPChar(P, 'R=') then
+          exit;
+        inc(P, 2);
+        sR := GetNextItemCardinal(P, ',');     // R in [1..16384] - default 8
+        if (sR = 0) or
+           (sR > 16384) or
+           not IdemPChar(P, 'P=') then
+          exit;
+        inc(P, 2);
+        sP := GetNextItemCardinal(P, '$');     // P in [1..8191] - default 2
+        if (sP = 0) or
+           (sP > 8192) then
+          exit;
+        // rounds := <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        rounds := SCryptRounds(sLogN, sR, sP);
+        GetNextItem(P, '$', salt);
+        if not Base64uriValid(pointer(salt), @ConvertBase64ToBin) then
+          exit;
+        result := mcfSCrypt;
+        exit; // $scrypt$ charset is standard base64 and not passlib b64valid()
+      end;
+  else
+    begin
+      result := mcfUnknown;
+      exit;
+    end;
+  end;
+  if result = mcfBCrypt then // mcfBCrypt: '$2a$rounds$saltchecksum'
+  begin
+    FastSetString(salt, P, 22); // fixed 22 chars salt
+    inc(P, 22);                 // fixed 31 chars checksum (may be > with OPRF)
+  end
+  else
+    GetNextItem(P, '$', salt);
+  if not b64valid(pointer(salt)) then
+    result := mcfInvalid;
+end; // on success, P^ points to the {checksum} part - its encoding is unchecked
+
+function ModularCryptIdentify(const hash: RawUtf8; info: PRawUtf8): TModularCryptFormat;
+var
+  dummyrounds: cardinal;
+  dummysalt: RawUtf8;
+  P: PUtf8Char;
+begin
+  P := pointer(hash);
+  result := ModularCryptParse(P, dummyrounds, dummysalt);
+  if (info <> nil) and
+     (result in mcfValid) and
+     (P <> nil) then
+    FastSetString(info^, pointer(hash), P);
+end;
+
+function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
+  rounds, saltsize: cardinal; const salt: RawUtf8): RawUtf8;
+var
+  signer: TSynSigner;
+  logN, R, P: cardinal;
+  hasher: TSynHasher absolute signer;
+  dig: THash256 absolute signer;
+{%H-}begin
+  case format of
+    mcfMd5Crypt .. mcfSha512Crypt:
+      result := hasher.UnixCryptHash(MCF_ALGO[format], password, rounds, saltsize, salt);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+      result := signer.Pbkdf2ModularCrypt(format, password, rounds, saltsize, salt);
+    mcfBCrypt, mcfBCryptSha256:
+      if Assigned(BCrypt) then
+        result := BCrypt(password, salt, rounds, nil, format = mcfBCryptSha256);
+    mcfSCrypt:
+      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        SCryptRoundsDecode(rounds, logN, R, P);
+        result := SCryptHash(password, salt, logN, R, P);
+      end;
+  else
+    FastAssignNew(result);
+  end;
+end;
+
+function ModularCryptHash(const format, password: RawUtf8;
+  decodedFormat: PModularCryptFormat): RawUtf8;
+var
+  mcf: TModularCryptFormat;
+  P: PUtf8char;
+  rounds: cardinal;
+  salt: RawUtf8;
+begin
+  FastAssignNew(result);
+  P := pointer(format);
+  mcf := ModularCryptParse(P, rounds, salt);
+  if decodedFormat <> nil then
+    decodedFormat^ := mcf;
+  if mcf in mcfValid then
+    result := ModularCryptHash(mcf, password, rounds, 0, salt);
+end;
+
+function ModularCryptVerify(const password, hash: RawUtf8;
+  allowed: TModularCryptFormats; maxrounds: cardinal): TModularCryptFormat;
+var
+  rounds, pos, logN, R, P: cardinal;
+  salt, h: RawUtf8;
+  checksum: PUtf8Char;
+  signer: TSynSigner;
+  hasher: TSynHasher absolute signer;
+begin
+  checksum := pointer(hash);
+  result := ModularCryptParse(checksum, rounds, salt);
+  if not (result in mcfValid) then
+    exit;
+  if (allowed <> []) and
+     not (result in allowed) then
+  begin
+    result := mcfUnknown;
+    exit;
+  end;
+  if (maxrounds <> 0) and
+     (rounds > maxrounds) then
+  begin
+    result := mcfInvalid;
+    exit;
+  end;
+  pos := 0;
+  case result of
+    mcfMd5Crypt .. mcfSha512Crypt:
+      h := hasher.UnixCryptHash(MCF_ALGO[result], password, rounds, 0, salt, @pos);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+      h := signer.Pbkdf2ModularCrypt(result, password, rounds, 0, salt, @pos);
+    mcfBCrypt .. mcfBCryptSha256:
+      if (rounds in [4 .. 31]) and
+         (length(salt) = 22) then
+        h := BCrypt(password, salt, rounds, @pos, result = mcfBCryptSha256)
+      else
+        result := mcfInvalid;
+    mcfScrypt:
+      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        SCryptRoundsDecode(rounds, logN, R, P);
+        h := SCryptHash(password, salt, logN, R, P, @pos);
+      end;
+  else
+    begin
+      result := mcfUnknown;
+      exit;
+    end;
+  end;
+  if (pos = 0) or
+     (mormot.core.base.StrComp(checksum, PUtf8Char(pointer({%H-}h)) + pos - 1) <> 0) then
+    result := mcfInvalid;
+end;
+
+function ModularCryptFakeInfo(const id: RawUtf8; format: TModularCryptFormat): RawUtf8;
+var
+  h: THash256Rec; // always return the same fake content for the same id
+  enc: PChar64;
+  sha: TSha256;
+  salt: TShort23 absolute sha;
+const
+  RANGE = cardinal(high(TModularCryptFormat)) - cardinal(mcfMd5Crypt); // = 9
+begin
+  sha.Init;
+  sha.Update(@SystemEntropy.Startup, SizeOf(SystemEntropy.Startup));
+  sha.Update(id);
+  sha.Final(h.b, {noinit=}true);
+  if format <= mcfMd5Crypt then // compute consistent format if none supplied
+    format := TModularCryptFormat(h.b[0] mod RANGE + byte(succ(mcfMd5Crypt)));
+  Join(['$', MCF_IDENT[format], '$'], result);
+  enc := @HASH64_CHARS;
+  if format = mcfSCrypt then
+    enc := @ConvertToBase64;
+  salt[0] := #22;  // return consistent salt between calls for the same id
+  Base64uriEncode(@salt[1], @h.Hi, 16, enc);
+  case format of   // as if they were created with our default parameters
+    mcfSha256Crypt .. mcfSha512Crypt:
+      Append(result, ['rounds=', MCF_ROUNDS[format], '$', salt, '$']);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+     Append(result, [MCF_ROUNDS[format], '$', salt, '$']);
+    mcfBCrypt:
+      Append(result, ['12$', salt]);
+    mcfBCryptSha256:
+      Append(result, ['v=2,t=2b,r=12$', salt, '$']);
+    mcfSCrypt:
+      Append(result, ['ln=16,r=8,p=2$', salt, '$']);
+  end;
+end;
+
+function SCryptRounds(LogN, BlockSize, Parallel: cardinal): cardinal;
+begin // = <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+  if LogN = 0 then
+    LogN := 16
+  else if LogN > 31 then
+    LogN := 31;
+  if BlockSize = 0 then
+    BlockSize := 8
+  else if BlockSize > 16384 then
+    BlockSize := 16384;
+  if Parallel = 0 then
+    Parallel := 1
+  else if Parallel > 8192 then
+    Parallel := 8192;
+  result := (LogN shl 27) + ((BlockSize - 1) shl 13) + (Parallel - 1);
+end;
+
+procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
+begin
+  if Rounds = 0 then
+  begin
+    LogN := 16;
+    BlockSize := 8;
+    Parallel := 2; // those default values uses 64MB and 140ms - close to BCrypt
+    exit;
+  end;
+  LogN := Rounds shr 27;
+  if LogN = 0 then
+    LogN := 16;     // LogN never 0, 5-bit up to 31
+  BlockSize :=  (Rounds shr 13) and 16383;
+  if BlockSize = 0 then
+    BlockSize := 8
+  else
+    inc(BlockSize); // R never 0, 14-bit up to 16384
+  Parallel := Rounds and 8191;
+  if Parallel = 0 then
+    Parallel := 1
+  else
+    inc(Parallel); // P never 0, 13-bit up to 8192
+end;
+
+const
+  SCRYPT_KEYLEN  = 32; // 32-byte output key = 43 chars
+  SCRYPT_SALTLEN = 16; // 16-byte default salt = 22 chars
+
+function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8; LogN: PtrUInt;
+  BlockSize: PtrUInt; Parallel: PtrUInt; HashPos: PInteger; Api: TSCriptRaw): RawUtf8;
+var
+  saltbin, saltb64, hash: RawByteString;
+begin
+  FastAssignNew(result);
+  if not Assigned(Api) then
+    Api := @SCrypt; // from mormot.crypt.other or mormot.crypt.openssl
+  if not Assigned(Api) or
+     (LogN <= 1) or
+     (LogN > 31) or
+     (BlockSize = 0) or
+     (Parallel = 0) then
+    exit;
+  if not TAesPrng.Main.RandomSalt(saltbin, saltb64, SCRYPT_SALTLEN, Salt,
+           @ConvertToBase64, @ConvertBase64ToBin) then
+    exit; // expects standard base64 but without trailing '='
+  hash := Api(Password, saltbin, 1 shl LogN, BlockSize, Parallel, SCRYPT_KEYLEN);
+  if hash = '' then
+    exit;
+  Make(['$scrypt$ln=', LogN, ',r=', BlockSize, ',p=', Parallel, '$',
+        saltb64, '$'], result);
+  if HashPos <> nil then
+    HashPos^ := length(result) + 1;
+  Append(result, BinToBase64uri(hash, @ConvertToBase64));
+end;
+
+
+// SCRAM-like mutual auth - see https://github.com/synopse/mORMot2/issues/405
+
+function ScramPersistedKey(const Hash, User: RawUtf8): RawUtf8;
+var
+  clientkey: THash256;
+  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
+begin
+  FastAssignNew(result); // error
+  if (Hash = '') or
+     (Hash[1] <> '$') or // should be a true KDF/MCF result
+     not (ModularCryptIdentify(Hash, @result) in mcfValid) then
+    exit;
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
+  Sha256Digest(stored.Lo, clientkey); // store H(clientkey) for ScramClientProof
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], stored.Hi, '|');
+  result[1] := '#'; // "#MCF prefix" + base64uri(StoredKey + ServerKey)
+  Append(result, BinToBase64uri(stored.b));
+  FillZero(clientkey);
+  FillZero(stored.b);
+end;
+
+function ScramPersistedKey(Mcf: TModularCryptFormat; const Password, User: RawUtf8;
+  Rounds: cardinal): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(mcf, Password, Rounds), User);
+end;
+
+function ScramPersistedKey(const McfFormat, Password, User: RawUtf8): RawUtf8;
+begin
+  result := ScramPersistedKey(ModularCryptHash(McfFormat, Password), User);
+end;
+
+function ScramClientProof(const Hash, User: RawUtf8; var ClientSignature: THash256;
+  const Msg: array of RawByteString): RawUtf8;
+var
+  clientkey, storedkey: THash256;
+begin
+  FastAssignNew(result); // error
+  if (Hash = '') or
+     (Hash[1] <> '$') or // should be a true KDF/MCF result
+     not (ModularCryptIdentify(Hash) in mcfValid) then
+    exit;
+  HmacSha256U(pointer(Hash), length(Hash), [User, 'Client Key'], clientkey, '|');
+  Sha256Digest(storedkey, clientkey);
+  HmacSha256U(@storedkey, SizeOf(storedkey), Msg, ClientSignature, '|');
+  Xor256(@clientkey, @ClientSignature);
+  result := BinToBase64uri(clientkey);
+  FillZero(clientkey);
+  FillZero(storedkey);
+end;
+
+function ScramServerProof(const PersistedKey, ClientProof: RawUtf8;
+  const Msg: array of RawByteString): RawUtf8;
+var
+  l: PtrInt;
+  k: PAnsiChar;
+  clientsig, clientkey: THash256;
+  stored: THash512Rec; // Lo=StoredKey, Hi=ServerKey
+begin
+  FastAssignNew(result); // error
+  if not Base64uriToBin(ClientProof, @clientkey, SizeOf(clientkey)) then
+    exit;
+  l := length(PersistedKey) - 86;
+  k := pointer(PersistedKey);
+  if (l < 0) or // should end with base64-uri encoded 2*256-bit = 86 chars
+     (k[0] <> '#') or
+     not Base64uriToBin(k + l, @stored, 86, SizeOf(stored)) then
+    exit;
+  HmacSha256U(@stored.Lo, SizeOf(stored.Lo), Msg, clientsig, '|');
+  Xor256(@clientkey, @clientsig);
+  Sha256Digest(clientkey, clientkey);
+  if IsEqual(clientkey, stored.Lo) then // H(candidate_ClientKey) = StoredKey
+  begin
+    Xor256(@stored.Hi, @clientsig);
+    result := BinToBase64uri(stored.Hi); // proof on success
+  end;
+  FillZero(clientkey);
+  FillZero(stored.b);
+end;
+
+function ScramClientServerAuth(const Hash, User, ServerProof: RawUtf8;
+  var ClientSignature: THash256): boolean;
+var
+  serverkey, proof: THash256;
+begin
+  result := false;
+  if (Hash <> '') and
+     (Hash[1] = '$') and // should be a true KDF/MCF result
+     Base64uriToBin(ServerProof, @proof, SizeOf(proof)) then
+  begin
+    HmacSha256U(pointer(Hash), length(Hash), [User, 'Server Key'], serverkey, '|');
+    Xor256(@proof, @ClientSignature);
+    result := IsEqual(proof, serverkey);
+    FillZero(proof);
+    FillZero(serverkey);
+  end;
+  FillZero(ClientSignature);
+end;
+
+
+{ TScramClient }
+
+constructor TScramClient.Create(aAlgo: TSignAlgo; aMcfSupport: boolean);
+begin
+  fAlgo := aAlgo;
+  fSize := SIGN_SIZE[aAlgo];
+  fMcfSupport := aMcfSupport;
+end;
+
+destructor TScramClient.Destroy;
+begin
+  FillZero(fAuthMessage);
+  FillZero(fServerProof);
+  inherited Destroy;
+end;
+
+function TScramClient.ComputeFirstMessage(const User: RawUtf8;
+  out Mechanism: RawUtf8; const TestForceNonce: RawUtf8): RawUtf8;
+var
+  usr: RawUtf8;
+begin
+  Join(['SCRAM-', SIGNER_TXT[fAlgo]], Mechanism);
+  if TestForceNonce <> '' then
+    fClientNonce := TestForceNonce // used against reference vectors
+  else
+  begin
+    Random128(@fSigner); // unpredictable - use fSigner as transient storage
+    fClientNonce := BinToBase64(@fSigner, SizeOf(THash128));
+  end;
+  usr := StringReplaceAll(User, ['=', '=3D', ',', '=2C']);
+  FormatUtf8('n=%,r=%', [usr, fClientNonce], fAuthMessage);
+  if fMcfSupport then
+    Append(fAuthMessage, ',f=y');
+  Join(['n,,', fAuthMessage], result);
+end;
+
+function TScramClient.ComputeFinalMessage(
+  const ServerResponse, Password: RawUtf8): RawUtf8;
+var
+  resp: TDocVariantData;
+  fullnonce, s, i, mcf, key, msg: RawUtf8;
+  salt: RawByteString;
+  iterations: integer;
+  salted, client, stored, server: THash512Rec;
+begin
+  // decode input parameters
+  result := ''; // FastAssignNew() makes false positive on Delphi 2007
+  fServerProof := '';
+  if (fAuthMessage = '') or
+     (fClientNonce = '') then
+  begin
+    fLastError := 'out of order ComputeFinalMessage() usage';
+    exit;
+  end;
+  iterations := 0;
+  fLastError := 'invalid Server initial response';
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if not resp.GetAsRawUtf8('r', fullnonce) or
+     not StartWithExact(fullnonce{%H-}, fClientNonce) then
+    exit;
+  if fMcfSupport and
+     resp.GetAsRawUtf8('f', mcf) then // SCRAM-MCF extension
+  begin
+    if fAlgo = saSha1 then
+      exit; // this weak algo is rejected by the draft RFC
+    mcf := ModularCryptHash(Base64ToBin(mcf), Password); // ignore i=..,s=..
+    if mcf = '' then
+      exit; // unsupported Modular Crypt algorithm or invalid prefix
+  end
+  else if not resp.GetAsRawUtf8('s', s) or
+          not Base64ToBin(pointer({%H-}s), length({%H-}s), salt) or
+          not resp.GetAsRawUtf8('i', i) or
+          not ToInteger(i{%H-}, iterations) or
+          (iterations <= 0) or
+          (iterations > MAX_PBKDF2_ROUNDS) then // avoid DoS attacks
+    // invalid s=... and i=... standard SCRAM parameters
+    exit;
+  // hash password according to server expectations and compute client signature
+  Join(['c=biws,r=', fullnonce], key);
+  Join([fAuthMessage, ',', ServerResponse, ',', key], msg);
+  if mcf = '' then
+  begin
+    fSigner.Pbkdf2(fAlgo, Password, salt{%H-}, iterations, @salted);
+    fSigner.Full(fAlgo, @salted, fSize, 'Client Key', @client);
+    fSigner.Full(fAlgo, @salted, fSize, 'Server Key', @server);
+    FillZero(salted, fSize);
+  end
+  else
+  begin
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Client Key', @client);
+    fSigner.Full(fAlgo, pointer(mcf), length(mcf), 'Server Key', @server);
+    FillZero(mcf);
+  end;
+  // compute client and server proofs
+  fSigner.Hash(fAlgo, @client, fSize, stored);
+  fSigner.Full(fAlgo, @stored, fSize, msg, @stored);
+  XorMemory(@client, @stored, fSize);
+  Join([key, ',p=', BinToBase64(@client, fSize)], result); // client proof
+  fSigner.Full(fAlgo, @server, fSize, msg, @server);
+  fServerProof := BinToBase64(@server, fSize);             // server proof
+  fLastError := '';
+  FillZero(key);
+  FillZero(client, fSize);
+  FillZero(stored, fSize);
+  FillZero(server, fSize);
+end;
+
+function TScramClient.CheckFinalResponse(const ServerResponse: RawUtf8): boolean;
+var
+  resp: TDocVariantData;
+  proof: RawUtf8;
+begin
+  result := false;
+  if fServerProof = '' then
+  begin
+    fLastError := 'out of order CheckFinalResponse() usage';
+    exit;
+  end;
+  resp.InitFromPairs(ServerResponse, JSON_FAST, '=', ',');
+  if resp.GetAsRawUtf8('v', proof) then
+    if proof = fServerProof then
+    begin
+      fLastError := '';
+      result := true;
+    end
+    else
+      fLastError := 'invalid Server proof'
+  else
+    fLastError := 'invalid Server last response';
+end;
+
+{ User 2FA authentication via TOTP as defined in RFC 6238 }
+
+const
+  TOTP_MOD: array[4..8] of cardinal = (10000, 100000, 1000000, 10000000, 100000000);
+
+function TotpGenerate(const secret: RawUtf8; digits: integer; algo: TSignAlgo;
+  binary: boolean; timestep: Int64): RawUtf8;
+var
+  sec: RawByteString;
+  signer: TSynSigner;
+  h: THash512;
+  v: cardinal;
+begin
+  FastAssignNew(result);
+  if binary then
+    sec := secret
+  else
+    sec := Base32ToBin(secret);
+  if (length(sec) < TOTP_SECRET_MIN) or
+     not (digits in [low(TOTP_MOD) .. high(TOTP_MOD)]) then
+    exit;
+  if timestep < 0 then
+    timestep := UnixTimeUtc div TOTP_PERIOD;
+  timestep := bswap64(timestep);
+  signer.Init(algo, pointer(sec), length(sec));
+  signer.Update(@timestep, SizeOf(timestep));
+  signer.Final(@h);
+  v := bswap32(PCardinal(@h[h[signer.SignatureSize - 1] and 15])^) and $7fffffff;
+  UInt32DigitsToUtf8(v mod TOTP_MOD[digits], digits, result);
+end;
+
+function TotpGenerateSecret(len: PtrInt): RawUtf8;
+var
+  bin: RawByteString;
+begin
+  TAesPrng.Main.FillRandomVar(bin, MaxPtrInt(len, TOTP_SECRET_MIN));
+  result := BinToBase32(bin);
+  FillZero(bin);
+end;
+
+function TotpValidate(const secret, usercode: RawUtf8; window: integer;
+  algo: TSignAlgo; timestep: Int64; binary: boolean): boolean;
+var
+  sec: RawByteString;
+  digits, key: cardinal;
+  w: PtrInt;
+begin
+  result := false;
+  digits := length(usercode);
+  if (cardinal(window) > 100) or
+     not (digits in [low(TOTP_MOD) .. high(TOTP_MOD)]) or
+     not ToCardinal(usercode, key) then
+    exit; // reject weak usercode ASAP
+  if binary then
+    sec := secret
+  else
+    sec := Base32ToBin(secret); // decode once into binary
+  if length(sec) < TOTP_SECRET_MIN then
+    exit;
+  if timestep < 0 then
+    timestep := UnixTimeUtc div TOTP_PERIOD;
+  result := true;
+  if TotpGenerate(sec, digits, algo, {bin=}true, timestep) = userCode then
+    exit; // first check current time step (most common)
+  for w := -window to +window do
+    if (w <> 0) and
+       (TotpGenerate(sec, digits, algo, {bin=}true, timestep + w) = userCode) then
+      exit; // verify previous and next time steps
+  result := false;
+end;
+
+function TotpUrl(const issuer, account, b32secret: RawUtf8; digits: integer;
+  algo: TSignAlgo; period: integer): RawUtf8;
+var
+  iss, acc: RawUtf8;
+begin
+  iss := UrlEncodeName(issuer); // favor %20 for spaces here, not +
+  acc := UrlEncodeName(account);
+  FormatUtf8('otpauth://totp/%:%?secret=%&issuer=%&digits=%&period=%',
+    [iss, acc, Split(b32secret, '='), iss, digits, period], result);
+  if algo <> saSha1 then
+    Append(result, '&algorithm=', SIGNER_API[algo]);
 end;
 
 
@@ -6120,7 +6411,7 @@ var
   p: PUtf8Char;
   dp: TDigestProcess;
 begin
-  result := '';
+  FastAssignNew(result);
   dp.Algo := daMD5; // something is needed 
   p := pointer(FromServer);
   while p <> nil do
@@ -6135,7 +6426,7 @@ var
   p: PUtf8Char;
   dp: TDigestProcess;
 begin
-  result := '';
+  FastAssignNew(result);
   if Algo = daUndefined then
     exit;
   // parse server token
@@ -6157,6 +6448,8 @@ begin
   dp.DigestHa0;
   dp.DigestResponse(DigestMethod);
   result := dp.ClientResponse(DigestUriName);
+  FillZero(dp.HA0.b); // Ha0 is a sensitive value
+  FillZero(dp.HA1);
 end;
 
 procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
@@ -6173,7 +6466,7 @@ function BasicRealm(const FromServer: RawUtf8): RawUtf8;
 var
   p: PUtf8Char;
 begin
-  result := '';
+  FastAssignNew(result);
   p := pointer(FromServer);
   if IdemPChar(p, 'REALM="') then
     UnQuoteSqlStringVar(p + 6, result);
@@ -6185,7 +6478,7 @@ var
   h: THash128Rec;
   noncehex, opaquehex: TShort32;
 begin
-  result := '';
+  FastAssignNew(result);
   if (Algo = daUndefined) or
      (QuotedRealm = '') then
     exit; // missing some mandatory context
@@ -6404,16 +6697,16 @@ end;
 
 function TDigestAuthServer.DigestAlgoMatch(const FromClient: RawUtf8): boolean;
 var
-  p: PUtf8Char;
-  alg: ShortString;
+  p, a: PUtf8Char;
+  l: PtrInt;
 begin
   result := false;
   p := StrPosI('ALGORITHM=', pointer(FromClient));
   if p = nil then
     exit;
   inc(p, 10);
-  GetNextItemShortString(p, @alg);
-  result := IdemPropNameU(DIGEST_NAME[fAlgo], @alg[1], ord(alg[0]));
+  l := GetNextItemTrimedBuffer(p, ',', a);
+  result := IdemPropNameU(DIGEST_NAME[fAlgo], a, l);
 end;
 
 function TDigestAuthServer.DigestAuth(FromClient: PUtf8Char;
@@ -6751,7 +7044,7 @@ function TObjectWithPassword.GetPassWordPlain: SpiUtf8;
 begin
   if (self = nil) or
      (fPassWord = '') then
-    result := ''
+    FastAssignNew(result)
   else if fKey = OBJECTPASSWORD_PLAIN then
     result := fPassword
   else
@@ -6799,7 +7092,7 @@ begin
   begin
     i := PosExChar(':', fPassword);
     if i > 0 then
-      ECrypt.RaiseUtf8('%.PassWordPlain unable to retrieve the stored ' +
+      ECrypt.RaiseUtf8('%.GetPasswordSafe unable to retrieve the stored ' +
         'v: current user is [%], but password in % was encoded for [%]',
         [self, Executable.User, app, copy(fPassword, 1, i - 1)]);
   end;
@@ -7177,8 +7470,11 @@ begin
 end;
 
 function TSynUniqueIdentifierBits.CreateTimeLog: TTimeLog;
+var
+  bits: TTimeLogBits; // safer with an explicit local variable
 begin
-  PTimeLogBits(@result)^.From(UnixTimeToDateTime(Value shr 31));
+  bits.From(UnixTimeToDateTime(Value shr 31));
+  result := bits.Value;
 end;
 
 function TSynUniqueIdentifierBits.CreateDateTime: TDateTime;
@@ -7263,8 +7559,11 @@ begin
 end;
 
 function TSynUniqueIdentifierGenerator.ComputeNew: Int64;
+var
+  b: TSynUniqueIdentifierBits;
 begin
-  ComputeNew(PSynUniqueIdentifierBits(@result)^);
+  ComputeNew(b);
+  result := b.Value;
 end;
 
 procedure TSynUniqueIdentifierGenerator.ComputeFromDateTime(
@@ -7289,6 +7588,7 @@ constructor TSynUniqueIdentifierGenerator.Create(
 var
   i, len: integer;
   crc: cardinal;
+  tab: PCrc32tab;
   key: THash256Rec;
 begin
   inherited Create; // may have been overriden
@@ -7313,11 +7613,12 @@ begin
     // naive and would be broken easily with brute force - but point here is to
     // hide/obfuscate public values at end-user level (e.g. when publishing URIs),
     // not implement strong security, so it sounds good enough for our purpose
-    crc := crc32ctab[0, len and 1023];
+    tab := crc32ctab;
+    crc := tab^[0, len and 1023];
     for i := 0 to high(fCrypto) + 1 do
     begin
-      crc := crc32ctab[0, crc and 1023] xor
-             crc32ctab[3, i] xor
+      crc := tab^[0, crc and 1023] xor
+             tab^[3, i] xor
              kr32(crc, pointer(aSharedObfuscationKey), len) xor
              crc32c(crc, pointer(aSharedObfuscationKey), len) xor
              fnv32(crc, pointer(aSharedObfuscationKey), len);
@@ -7352,14 +7653,14 @@ var
   bits: TSynUniqueIdentifierObfuscatedBits absolute block; // 64+32 = 96-bit
   key: cardinal;
 begin
-  result := '';
+  FastAssignNew(result);
   if aIdentifier = 0 then
     exit;
   bits.id.Value := aIdentifier;
   if self = nil then
     key := 0
   else
-    key := crc32ctab[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
+    key := crc32ctab^[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
   bits.crc := crc32c(bits.id.ProcessID, @bits.id, SizeOf(bits.id)) xor key;
   if self <> nil then
     if fCryptoAesE.Initialized then
@@ -7398,7 +7699,7 @@ begin
     fCryptoAesD.Decrypt(block.b, block.b);
     if block.c3 <> fCryptoCRC then
       exit;
-    key := crc32ctab[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
+    key := crc32ctab^[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
   end
   else
   begin
@@ -7410,7 +7711,7 @@ begin
     else
     begin
       bits.id.Value := bits.id.Value xor PInt64(@fCrypto[high(fCrypto) - 1])^;
-      key := crc32ctab[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
+      key := crc32ctab^[0, bits.id.ProcessID and 1023] xor fCryptoCRC;
     end;
   end;
   if crc32c(bits.id.ProcessID, @bits.id, SizeOf(bits.id)) xor key = bits.crc then
@@ -7893,9 +8194,10 @@ end;
 
 { TCryptRandom }
 
-function TCryptRandom.Get(len: PtrInt): RawByteString;
+procedure TCryptRandom.Get(var dst: RawByteString; len: PtrInt);
 begin
-  Get(FastNewRawByteString(result, len), len);
+  FillZero(dst);
+  Get(FastNewRawByteString(dst, len), len);
 end;
 
 function TCryptRandom.GetBytes(len: PtrInt): TBytes;
@@ -7906,13 +8208,24 @@ begin
 end;
 
 function TCryptRandom.Get32: cardinal;
+var
+  n: cardinal; // safer with a local variable
 begin
-  Get(@result, 4);
+  Get(@n, SizeOf(n));
+  result := n;
 end;
 
 function TCryptRandom.Get32(max: cardinal): cardinal;
 begin
   result := (QWord(Get32) * max) shr 32;
+end;
+
+function TCryptRandom.Get64: QWord;
+var
+  n: QWord; // safer with a local variable
+begin
+  Get(@n, SizeOf(n));
+  result := n;
 end;
 
 function TCryptRandom.GetDouble: double;
@@ -7922,6 +8235,14 @@ begin
   result := Get32 * COEFF32; // 32-bit resolution is enough for our purpose
 end;
 
+function TCryptRandom.GetPassword(len: PtrInt): SpiUtf8;
+begin
+  repeat
+    Get(RawByteString(result), Len);
+  until MakeStrongPassword(result);
+end;
+
+
 { TCryptRandomAesPrng }
 
 type
@@ -7929,6 +8250,7 @@ type
   public
     procedure Get(dst: pointer; dstlen: PtrInt); override;
     function Get32: cardinal; override;
+    function Get64: QWord; override;
   end;
 
 procedure TCryptRandomAesPrng.Get(dst: pointer; dstlen: PtrInt);
@@ -7941,42 +8263,41 @@ begin
   result := TAesPrng.Main.Random32; // a CSPRNG is pointless for 32-bit anyway
 end;
 
+function TCryptRandomAesPrng.Get64: QWord;
+begin
+  result := TAesPrng.Main.Random64;
+end;
+
+
 { TCryptRandomEntropy }
 
 const
   // CSV text of TAesPrngGetEntropySource items as used for Rnd() factory naming
-  RndAlgosText: PUtf8Char =
-    'rnd-entropy,rnd-entropysys,rnd-entropysysblocking,rnd-entropyuser';
+  RndAlgosText: PUtf8Char = 'rnd-entropy,rnd-entropy-full,rnd-entropy-sys,' +
+    'rnd-entropy-sysblocking,rnd-entropy-user';
 
 type
   TCryptRandomEntropy = class(TCryptRandom)
   protected
     fSource: TAesPrngGetEntropySource;
+    fNonce: RawByteString;
   public
     constructor Create(const name: RawUtf8); override;
-    function Get(len: PtrInt): RawByteString; override;
     procedure Get(dst: pointer; dstlen: PtrInt); override;
   end;
 
 constructor TCryptRandomEntropy.Create(const name: RawUtf8);
 begin
   fSource := TAesPrngGetEntropySource(InternalResolve(name, RndAlgosText));
-  inherited Create(name); // should be done after InternalResolve()
-end;
-
-function TCryptRandomEntropy.Get(len: PtrInt): RawByteString;
-begin
-  result := TAesPrng.GetEntropy(len, fSource);
+  RandomByteString(16, fNonce); // good enough for per-instance naming
+  inherited Create(name);       // should be done after InternalResolve()
 end;
 
 procedure TCryptRandomEntropy.Get(dst: pointer; dstlen: PtrInt);
-var
-  tmp: RawByteString;
-begin
-  tmp := TAesPrng.GetEntropy(dstlen, fSource); // may be slow for a few bytes
-  MoveFast(pointer(tmp)^, dst^, dstlen);
-  FillZero(tmp);
+begin // warning: may be slow for a few bytes
+  TAesPrng.GetEntropy(dst, dstlen, fSource, fNonce);
 end;
+
 
 { TCryptRandomSysPrng }
 
@@ -8780,7 +9101,7 @@ begin
   // use our proprietary mormot.core.secure encryption, not standard PKCS#8
   // - overriden in mormot.crypt.openssl to use PEVP_PKEY standard serialization
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   try
     // call overriden TCryptPrivateKeyEcc.ToDer and TCryptPrivateKeyRsa.ToDer
@@ -8827,7 +9148,7 @@ end;
 function TCryptPrivateKey.SignDigest(const Dig: THash512Rec; DigLen: integer;
   DigAlgo: TCryptAsymAlgo): RawByteString;
 begin
-  result := ''; // to be overriden if needed (not for OpenSSL)
+  FastAssignNew(result); // to be overriden if needed (not for OpenSSL)
 end;
 
 function TCryptPrivateKey.Load(Algorithm: TCryptKeyAlgo;
@@ -8891,7 +9212,7 @@ end;
 function TCryptPrivateKey.SharedSecret(
   const PeerKey: ICryptPublicKey): RawByteString;
 begin
-  result := ''; // unsupported by this algorithm (only ECC by now)
+  FastAssignNew(result); // unsupported by this algorithm (only ECC by now)
 end;
 
 
@@ -8990,12 +9311,13 @@ begin
       ccmIssuerName:
         found := EqualBuf(Cert^.GetIssuerName, Value);
       ccmSubjectCN:
-        found := IdemPropNameU(Cert^.GetSubject('CN'), Value);
+        found := PropNameEquals(Cert^.GetSubject('CN'), Value);
       ccmIssuerCN:
-        found := IdemPropNameU(Cert^.GetIssuer('CN'), Value);
+        found := PropNameEquals(Cert^.GetIssuer('CN'), Value);
       ccmSubjectKey:
         found := HumanHexCompare(Cert^.GetSubjectKey, Value) = 0;
-      ccmAuthorityKey:
+      ccmAuthorityKey,
+      ccmIssuedBy:
         found := CsvContains(Cert^.GetAuthorityKey, Value);
       ccmSubjectAltName:
         found := FindRawUtf8(Cert^.GetSubjects, Value, {casesens=}false) >= 0;
@@ -9004,9 +9326,9 @@ begin
       ccmBinary:
         found := EqualBuf(Cert^.Save, Value);
       ccmSha1:
-        found := IdemPropNameU(Cert^.GetDigest(hfSha1), Value);
+        found := PropNameEquals(Cert^.GetDigest(hfSha1), Value);
       ccmSha256:
-        found := IdemPropNameU(Cert^.GetDigest(hfSha256), Value);
+        found := PropNameEquals(Cert^.GetDigest(hfSha256), Value);
     else
       found := false; // unsupported search method (e.g. ccmUsage)
     end;
@@ -9044,10 +9366,22 @@ begin
     // note: Fields=nil since TCryptCertInternal does not support them
 end;
 
-function TCryptCert.IsAuthorizedBy(const Authority: ICryptCert): boolean;
+function TCryptCert.GetFields(var fields: TCryptCertFields; withexts: boolean): boolean;
 begin
-  result := (Authority <> nil) and
-            IdemPropNameU(GetAuthorityKey, Authority.GetSubjectKey);
+  result := false; // not supported by default (e.g. for syn-es256)
+end;
+
+function TCryptCert.IsAuthorizedBy(const Authority: ICryptCert): boolean;
+var
+  akid: RawUtf8;
+begin
+  result := false;
+  if (Authority = nil) or
+     not PropNameEquals(GetIssuerName, Authority.GetSubjectName) then
+    exit; // IssuerDN should match Authority.SubjectDN
+  akid := GetAuthorityKey;
+  result := (akid = '') or // self-signed
+            PropNameEquals(akid, Authority.GetSubjectKey); // AKI = SKI
 end;
 
 function TCryptCert.Compare(const Another: ICryptCert;
@@ -9085,6 +9419,8 @@ begin
         result := CompareBuf(GetDigest(hfSHA1), Another.GetDigest(hfSHA1));
       ccmSha256:
         result := CompareBuf(GetDigest(hfSHA256), Another.GetDigest(hfSHA256));
+      ccmIssuedBy:
+        result := CompareBuf(GetAuthorityKey, Another.GetSubjectKey);
     else // e.g. ccmInstance
       result := ComparePointer(pointer(self), pointer(Another));
     end
@@ -9189,7 +9525,7 @@ var
   headpayload: RawUtf8;
   sig: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   if not HasPrivateSecret then
     exit;
   // cut-down version of TJwtAbstract.PayloadToJson
@@ -9276,14 +9612,14 @@ var
   x, y: RawByteString;
 begin
   // retrieve raw public key parameters and export as JWT
-  result := '';
+  FastAssignNew(result);
   if GetKeyParams(x, y) then
     result := SaveAsJwk(AsymAlgo, x, y);
 end;
 
 function TCryptCert.SharedSecret(const pub: ICryptCert): RawByteString;
 begin
-  result := ''; // unsupported by default
+  FastAssignNew(result); // unsupported by default
 end;
 
 function TCryptCert.AsymAlgo: TCryptAsymAlgo;
@@ -9317,6 +9653,12 @@ end;
 
 { TCryptStore }
 
+constructor TCryptStore.Create(algo: TCryptAlgo);
+begin
+  fTrust := DefaultCryptStoreTrust;
+  inherited Create(algo);
+end;
+
 destructor TCryptStore.Destroy;
 begin
   inherited Destroy;
@@ -9327,6 +9669,16 @@ function TCryptStore.Load(const Saved: RawByteString): boolean;
 begin
   Clear;
   result := AddFromBuffer(Saved) <> nil; // expect chain of PEM Cert + CRLs
+end;
+
+procedure TCryptStore.SetTrust(const Value: TCertStoreTrusts);
+begin
+  fTrust := Value;
+end;
+
+function TCryptStore.GetTrust: TCertStoreTrusts;
+begin
+  result := fTrust;
 end;
 
 function TCryptStore.Cache: TCryptCertCache;
@@ -9544,7 +9896,7 @@ begin
     begin
       if WithExplanatoryText then
         // see https://datatracker.ietf.org/doc/html/rfc7468#section-5.2
-        W.Add('Subject: %'#13#10'Issuer: %'#13#10'Validity: from % to %'#13#10,
+        W.Add('Subject: %'#13#10'Issuer: %'#13#10'Validity: from %Z to %Z'#13#10,
          [c^.GetSubjectName, c^.GetIssuerName, DateTimeToIso8601Short(
             c^.GetNotBefore), DateTimeToIso8601Short(c^.GetNotAfter)]);
       W.AddString(c^.Save(cccCertOnly, '', ccfPem));
@@ -9567,7 +9919,7 @@ end;
 
 constructor TCryptCertCache.Create(TimeOutSeconds: integer);
 begin
-  fList := TSynDictionary.Create(TypeInfo(TRawByteStringDynArray),
+  fList := TSynDictionary.Create(TypeInfo(TRawByteStringDynArray), // DER
     TypeInfo(ICryptCerts), {caseins=}false, TimeOutSeconds);
   fList.OnCanDeleteDeprecated := OnDelete;
   fList.ThreadUse := uRWLock; // non-blocking Load() and Find()
@@ -9639,8 +9991,8 @@ begin
       der := NextPemToDer(p, @k);
       if der = '' then
         break;
-      if not (k in [pemUnspecified, pemCertificate]) then
-        continue; // no need to try loading something which is not a X.509 cert
+      if not (k in [pemUnspecified, pemCertificate, pemSynopseCertificate]) then
+        continue; // no need to try loading something which is not a certificate
       c := Load(der);
       if c <> nil then
         ChainAdd(result, c);
@@ -9678,8 +10030,8 @@ end;
 constructor TCryptCertList.Create;
 begin
   inherited Create;
-  fList := TSynDictionary.Create(
-    TypeInfo(TRawByteStringDynArray), TypeInfo(ICryptCerts));
+  fList := TSynDictionary.Create(TypeInfo(TRawByteStringDynArray), // key=SKID
+    TypeInfo(ICryptCerts));
   fList.ThreadUse := uRWLock; // non-blocking Find()
 end;
 
@@ -9808,6 +10160,60 @@ begin
   DynArrayFakeLength(result, n);
 end;
 
+procedure AddCustomExts(var exts: TCryptCustomExts; const o, v: RawByteString; crit: boolean);
+var
+  n: PtrInt;
+begin
+  n := length(exts);
+  SetLength(exts, n + 1);
+  with exts[n] do
+  begin
+    Oid := o;
+    Value := v;
+    Critical := crit;
+  end;
+end;
+
+procedure AddCustomExts(var exts: TCryptCustomExts; const o: TAsnBuffer;
+  const v: RawByteString; crit: boolean);
+var
+  oid: RawByteString;
+begin
+  FastSetRawByteString(oid, o.Data, o.Len); // seldom called
+  AddCustomExts(exts, oid, v, crit);
+end;
+
+function FindCustomExts(const Other: TCryptCustomExts; OidText: PUtf8Char): RawByteString;
+begin
+  result := FindCustomExtsAsn(pointer(Other), length(Other), AsnEncOid(OidText));
+end;
+
+function FindCustomExtsAsn(o: PCryptCustomExt; n: integer; const b: TAsnObject): RawByteString;
+begin
+  FastAssignNew(result);
+  if (o <> nil) and
+     (n > 0) and
+     (b <> '') then
+    repeat
+      if SortDynArrayRawByteString(o^.Oid, b) = 0 then // O(n) search
+      begin
+        result := o^.Value;
+        exit;
+      end;
+      inc(o);
+      dec(n);
+    until n = 0;
+end;
+
+function FindAia(const ext: TCryptCustomExts; var ocsp, issuers: TRawUtf8DynArray): boolean;
+var
+  aia: TAsnObject;
+begin
+  aia := FindCustomExts(ext, ASN1_OID_AIA);
+  result := (aia <> '') and
+            AsnDecAia(aia, ocsp, issuers);
+end;
+
 
 { TCryptCertPerUsage }
 
@@ -9879,7 +10285,7 @@ function TCryptCertPerUsage.AsPem: RawUtf8;
 var
   i: PtrInt;
 begin
-  result := '';
+  FastAssignNew(result);
   for i := 0 to length(List) - 1 do
     result  := result + List[i].Save(cccCertOnly, '', ccfPem) + (CRLF + CRLF);
 end;
@@ -9970,10 +10376,10 @@ var
 begin
   if from_cu_text then
   begin
-    result := '';
+    result[0] := #0;
     for cu := low(cu) to high(cu) do
       if cu in u then
-        AppendShortTwoChars(@CU_TEXT[cu], @result);
+        AppendShortTwoCharsSafe(PWord(@CU_TEXT[cu])^, result);
   end
   else
     GetSetNameShort(TypeInfo(TCryptCertUsages), u, result, {trim=}true);
@@ -10009,7 +10415,7 @@ function SaveAsJwk(algo: TCryptAsymAlgo; const x, y: RawByteString): RawUtf8;
 var
   bx, by: RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if (x = '') or
      (y = '') or
      (algo in [caaEdDSA]) then // EDSA not yet supported (single "x" parameter)
@@ -10342,7 +10748,7 @@ begin
     base64.Done;
   end
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function NextPem(var P: PUtf8Char; Kind: PPemKind): TCertPem;
@@ -10352,7 +10758,7 @@ var
 begin
   pem := ParsePem(P, Kind, len, {excludemarkers=}false);
   if pem = nil then
-    result := ''
+    FastAssignNew(result)
   else
     FastSetString(RawUtf8(result), pem, len);
 end;
@@ -10370,7 +10776,7 @@ begin
     pem := NextPem(P, @k);
     if pem = '' then
       break;
-    if k = pemCertificate then
+    if k = pemCertificate then // pemSynopseCertificate is out-of-scope here
       if {%H-}Cert <> '' then
         exit // should contain a single Certificate
       else
@@ -10511,7 +10917,7 @@ begin
     result := BinToBase64uri(pointer(signature), length(signature));
     exit;
   end;
-  result := '';
+  FastAssignNew(result);
   derlen := length(signature);
   der := pointer(signature);
   if (derlen < 50) or
@@ -10631,7 +11037,7 @@ var
   algo: TSignAlgo;
   finalSalt: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   if (PassPhrase = '') or
      (Salt = '') or
      (Iterations < 0) or
@@ -10687,7 +11093,7 @@ var
   p: PHash256Rec;
   h0, h1: THash256Rec;
 begin
-  result := '';
+  FastAssignNew(result);
   case EncType of
     ENCTYPE_AES128_CTS_HMAC_SHA1_96:
       keysize := SizeOf(THash128);
@@ -10725,7 +11131,7 @@ var
   algo: TSignAlgo;
   keysize: cardinal;
 begin
-  result := '';
+  FastAssignNew(result);
   case EncType of
     ENCTYPE_AES128_CTS_HMAC_SHA256_128:
       begin
@@ -10748,7 +11154,7 @@ function MakeKerberosKey(const PassPhrase, Salt: RawUtf8;
 var
   tkey: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   tkey := MakeKerberosKeySeed(PassPhrase, Salt, EncType, Iterations);
   if tkey = '' then
     exit;
@@ -10812,7 +11218,7 @@ class function TKerberosKeyTabGenerator.Generate(const aPrincipal: RawUtf8;
 var
   gen: TKerberosKeyTabGenerator;
 begin
-  result := '';
+  FastAssignNew(result);
   gen := TKerberosKeyTabGenerator.Create;
   try
     if gen.AddNew(aPrincipal, aPassword, aIsComputer, aSalt, aEncType) then
@@ -10861,7 +11267,7 @@ begin
                 ]);
   else
     begin
-      result := ''; // make compiler happy
+      FastAssignNew(result); // make compiler happy
       ECrypt.RaiseUtf8('Unexpected CkaToSeq(%)', [ToText(cka)^]);
     end;
   end;
@@ -10886,10 +11292,11 @@ end;
 function SeqToEccPrivKey(cka: TCryptKeyAlgo; const seq: RawByteString;
   rfcpub: PRawByteString): RawByteString;
 var
-  oid, oct, key: RawByteString;
-  pos, posoct, vt, vers: integer;
+  oid, key: TAsnObject;
+  pos, vt, vers: integer;
+  oct: TAsnBuffer;
 begin
-  result := '';
+  FastAssignNew(result);
   if rfcpub <> nil then
     rfcpub^ := '';
   // initial sequence decoding
@@ -10917,11 +11324,10 @@ begin
           if oid <> CKA_OID[cka] then
             exit;
           // private key raw binary extraction
-          posoct := 1;
-          if (AsnNextRaw(pos, seq, oct) = ASN1_OCTSTR) and // privateKey
-             (AsnNext(posoct, oct{%H-}) = ASN1_SEQ) and
-             (AsnNext(posoct, oct) = ASN1_INT) and
-             (AsnNextRaw(posoct, oct, key) = ASN1_OCTSTR) then
+          if (AsnNextBuffer(pos, seq, oct) = ASN1_OCTSTR) and // privateKey
+             (AsnNextBuffer(oct{%H-}) = ASN1_SEQ) and
+             (AsnNextBuffer(oct) = ASN1_INT) and
+             (AsnNextBuffer(oct, @key) = ASN1_OCTSTR) then
             result := key;
         end;
       1: // https://www.rfc-editor.org/rfc/rfc5915 EC key pair alternate format
@@ -10943,7 +11349,6 @@ begin
         end;
       end;
     end;
-  FillZero(oct);
   FillZero(key);
 end;
 
@@ -10952,7 +11357,7 @@ var
   oid: RawByteString;
   pos: integer;
 begin
-  result := '';
+  FastAssignNew(result);
   // PKCS#8 sequence decoding
   pos := 1;
   if (AsnNext(pos, seq) <> ASN1_SEQ) or
@@ -10973,7 +11378,7 @@ begin
   if oid = CKA_OID[cka] then
     // public key raw binary extraction
     if AsnNextRaw(pos, seq, result) <> ASN1_BITSTR then
-      result := '';
+      FastAssignNew(result);
 end;
 
 function X509PubKeyToDer(Algorithm: TCryptKeyAlgo;
@@ -10990,13 +11395,13 @@ end;
 function X509PubKeyFromDer(const PkcsDer: RawByteString): RawByteString;
 var
   pos: integer;
-  algoseq: RawByteString; // algorithm OID(s) as encoded by CkaToSeq()
+  algoseq: TAsnBuffer; // algorithm OID(s) as encoded by CkaToSeq()
 begin
   pos := 1;
   if (AsnNext(pos, PkcsDer) <> ASN1_SEQ) or
-     (AsnNextRaw(pos, PkcsDer, algoseq) <> ASN1_SEQ) or
+     (AsnNextBuffer(pos, PkcsDer, algoseq) <> ASN1_SEQ) or // CkaToSeq()
      (AsnNextRaw(pos, PkcsDer, result) <> ASN1_BITSTR) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 function X509PubKeyBits(const SubjectPublicKey: RawByteString;
@@ -11033,9 +11438,9 @@ begin
             if PubText <> nil then
             begin
               name := 'RSA ';
-              bits := '      Modulus:'#13#10 +
-                BinToHumanHex(pointer(modulo), length(modulo), 16, 8) +
-                '      Exponent: 0x' + BinToHex(exp) + #13#10 ;
+              Join(['      Modulus:'#13#10,
+                BinToHumanHex(pointer(modulo), length(modulo), 16, 8),
+                '      Exponent: 0x', BinToHex(exp), #13#10], bits);
             end;
           end;
         end;
@@ -11059,8 +11464,8 @@ function ParsedToText(const c: TX509Parsed): RawUtf8;
       if cu in c.Usage then
         AddToCsv(CU_FULLTEXT[cu], usage{%H-}, ', ');
     if usage <> '' then
-      result := result +   '    X509v3 ' + ext + #13#10 +
-                           '      ' + usage + #13#10;
+      result := Join([result, '    X509v3 ', ext, #13#10 +
+                              '      ', usage, #13#10]);
   end;
 
 var
@@ -11075,41 +11480,41 @@ begin
   else
     version := 1;
   X509PubKeyBits(c.PubKey, @bits);
-  result := 'Certificate:'#13#10 +
-            '  Version: ' + SmallUInt32Utf8[version + 1] +
-                   ' (0x' + SmallUInt32Utf8[version] + ')'#13#10 +
-            '  Serial Number:'#13#10 +
-            '    ' + c.Serial + #13#10 +
-            '  Signature Algorithm: ' + c.SigAlg + #13#10 +
-            '  Issuer: ' + c.IssuerDN + #13#10 +
-            '  Validity'#13#10 +
-            '    Not Before: ' + DateTimeToHttpDate(c.NotBefore) + #13#10 +
-            '    Not After : ' + DateTimeToHttpDate(c.NotAfter)  + #13#10 +
-            '  Subject: ' + c.SubjectDN + #13#10 +
-            '  Subject Public Key Info:'#13#10 +
-            '    Public Key Algorithm: ' + c.PubAlg + #13#10 +
-            bits;
+  Join(['Certificate:'#13#10 +
+        '  Version: ', SmallUInt32Utf8[version + 1],
+        ' (0x', SmallUInt32Utf8[version] ,')'#13#10 +
+        '  Serial Number:'#13#10 +
+        '    ', c.Serial, #13#10 +
+        '  Signature Algorithm: ', c.SigAlg, #13#10 +
+        '  Issuer: ', c.IssuerDN, #13#10 +
+        '  Validity'#13#10 +
+        '    Not Before: ', DateTimeToHttpDate(c.NotBefore), #13#10 +
+        '    Not After : ', DateTimeToHttpDate(c.NotAfter), #13#10 +
+        '  Subject: ', c.SubjectDN, #13#10 +
+        '  Subject Public Key Info:'#13#10 +
+        '    Public Key Algorithm: ', c.PubAlg, #13#10,
+        bits], result);
   if version = 1 then
     exit;
   // append the X.509 v3 known extensions
-  result := result + '  X509v3 extensions:'#13#10;
-  KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
-  KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
+  Append(result, '  X509v3 extensions:'#13#10);
+  KeyUsage(cuCrlSign,   cuDigitalSignature, 'Key Usage: critical');
+  KeyUsage(cuTlsServer, cuTimestamp,        'Extended Key Usage:');
   if cuCA in c.Usage then
     bits := 'TRUE'
   else
     bits := 'FALSE';
-  result := result + '    X509v3 Basic Constraints: critical'#13#10 +
-                     '      CA:' + bits + #13#10;
+  result := Join([result, '    X509v3 Basic Constraints: critical'#13#10 +
+                          '      CA:', bits, #13#10]);
   if c.SubjectID <> '' then
-    result := result + '    X509v3 Subject Key Identifier:'#13#10 +
-                       '      ' + c.SubjectID + #13#10;
+    result := Join([result, '    X509v3 Subject Key Identifier:'#13#10 +
+                            '      ', c.SubjectID, #13#10]);
   if c.IssuerID <> '' then
-    result := result + '    X509v3 Authority Key Identifier:'#13#10 +
-                       '      ' + c.IssuerID + #13#10;
+    result := Join([result, '    X509v3 Authority Key Identifier:'#13#10 +
+                            '      ', c.IssuerID, #13#10]);
   if c.SubjectAltNames <> '' then
-    result := result + '    X509v3 Subject Alternative Name:'#13#10 +
-                       '      ' + c.SubjectAltNames + #13#10;
+    result := Join([result, '    X509v3 Subject Alternative Name:'#13#10 +
+                            '      ', c.SubjectAltNames, #13#10]);
 end;
 
 {$ifdef OSWINDOWS}
@@ -11187,18 +11592,20 @@ end;
 function AsnNextTime(var Pos: integer; const Buffer: TAsnObject;
   out Value: TDateTime): boolean;
 var
-  vt: integer;
-  raw: RawByteString;
+  vt: PtrInt;
+  raw: TAsnBuffer;
+  tmp: TShort63;
 begin
-  vt := AsnNextRaw(pos, Buffer, raw);
+  vt := AsnNextBuffer(pos, Buffer, raw);
   result := false;
-  if length(raw) < 12 then
+  if (raw.Len < 12) or (raw.Len > 60) then
     exit;
+  tmp[0] := #0;
   case vt of
     ASN1_UTCTIME:
-      Prepend(raw, '20'); // YY -> YYYY
+      PCardinal(@tmp)^ := 2 + ord('2') shl 8 + ord('0') shl 16; // YY -> '20YY'
     ASN1_GENTIME:
-      if raw = '99991231235959Z' then
+      if EqualBuf('99991231235959Z', raw.Data, raw.Len) then
       begin
         Value := 0; // special value for unspecified NotAfter
         result := true;
@@ -11207,161 +11614,78 @@ begin
   else
     exit;
   end;
-  insert('T', raw, 9); // make ISO-8601 compatible 'YYYYMMDDThhmmss'
-  Iso8601ToDateTimePUtf8CharVar(pointer(raw), length(raw), Value);
+  vt := 8 - ord(tmp[0]);
+  AppendShortBuffer(raw.Data, vt, high(tmp), @tmp);
+  AppendShortChar('T', @tmp); // make ISO-8601 compatible 'YYYYMMDDThhmmss'
+  AppendShortBuffer(PAnsiChar(raw.Data) + vt, raw.Len - vt, high(tmp), @tmp);
+  Iso8601ToDateTimePUtf8CharVar(@tmp[1], ord(tmp[0]), Value);
   result := Value <> 0;
 end;
 
-function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
+function AsnNextGeneralName(var Pos: integer; const Buffer: TAsnObject;
+  var Name: RawUtf8): boolean;
+var
+  v: TAsnBuffer;
+begin
+  case AsnNextBuffer(Pos, Buffer, v) of // most GeneralName types decoding
+    ASN1_NULL: // no more items
+      begin
+        result := false;
+        exit;
+      end;
+    ASN1_CTX1, // rfc8722Name
+    ASN1_CTX2, // dnsName
+    ASN1_CTX6: // uri
+      FastSetString(Name, v.Data, v.Len); // was stored as IA5String
+    ASN1_CTX7: // ip
+      AsnDecIp(v.Data, v.Len, Name);
+    // ASN1_CTX4 = directoryName = TXName
+  else
+    FastAssignNew(Name);  // unsupported value type
+  end;
+  result := true;
+end;
+
+procedure AsnDecIp(p: PAnsiChar; len: integer; var text: RawUtf8);
 begin
   case len of
     4:
       with PDWordRec(p)^ do
-        FormatUtf8('%.%.%.%', [B[0], B[1], B[2], B[3]], result);
+        FormatUtf8('%.%.%.%', [B[0], B[1], B[2], B[3]], text);
    16:
      // expanded IPv6 xx:xx:xx:...:xx content (no mormot.net.sock dependency)
-     ToHumanHex(result, pointer(p), len);
+     ToHumanHex(text, pointer(p), len);
   else
-    BinToHexLower(p, len, result);
+    BinToHexLower(p, len, text);
   end;
 end;
 
-function IsBinaryString(var Value: RawByteString): boolean;
+function AsnDecAia(const ext: TAsnObject; var ocsp, issuers: TRawUtf8DynArray): boolean;
 var
-  n: PtrInt;
-begin
-  result := true;
-  for n := 1 to length(Value) do
-    case ord(Value[n]) of
-      0:
-        if n <> length(value) then
-          exit
-        else
-          // consider null-terminated strings as non-binary, but truncate
-          SetLength(Value, n - 1);
-      1..8, // consider TAB (#9) char as text
-      10..31:
-        exit;
-    end;
+  pos: integer;
+  oid, v: RawByteString;
+begin // see xeAuthorityInformationAccess in TXTbsCertificate.AddNextExtensions
   result := false;
-end;
-
-procedure DumpClass(at: integer; w: TTextWriter);
-begin
-  if at and ASN1_CL_APP <> 0 then
-    w.AddShorter('APP ');
-  if at and ASN1_CL_CTX <> 0 then
-    w.AddShorter('CTX ');
-  if at and ASN1_CL_PRI = ASN1_CL_PRI then
-    w.AddShorter('PRI ');
-  if at < ASN1_CL_APP then
-    w.AddShorter('unknown')
-  else
-    w.AddByteToHex(at and $0f);
-end;
-
-function AsnDump(const Value: TAsnObject): RawUtf8;
-var
-  i, at, x, n, indent, ilcount: integer;
-  s: RawByteString;
-  il: TIntegerDynArray;
-  w: TTextWriter;
-  tmp: TTextWriterStackBuffer;
-begin
-  w := TTextWriter.CreateOwnedStream(tmp);
-  try
-    i := 1;
-    ilcount := 0;
-    indent := 0;
-    while i < length(Value) do
+  ocsp := nil;
+  issuers := nil;
+  pos := 1;
+  if AsnNext(pos, ext) = ASN1_SEQ then
+    while (AsnNext(pos, ext) = ASN1_SEQ) and
+          (AsnNext(pos, ext, @oid) = ASN1_OBJID) and
+          (AsnNext(pos, ext, @v) = ASN1_CTX6) do
     begin
-      for n := ilcount - 1 downto 0 do
-        if il[n] <= i then
-        begin
-          DeleteInteger(il, ilcount, n);
-          dec(indent, 2);
-        end;
-      at := AsnNext(i, Value, @s);
-      w.AddChars(' ', indent);
-      w.Add('$');
-      w.AddByteToHexLower(at);
-      if (at and ASN1_CL_CTR) <> 0 then
+      result := true;
+      if oid{%H-} = ASN1_OID_AIA_OCSP then
       begin
-        w.Add(' ');
-        case at of
-          ASN1_SEQ:
-            w.AddShorter('SEQ');
-          ASN1_SETOF:
-            w.AddShorter('SETOF');
-        else
-          DumpClass(at, w);
-        end;
-        x := length(s);
-        w.Add(' CTR: length %', [x]);
-        inc(indent, 2);
-        AddInteger(il, ilcount, x + i - 1);
+        if IsHttp(v{%H-}) then
+          AddRawUtf8(ocsp, v);
       end
-      else
-      begin
-        w.Add(' ');
-        case at of
-          // base ASN.1 types
-          ASN1_BOOL:
-            w.AddShorter('BOOL');
-          ASN1_INT:
-            w.AddShorter('INT');
-          ASN1_BITSTR:
-            w.AddShorter('BITSTR');
-          ASN1_OCTSTR:
-            w.AddShorter('OCTSTR');
-          ASN1_NULL:
-            w.AddShorter('NULL');
-          ASN1_OBJID:
-            w.AddShorter('OBJID');
-          ASN1_ENUM:
-            w.AddShorter('ENUM');
-          ASN1_UTF8STRING:
-            w.AddShorter('UTF8');
-          ASN1_PRINTSTRING:
-            w.AddShorter('PRINT');
-          ASN1_IA5STRING:
-            w.AddShorter('IA5');
-          ASN1_UTCTIME:
-            w.AddShorter('UTC');
-          ASN1_GENTIME:
-            w.AddShorter('GEN');
-        else
-          DumpClass(at, w);
-        end;
-        w.Add(':', ' ');
-        if IsBinaryString(s) then
-        begin
-          w.Add('binary len=% ', [length(s)]);
-          w.AddShort(EscapeToShort(s));
-        end
-        else if at in ASN1_NUMBERS then
-          w.AddString(s) // not quoted value
-        else if PosExChar('"', s) = 0 then
-        begin
-          w.Add('"');
-          w.AddString(s);
-          w.AddDirect('"');
-        end
-        else
-        begin
-          w.Add('''');
-          w.AddString(s); // alternate output layout for quoted text
-          w.AddDirect('''');
-        end;
-      end;
-      w.AddDirectNewLine; // adapted to the current console output
+      else if oid = ASN1_OID_AIA_ISSUERS then
+        if IsHttp(v) or
+           IsLdap(v) then
+          AddRawUtf8(issuers, v);
     end;
-    w.SetText(result);
-  finally
-    w.Free;
-  end;
 end;
-
 
 function SecurityDescriptorToJson(const SD: TSecurityDescriptor): RawUtf8;
 begin
@@ -11374,6 +11698,39 @@ function SecurityDescriptorFromJson(const Json: RawUtf8;
 begin
   SD.Clear;
   result := RecordLoadJson(SD, Json, TypeInfo(TSecurityDescriptor));
+end;
+
+
+{ **************** TSynMustache Cryptographic Expression Helpers }
+
+class procedure TSynMustacheCryptoHelpers.Md5(const Value: variant;
+  out Result: variant);
+begin
+  RawUtf8ToVariant(mormot.crypt.core.Md5(ToUtf8(Value)), Result);
+end;
+
+class procedure TSynMustacheCryptoHelpers.Sha1(const Value: variant;
+  out Result: variant);
+begin
+  RawUtf8ToVariant(mormot.crypt.core.Sha1(ToUtf8(Value)), Result);
+end;
+
+class procedure TSynMustacheCryptoHelpers.Sha256(const Value: variant;
+  out Result: variant);
+begin
+  RawUtf8ToVariant(mormot.crypt.core.Sha256(ToUtf8(Value)), Result);
+end;
+
+class procedure TSynMustacheCryptoHelpers.Sha512(const Value: variant;
+  out Result: variant);
+begin
+  RawUtf8ToVariant(mormot.crypt.core.Sha512(ToUtf8(Value)), Result);
+end;
+
+class procedure TSynMustacheCryptoHelpers.PasswordGenerate(const Value: variant;
+  out Result: variant);
+begin // {{ passwordgenerate len }}
+  RawUtf8ToVariant(TAesPrng.Main.RandomPassword(AnyVariantToIntegerDef(Value)));
 end;
 
 // some callbacks for custom JSON serialization of security related types
@@ -11507,6 +11864,8 @@ begin
   {$ifdef OSWINDOWS}
   X509Parse         := @WinX509Parse; // use mormot.lib.sspi.pas WinCertDecode()
   WinCertInfoToText := @Win2Text;
+  if IsAiaDisabledInWindowsRegistry then
+    exclude(DefaultCryptStoreTrust, cstAiaIntermediate);
   {$endif OSWINDOWS}
 end;
 

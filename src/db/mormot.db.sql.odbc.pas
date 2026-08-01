@@ -796,7 +796,7 @@ begin
   res := GetCol(Col, ftBlob);
   case res of
     colNull:
-      result := '';
+      FastAssignNew(result);
     colWrongType:
       ColumnToTypedValue(Col, ftBlob, result);
   else
@@ -811,7 +811,7 @@ begin
   res := GetCol(Col, ftUtf8);
   case res of
     colNull:
-      result := '';
+      FastAssignNew(result);
     colWrongType:
       ColumnToTypedValue(Col, ftUtf8, result);
   else
@@ -821,15 +821,18 @@ begin
 end;
 
 function TSqlDBOdbcStatement.ColumnCurrency(Col: integer): currency;
+var
+  curr: currency; // safer with an explicit variable
 begin
   case GetCol(Col, ftCurrency) of
     colNull:
-      result := 0;
+      PInt64(@curr)^ := 0;
     colWrongType:
-      ColumnToTypedValue(Col, ftCurrency, result);
+      ColumnToTypedValue(Col, ftCurrency, curr);
   else
-    PInt64(@result)^ := StrToCurr64(pointer(fColData[Col])); // as SQL_C_CHAR
+    PInt64(@curr)^ := StrToCurr64(pointer(fColData[Col])); // as SQL_C_CHAR
   end;
+  result := curr;
 end;
 
 function TSqlDBOdbcStatement.ColumnDateTime(Col: integer): TDateTime;
@@ -879,7 +882,7 @@ procedure TSqlDBOdbcStatement.ColumnToJson(Col: integer; W: TJsonWriter);
 var
   p: PSqlDBColumnProperty;
   v: pointer;
-  tmp: array[0..31] of AnsiChar;
+  tmp: TTemp32;
 begin
   if (not Assigned(fStatement)) or
      (CurrentRow <= 0) then

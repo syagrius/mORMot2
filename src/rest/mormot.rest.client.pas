@@ -24,7 +24,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   {$ifdef DOMAINRESTAUTH}
   mormot.lib.sspi,   // void unit on POSIX
   mormot.lib.gssapi, // void unit on Windows
@@ -532,9 +531,8 @@ type
   PRestClientCallbackItem = ^TRestClientCallbackItem;
 
   /// store the references to active interface callbacks on a REST Client
-  TRestClientCallbacks = class(TSynPersistent)
+  TRestClientCallbacks = class(TObjectLightLock)
   protected
-    fSafe: TLightLock; // very unlikely to have contention on client side
     fCurrentID: integer; // thread-safe TRestClientCallbackID sequence generator
     function UnRegisterByIndex(index: integer): boolean;
   public
@@ -558,11 +556,11 @@ type
     /// find the index of the ID in the internal list
     // - warning: this method should be called within Safe.Lock/Safe.Unlock
     function FindIndex(aID: TRestClientCallbackID): PtrInt;
-    /// find a matching callback
+    /// find a matching callback in a thread-safe way
     // - will call FindIndex(aItem.ID) within Safe.Lock/Safe.Unlock
     // - returns TRUE if aItem.ID was found and aItem filled, FALSE otherwise
     function FindEntry(var aItem: TRestClientCallbackItem): boolean;
-    /// find a matching entry
+    /// find a matching entry in a thread-safe way
     // - will call FindIndex(aID) within Safe.Lock/Safe.Unlock
     // - returns TRUE if aID was found and aInstance/aFactory set, FALSE otherwise
     function FindAndRelease(aID: TRestClientCallbackID): boolean;
@@ -685,6 +683,8 @@ type
     // - return TRUE on success, FALSE on any connection error
     // - follows ConnectRetrySeconds property for optional retrial
     // - calls OnConnected/OnConnectionFailed events if set
+    // - could be used e.g. if you need to access the Socket property before any
+    // REST command like ClientSetUser(), e.g. to call Socket.AuthorizeBasic()
     function IsOpen: boolean; virtual;
     /// main method calling the remote Server via a RESTful command
     // - redirect to the InternalUri() abstract method, which should be
@@ -1319,7 +1319,7 @@ begin
      (JsonDecode(pointer({%H-}resp), @AUTH_N, length(AUTH_N), @values, true) = nil) then
   begin
     Sender.fSession.Data := ''; // reset temporary 'data' field
-    result := ''; // error
+    FastAssignNew(result); // error
     exit;
   end;
   result := values[0].ToUtf8; // not ToUtf8(result) to please Delphi 2007
@@ -1413,7 +1413,7 @@ var
   rnd: THash128 absolute clientsign;
   values: array[0..1] of TValuePUtf8Char;
 begin
-  result := ''; // error
+  FastAssignNew(result); // error
   if User.LogonName = '' then
     exit;
   // compute the 160-bit client nonce (needed by ScramClientProof)
@@ -1470,7 +1470,7 @@ begin
       // success: fSession.PrivateKey computed without the server DB key
       User.PasswordHashHexa := '#'
     else
-      result := ''; // error
+      FastAssignNew(result); // error
 end;
 
 
@@ -1711,15 +1711,14 @@ var
   sec: TSecContext;
   bin: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   if not InitializeDomainAuth then
     exit;
   Sender.fSession.Data := '';
   InvalidateSecContext(sec);
   try
     repeat
-      if (User.LogonName <> '') or
-         ClientSspiPasswordIsFile(User.PasswordHashHexa) then // FILE:keytab
+      if User.LogonName <> '' then
         ClientSspiAuthWithPassword(sec, Sender.fSession.Data,
           User.LogonName, User.PasswordHashHexa, {spn=}'', bin)
       else
@@ -2199,7 +2198,7 @@ var
   resp: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     if fSession.Version = '' then
@@ -2223,7 +2222,8 @@ begin
   begin
     fSession.IDHexa8 := CardinalToHexLower(fSession.ID);
     fSession.PrivateKey := crc32(0, pointer(aSessionKey), length(aSessionKey));
-    if aUser.PasswordHashHexa <> '#' then // ignore the SCRAM DB value
+    if (aUser.PasswordHashHexa <> '') and      // e.g. Kerberos
+       (aUser.PasswordHashHexa[1] <> '#') then // e.g. SCRAM DB value
       fSession.PrivateKey := crc32(fSession.PrivateKey,
         pointer(aUser.PasswordHashHexa), length(aUser.PasswordHashHexa));
   end;
@@ -2765,7 +2765,7 @@ begin
       aMethodName, aNameValueParameters, resp, aTable, aID) = HTTP_SUCCESS then
     result := JsonDecode(resp)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestClientUri.CallBackPut(const aMethodName, aSentData: RawUtf8;

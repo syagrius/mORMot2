@@ -21,7 +21,6 @@ uses
   sysutils,
   classes,
   variants,
-  contnrs,
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -865,7 +864,7 @@ begin
     include(hso, hsoThreadSmooting); // regular HW tends to like it
   {$ifdef USEHTTPSYS}
   if aUse in HTTP_API_MODES then // Windows system's http.sys
-    if PosEx('Wine', OSVersionInfoEx) > 0 then
+    if wsWine in WindowsSpecs then
     begin
       fLog.Add.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
           'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
@@ -1077,7 +1076,7 @@ var
   err: integer;
   https: boolean;
 begin
-  result := '';
+  FastAssignNew(result);
   if not fHttpServer.InheritsFrom(THttpApiServer) then
     exit;
   https := aSecurity in SEC_TLS;
@@ -1105,7 +1104,7 @@ begin
 end;
 {$else}
 begin
-  result := ''; // do nothing, but no error
+  FastAssignNew(result); // do nothing, but no error
 end;
 {$endif USEHTTPSYS}
 

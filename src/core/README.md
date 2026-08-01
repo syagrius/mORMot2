@@ -148,7 +148,7 @@ Low-Level Memory Buffers Processing Functions shared by all framework units
 - URI-Encoded Text Buffer Process
 - Basic MIME Content Types Support
 - Text Memory Buffers and Files
-- `TStreamRedirect` and other Hash process
+- `TStreamRedirect` and other `TStream`/Hash process
 - `RawByteString` Buffers Aggregation via `TRawByteStringGroup`
 
 ### mormot.core.data
@@ -260,6 +260,7 @@ High-Level Multi-Threading features shared by all framework units
 - Background Thread Processing
 - Parallel Execution in a Thread Pool
 - Server Process Oriented Thread Pool
+- `TPipeStream` Read/Write synchronization between two threads
 
 ### mormot.core.zip
 
@@ -276,6 +277,7 @@ With proper Unicode and ZIP64 support, and faster libdeflate usage if available.
 Logic-Less `{{Mustache}}` Templates Rendering
 - *Mustache* Execution Data Context Types
 - `TSynMustache` Template Processing
+- `TSynMustache` Standard Expression Helpers
 
 The `TSynMustache` data context could be a `TDocVariant` document, or any kind of data using direct RTTI lookup.
 

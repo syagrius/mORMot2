@@ -368,16 +368,16 @@ begin
   if result <> nil then
     if result <> TypeInfo(integer) then
       if result <> TypeInfo(cardinal) then
-        if result <> TypeInfo(RawUtf8) then
-          result := @RawName     // as stored in RTTI
+        if result <> TypeInfo(RawUtf8) then // = TypeInfo(Utf8String)
+          result := @RawName                // as stored in RTTI
         else
-          result := @UTF8_NAME   // instead of 'UTF8String'
+          result := @UTF8_NAME              // instead of 'UTF8String'
       else
-        result := @CARDINAL_NAME // instead of 'longword'
+        result := @CARDINAL_NAME            // instead of 'longword'
     else
-      result := @INTEGER_NAME    // instead of 'longint'
+      result := @INTEGER_NAME               // instead of 'longint'
   else
-    result := @NULCHAR;          // instead of a GPF
+    result := @NULCHAR;                     // instead of a GPF
 end;
 
 function TRttiInfo.RecordSize: PtrInt;
@@ -656,42 +656,38 @@ end;
 
 const
   // gather rk* to reduce number of TRttiCustomListPairs hash slots in memory
-  RK_TOSLOT_MAX = {$ifdef NOPATCHVMT} 11 {$else} 10 {$endif NOPATCHVMT};
+  RK_TOSLOT_MAX = 9;
   RK_TOSLOT: array[TRttiKind] of byte = (
-    0,   // rkUnknown
-    1,   // rkInteger
-    2,   // rkChar
-    3,   // rkEnumeration
-    4,   // rkFloat
-    5,   // rkSet
-    0,   // rkMethod
-    0,   // rkSString
-    6,   // rkLStringOld
-    6,   // rkLString
-    7,   // rkWString
-    7,   // rkVariant
-    2,   // rkArray
-    8,   // rkRecord
-    7,   // rkInterface
-    {$ifdef NOPATCHVMT}
-    11,  // rkClass
-    {$else}
-    4,   // vmtAutoTable is used instead of rkClass slot
-    {$endif NOPATCHVMT}
-    8,   // rkObject
-    2,   // rkWChar
-    3,   // rkBool
-    9,   // rkInt64
-    9,   // rkQWord
-    10,  // rkDynArray
-    0,   // rkInterfaceRaw
-    0,   // rkProcVar
-    7,   // rkUString
-    2,   // rkUChar
-    0,   // rkHelper
-    0,   // rkFile
-    0,   // rkClassRef
-    0);  // rkPointer
+    0,  // rkUnknown
+    1,  // rkInteger
+    2,  // rkChar
+    3,  // rkEnumeration
+    2,  // rkFloat
+    4,  // rkSet
+    0,  // rkMethod
+    0,  // rkSString
+    5,  // rkLStringOld
+    5,  // rkLString
+    6,  // rkWString
+    6,  // rkVariant
+    1,  // rkArray
+    7,  // rkRecord
+    6,  // rkInterface
+    0,  // rkClass - vmtAutoTable may be used instead of rkClass slot
+    7,  // rkObject
+    2,  // rkWChar
+    3,  // rkBool
+    8,  // rkInt64
+    8,  // rkQWord
+    9,  // rkDynArray
+    1,  // rkInterfaceRaw
+    1,  // rkProcVar
+    2,  // rkUString
+    2,  // rkUChar
+    0,  // rkHelper
+    0,  // rkFile
+    0,  // rkClassRef
+    1); // rkPointer
 
 
 { ********* Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly }
@@ -723,8 +719,10 @@ procedure fpc_rtl_freemem;           external name 'SYSTEM_$$_FREEMEM$POINTER$$Q
 procedure PatchJmp(old, new: PByteArray; size: PtrInt; jmp: PtrUInt = 0);
 var
   rel: PCardinal;
+  mov: cardinal;
 begin
-  PatchCode(old, new, size, nil, {unprotected=}true);
+  if not PatchProcess(old, new, size) then
+    exit;
   if jmp = 0 then
     jmp := PtrUInt(@fpc_freemem);
   repeat // search and fix "jmp rel fpc_freemem"
@@ -737,7 +735,8 @@ begin
     rel := @old[size + 1];
   until (old[size] = $e9) and
         (rel^ = cardinal(jmp - PtrUInt(@new[size]) - 5));
-  rel^ := jmp - PtrUInt(rel) - 4;
+  mov := jmp - PtrUInt(rel) - 4;
+  PatchProcess(rel, @mov, 4); // rel^ := mov;
 end;
 
 procedure _ansistr_decr_ref(var p: pointer); nostackframe; assembler;
@@ -838,7 +837,7 @@ asm
         je      @0
         test    s1, s2
         jz      @maybe0
-@first: mov     al, byte ptr [s1] // we can check the first char (for quicksort)
+@first: mov     al, byte ptr [s1] // we can check the first char (for QuickSort)
         movzx   r8, byte ptr [s2]
         sub     rax, r8
         je      @s
@@ -969,9 +968,9 @@ end;
 procedure _ansistr_concat_convert(var dest: RawByteString;
   const s1, s2: RawByteString; cp, cp1, cp2: cardinal);
 var
-  t1, t2, t: TSynTempBuffer; // avoid most memory allocations
   p1, p2, p: PAnsiChar;
   eng: TSynAnsiConvert;
+  t1, t2, t: TSynTempBuffer; // avoid most memory allocations
 begin
   p1 := AnsiBufferToTempUtf8(t1, pointer(s1), length(s1), cp1);
   p2 := AnsiBufferToTempUtf8(t2, pointer(s2), length(s2), cp2);
@@ -1005,12 +1004,11 @@ end;
 function _lstrcp(const s: RawByteString; cp: integer): integer; inline;
 begin
   result := cp;
-  if s <> '' then
-  begin
-    result := PStrRec(PtrUInt(s) - _STRRECSIZE)^.codePage;
-    if result <= CP_OEMCP then
-      result := CP_UTF8;
-  end;
+  if s = '' then
+    exit;
+  result := PStrRec(PtrUInt(s) - _STRRECSIZE)^.codePage;
+  if result <= CP_OEMCP then
+    result := CP_UTF8;
 end;
 
 procedure _ansistr_concat_utf8(var dest: RawByteString;
@@ -1051,7 +1049,7 @@ begin
     begin
       // dest := dest+s2 -> resize dest inplace
       new := PAnsiChar(pointer(dest)) - _STRRECSIZE;
-      PStrRec(new)^.codePageElemSize := cp + (1 shl 16); // always force
+      PStrRec(new)^.codePageElemSize := cp + (SizeOf(AnsiChar) shl 16); // force
       PStrRec(new)^.length := l1 + _lstrlen(s2);
       pointer(dest) := new;
       new := ReallocMem(pointer(dest),
@@ -1164,7 +1162,7 @@ begin
     begin
       // dest := dest+s... -> realloc dest in-place
       new := PAnsiChar(pointer(dest)) - _STRRECSIZE;
-      PStrRec(new)^.codePageElemSize := cp + (1 shl 16); // always force
+      PStrRec(new)^.codePageElemSize := cp + (SizeOf(AnsiChar) shl 16); // force
       PStrRec(new)^.length := len;
       pointer(dest) := new;
       new := ReallocMem(pointer(dest), len + (_STRRECSIZE + 16)) + _STRRECSIZE;
@@ -1194,6 +1192,13 @@ end;
 
 {$endif FPC_HAS_CPSTRING}
 
+// Win64 seems not to like our patched RTL for the DEBUG stack trace
+{$ifdef OSWINDOWS}
+  {$ifdef DEBUG}
+    {$define NOPATCHRTL}
+  {$endif DEBUG}
+{$endif OSWINDOWS}
+
 procedure RedirectRtl;
 {$ifndef NOPATCHRTL}
 var
@@ -1201,23 +1206,24 @@ var
 {$endif NOPATCHRTL}
 begin
   {$ifndef NOPATCHRTL}
-  RedirectCode(@system.Move,            @MoveFast);
-  RedirectCode(@system.FillChar,        @FillCharFast);
-  PatchCode(@fpc_ansistr_incr_ref,      @_ansistr_incr_ref, $17);     // fpclen=$2f
-  PatchJmp(@fpc_ansistr_decr_ref,       @_ansistr_decr_ref, $27);     // fpclen=$3f
-  PatchJmp(@fpc_ansistr_assign,         @_ansistr_assign, $3f);       // fpclen=$3f
-  PatchCode(@fpc_ansistr_compare,       @_ansistr_compare, $7f);      // fpclen=$12f
-  PatchCode(@fpc_ansistr_compare_equal, @_ansistr_compare_equal, $57);// fpc=$cf
-  PatchCode(@fpc_unicodestr_incr_ref,   @_ansistr_incr_ref, $17);     // fpc=$2f
-  PatchJmp(@fpc_unicodestr_decr_ref,    @_ansistr_decr_ref, $27);     // fpc=$3f
-  PatchJmp(@fpc_unicodestr_assign,      @_ansistr_assign, $3f);       // fpc=$3f
-  PatchCode(@fpc_dynarray_incr_ref,     @_dynarray_incr_ref, $17);    // fpc=$2f
-  PatchJmp(@fpc_dynarray_clear,         @_dynarray_decr_ref, $2f,
+  if not RedirectCode(@system.Move, @MoveFast) then
+    exit; // do not try anything more on hardened systems
+  RedirectCode(@system.FillChar,           @FillCharFast);
+  PatchProcess(@fpc_ansistr_incr_ref,      @_ansistr_incr_ref, $17);     // fpclen=$2f
+  PatchJmp(@fpc_ansistr_decr_ref,          @_ansistr_decr_ref, $27);     // fpclen=$3f
+  PatchJmp(@fpc_ansistr_assign,            @_ansistr_assign, $3f);       // fpclen=$3f
+  PatchProcess(@fpc_ansistr_compare,       @_ansistr_compare, $7f);      // fpclen=$12f
+  PatchProcess(@fpc_ansistr_compare_equal, @_ansistr_compare_equal, $57);// fpc=$cf
+  PatchProcess(@fpc_unicodestr_incr_ref,   @_ansistr_incr_ref, $17);     // fpc=$2f
+  PatchJmp(@fpc_unicodestr_decr_ref,       @_ansistr_decr_ref, $27);     // fpc=$3f
+  PatchJmp(@fpc_unicodestr_assign,         @_ansistr_assign, $3f);       // fpc=$3f
+  PatchProcess(@fpc_dynarray_incr_ref,     @_dynarray_incr_ref, $17);    // fpc=$2f
+  PatchJmp(@fpc_dynarray_clear,            @_dynarray_decr_ref, $2f,
     PtrUInt(@_dynarray_decr_ref_free));
-  RedirectCode(@fpc_dynarray_decr_ref,  @fpc_dynarray_clear);
-  PatchCode(@fpc_variant_init,          @_variant_init, $0f);      // fpclen=$1f
+  RedirectCode(@fpc_dynarray_decr_ref,     @fpc_dynarray_clear);
+  PatchProcess(@fpc_variant_init,          @_variant_init, $0f);      // fpclen=$1f
   {$ifdef FPC_HAS_CPSTRING}
-  RedirectCode(@fpc_setstring_ansistr,  @_setstring_ansistr_pansichar);
+  RedirectCode(@fpc_setstring_ansistr,     @_setstring_ansistr_pansichar);
   // Delphi/Windows is never natively UTF-8, but FPC+Lazarus is very likely :)
   if Unicode_CodePage = CP_UTF8 then
   begin

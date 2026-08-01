@@ -34,7 +34,6 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.threads,
   mormot.core.interfaces,
   mormot.orm.base,
   mormot.orm.core;
@@ -1568,7 +1567,7 @@ function TServiceContainer.AddServiceInternal(aService: TServiceFactory): PtrInt
 var
   ndx: integer;
   im: TServiceInternalMethod;
-  m: PtrInt;
+  m, n: PtrInt;
   int: PServiceContainerInterface;
   uri: RawUtf8;
 begin
@@ -1580,7 +1579,8 @@ begin
     uri := aService.fInterfaceMangledUri
   else
     uri := aService.fInterfaceUri;
-  int := fInterfaces.AddUniqueName(uri, @result);
+  n := 0;
+  int := fInterfaces.AddUniqueName(uri, @n);
   int^.Service := aService;
   // add associated methods - first SERVICE_PSEUDO_METHOD[], then from interface
   Append(uri, '.');
@@ -1589,6 +1589,7 @@ begin
     AddServiceMethodInternal(uri + SERVICE_PSEUDO_METHOD[im], aService, ndx);
   for m := 0 to aService.fInterface.MethodsCount - 1 do
     AddServiceMethodInternal(uri + aService.fInterface.Methods[m].Uri, aService, ndx);
+  result := n; // safer with a transient local variable
 end;
 
 procedure TServiceContainer.CheckInterface(const aInterfaces: array of PRttiInfo);
@@ -1666,7 +1667,7 @@ end;
 function TServiceContainer.GetMethodName(ListInterfaceMethodIndex: integer): RawUtf8;
 begin
   if cardinal(ListInterfaceMethodIndex) >= cardinal(length(fInterfaceMethod)) then
-    result := ''
+    FastAssignNew(result)
   else
     with fInterfaceMethod[ListInterfaceMethodIndex] do
       result := InterfaceService.fInterface.GetMethodName(InterfaceMethodIndex);
@@ -1770,7 +1771,7 @@ var
   i: PtrInt;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (fInterface = nil) then
     exit;

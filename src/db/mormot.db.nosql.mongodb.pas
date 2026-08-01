@@ -754,9 +754,8 @@ type
   // - all access will be protected by a mutex (critical section): it is thread
   // safe but you may use one TMongoClient per thread or a connection pool, for
   // better performance
-  TMongoConnection = class(TSynPersistent)
+  TMongoConnection = class(TObjectOSLock)
   protected
-    fSafe: TOSLock;
     fLocked: cardinal;
     fClient: TMongoClient;
     fSocket: TCrtSocket;
@@ -2782,7 +2781,7 @@ begin
   if fServerAddress = '' then
     fServerAddress := '127.0.0.1';
   fServerPort := aServerPort;
-  fSafe.Init;
+  inherited Create; // fSafe.Init;
 end;
 
 destructor TMongoConnection.Destroy;
@@ -2794,8 +2793,7 @@ begin
       ; // continue on socket error
     end;
   finally
-    fSafe.Done;
-    inherited Destroy;
+    inherited Destroy; // fSafe.Done;
   end;
 end;
 
@@ -2814,8 +2812,6 @@ begin
       EMongoException.RaiseUtf8('%.Open unable to connect to MongoDB server %: % [%]',
         [self, Client.ConnectionString, E, E.Message]);
   end;
-  fSocket.TcpNoDelay := true; // we buffer all output data before sending
-  fSocket.KeepAlive := true;  // do not close the connection without notice
 end;
 
 function TMongoConnection.GetOpened: boolean;
@@ -3257,7 +3253,7 @@ begin
     returnedvalue);
   with _Safe(returnedValue)^ do
     if GetValueOrDefault('ok', 1) <> 0 then
-      result := ''
+      FastAssignNew(result)
     else if not GetAsRawUtf8('errmsg', result) then
       result := 'unspecified error';
 end;
@@ -3483,7 +3479,7 @@ function TMongoClient.ServerBuildInfoText: RawUtf8;
 begin
   with _Safe(ServerBuildInfo)^ do
     if count = 0 then
-      result := ''
+      FastAssignNew(result)
     else
     begin
       FormatUtf8('MongoDB % %', [U['version'], U['javascriptEngine']], result);
@@ -3600,8 +3596,12 @@ begin
 end;
 
 function MongoPasswordDigest(const UserName, Password: RawUtf8): RawUtf8;
+var
+  key: RawUtf8;
 begin
-  result := Md5(UserName + ':mongo:' + Password);
+  Join([UserName, ':mongo:', Password], key);
+  result := Md5(key);
+  FillZero(key);
 end;
 
 function TMongoClient.OpenAuth(const DatabaseName, UserName, PassWord: RawUtf8;
@@ -3656,7 +3656,7 @@ procedure TMongoClient.DoAuth(const DatabaseName, UserName, Password: RawUtf8;
 var
   conn: TMongoConnection;
   res, bson: variant;
-  err, nonce, key, mech: RawUtf8;
+  err, nonce, key0, key1, mech: RawUtf8;
   payload: RawByteString;
   sc: TScramClient;
 
@@ -3693,15 +3693,17 @@ begin
     if err <> '' then
       EMongoException.RaiseUtf8('%.OpenAuthCR("%") step1: % - res=%',
         [self, DatabaseName, err, res]);
-    mech := MongoPasswordDigest(UserName, Password);
-    Join([nonce, UserName, mech], key);
-    FillZero(mech);
+    key0 := MongoPasswordDigest(UserName, Password);
+    Join([nonce, UserName, key0], key1);
+    FillZero(key0);
+    key0 := Md5(key1);
     bson := BsonVariant([
       'authenticate', 1,
       'user',         UserName,
       'nonce',        nonce,
-      'key',          Md5(key)]);
-    FillZero(key);
+      'key',          key0]);
+    FillZero(key0);
+    FillZero(key1);
     err := conn.RunCommand(DatabaseName, bson, res);
     if err <> '' then
       EMongoException.RaiseUtf8('%.OpenAuthCR("%") step2: % - res=%',
@@ -3740,14 +3742,14 @@ begin
     ExtractPayload;
     if err = '' then
     begin
-      key := sc.ComputeFinalMessage(payload, Password);
-      if key = '' then
+      key1 := sc.ComputeFinalMessage(payload, Password);
+      if key1 = '' then
         err := sc.LastError;
     end;
     if err <> '' then
       EMongoException.RaiseUtf8('%.OpenAuth%("%") step1: % - res=% as %',
         [self, mech, DatabaseName, err, res, payload]);
-    BsonVariantType.FromBinary(key, bbtGeneric, bson);
+    BsonVariantType.FromBinary(key1, bbtGeneric, bson);
     (* SEND
     {
       "saslContinue": 1,
@@ -4003,7 +4005,7 @@ begin
     // 2) better not set any mechanism to force SCRAM-SHA-256 on MongoDB >= 4.x
     usr.InitObject([
       'createUser',     UserName,
-      'pwd',            Password, // will be hashed server side
+      'pwd',            Password, // will be hashed server side - assume TLS
       'roles',          roles], JSON_FAST);
   result := RunCommand(variant(usr), res);
 end;
@@ -4175,7 +4177,7 @@ begin
   if AggregateCallFromVariant(pipelineArray, reply, res) then
     result := VariantSaveMongoJson(res, Mode)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TMongoCollection.AggregateDocFromJson(const PipelineJson: RawUtf8): variant;
@@ -4196,7 +4198,7 @@ begin
   if AggregateCallFromJson(PipelineJson, reply, res) then
     result := VariantSaveMongoJson(res, Mode)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TMongoCollection.Drop: RawUtf8;
@@ -4276,7 +4278,7 @@ end;
 procedure TMongoCollection.EnsureIndex(const Keys: array of RawUtf8;
   Ascending, Unique: boolean);
 const
-  order: array[boolean] of integer = ( -1, 1);
+  order: array[boolean] of integer = (-1, 1);
 var
   k, opt: variant;
   A: integer;
@@ -4354,7 +4356,7 @@ var
   v: variant;
 begin
   cmd.InitFast(7, dvObject);
-  cmd.AddValue('find', fName);
+  cmd.AddValueText('find', fName);
   if not VarIsEmptyOrNull(Criteria) then
     if BsonVariantType.GetItem(Criteria, '$query', v) then
     begin

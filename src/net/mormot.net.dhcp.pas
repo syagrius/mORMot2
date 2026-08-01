@@ -469,11 +469,11 @@ function IsValidRfc3925(op: PAnsiChar; len: integer): boolean;
 function TlvOptionToJson(opt: pointer; recognize: boolean): RawJson;
 
 /// convert a DNS wire format aka binary "canonical form" into plain ASCII text
-function DnsLabelToText(v: pointer; len: PtrInt; var txt: shortstring): boolean;
-function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: shortstring): boolean;
+function DnsLabelToText(v: pointer; len: PtrInt; var txt: ShortString): boolean;
+function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: ShortString): boolean;
 
 /// convert plain ASCII text as DNS wire format aka binary "canonical form"
-function DnsLabelAppendBin(p: PUtf8Char; var bin: shortstring): PUtf8Char;
+function DnsLabelAppendBin(p: PUtf8Char; var bin: ShortString): PUtf8Char;
 
 /// parse a CIDR route(s) text into a RFC 3442 compliant binary blob
 // - expect '192.168.1.0/24,10.0.0.5,10.0.0.0/8,192.168.1.1' readable format
@@ -2068,7 +2068,7 @@ end;
 
 // uncompressed DNS label format: [len + part] + ending len=0
 
-function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: shortstring): boolean;
+function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: ShortString): boolean;
 var
   vlen: PtrInt;
 begin
@@ -2095,13 +2095,13 @@ begin
   result := true;
 end;
 
-function DnsLabelToText(v: pointer; len: PtrInt; var txt: shortstring): boolean;
+function DnsLabelToText(v: pointer; len: PtrInt; var txt: ShortString): boolean;
 begin
   txt[0] := #0;
   result := DnsLabelAppendText(PByteArray(v), len, txt);
 end;
 
-function DnsLabelAppendBin(p: PUtf8Char; var bin: shortstring): PUtf8Char;
+function DnsLabelAppendBin(p: PUtf8Char; var bin: ShortString): PUtf8Char;
 var
   len: PtrInt;
 begin
@@ -2773,7 +2773,7 @@ var
   tmp: TTextWriterStackBuffer; // 8KB static
   W: TJsonWriter;
 begin
-  result := '';
+  FastAssignNew(result);
   if not DhcpParseHeader(dhcp, len) then
     exit;
   W := TJsonWriter.CreateOwnedStream(tmp);
@@ -4486,7 +4486,7 @@ var
   tmp: TTextWriterStackBuffer; // 8KB static
   W: TJsonWriter;
 begin
-  result := '';
+  FastAssignNew(result);
   if Mac64 = 0 then
     exit;
   W := TJsonWriter.CreateOwnedStream(tmp);
@@ -4505,7 +4505,7 @@ var
   tmp: TTextWriterStackBuffer; // 8KB static
   W: TJsonWriter;
 begin
-  result := '';
+  FastAssignNew(result);
   if SendLen = 0 then
     exit;
   W := TJsonWriter.CreateOwnedStream(tmp);
@@ -5568,9 +5568,10 @@ function TDhcpProcess.SaveToFile(const FileName: TFileName): integer;
 var
   txt: RawUtf8;
   bak: TFileName;
+  n: integer; // not PtrInt
   hasbak: boolean;
 begin // for 100K leases: SaveToText=4.21ms FileFromString=1.44ms (4.2MB)
-  txt := SaveToText(@result);     // make fScopeSafe.ReadLock/ReadUnLock
+  txt := SaveToText(@n);     // make fScopeSafe.ReadLock/ReadUnLock
   hasbak := false;
   if not (dsoNoFileBak in fOptions) then
   begin
@@ -5579,7 +5580,10 @@ begin // for 100K leases: SaveToText=4.21ms FileFromString=1.44ms (4.2MB)
     hasbak := RenameFile(FileName, bak);    // atomic backup
   end;
   if FileFromString(txt, FileName) then
-    fModifSaved := fModifSequence // success: won't retry on next OnIdle()
+  begin
+    fModifSaved := fModifSequence; // success: won't retry on next OnIdle()
+    result := n;
+  end
   else
   begin
     if hasbak then
@@ -5632,7 +5636,7 @@ begin
       end;
     end;
     QueryPerformanceMicroSeconds(stop);
-    MicroSecToString(stop - start, us);
+    MicroSecToStringVar(stop - start, us);
     AppendShortCharSafe(' ', us);
   end;
   // notify the scope

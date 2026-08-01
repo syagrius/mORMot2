@@ -134,7 +134,8 @@ type
   // we redefined most of the sockaddr structs due to OpenBSD FPC RTL bug
   // and to share the same fields between FPC and Delphi POSIX
 
-  {$ifdef SOCK_HAS_SINLEN} // as set in mormot.defines.inc (and FPC RTL)
+  // SOCK_HAS_SINLEN is set in mormot.defines.inc (and FPC RTL)
+  {$ifdef SOCK_HAS_SINLEN}
   sa_family_t = cuchar;    // 8-bit to follow a 8-bit sa_len field
   {$else}
   sa_family_t = cushort;   // 16-bit on Linux as on Windows
@@ -150,7 +151,7 @@ type
       1: (sin_family: sa_family_t;
           sin_port:   cushort;
           sin_addr:   TNetIP4;
-          sin_zero:   packed array[0..7] of cuchar);
+          sin_zero:   Int64);
   end;
   PSockAddrIn = ^TSockAddrIn;
 
@@ -180,10 +181,10 @@ type
   PSockAddr = ^TSockAddr;
 
   THostEnt = record
-    h_name: PAnsiChar;
-    h_aliases: PPAnsiChar;
+    h_name:     PAnsiChar;
+    h_aliases:  PPAnsiChar;
     h_addrtype: cint;
-    h_length: TSockLen;
+    h_length:   TSockLen;
     case integer of
        0: (h_addr_list: PPAnsiChar);
        1: (h_addr:      ^PNetIP4);
@@ -272,7 +273,7 @@ end;
 
 function closesocket(s: integer): integer; inline;
 begin
-  result := FileClose(s);
+  result := fpclose(s);
 end;
 
 function getnameinfo(addr: PSockAddr; namelen: TSockLen; host: PAnsiChar;
@@ -282,12 +283,12 @@ function getnameinfo(addr: PSockAddr; namelen: TSockLen; host: PAnsiChar;
 
 function bind(s: integer; addr: PSockAddr; namelen: TSockLen): integer; inline;
 begin
-  result := fpbind(s, addr, namelen);
+  result := fpbind(s, pointer(addr), namelen);
 end;
 
 function getsockname(s: integer; name: PSockAddr; var namelen: TSockLen): integer; inline;
 begin
-  result := fpgetsockname(s, name, @namelen);
+  result := fpgetsockname(s, pointer(name), @namelen);
 end;
 
 function listen(s: integer; backlog: integer): integer; inline;
@@ -297,7 +298,7 @@ end;
 
 function accept(s: integer; addr: PSockAddr; var addrlen: TSockLen): integer; inline;
 begin
-  result := fpaccept(s, addr, @addrlen);
+  result := fpaccept(s, pointer(addr), @addrlen);
 end;
 
 {$ifdef HASACCEPT4}
@@ -308,7 +309,7 @@ function accept4(s: integer; addr: PSockAddr; var addrlen: TSockLen; flags: inte
 
 function connect(s: integer; name: PSockAddr; namelen: TSockLen): integer; inline;
   begin
-    result := fpconnect(s, name, namelen);
+    result := fpconnect(s, pointer(name), namelen);
   end;
 
 function select(nfds: integer; readfds, writefds, exceptfds: PFDSet;
@@ -325,7 +326,7 @@ end;
 function recvfrom(s: integer; Buf: pointer; len: size_t; flags: integer;
    from: PSockAddr; fromlen: pSocklen): ssize_t; inline;
 begin
- result := fprecvfrom(s, Buf, len, flags, from, fromlen);
+ result := fprecvfrom(s, Buf, len, flags, pointer(from), fromlen);
 end;
 
 function send(s: integer; Buf: pointer; len: size_t; flags: integer): ssize_t; inline;
@@ -336,12 +337,12 @@ end;
 function sendto(s: integer; Buf: pointer; len: size_t; flags: integer;
    addrto: PSockAddr; tolen: integer): ssize_t; inline;
 begin
- result := fpsendto(s, Buf, len, flags, addrto, tolen);
+ result := fpsendto(s, Buf, len, flags, pointer(addrto), tolen);
 end;
 
 function getpeername(s: integer; name: PSockAddr; var namelen: TSockLen): integer; inline;
 begin
-  result := fpgetpeername(s, name, @namelen);
+  result := fpgetpeername(s, pointer(name), @namelen);
 end;
 
 {$else}
@@ -436,6 +437,17 @@ function poll(fds: PPollFD; nfds, timeout: integer): integer; cdecl;
   external clib name 'poll' + LIBC_SUFFIX;
 {$endif OSDARWIN}
 
+function inet_pton(af: integer; src, dst: pointer): integer; cdecl;
+  external clib name 'inet_pton' + LIBC_SUFFIX;
+
+{$ifdef FPC}
+function fpunlinka(path: PAnsiChar): integer; inline; // internal call
+begin
+  if path <> nil then
+    result := fpunlink(path);
+end;
+{$endif FPC}
+
 function RawSocketErrNo: integer;
 begin
   result := cerrno; // thread-locale variable from libc
@@ -483,56 +495,53 @@ var
   // gethostbyname() result is NOT thread-safe: we need to protect its calls;
   // since this may take some time, we use a pthread mutex, not a TLightLock
 
-procedure TNetAddr.Clear;
-begin
-  PInteger(@Addr)^ := 0; // sa_len = sin_family = sin_port = 0
-end; // other fields are not supposed/required to be initialized on POSIX
-
-procedure TNetAddr.SetFamily(fam: cardinal);
-begin
-  PSockAddr(@Addr)^.sin_family := fam;
-  {$ifdef SOCK_HAS_SINLEN}
-  PSockAddr(@Addr)^.sa_len := Size; // for OpenBSD - FreeBSD/Darwin allow 0
-  {$endif SOCK_HAS_SINLEN}
-end;
-
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
   h: PHostEnt;
+  ad: PUtf8Char;
+  adlen: PtrInt;
   ad4: TSockAddr absolute Addr;
+  ad6: TSockAddrIn6 absolute Addr;
+  adu: TSockAddrUnix absolute Addr;
 begin
   Clear;
   result := nrNotFound;
   if address = '' then
     exit;
   // handle unix domain socket path from address (ignoring addrport)
+  ad := pointer(address);
+  adlen := length(address);
+  if IsUnix(ad) then
+  begin
+    // detect address as 'unix:/path/to/myapp.socket' with default nlTcp
+    layer := nlUnix;
+    inc(ad, 5);
+    dec(adlen, 5);
+  end;
   if layer = nlUnix then
   begin
     // socket file name is just copied to the address struct
-    with PSockAddrUnix(@Addr)^ do
-      if length(address) >= SizeOf(sun_path) then
-        // avoid buffer overflow or truncated socket name
-        result := nrInvalidParameter
-      else
-      begin
-        sun_family := AF_UNIX;
-        {$ifdef SOCK_HAS_SINLEN}
-        sun_len := SOCKADDR_SIZE; // mandatory on OpenBSD - FreeBSD/Darwin allow 0
-        {$endif SOCK_HAS_SINLEN}
-        MoveFast(pointer(address)^, sun_path, length(address) + 1); // +1 for #0
-        result := nrOK;
-      end;
+    if (adlen = 0) or
+       (adlen >= SizeOf(adu.sun_path)) then
+      // avoid buffer overflow or truncated socket name
+      result := nrInvalidParameter
+    else
+    begin
+      MoveFast(ad^, adu.sun_path, adlen + 1); // +1 for #0
+      SetFamily(AF_UNIX);
+      result := nrOK;
+    end;
     exit;
   end;
   // check supplied IP port
-  ad4.sin_port := bswap16(GetCardinal(pointer(addrport)));
-  if (ad4.sin_port = 0) and
-     (addrport <> '0') then // explicit '0' to get ephemeral port
+  result := nrInvalidParameter;
+  if not ParsePort(addrport) then
     exit;
-  // check most simple IPv4 resolution (maybe using mormot.net.dns)
+  // check most simple IPv4/IPv6 resolution (maybe using mormot.net.dns)
   result := nrOk;
-  if SetFromIP4(address, false) then
+  if SetFromIP4(address, false) or
+     SetFromIP6(address) then // inet_pton() OS API is faster than gethostbyname
     exit;
   // use OS API (getaddrinfo is more recent, but addrinfo is not cross-platform)
   _gethostbynamesafe.Lock;
@@ -542,15 +551,16 @@ begin
       result := nrNotFound
     else
     begin
-      SetFamily(h^.h_addrtype);
       case h^.h_addrtype of
         AF_INET:
            ad4.sin_addr := h^.h_addr^^;
         AF_INET6:
-           PSockAddrIn6(@Addr)^.sin6_addr := h^.h_addr6^^;
+           ad6.sin6_addr := h^.h_addr6^^;
       else
         result := nrNotImplemented;
+        exit;
       end;
+      SetFamily(h^.h_addrtype);
     end;
   finally
     _gethostbynamesafe.UnLock;
@@ -586,6 +596,35 @@ begin
   if @self <> nil then
     setsockopt(TSocket(@self), SOL_SOCKET, SO_REUSEPORT, @v, SizeOf(v));
   // don't call SetOpt() which raise ENetSock on old kernel without SO_REUSEPORT
+end;
+
+// FPC does not provide BSD and macOS values - and OpenBSD has no such feature
+{$ifdef OSLINUXANDROID}
+  {$define HASKEEPALIVETCP} // defined in FPC headers or mormot.core.os.delphi
+{$endif OSLINUXANDROID}
+{$ifdef OSFREEBSD}
+const
+  TCP_KEEPIDLE  = 4;
+  TCP_KEEPINTVL = 5;
+  TCP_KEEPCNT   = 6;
+  {$define HASKEEPALIVETCP}
+{$endif OSFREEBSD}
+{$ifdef OSDARWIN}
+const
+  TCP_KEEPIDLE  = $10; // named TCP_KEEPALIVE on Darwin
+  TCP_KEEPINTVL = $101;
+  TCP_KEEPCNT   = $102;
+  {$define HASKEEPALIVETCP}
+{$endif OSDARWIN}
+
+procedure TNetSocketWrap.SetKeepAliveTcp(idle, intvl, cnt: cardinal);
+begin
+  {$ifdef HASKEEPALIVETCP}
+  if setsockopt(TSocket(@self), IPPROTO_TCP, TCP_KEEPIDLE, @idle, SizeOf(idle)) <> NO_ERROR then
+    exit; // don't call SetOpt() which raises ENetSock
+  setsockopt(TSocket(@self), IPPROTO_TCP, TCP_KEEPINTVL, @intvl, SizeOf(intvl));
+  setsockopt(TSocket(@self), IPPROTO_TCP, TCP_KEEPCNT, @cnt, SizeOf(cnt));
+  {$endif HASKEEPALIVETCP}
 end;
 
 procedure TNetSocketWrap.SetSendTimeout(ms: integer);
@@ -741,6 +780,11 @@ end;
 
 
 { ******************** Mac and IP Addresses Support }
+
+function Inet6Pton(text: PUtf8Char; value: PByte): boolean; inline;
+begin
+  result := inet_pton(AF_INET6, text, value) = 1; // use the C library
+end;
 
 const
   IFF_UP        = $1;
@@ -1130,7 +1174,7 @@ var
   retry: integer;
   start: Int64;
 begin
-  result := '';
+  FastAssignNew(result);
   // validate and prepare input parameters
   if not NetIsIP4(pointer(IP), @arp.TPA) or
      not GetLocalMacAddress(IP, local) or // ask the kernel routage table
@@ -1304,7 +1348,7 @@ end;
 var
   EtcResolve, EtcResolveEnv: TCachedValue; // 64 seconds thread-safe cache
 
-function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
+procedure _GetDnsAddresses(usePosixEnv, getAD: boolean; var result: TRawUtf8DynArray);
 var
   resolv, one: RawUtf8;
   p: PUtf8Char;
