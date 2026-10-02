@@ -957,7 +957,7 @@ end;
 
 function TSynZipStream.Seek(Offset: Longint; Origin: Word): Longint;
 begin
-  result := Seek(Offset, TSeekOrigin(Origin));
+  result := Seek(Offset, TSeekOrigin(Origin)); // redirect to the 64-bit method
 end;
 
 function TSynZipStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
@@ -966,17 +966,17 @@ begin
   if fInitialized then
     if (Offset = 0) and
        (Origin in [soCurrent, soEnd]) then
-    // for TStream.Position/GetSize on Delphi
-    result := fSizeIn
-  else if (Offset <> 0) or
-          (Origin <> soBeginning) or
-          (fSizeIn <> 0) then
-    ESynZip.RaiseUtf8('Unexpected %.Seek', [self]);
+      // for TStream.Position/GetSize on Delphi
+      result := fSizeIn
+    else if (Offset <> 0) or
+            (Origin <> soBeginning) or
+            (fSizeIn <> 0) then
+      RaiseStreamError(self, 'Seek');
 end;
 
 function TSynZipStream.{%H-}Read(var Buffer; Count: Longint): Longint;
 begin
-  ESynZip.RaiseUtf8('%.Read is not supported', [self]);
+  RaiseStreamError(self, 'Read');
   result := 0; // make compiler happy
 end;
 
@@ -1078,7 +1078,7 @@ constructor TSynZipDecompressor.Create(outStream: TStream;
   Format: TSynZipCompressorFormat);
 begin
   if fFormat = szcfGZ then
-    ESynZip.RaiseUtf8('%.Create: unsupported szcfGZ', [self]);
+    RaiseStreamError(self, 'Create: unsupported szcfGZ');
   fDestStream := outStream;
   fFormat := Format;
   Z.Init(nil, 0, outStream, @fCrc, nil, 0, 256 shl 10); // use 256KB buffers
@@ -1217,7 +1217,7 @@ begin
   if (comp = nil) or
      ((uncomplen32 = 0) and
       (crc32 = 0)) or
-     not ToBuffer(FastSetString(RawUtf8(result), uncomplen32)) then
+     not ToBuffer(FastSetString(RawUtf8(result{%H-}), uncomplen32)) then
     FastAssignNew(result); // invalid CRC or truncated uncomplen32
 end;
 
@@ -1361,7 +1361,7 @@ end;
 function GZWrite(buf: pointer; len, level: PtrInt): RawByteString;
 begin
   if len > 0 then
-    len := GZWrite(buf, FastNewRawByteString(result, GZWriteLen(len)), len, level);
+    len := GZWrite(buf, FastNewRawByteString(result{%H-}, GZWriteLen(len)), len, level);
   if len <= 0 then
     FastAssignNew(result) // error
   else
@@ -1809,7 +1809,7 @@ begin
               begin
                 // read and move the file by 1MB chunks
                 InfoStart(len, 'Read ', s^.zipName);
-                if tmp = '' then
+                if {%H-}tmp = '' then
                   pointer(tmp) := FastNewString(1 shl 20);
                 readpos := Int64(s^.fileinfo.offset) + info.localsize;
                 repeat
@@ -2426,8 +2426,7 @@ begin
   PLastHeader(P)^ := lh;
   inc(PLastHeader(P));
   fDest.WriteBuffer(pointer(tmp)^, P - pointer(tmp)); // write at once to fDest
-  if fDest.InheritsFrom(THandleStream) then
-    SetEndOfFile(THandleStream(fDest).Handle); // may need to be truncated
+  fDest.Size := fDest.Position; // files need to be truncated
 end;
 
 const
@@ -2718,7 +2717,13 @@ begin
     h := hnext;
   end;
   if prev <> nil then
+  begin
     prev^.nextlocaloffs := fCentralDirectoryOffset; // last file backward search
+    if prev^.local <> nil then
+      // the central directory is in memory and follows the last file data:
+      // allow SearchFromDataDescriptor() to work without any fSource
+      prev^.nextlocal := pointer(fCentralDirectory);
+  end;
   if fCount = 0 then
     fEntry := nil
   else if fCount <> fCentralDirectoryTotalFiles then
@@ -3007,7 +3012,7 @@ var
   tmp: RawByteString;
   info: TFileInfoFull;
 begin
-  FastAssignNew(result);
+  FastAssignNew(result{%H-});
   if not RetrieveFileInfo(aIndex, info) or
      (info.f64.zfullSize = 0) or
      ((aMaxSize > 0) and
@@ -3284,7 +3289,7 @@ var
 begin
   aIndex := NameToIndex(aName);
   if aIndex < 0 then
-    FastAssignNew(result)
+    FastAssignNew(result{%H-})
   else
     result := UnZip(aIndex);
 end;
@@ -3392,7 +3397,7 @@ begin
              EventArchiveZipCompressLevel);
           try
             // re-compression is done for each TAlgoCompress chunk
-            LogCompressAlgo.StreamUnCompress(s, z, LOG_MAGIC, {hash32=}true);
+            LogCompressAlgo.StreamUnCompress(s, z, LOG_MAGIC, {hash32=}true, true);
           finally
             z.Free; // finalize the .zip entry
           end;
@@ -3651,7 +3656,7 @@ function CompressString(const data: RawByteString; failIfGrow: boolean;
 var
   len : integer;
 begin
-  FastNewRawByteString(result, 12 + zlibCompressMax(length(data)));
+  FastNewRawByteString(result{%H-}, 12 + zlibCompressMax(length(data)));
   PInt64(result)^ := length(data);
   PCardinalArray(result)^[2] := adler32(0, pointer(data), length(data));
   // use faster libdeflate instead of plain zlib if available
@@ -3667,7 +3672,7 @@ end;
 
 function UncompressString(const data: RawByteString): RawByteString;
 begin
-  FastAssignNew(result);
+  FastAssignNew(result{%H-});
   if Length(data) > 12 then
   begin
     SetLength(result, PCardinal(data)^);

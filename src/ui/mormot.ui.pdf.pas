@@ -20,9 +20,9 @@ interface
 
 {$I ..\mormot.defines.inc}
 
-{$ifdef OSPOSIX}
+{$ifndef HAS_UI_PDF}
 
-// do-nothing-unit on non Windows system
+// do-nothing unit without Delphi VCL or FPC/Lazarus LCL on Windows
 
 implementation
 
@@ -3152,7 +3152,7 @@ begin
   DecodeDate(ADate, D[2], D[3], D[4]);
   DecodeTime(ADate, D[5], D[6], D[7], D[8]);
   SetLength(result{%H-}, 17);
-  YearToPChar(D[2], pointer(PtrInt(result) + 2));
+  YearToPChar(D[2], pointer(PtrUInt(result) + 2));
   PWord(result)^ := ord('D') + ord(':') shl 8;
   for i := 3 to 7 do
     PWordArray(pointer(result))^[i] := TwoDigitLookupW[D[i]];
@@ -4966,7 +4966,7 @@ begin
         L := high(fTmp) shr 1;
     end;
     mormot.core.text.BinToHex(PW, B, L);
-    inc(PtrInt(PW), L);
+    inc(PByte(PW), L);
     inc(B, L * 2);
     dec(len, L);
   until len = 0;
@@ -5164,7 +5164,7 @@ begin
           L := high(fTmp) shr 2; // max WideCharCount allowed in Tmp[]
       end;
       BinToHex4(pointer(PW), B, L);
-      inc(PtrInt(PW), L * 2);
+      inc(PByte(PW), L * 2);
       inc(B, L * 4);
       dec(WideCharCount, L);
     until WideCharCount = 0;
@@ -5557,7 +5557,7 @@ constructor TPdfWrite.Create(Destination: TPdfDocument; DestStream: TStream);
 begin
   fDoc := Destination;
   fDestStream := DestStream;
-  fDestStreamPosition := fDestStream.Seek(0, soCurrent);
+  fDestStreamPosition := fDestStream.Position;
   B := @fTmp;
   BEnd := B + high(fTmp);
   BEnd4 := BEnd - 4;
@@ -5930,7 +5930,7 @@ begin
   if P = nil then
     exit;
   Header := P;
-  inc(PtrInt(P), SizeOf(TCmapHeader));
+  inc(PByte(P), SizeOf(TCmapHeader));
   off := 0;
   for i := 0 to Header^.numberSubtables - 1 do
     with SubTable^[i] do
@@ -6879,7 +6879,7 @@ begin
   // retrieve true type fonts available for all charsets
   FillCharFast(LFont, SizeOf(LFont), 0);
   LFont.lfCharset := DEFAULT_CHARSET; // enumerate ALL fonts
-  EnumFontFamiliesExW(fDC, LFont, @EnumFontsProcW, PtrInt(@fTrueTypeFonts), 0);
+  EnumFontFamiliesExW(fDC, LFont, @EnumFontsProcW, PtrUInt(@fTrueTypeFonts), 0);
   QuickSortRawUtf8(fTrueTypeFonts, length(fTrueTypeFonts), nil, @StrIComp);
   fCompressionMethod := cmFlateDecode; // deflate by default
   fBookMarks := TRawUtf8List.CreateEx([fCaseSensitive, fNoDuplicate]);
@@ -9815,7 +9815,7 @@ begin
       {$endif USE_SYNGDIPLUS}
         SaveToStream(fWriter.fDestStream); // with CompressionQuality recompress
     end;
-    fWriter.fDestStreamPosition := fWriter.fDestStream.Seek(0, soCurrent);
+    fWriter.fDestStreamPosition := fWriter.fDestStream.Position;
   end
   else
   begin
@@ -9906,7 +9906,7 @@ begin
   fFilter := 'DCTDecode';
   fWriter.Save; // flush to allow direct access to fDestStream
   fWriter.Add(aJpegFile.Memory, len);
-  fWriter.fDestStreamPosition := fWriter.fDestStream.Seek(0, soCurrent);
+  fWriter.fDestStreamPosition := fWriter.fDestStream.Position;
   fAttributes.AddItem('Width', fPixelWidth);
   fAttributes.AddItem('Height', fPixelHeight);
   case bits of
@@ -10990,13 +10990,13 @@ begin
               PT_BEZIERTO:
                 begin
                   E.Canvas.CurveToCI(
+                    PEMRPolyDraw(R)^.aptl[i].X,
+                    PEMRPolyDraw(R)^.aptl[i].Y,
                     PEMRPolyDraw(R)^.aptl[i + 1].X,
                     PEMRPolyDraw(R)^.aptl[i + 1].Y,
                     PEMRPolyDraw(R)^.aptl[i + 2].X,
-                    PEMRPolyDraw(R)^.aptl[i + 2].Y,
-                    PEMRPolyDraw(R)^.aptl[i + 3].X,
-                    PEMRPolyDraw(R)^.aptl[i + 3].Y);
-                  inc(i, 3);
+                    PEMRPolyDraw(R)^.aptl[i + 2].Y);
+                  inc(i, 2); // eventual inc(i) below
                   if polytypes^[i] and PT_CLOSEFIGURE <> 0 then
                   begin
                     E.Canvas.LineToI(position.X, position.Y);
@@ -11049,13 +11049,13 @@ begin
               PT_BEZIERTO:
                 begin
                   E.Canvas.CurveToCI(
+                    PEMRPolyDraw16(R)^.apts[i].X,
+                    PEMRPolyDraw16(R)^.apts[i].Y,
                     PEMRPolyDraw16(R)^.apts[i + 1].X,
                     PEMRPolyDraw16(R)^.apts[i + 1].Y,
                     PEMRPolyDraw16(R)^.apts[i + 2].X,
-                    PEMRPolyDraw16(R)^.apts[i + 2].Y,
-                    PEMRPolyDraw16(R)^.apts[i + 3].X,
-                    PEMRPolyDraw16(R)^.apts[i + 3].Y);
-                  inc(i, 3);
+                    PEMRPolyDraw16(R)^.apts[i + 2].Y);
+                  inc(i, 2); // eventual inc(i) below
                   if polytypes^[i] and PT_CLOSEFIGURE <> 0 then
                   begin
                     E.Canvas.LineToI(position.X, position.Y);
@@ -12494,7 +12494,7 @@ end;
 {$endif USE_METAFILE}
 
 
-{$endif OSPOSIX}
+{$endif HAS_UI_PDF}
 
 end.
 

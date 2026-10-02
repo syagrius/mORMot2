@@ -188,9 +188,11 @@ type
     property Partials: TSynMustachePartials
       read fPartials write fPartials;
     /// access to the {{"English text}} translation string callback
+    // - match TLanguageFile.Translate signature in mormot.core.i18n.pas
     property OnStringTranslate: TOnStringTranslate
       read fOnStringTranslate write fOnStringTranslate;
     /// access to the {{"English text}} translation RawUtf8 callback
+    // - match TLanguageFile.TranslateUtf8 signature in mormot.core.i18n.pas
     property OnUtf8Translate: TOnUtf8Translate
       read fOnUtf8Translate write fOnUtf8Translate;
     /// read-only access to the associated text writer instance
@@ -650,6 +652,10 @@ type
     class procedure Keys(const Value: variant; out Result: variant);
     class procedure Count(const Value: variant; out Result: variant);
     class procedure Get(const Value: variant; out Result: variant);
+    {$ifdef HASITERATORS}
+    class procedure Product(const Value: variant; out Result: variant);
+    class procedure ProductValue(const Value: variant; out Result: variant);
+    {$endif HASITERATORS}
   public
     /// define a helper to GlobalInfoFind() e.g. {{info os:name}}
     // - not defined with standard helpers for safety
@@ -687,26 +693,37 @@ end;
 
 procedure TSynMustacheContext.TranslateBlock(Text: PUtf8Char; TextLen: integer);
 var
-  s: string;
-  u: RawUtf8;
+  p: pointer; // manual RawUtf8/string handling
 begin
+  p := nil;
   if Assigned(OnUtf8Translate) then
   begin
-    OnUtf8Translate(Text, TextLen, u);
-    if u <> '' then
+    OnUtf8Translate(Text, TextLen, RawUtf8(p));
+    if p <> nil then
     begin
-      fWriter.AddString(u);
+      if fEscapeInvert then // HTML escape translation by default
+        fWriter.AddString(RawUtf8(p))
+      else
+        _AddHtmlEscape(fWriter, p, {len=}0, hfAnyWhere); // faster with len=0
+      FastAssignNew(p);
       exit;
     end;
   end
   else if Assigned(OnStringTranslate) then
   begin
-    Utf8DecodeToString(Text, TextLen, s);
-    OnStringTranslate(s);
-    fWriter.AddNoJsonEscapeString(s);
+    Utf8DecodeToString(Text, TextLen, string(p));
+    OnStringTranslate(string(p));
+    if fEscapeInvert then // HTML escape translation by default
+      fWriter.AddNoJsonEscapeString(string(p))
+    else
+      fWriter.AddHtmlEscapeString(string(p));
+    FastAssignNew(p);
     exit;
   end;
-  fWriter.AddNoJsonEscape(Text, TextLen);
+  if fEscapeInvert then
+    fWriter.AddNoJsonEscape(Text, TextLen)
+  else
+    _AddHtmlEscape(fWriter, Text, TextLen, hfAnyWhere);
 end;
 
 function TSynMustacheContext.GetVariantFromContext(
@@ -1894,7 +1911,7 @@ begin
         // ignore whole internal {{<partial}}
         TagStart := t^.SectionOppositeIndex;
       mtTranslate:
-        if t^.TextLen <> 0 then
+        if t^.TextLen <> 0 then // {{"English text}}
           Context.TranslateBlock(t^.TextStart, t^.TextLen);
     end;
     inc(TagStart);
@@ -2428,8 +2445,12 @@ end;
 
 class procedure TSynMustacheStandardHelpers.NewGuid(const Value: variant;
   out Result: variant);
+var
+  guid: TGuid;
 begin
-  RawUtf8ToVariant(GuidToRawUtf8(RandomGuid), Result);
+  RandomBytes(@guid, SizeOf(guid)); // no need of mormot.crypt.core RandomGuid()
+  MakeRandomGuid(@guid);
+  RawUtf8ToVariant(GuidToRawUtf8(guid), Result);
 end;
 
 class procedure TSynMustacheStandardHelpers.ExtractFileName(const Value: variant;
@@ -2445,7 +2466,8 @@ var
   i64: Int64;
 begin
   PCardinal(@Result)^ := varNull;
-  if not AnyVariantToInteger(Value, i64) then
+  if VarIsEmptyOrNull(Value) or
+     not AnyVariantToInteger(Value, i64) then
     exit; // Value=null or can't be converted/truncated to an integer
   KBU(i64, u);
   RawUtf8ToVariant(u, Result);
@@ -2614,7 +2636,7 @@ var
 begin
   PCardinal(@Result)^ := varNull;
   if not VariantToTempUtf8(Value, u, [vfNoComplex, vfNullAsVoid]) then
-    exit;
+    exit; // should be a string
   v := GlobalInfoFind(u.Text, u.Len, l);
   if v <> nil then
     RawUtf8ToVariant(v, l, Result);
@@ -2677,6 +2699,52 @@ class procedure TSynMustacheStandardHelpers.TitleCase(const Value: variant;
 begin
   DoCase(Value, Result, scTitleCase);
 end;
+
+{$ifdef HASITERATORS}
+
+class procedure TSynMustacheStandardHelpers.Product(const Value: variant;
+  out Result: variant);
+var
+  v, dv: PDocVariantData;
+  path: TTempUtf8;
+  enum: TDocVariantProductEnumerator;
+begin
+  // {{Product dataset,"tableHead.fields.field"}}
+  PCardinal(@Result)^ := varNull;
+  if not _SafeArray(Value, 2, dv) or
+     not _Safe(dv^.Values[0], v) or
+     not VariantToTempUtf8(dv^.Values[1], path, [vfNoComplex, vfNullAsVoid]) or
+     (path.Len = 0) then // path should be a non-void string
+    exit;
+  PDocVariantData(@Result)^.InitFast(dvArray);
+  enum.Init(path.Text, path.Len, '.', v);
+  while enum.MoveNext do
+    PDocVariantData(@Result)^.AddItemWeak(pointer(enum.Current));
+  TempUtf8Done(path);
+end;
+
+class procedure TSynMustacheStandardHelpers.ProductValue(const Value: variant;
+  out Result: variant);
+var
+  v, dv: PDocVariantData;
+  path: TTempUtf8;
+  enum: TDocVariantProductValueEnumerator;
+begin
+  // {{ProductValue dataset,"tableHead.fields.field.units"}}
+  PCardinal(@Result)^ := varNull;
+  if not _SafeArray(Value, 2, dv) or
+     not _Safe(dv^.Values[0], v) or
+     not VariantToTempUtf8(dv^.Values[1], path, [vfNoComplex, vfNullAsVoid]) or
+     (path.Len = 0) then
+    exit;
+  PDocVariantData(@Result)^.InitFast(dvArray);
+  enum.Init(path.Text, path.Len, '.', v);
+  while enum.MoveNext do
+    PDocVariantData(@Result)^.AddItemWeak(enum.Current);
+  TempUtf8Done(path);
+end;
+
+{$endif HASITERATORS}
 
 
 end.

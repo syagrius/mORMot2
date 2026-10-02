@@ -29,10 +29,11 @@ High-Performance Cryptographic features shared by all framework units
 - PBKDF2 Safe Key Derivation over SHA-2 and SHA-3
 - Digest/Hash to Hexadecimal Text Conversion
 - Deprecated MD5 SHA-1 Algorithms
+- Non Cryptographic Random Generators for Testing or IV Filling
 
 This unit is validated against OpenSSL for correctness.
 Optimized assembly is located in separated `mormot.crypt.core.asmx64.inc` and `mormot.crypt.core.asmx86.inc` files.
-It is fully stand-alone, and faster than OpenSSL on x86_64 (but AES-GCM).
+It is fully stand-alone, and faster than OpenSSL on x86_64 for most operations, except RSA.
 
 ### mormot.crypt.secure
 
@@ -104,6 +105,13 @@ High-Performance Cryptographic Features using *OpenSSL* 1.1 / 3.x / 4.x
 
 TL;DR: On x86_64, our `mormot.crypt.pas` asm is stand-alone and faster than *OpenSSL* for most algorithms, and only 20% slower for `AES-GCM` (but faster for *OpenSSL* 3.0).
 For `ECC` or `RSA`, our `mormot.crypt.ecc256r1` or `mormot.crypt.rsa` units are noticeably slower than *OpenSSL*, but fully stand-alone.
+
+### mormot.crypt.win
+
+Direct Cryptography using Windows API
+- AES cypher/uncypher using PROV_RSA_AES CryptoApi
+- High-Level Windows Certificate Store Integration
+- Middle-Level Windows CNG Private Key Integration
 
 ### mormot.crypt.pkcs11
 

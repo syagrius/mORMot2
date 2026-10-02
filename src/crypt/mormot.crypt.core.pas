@@ -16,6 +16,7 @@ unit mormot.crypt.core;
     - PBKDF2 Key Derivation over SHA-256 and SHA-3
     - Digest/Hash to Hexadecimal Text Conversion
     - Deprecated MD5 SHA-1 Algorithms
+    - Non Cryptographic Random Generators for Testing or IV Filling
 
    Validated against OpenSSL. Faster than OpenSSL on x86_64 (but AES-GCM).
 
@@ -496,8 +497,9 @@ type
     /// encrypt a buffer with AES-GCM, updating the associated authentication data
     function Encrypt(ptp, ctp: pointer; ILen: PtrInt): boolean;
     /// decrypt a buffer with AES-GCM, updating the associated authentication data
-    // - also validate the GMAC with the supplied ptag/tlen if ptag<>nil,
-    // and skip the AES-CTR phase if the authentication doesn't match
+    // - also validate the GMAC with the supplied ptag/tlen if ptag<>nil, and
+    // return false if the authentication doesn't match - the AES-CTR phase is
+    // skipped by the dual pass process only, not by the single pass branches
     function Decrypt(ctp, ptp: pointer; ILen: PtrInt;
       ptag: pointer = nil; tlen: PtrInt = 0): boolean;
     /// append some data to be authenticated, but not encrypted
@@ -1338,99 +1340,6 @@ type
     function AesGcmFinal(var Tag: TAesBlock; TagLen: integer): boolean; override;
   end;
 
-{$ifdef USE_PROV_RSA_AES}
-
-type
-  /// handle AES cypher/uncypher using Windows CryptoApi and the
-  // official Microsoft AES Cryptographic Provider (PROV_RSA_AES)
-  // - see @http://msdn.microsoft.com/en-us/library/windows/desktop/aa386979
-  // - timing of our optimized asm versions, for small (<=8KB) block processing
-  // (similar to standard web pages or most typical JSON/XML content),
-  // benchmarked on a Core i7 notebook and compiled as Win32 platform:
-  // ! AES128 - ECB:79.33ms CBC:83.37ms CFB:80.75ms OFB:78.98ms CTR:80.45ms
-  // ! AES192 - ECB:91.16ms CBC:96.06ms CFB:96.45ms OFB:92.12ms CTR:93.38ms
-  // ! AES256 - ECB:103.22ms CBC:119.14ms CFB:111.59ms OFB:107.00ms CTR:110.13ms
-  // - timing of the same process, using CryptoApi official PROV_RSA_AES provider:
-  // ! AES128 - ECB_API:102.88ms CBC_API:124.91ms
-  // ! AES192 - ECB_API:115.75ms CBC_API:129.95ms
-  // ! AES256 - ECB_API:139.50ms CBC_API:154.02ms
-  // - but the CryptoApi does not supports AES-NI, whereas our classes handle it,
-  // with a huge speed benefit
-  // - under Win64, the official CryptoApi is slower our x86_64 asm version,
-  // and the Win32 version of CryptoApi itself, but slower than our AES-NI code
-  // ! AES128 - ECB:107.95ms CBC:112.65ms CFB:109.62ms OFB:107.23ms CTR:109.42ms
-  // ! AES192 - ECB:130.30ms CBC:133.04ms CFB:128.78ms OFB:127.25ms CTR:130.22ms
-  // ! AES256 - ECB:145.33ms CBC:147.01ms CFB:148.36ms OFB:145.96ms CTR:149.67ms
-  // ! AES128 - ECB_API:89.64ms CBC_API:100.84ms
-  // ! AES192 - ECB_API:99.05ms CBC_API:105.85ms
-  // ! AES256 - ECB_API:107.11ms CBC_API:118.04ms
-  // - in practice, you could forget about using the CryptoApi, unless you are
-  // required to do so, for legal/corporate reasons
-  TAesAbstractApi = class(TAesAbstract)
-  protected
-    fKeyHeader: packed record
-      bType: byte;
-      bVersion: byte;
-      reserved: word;
-      aiKeyAlg: cardinal;
-      dwKeyLength: cardinal;
-    end;
-    fKeyHeaderKey: TAesKey; // should be just after fKeyHeader record
-    fKeyCryptoApi: pointer;
-    fInternalMode: cardinal;
-    procedure AfterCreate; override;
-    procedure InternalSetMode; virtual; abstract;
-    procedure EncryptDecrypt(BufIn, BufOut: pointer; Count: cardinal;
-      DoEncrypt: boolean);
-  public
-    /// release the AES execution context
-    destructor Destroy; override;
-    /// perform the AES cypher in the ECB mode
-    // - if Count is not a multiple of a 16 bytes block, the IV will be used
-    // to XOR the trailing bytes - so it won't be compatible with our
-    // TAesAbstractSyn classes: you should better use PKC7 padding instead
-    procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
-    /// perform the AES un-cypher in the ECB mode
-    // - if Count is not a multiple of a 16 bytes block, the IV will be used
-    // to XOR the trailing bytes - so it won't be compatible with our
-    // TAesAbstractSyn classes: you should better use PKC7 padding instead
-    procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
-  end;
-
-  /// handle AES cypher/uncypher without chaining (ECB) using Windows CryptoApi
-  TAesEcbApi = class(TAesAbstractApi)
-  protected
-    /// will set fInternalMode := CRYPT_MODE_ECB
-    procedure InternalSetMode; override;
-  end;
-
-  /// handle AES cypher/uncypher Cipher-block chaining (CBC) using Windows CryptoApi
-  TAesCbcApi = class(TAesAbstractApi)
-  protected
-    /// will set fInternalMode := CRYPT_MODE_CBC
-    procedure InternalSetMode; override;
-  end;
-
-  /// handle AES cypher/uncypher Cipher feedback (CFB) using Windows CryptoApi
-  // - NOT TO BE USED: the current PROV_RSA_AES provider does not return
-  // expected values for CFB
-  TAesCfbApi = class(TAesAbstractApi)
-  protected
-    /// will set fInternalMode := CRYPT_MODE_CFB
-    procedure InternalSetMode; override;
-  end;
-
-  /// handle AES cypher/uncypher Output feedback (OFB) using Windows CryptoApi
-  // - NOT TO BE USED: the current PROV_RSA_AES provider does not implement
-  // this mode, and returns a NTE_BAD_ALGID error
-  TAesOfbApi = class(TAesAbstractApi)
-  protected
-    /// will set fInternalMode := CRYPT_MODE_OFB
-    procedure InternalSetMode; override;
-  end;
-
-{$endif USE_PROV_RSA_AES}
-
   /// abstract parent class to TAesPkcs7Writer and TAesPkcs7Reader
   TAesPkcs7Abstract = class(TStreamWithNoSeek)
   protected
@@ -1573,6 +1482,9 @@ var
     daAesNiSse42,
     daAesGcmAvx,
     daKeccakAvx2);
+
+function HasKeccakAvx2: boolean;
+function HasAesGcmAvx: boolean;
 
 function ToText(algo: TAesMode): PShortString; overload;
 
@@ -1744,7 +1656,7 @@ type
     // - this method is thread-safe, and its AES process is non blocking
     function FillRandomHex(Len: integer): RawUtf8;
     /// compute a pseudorandom UUid value according to the RFC 4122
-    // - this method is stronger than RandomGuid() from mormot.core.os
+    // - RandomGuid() from this unit uses Random128() so is likely strong
     // - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
     procedure FillGuid(out Guid: TGuid);
     /// xor a binary buffer with some pseudorandom data
@@ -1975,18 +1887,6 @@ function MakeStrongPassWord(var Rnd: SpiUtf8): boolean;
 // - as used by TAesPrng.AFSplit and TAesPrng.AFUnSplit
 procedure AFDiffusion(buf, rnd: pointer; size: cardinal);
 
-/// get 128-bit of unpredictable random, suitable for Initialization Vectors
-// - will use its own AES-CTR instance, feeded once from TAesPrng.Main
-// - ensure uniqueness, unpredictability, high entropy, large period and
-// resistance to cryptographic attacks with an efficient thread-safe process
-// - TLecuyer is predictable so is considered unsafe to generate IV or MAC
-// - can optionally return additional 128-bit of output
-procedure Random128(iv: PAesBlock; iv2: PAesBlock = nil);
-
-/// initialize a Pierre L'Ecuyer gsl_rng_taus2 Tausworthe/LFSR generator
-// - used e.g. as a local thread-safe source of uniformly distributed randomness
-function RandomLecuyer(var rnd: TLecuyer): PLecuyer;
-
 var
   /// salt for CryptDataForCurrentUser() per-user local file name computation
   // - is filled with some random bytes by default, but you may override
@@ -2162,7 +2062,7 @@ type
     Index: PtrUInt;
     MLen: QWord;
     Hash: TSha512Hash;
-    Data: array[0..127] of byte;
+    Data: THash1024;
     procedure Init(InitHashes: pointer);
       {$ifdef HASINLINE} inline; {$endif}
     /// perform the final step into Hash private field
@@ -2289,16 +2189,18 @@ type
   PSha512 = ^TSha512;
 
 type
-  /// SHA-3 instances, as defined by NIST Standard for Keccak sponge construction
+  /// SHA-3, SHAKE and original Keccak instances
   // - SHA3_224..SHA3_512 output 224, 256, 384 and 512 bits of cryptographic hash
   // - SHAKE_128 and SHAKE_256 implements a XOF/cipher generator
+  // - KECCAK_256 uses the original padding, as required e.g. by Ethereum
   TSha3Algo = (
     SHA3_224,
     SHA3_256,
     SHA3_384,
     SHA3_512,
     SHAKE_128,
-    SHAKE_256);
+    SHAKE_256,
+    KECCAK_256);
 
   /// implements SHA-3 (Keccak) hashing
   // - Keccak was the winner of the NIST hashing competition for a new hashing
@@ -2529,29 +2431,6 @@ function Md5Buf(const Buffer; Len: cardinal): TMd5Digest;
 /// compute the HTDigest for a user and a realm, according to a supplied password
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
 function HTDigest(const user, realm, pass: RawByteString): RawUtf8;
-
-const
-  /// RFC 4122 standard UUID v5 namespace for domain names e.g. 'example.com'
-  UUID_DNS:  TGuid = '{6ba7b810-9dad-11d1-80b4-00c04fd430c8}';
-  /// RFC 4122 standard UUID v5 namespace for URL, e.g. 'https://example.com/page'
-  UUID_URL:  TGuid = '{6ba7b811-9dad-11d1-80b4-00c04fd430c8}';
-  /// RFC 4122 standard UUID v5 namespace for ISO Object Identifiers
-  UUID_OID:  TGuid = '{6ba7b812-9dad-11d1-80b4-00c04fd430c8}';
-  /// RFC 4122 standard UUID v5 namespace for X.500 Distinguished Names (DN)
-  UUID_X500: TGuid = '{6ba7b814-9dad-11d1-80b4-00c04fd430c8}';
-
-/// compute a GUID from an identifier, following RFC 4122 standard UUID v5
-// - use standard UUID_DNS/UUID_URL/UUID_OID/UUID_X500 or your own namespace
-// - the name is case-sensitive during this generation
-// - e.g. 'www.opentofu.org' DNS into {df1e675d-b743-5f6c-9952-6311d0f141df}
-procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
-  const namespace: TGuid);
-
-/// compute a GUID from an identifier, as does DotNet using SHA-1 hashing
-// - the name is case-insensitive during this generation
-// - compatible with Windows ETW name-based Provider ID / Control GUID
-// - e.g. 'MyCompany.MyComponent' into {ce5fa4ea-ab00-5402-8b76-9f76ac858fb5}
-procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
 
 
 { ****************** HMAC Authentication over SHA-256 }
@@ -2790,12 +2669,138 @@ function Sha3(Algo: TSha3Algo; const s: RawByteString;
 function Sha3(Algo: TSha3Algo; Buffer: pointer; Len: integer;
   DigestBits: integer = 0): RawUtf8; overload;
 
-/// SHA-256 hash calculation with length padding if shorter than 255 bytes
+/// compute an original Keccak-256 binary digest (distinct from SHA3-256)
+procedure Keccak256Full(Buffer: pointer; Len: integer; out Digest: THash256);
+
+/// compute an original Keccak-256 lowercase hexadecimal digest
+function Keccak256(const s: RawByteString): RawUtf8;
+
+/// SHA-256 hash calculation with length padding if shorter than 256 bytes
 // - WARNING: this algorithm is DEPRECATED, and supplied only for backward
-// compatibility of existing code (CryptDataForCurrentUser or TProtocolAes)
-// - use TSynSigner or Pbkdf2HmacSha256() for safer password derivation
+// compatibility with mORMot 1 code (CryptDataForCurrentUser or TProtocolAes)
+// - DO NOT use for new code or newly generated data
+// - see TSynSigner.Pbkdf2 or "Modular Crypt" for safer password derivation
 procedure Sha256Weak(const s: RawByteString; out Digest: TSha256Digest);
 
+
+{ ************ Non Cryptographic Random Generators for Testing or IV Filling }
+
+/// get 128-bit of unpredictable random, suitable for Initialization Vectors
+// - will use its own AES-CTR instance, feeded once from TAesPrng.Main
+// - ensure uniqueness, unpredictability, high entropy, large period and
+// resistance to cryptographic attacks with an efficient thread-safe process
+// - TLecuyer is predictable so is considered unsafe to generate IV or MAC
+// - can optionally return additional 128-bit of output
+procedure Random128(iv: PAesBlock; iv2: PAesBlock = nil); overload;
+
+/// get 128-bit of unpredictable random as 16-byte RawByteString
+procedure Random128(var Value: RawByteString); overload;
+
+/// initialize a Pierre L'Ecuyer gsl_rng_taus2 Tausworthe/LFSR generator
+// - used e.g. as a local thread-safe source of uniformly distributed randomness
+function RandomLecuyer(var rnd: TLecuyer): PLecuyer;
+
+/// get a random 100000000..999999999, i.e. exactly 9 digits with no leading zero
+// - returns 0 if our Random128() unpredictable generator is clearly broken
+function Random9Digits: cardinal;
+
+/// compute a random UUid value from the Random128() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
+procedure RandomGuid(out result: TGuid); overload;
+
+/// compute a random UUid value from the Random128() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
+function RandomGuid: TGuid; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// check if the supplied UUid value was randomly-generated according to RFC 4122
+function IsRandomGuid(u: PHash128): boolean;
+
+const
+  /// RFC 4122 standard UUID v5 namespace for domain names e.g. 'example.com'
+  UUID_DNS:  TGuid = '{6ba7b810-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for URL, e.g. 'https://example.com/page'
+  UUID_URL:  TGuid = '{6ba7b811-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for ISO Object Identifiers
+  UUID_OID:  TGuid = '{6ba7b812-9dad-11d1-80b4-00c04fd430c8}';
+  /// RFC 4122 standard UUID v5 namespace for X.500 Distinguished Names (DN)
+  UUID_X500: TGuid = '{6ba7b814-9dad-11d1-80b4-00c04fd430c8}';
+
+/// compute a GUID from an identifier, following RFC 4122 standard UUID v5
+// - use standard UUID_DNS/UUID_URL/UUID_OID/UUID_X500 or your own namespace
+// - the name is case-sensitive during this generation
+// - e.g. 'www.opentofu.org' DNS into {df1e675d-b743-5f6c-9952-6311d0f141df}
+procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
+  const namespace: TGuid);
+
+/// compute a GUID from an identifier, as does DotNet using SHA-1 hashing
+// - the name is case-insensitive during this generation
+// - compatible with Windows ETW name-based Provider ID / Control GUID
+// - e.g. 'MyCompany.MyComponent' into {ce5fa4ea-ab00-5402-8b76-9f76ac858fb5}
+procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
+
+/// check if the supplied UUid value was identifier-derivated according to RFC 4122
+function IsIdentifierGuid(u: PHash128): boolean;
+
+/// this unit maintains per-thread TLecuyer generators initalized by RandomLecuyer()
+// - e.g. so that tests won't interfere with SharedRandom actual framework process
+// - as used e.g. by RandomByteString(), RandomUtf8() or RandomIdentifier()
+function ThreadRandom: PLecuyer;
+
+{$ifndef PUREMORMOT2}
+function Lecuyer: PLecuyer; {$ifdef HASINLINE} inline; {$endif}
+{$endif PUREMORMOT2}
+
+/// fill a RawByteString with random bytes from per-thread gsl_rng_taus2 generator
+// - content is really binary, i.e. would contain the whole #0..#255 byte range
+// - use the same ThreadRandom generator than RandomAnsi7() or RandomIdentifier()
+function RandomByteString(Count: integer; var Dest;
+  CodePage: cardinal = CP_RAWBYTESTRING): pointer;
+
+/// create a temporary string random content, WinAnsi (code page 1252) content
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomWinAnsi(CharCount: integer): WinAnsiString;
+
+/// create a temporary UTF-8 random string, from RandomWinAnsi() content
+// - CharCount is the number of random WinAnsi chars, so it is very likely that
+// length(result) > CharCount once encoded into UTF-8
+// - use the same ThreadRandom generator than RandomAnsi7() or RandomIdentifier()
+function RandomUtf8(CharCount: integer): RawUtf8;
+
+/// create a temporary UTF-16 random string, from RandomWinAnsi() content
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomUnicode(CharCount: integer): SynUnicode;
+
+/// create a temporary string random content, using only ASCII 7-bit chars
+// - e.g. RandomAnsi7(10) = '1d2I(\?U; ' (from #$20 space to #$7e tilde)
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomAnsi7(CharCount: integer; CodePage: integer = CP_UTF8): RawByteString;
+
+/// create a temporary string random content, using A..Z,_,0..9 chars only
+// - for a strong password, use safer TAesPrng.Main.RandomPassword method
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomIdentifier(CharCount: integer): RawUtf8;
+
+/// create a temporary string random content, using uri-compatible chars only
+// - RandomIdentifier() only has uppercase chars whereas this one has lower too
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomUri(CharCount: integer): RawUtf8;
+
+/// create a temporary string, containing some fake text, with paragraphs
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+function RandomTextParagraph(WordCount: integer; LastPunctuation: AnsiChar = '.';
+  const RandomInclude: RawUtf8 = ''): RawUtf8;
+
+/// add some "bla bli blo blu" text, with paragraphs, to a TextWriter instance
+// - use the same ThreadRandom generator than RandomUtf8() or RandomIdentifier()
+procedure AddRandomTextParagraph(WR: TTextWriter; WordCount: integer;
+  LastPunctuation: AnsiChar = '.'; const RandomInclude: RawUtf8 = '';
+  NoLineFeed: boolean = false);
+
+{$ifndef PUREMORMOT2}
+function RandomString(CharCount: integer): WinAnsiString;
+  {$ifdef HASINLINE}inline;{$endif}
+{$endif PUREMORMOT2}
 
 
 implementation
@@ -3702,38 +3707,6 @@ end;
 
 { ********************* AES Encoding/Decoding }
 
-var
-  rnd128safe: TLightLock; // explicit local variable for aarch64 alignment
-  rnd128gen: TAes;        // dedicated thread-safe AES-CTR with 64-bit counter
-
-procedure Random128(iv, iv2: PAesBlock);
-var
-  aes: PAesContext;
-begin
-  rnd128safe.Lock;                  // thread safe with minimal contention
-  aes := @rnd128gen;
-  if PPtrUInt(aes)^ = 0 then
-    PAes(aes)^.EncryptInitRandom;   // initialize AES-128 (or AES-256 if HW AES)
-  iv^ := aes^.iv.b;                 // AES-CTR with little endian 64-bit counter
-  inc(aes^.iv.Lo);                  // overflow after 268,435,456 TB of output
-  if iv2 <> nil then
-  begin
-    iv2^ := aes^.iv.b;              // additional 128-bit
-    inc(aes^.iv.Lo);
-  end;
-  rnd128safe.UnLock;
-  aes^.DoBlock(aes^, iv^, iv^);     // thread-safe non-blocking process
-  if iv2 <> nil then
-    aes^.DoBlock(aes^, iv2^, iv2^); // optional 256-bit output
-end;
-
-function RandomLecuyer(var rnd: TLecuyer): PLecuyer;
-begin
-  Random128(@rnd);   // 88-bit seed from our CSPRNG
-  rnd.SeedGenerator; // inlined TLecuyer.Seed
-  result := @rnd;
-end;
-
 procedure ComputeAesStaticTables;
 var
   i, x, y: byte;
@@ -4164,7 +4137,7 @@ begin // note: we can't use Random128() here to avoid endless recursion
   if MainAesPrng <> nil then
     MainAesPrng.FillRandom(rnd)         // favor our CSPRNG if available
   else
-    FillSystemRandom(@rnd, Bits shr 3, false); // seed from OS
+    FillSystemRandom(@rnd, Bits shr 3, false); // seed from OS as fallback
   EncryptInit(rnd, Bits);               // transient AES-128/256 secret
   FillZero(TAesContext(Context).iv.b);  // as per NIST SP 800-90A
   FillZero(rnd);                        // anti-forensic
@@ -4810,13 +4783,21 @@ begin
     inc(BufOut, onepass);
   until false;
 end;
+
+function HasAesGcmAvx: boolean;
+begin
+  result := (cpuAESGCM in X64CpuFeatures) and
+            not (daAesGcmAvx in DisabledAsm);
+end;
+
+{$else}
+function HasAesGcmAvx: boolean;
+begin
+  result := false;
+end;
 {$endif USEGCMAVX}
 
 function TAesGcmEngine.Init(const Key; KeyBits: PtrInt; AllowAvx: boolean): boolean;
-{$ifdef USEGCMAVX}
-var
-  cf: ^TIntelCpuFeatures;
-{$endif USEGCMAVX}
 begin
   FillCharFast(state, SizeOf(state), 0);
   result := aes.EncryptInit(Key, KeyBits);
@@ -4824,12 +4805,8 @@ begin
     exit;
   aes.Encrypt(state.ghash_h, state.ghash_h);
   {$ifdef USEGCMAVX}
-  cf := @CpuFeatures;
   if AllowAvx and
-     (cfCLMUL in cf^) and
-     (cfSSE41 in cf^) and
-     (cfAESNI in cf^) and
-     not (daAesGcmAvx in DisabledAsm) then
+     HasAesGcmAvx then
   begin
     // 8x interleaved aesni + pclmulqdq x86_64 asm - using 256 bytes in gf_t4k[]
     state.flags := [flagAVX, flagCLMUL];
@@ -4982,7 +4959,7 @@ begin
   {$ifdef USEGCMAVX}
   if (flagAVX in state.flags) and
      (ILen <> 0) then
-    AvxProcess(ctp, ptp, ILen, {encrypt=}false)
+    AvxProcess(ctp, ptp, ILen, {encrypt=}false) // single pass GMAC + AES-CTR
   else
   {$endif USEGCMAVX}
   if (ILen <> 0) and
@@ -5005,14 +4982,6 @@ begin
       inc(PAesBlock(ctp));
       dec(ILen);
     until ILen = 0;
-    if (ptag <> nil) and
-       (tlen > 0) then
-    begin
-      Final(tag, {anddone=}false);
-      if not IsEqual(tag, ptag^, tlen) then
-        // check authentication after single pass encryption + auth
-        exit;
-    end;
   end
   else
   begin
@@ -5025,8 +4994,17 @@ begin
       if not IsEqual(tag, ptag^, tlen) then
         // check authentication before decryption
         exit;
+      tlen := 0; // already verified
     end;
     internal_crypt(ctp, ptp, iLen);
+  end;
+  if (ptag <> nil) and
+     (tlen > 0) then
+  begin
+    Final(tag, {anddone=}false);
+    if not IsEqual(tag, ptag^, tlen) then
+      // check authentication after single pass decryption
+      exit;
   end;
   result := true;
 end;
@@ -6743,141 +6721,6 @@ begin
   end;
   fStarted := stNone; // allow reuse of this fGcm instance
 end;
-
-
-{$ifdef USE_PROV_RSA_AES}
-
-var
-  CryptoApiAesProvider: HCRYPTPROV = HCRYPTPROV_NOTTESTED;
-
-procedure EnsureCryptoApiAesProviderAvailable;
-begin
-  if CryptoApiAesProvider = nil then
-    ESynCrypto.RaiseU('PROV_RSA_AES provider not installed')
-  else if CryptoApiAesProvider = HCRYPTPROV_NOTTESTED then
-  begin
-    CryptoApiAesProvider := nil;
-    if CryptoApi.Available then
-    begin
-      if not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
-              PROV_RSA_AES, CRYPT_VERIFYCONTEXT) then
-        if (HRESULT(GetLastError) <> NTE_BAD_KEYSET) or
-           not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
-             PROV_RSA_AES, CRYPT_NEWKEYSET) then
-          ESynCrypto.RaiseLastOSError('in AcquireContext', []);
-    end;
-  end;
-end;
-
-
-{ TAesAbstractApi }
-
-procedure TAesAbstractApi.AfterCreate;
-begin
-  EnsureCryptoApiAesProviderAvailable;
-  InternalSetMode;
-  fKeyHeader.bType := PLAINTEXTKEYBLOB;
-  fKeyHeader.bVersion := CUR_BLOB_VERSION;
-  case fKeySize of
-    128:
-      fKeyHeader.aiKeyAlg := CALG_AES_128;
-    192:
-      fKeyHeader.aiKeyAlg := CALG_AES_192;
-    256:
-      fKeyHeader.aiKeyAlg := CALG_AES_256;
-  end;
-  fKeyHeader.dwKeyLength := fKeySizeBytes;
-  fKeyHeaderKey := fKey;
-end;
-
-destructor TAesAbstractApi.Destroy;
-begin
-  if fKeyCryptoApi <> nil then
-    CryptoApi.DestroyKey(fKeyCryptoApi);
-  FillCharFast(fKeyHeaderKey, SizeOf(fKeyHeaderKey), 0);
-  inherited;
-end;
-
-procedure TAesAbstractApi.EncryptDecrypt(BufIn, BufOut: pointer; Count: cardinal;
-  DoEncrypt: boolean);
-var
-  n: cardinal;
-begin
-  if Count = 0 then
-    exit; // nothing to do
-  if fKeyCryptoApi <> nil then
-  begin
-    CryptoApi.DestroyKey(fKeyCryptoApi);
-    fKeyCryptoApi := nil;
-  end;
-  if not CryptoApi.ImportKey(CryptoApiAesProvider, @fKeyHeader,
-     SizeOf(fKeyHeader) + fKeySizeBytes, nil, 0, fKeyCryptoApi) then
-    ESynCrypto.RaiseLastOSError('in CryptImportKey for %', [self]);
-  if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_IV, @fIV, 0) then
-    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_IV) for %', [self]);
-  if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_MODE, @fInternalMode, 0) then
-    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',
-       [fInternalMode, self]);
-  if BufOut <> BufIn then
-    MoveFast(BufIn^, BufOut^, Count);
-  n := Count and not AesBlockMod;
-  if DoEncrypt then
-  begin
-    if not CryptoApi.Encrypt(fKeyCryptoApi, nil, false, 0, BufOut, n, Count) then
-      ESynCrypto.RaiseLastOSError('in Encrypt() for %', [self]);
-  end
-  else if not CryptoApi.Decrypt(fKeyCryptoApi, nil, false, 0, BufOut, n) then
-    ESynCrypto.RaiseLastOSError('in Decrypt() for %', [self]);
-  dec(Count, n);
-  if Count > 0 then // remaining bytes will be XORed with the supplied IV
-    XorMemoryTrailer(@PByteArray(BufOut)[n], @PByteArray(BufIn)[n], @fIV, Count);
-end;
-
-procedure TAesAbstractApi.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
-begin
-  EncryptDecrypt(BufIn, BufOut, Count, true);
-end;
-
-procedure TAesAbstractApi.Decrypt(BufIn, BufOut: pointer; Count: cardinal);
-begin
-  EncryptDecrypt(BufIn, BufOut, Count, false);
-end;
-
-{ TAesEcbApi }
-
-procedure TAesEcbApi.InternalSetMode;
-begin
-  fInternalMode := CRYPT_MODE_ECB;
-  fAlgoMode := mEcb;
-end;
-
-{ TAesCbcApi }
-
-procedure TAesCbcApi.InternalSetMode;
-begin
-  fInternalMode := CRYPT_MODE_CBC;
-  fAlgoMode := mCbc;
-end;
-
-{ TAesCfbApi }
-
-procedure TAesCfbApi.InternalSetMode;
-begin
-  ESynCrypto.RaiseUtf8('%: CRYPT_MODE_CFB is not compliant', [self]);
-  fInternalMode := CRYPT_MODE_CFB;
-  fAlgoMode := mCfb;
-end;
-
-{ TAesOfbApi }
-
-procedure TAesOfbApi.InternalSetMode;
-begin
-  ESynCrypto.RaiseUtf8('%: CRYPT_MODE_OFB not implemented by PROV_RSA_AES', [self]);
-  fInternalMode := CRYPT_MODE_OFB;
-  fAlgoMode := mOfb;
-end;
-
-{$endif USE_PROV_RSA_AES}
 
 
 { TAesPkcs7Abstract }
@@ -8700,6 +8543,16 @@ const
     QWord($000000000000800A), QWord($800000008000000A), QWord($8000000080008081),
     QWord($8000000000008080), QWord($0000000080000001), QWord($8000000080008008));
 
+function HasKeccakAvx2: boolean;
+begin
+  {$ifdef ASMX64AVX1}
+  result := (cpuAVX2 in X64CpuFeatures) and
+            not (daKeccakAvx2 in DisabledAsm);
+  {$else}
+  result := false;
+  {$endif ASMX64AVX1}
+end;
+
 {$ifdef ASMINTELNOTPIC}
 
 procedure KeccakPermutation(A: PQWordArray);
@@ -8915,7 +8768,7 @@ type
 
 const
   SHA3_DEF_LEN: array[TSha3Algo] of integer = (
-    224, 256, 384, 512, 256, 512);
+    224, 256, 384, 512, 256, 512, 256);
 
 procedure TSha3Context.Init(aAlgo: TSha3Algo);
 var
@@ -8923,7 +8776,8 @@ var
 begin
   FillCharFast(self, SizeOf(self), 0);
   bits := SHA3_DEF_LEN[aAlgo];
-  if aAlgo < SHAKE_128 then
+  if (aAlgo < SHAKE_128) or
+     (aAlgo = KECCAK_256) then
     bits := bits shl 1;
   Rate := cKeccakPermutationBits - bits;
   Capacity := bits;
@@ -9070,7 +8924,9 @@ begin
   else
     lw := bits and Pred(cardinal(1) shl bitlen);
   // append the domain separation bits
-  if Algo >= SHAKE_128 then
+  if Algo = KECCAK_256 then
+    ll := bitlen // original Keccak: pad10*1 without SHA-3 domain bits
+  else if Algo >= SHAKE_128 then
   begin
     // SHAKE: append four MSB bits 1111
     lw := lw or (cardinal($0f) shl bitlen);
@@ -9952,51 +9808,6 @@ begin
   Append(result, Md5(tmp));
 end;
 
-procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
-  const namespace: TGuid);
-var
-  sha1: TSha1;
-  dig: TSha1Digest;
-  be: TGuid absolute dig; // hash over big endian values
-begin
-  be := namespace;
-  SwapGuid(be);
-  sha1.Init;
-  sha1.Update(@be, SizeOf(be));
-  sha1.Update(name);
-  sha1.Final(dig, {noinit=}true);
-  SwapGuid(PGuid(@dig)^);
-  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
-  dig[8] := (dig[8] and $3f) or $80; // set variant as per RFC 4122
-  guid := PGuid(@dig)^;
-end;
-
-const
-  DOTNET_NAMESPACE: TGuid = '{b22d2c48-90c3-c847-87f8-1a15bfc130fb}';
-
-procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
-var
-  sha1: TSha1;
-  dig: TSha1Digest;
-  up: RawUtf8;
-  n: PtrInt;
-  tmp: TSynTempBuffer;
-begin
-  FillZero(guid);
-  UpperCaseCopy(name, up);           // normalize identifier to uppercase
-  n := Utf8DecodeToUnicode(up, tmp); // UTF-16 little endian
-  if n = 0 then
-    exit;
-  bswap16array(tmp.buf, n);  // UTF-16 big endian conversion
-  sha1.Init;
-  sha1.Update(@DOTNET_NAMESPACE, SizeOf(DOTNET_NAMESPACE));
-  sha1.Update(tmp.buf, n * 2);
-  sha1.Final(dig, {noinit=}true);
-  tmp.Done; // unlikely
-  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
-  guid := PGuid(@dig)^;
-end;
-
 
 { TSha1 }
 
@@ -10491,6 +10302,21 @@ begin
   result := sha.FullStr(Algo, Buffer, Len, DigestBits);
 end;
 
+procedure Keccak256Full(Buffer: pointer; Len: integer; out Digest: THash256);
+var
+  sha: TSha3;
+begin
+  sha.Full(KECCAK_256, Buffer, Len, @Digest, 256);
+end;
+
+function Keccak256(const s: RawByteString): RawUtf8;
+var
+  dig: THash256;
+begin
+  Keccak256Full(pointer(s), length(s), dig);
+  BinToHexLower(@dig, SizeOf(dig), result);
+end;
+
 // required by read_h -> deprecated even if available with PUREMORMOT2
 procedure Sha256Weak(const s: RawByteString; out Digest: TSha256Digest);
 var
@@ -10501,7 +10327,7 @@ var
 begin
   l := length(s);
   P := pointer(s);
-  if l < SizeOf(tmp) then // add some salt to unweak password < 256 bytes
+  if l < SizeOf(tmp) then // add some padding up to 256 bytes
   begin
     FillcharFast(tmp, SizeOf(tmp), l);
     if l > 0 then
@@ -10511,6 +10337,334 @@ begin
   else
     sha.Full(P, l, Digest);
 end;
+
+
+{ ************ Non Cryptographic Random Generators for Testing or IV Filling }
+
+var
+  rnd128safe: TLightLock; // explicit local variable for aarch64 alignment
+  rnd128gen: TAes;        // dedicated thread-safe AES-CTR with 64-bit counter
+
+procedure Random128(iv, iv2: PAesBlock);
+var
+  aes: PAesContext;
+begin
+  rnd128safe.Lock;                  // thread safe with minimal contention
+  aes := @rnd128gen;
+  if PPtrUInt(aes)^ = 0 then
+    PAes(aes)^.EncryptInitRandom;   // initialize AES-128 (or AES-256 if HW AES)
+  iv^ := aes^.iv.b;                 // AES-CTR with little endian 64-bit counter
+  inc(aes^.iv.Lo);                  // overflow after 268,435,456 TB of output
+  if iv2 <> nil then
+  begin
+    iv2^ := aes^.iv.b;              // additional 128-bit
+    inc(aes^.iv.Lo);
+  end;
+  rnd128safe.UnLock;
+  aes^.DoBlock(aes^, iv^, iv^);     // thread-safe non-blocking process
+  if iv2 <> nil then
+    aes^.DoBlock(aes^, iv2^, iv2^); // optional 256-bit output
+end;
+
+procedure Random128(var Value: RawByteString);
+begin
+  Random128(FastNewRawByteString(Value, SizeOf(TAesBlock)));
+end;
+
+function RandomLecuyer(var rnd: TLecuyer): PLecuyer;
+begin
+  Random128(@rnd);   // 88-bit seed from our CSPRNG
+  rnd.SeedGenerator; // inlined TLecuyer.Seed
+  result := @rnd;
+end;
+
+function Random9Digits: cardinal;
+var
+  rnd: THash128Rec;
+begin
+  Random128(@rnd); // unpredictable
+  result := rnd.c0 mod 900000000;
+  if result = 0 then
+    result := rnd.c1 mod 900000000;
+  if result = 0 then
+    result := rnd.c2 mod 900000000;
+  FillZero(rnd.b); // anti forensic
+  if result <> 0 then // only 1 in 7 x 10^26 probability
+    inc(result, 100000000);
+end;
+
+function IsRandomGuid(u: PHash128): boolean;
+begin
+  result := ((u[7] and $f0) = $40) and ((u[8] and $c0) = $80);
+end;
+
+procedure RandomGuid(out result: TGuid);
+begin
+  Random128(@result); // 122-bit seed from our CSPRNG
+  MakeRandomGuid(@result);
+end;
+
+function RandomGuid: TGuid;
+begin
+  RandomGuid(result);
+end;
+
+procedure IdentifierGuid(const name: RawUtf8; out guid: TGuid;
+  const namespace: TGuid);
+var
+  sha1: TSha1;
+  dig: TSha1Digest;
+  be: TGuid absolute dig; // hash over big endian values
+begin
+  be := namespace;
+  SwapGuid(be);
+  sha1.Init;
+  sha1.Update(@be, SizeOf(be));
+  sha1.Update(name);
+  sha1.Final(dig, {noinit=}true);
+  SwapGuid(PGuid(@dig)^);
+  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
+  dig[8] := (dig[8] and $3f) or $80; // set variant as per RFC 4122
+  guid := PGuid(@dig)^;
+end;
+
+const
+  DOTNET_NAMESPACE: TGuid = '{b22d2c48-90c3-c847-87f8-1a15bfc130fb}';
+
+procedure DotNetIdentifierGuid(const name: RawUtf8; out guid: TGuid);
+var
+  sha1: TSha1;
+  dig: TSha1Digest;
+  up: RawUtf8;
+  n: PtrInt;
+  tmp: TSynTempBuffer;
+begin
+  FillZero(guid);
+  UpperCaseCopy(name, up);           // normalize identifier to uppercase
+  n := Utf8DecodeToUnicode(up, tmp); // UTF-16 little endian
+  if n = 0 then
+    exit;
+  bswap16array(tmp.buf, n);  // UTF-16 big endian conversion
+  sha1.Init;
+  sha1.Update(@DOTNET_NAMESPACE, SizeOf(DOTNET_NAMESPACE));
+  sha1.Update(tmp.buf, n * 2);
+  sha1.Final(dig, {noinit=}true);
+  tmp.Done; // unlikely
+  dig[7] := (dig[7] and $0f) or $50; // mark as version 5 = name-based GUID
+  guid := PGuid(@dig)^;
+end;
+
+function IsIdentifierGuid(u: PHash128): boolean;
+begin
+  result := (u[7] and $f0) = $50; // version 5 = name-based GUID
+end;
+
+threadvar // do not make public for compilation within Delphi packages
+  _RandomTests: TLecuyer; // 16 bytes per thread for each TLecuyer generator
+
+function ThreadRandom: PLecuyer;
+begin
+  result := @_RandomTests;
+  if PPtrUInt(result)^ = 0 then
+    RandomLecuyer(result^); // 88-bit seed from our CSPRNG once per thread
+end;
+
+{$ifndef PUREMORMOT2}
+function Lecuyer: PLecuyer;
+begin
+  result := ThreadRandom;
+end;
+{$endif PUREMORMOT2}
+
+function RandomByteString(Count: integer; var Dest; CodePage: cardinal): pointer;
+begin
+  FastSetStringCP(Dest, nil, Count, CodePage);
+  ThreadRandom.Fill(pointer(Dest), Count);
+  result := pointer(Dest);
+end;
+
+procedure _Random2WinAnsi(p: PByte; n: integer);
+var
+  c: byte;
+begin
+  if n <> 0 then
+    repeat
+      c := p^;         // in two steps for FPC
+      c := c and 127;  // in range 00..7f +$20 = 20..9f
+      case c of        // note: 81, 8d, 8f, 90, 9d are unused in CP1252
+        $5f .. $6f:
+          inc(c, $60); // 80..$8f -> c0..cf uppercase accents (7f=DEL)
+        $70 .. $7f:
+          inc(c, $70); // 90..9f -> e0..ef lowercase accents
+      else
+        inc(c, $20);   // -> 20..7e chars (' '..'~' range)
+      end;
+      p^ := c;
+      inc(p);
+      dec(n);
+    until n = 0;
+end;
+
+function RandomWinAnsi(CharCount: integer): WinAnsiString;
+begin
+  _Random2WinAnsi(RandomByteString(CharCount, result, CP_WINANSI), CharCount);
+end;
+
+function RandomAnsi7(CharCount, CodePage: integer): RawByteString;
+var
+  i: PtrInt;
+  R: PByteArray;
+begin
+  R := RandomByteString(CharCount, result, CodePage);
+  for i := 0 to CharCount - 1 do
+    R[i] := (R[i] mod 95) + 32; // [' ' .. #$7e] (#126=tilde) range
+end;
+
+procedure InitRandom64(chars64: PAnsiChar; count: integer; var result: RawUtf8);
+var
+  i: PtrInt;
+  R: PAnsiChar;
+begin
+  R := RandomByteString(count, result, CP_UTF8);
+  for i := 0 to count - 1 do
+    R[i] := chars64[PtrUInt(R[i]) and 63];
+end;
+
+const
+  IDENT_CHARS: TChar64 =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ_';
+  URL_CHARS: TChar64 =
+    'abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFGH.JKLMNOP-RSTUVWXYZ.';
+
+function RandomIdentifier(CharCount: integer): RawUtf8;
+begin
+  InitRandom64(@IDENT_CHARS, CharCount, result);
+end;
+
+function RandomUri(CharCount: integer): RawUtf8;
+begin
+  InitRandom64(@URL_CHARS, CharCount, result);
+end;
+
+function RandomUtf8(CharCount: integer): RawUtf8;
+var
+  win: TSynTempBuffer;
+begin
+  _Random2WinAnsi(win.Init(CharCount), CharCount); // include accentuated chars
+  WinAnsiConvert.AnsiBufferToRawUtf8(win.buf, CharCount, result);
+  win.Done;
+end;
+
+function RandomUnicode(CharCount: integer): SynUnicode;
+begin
+  result := WinAnsiConvert.AnsiToUnicodeString(RandomWinAnsi(CharCount));
+end;
+
+function RandomTextParagraph(WordCount: integer;
+  LastPunctuation: AnsiChar; const RandomInclude: RawUtf8): RawUtf8;
+var
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
+  WR: TTextWriter;
+begin
+  WR := TTextWriter.CreateOwnedStream(tmp);
+  try
+    AddRandomTextParagraph(WR, WordCount, LastPunctuation, RandomInclude);
+    WR.SetText(result);
+  finally
+    WR.Free;
+  end;
+end;
+
+procedure AddRandomTextParagraph(WR: TTextWriter; WordCount: integer;
+  LastPunctuation: AnsiChar; const RandomInclude: RawUtf8; NoLineFeed: boolean);
+type
+  TKind = (
+    space, comma, dot, question, paragraph);
+const
+  bla: array[0 .. 15] of TShort3 = (
+    'bla', 'ble', 'bli', 'blo', 'blu', 'bla', 'bli', 'blo',
+    'cha', 'che', 'chi', 'cho', 'chu', 'cha', 'chi', 'cho');
+  endKind = [dot, paragraph, question];
+var
+  n: integer;
+  s: TShort7;
+  last: TKind;
+  rnd: cardinal;
+  lec: PLecuyer;
+begin
+  lec := ThreadRandom; // retrieve once the random seed for this thread
+  last := paragraph;
+  while WordCount > 0 do
+  begin
+    rnd := lec^.Next;      // 32-bit of randomness for up to 5 words per loop
+    n := (rnd and 3) + 2;  // n = 2..5
+    rnd := rnd shr 2;      // consume 2 bits
+    repeat
+      PCardinal(@s)^ := PCardinal(@bla[rnd and 15])^;
+      rnd := rnd shr 4;    // consume up to 5*4 = 20 bits from rnd
+      s[0] := #4;
+      s[4] := ' ';
+      if last in endKind then
+      begin
+        last := space;
+        s[1] := 'P';
+      end;
+      WR.AddShorter(s);
+      dec(WordCount);
+      if WordCount = 0 then
+        break;
+      dec(n);
+    until n = 0;
+    WR.CancelLastChar(' ');
+    case rnd and 127 of // consume 7 bits from rnd (total up to 29 bits)
+      0 .. 4:
+        begin
+          if RandomInclude <> '' then
+          begin
+            WR.AddDirect(' ');
+            WR.AddString(RandomInclude); // 5/128 = 4% chance of text inclusion
+          end;
+          last := space;
+        end;
+      5 .. 50:
+        last := space;
+      51 .. 90:
+        last := comma;
+      91 .. 105:
+        last := dot;
+      106 .. 115:
+        last := question;
+      116 .. 127:
+        if NoLineFeed then
+          last := dot
+        else
+          last := paragraph;
+    end;
+    case last of
+      space:
+        WR.AddDirect(' ');
+      comma:
+        WR.AddDirect(',', ' ');
+      dot:
+        WR.AddDirect('.', ' ');
+      question:
+        WR.AddDirect('?', ' ');
+      paragraph:
+        WR.AddDirect('.', #13, #10);
+    end;
+  end;
+  if (LastPunctuation <> ' ') and
+     not (last in endKind) then
+    WR.AddDirect('b', 'l', 'a', LastPunctuation);
+end;
+
+{$ifndef PUREMORMOT2}
+function RandomString(CharCount: integer): WinAnsiString;
+begin
+  result := RandomWinAnsi(CharCount);
+end;
+{$endif PUREMORMOT2}
+
 
 
 procedure InitializeUnit;
@@ -10626,11 +10780,6 @@ begin
   if AesNiHashKey <> nil then
     FreeMemAligned(AesNiHashKey, SizeOf(AesNiHashKey^));
   {$endif USEAESNIHASH}
-  {$ifdef USE_PROV_RSA_AES}
-  if (CryptoApiAesProvider <> nil) and
-     (CryptoApiAesProvider <> HCRYPTPROV_NOTTESTED) then
-    CryptoApi.ReleaseContext(CryptoApiAesProvider, 0);
-  {$endif USE_PROV_RSA_AES}
   FillZero(_h.k); // anti-forensic of the dead process
 end;
 

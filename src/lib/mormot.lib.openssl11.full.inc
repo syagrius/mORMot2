@@ -31,7 +31,7 @@ const
   AES_MAXNR = 14;
   AES_BLOCK_SIZE = 16;
   
-  _I64_MAX = 9223372036854775807; 
+  _I64_MAX = MAX_INT64;
   OSSL_SSIZE_MAX = _I64_MAX;
   
   CRYPTO_F_CMAC_CTX_NEW = 120;
@@ -2191,7 +2191,6 @@ const
   NID_name_constraints = 666;
   SN_crl_distribution_points = 'crlDistributionPoints';
   LN_crl_distribution_points = 'X509v3 CRL Distribution Points';
-  NID_crl_distribution_points = 103;
   SN_certificate_policies = 'certificatePolicies';
   LN_certificate_policies = 'X509v3 Certificate Policies';
   NID_certificate_policies = 89;
@@ -20890,9 +20889,6 @@ function ERR_peek_last_error_line(_file: PPUtf8Char; line: PInteger): cardinal; 
 
 function ERR_peek_last_error_line_data(_file: PPUtf8Char; line: PInteger; data: PPUtf8Char; flags: PInteger): cardinal; cdecl;
   external LIB_CRYPTO name _PU + 'ERR_peek_last_error_line_data';
-
-procedure ERR_clear_error(); cdecl;
-  external LIB_CRYPTO name _PU + 'ERR_clear_error';
 
 function ERR_error_string(e: cardinal; buf: PUtf8Char): PUtf8Char; cdecl;
   external LIB_CRYPTO name _PU + 'ERR_error_string';

@@ -2606,9 +2606,9 @@ type
     fName: RawUtf8;
     fProps: TRttiCustomProps;
     fPrivateSlotsSafe: TLightLock; // topmost position to force aarch64 alignment
+    fArrayFirstField, fArrayFirstFieldSort: TRttiParserType;
     fSetRandom: TRttiCustomRandom;
     // used by mormot.core.json.pas
-    fArrayFirstField, fArrayFirstFieldSort: TRttiParserType;
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
     fJsonSave: pointer; // contains a TRttiJsonSave - used if fJsonWriter=nil
     fJsonReader, fJsonWriter: TMethod; // TOnRttiJsonRead/TOnRttiJsonWrite
@@ -3180,11 +3180,11 @@ var
 { ************************ TRttiMap Field Mapping (e.g. DTO/Domain Objects) }
 
 type
-  /// pointer to a TRttiMap reference, for fluid-interface initialization
+  /// pointer to a TRttiMap reference, for fluent-interface initialization
   PRttiMap = ^TRttiMap;
 
   /// customizable field mapping between classes and records
-  // - Init/Map overloaded methods return self to allow proper fluid-calling
+  // - Init/Map overloaded methods return self to allow proper fluent-calling
   // - records should have field-level extended RTTI (since Delphi 2010 / FPC
   // trunk), or have been properly defined with Rtti.RegisterFromText() on
   // oldest Delphi or FPC
@@ -3217,15 +3217,15 @@ type
     // !  map.Init(TypeInfo(TMyRecordA), TypeInfo(TMyRecordB));
     function Init(A, B: PRttiInfo): PRttiMap; overload;
     /// use RTTI field names to map the content
-    // - returns self to continue manual calls to Map() in a fluid interface,
+    // - returns self to continue manual calls to Map() in a fluent interface,
     // e.g. to tune the default mapping made by this method
     function AutoMap: PRttiMap;
     /// map two fields by name
     // - if any field A or B name is '', this field will be ignored
-    // - returns self to continue manual calls to Map() in a fluid interface
+    // - returns self to continue manual calls to Map() in a fluent interface
     function Map(const A, B: RawUtf8): PRttiMap; overload;
     /// map fields by A,B pairs of names
-    // - returns self to continue manual calls to Map() in a fluid interface
+    // - returns self to continue manual calls to Map() in a fluent interface
     function Map(const ABPairs: array of RawUtf8): PRttiMap; overload;
     /// thread-safe copy mapped B fields values into A
     // - A and B are either a TObject instance or a @record pointer, depending
@@ -3461,6 +3461,8 @@ type
   TSynMonitorAbstract = class(TObjectWithRttiMethods)
   protected
     fSafe: TLightLock; // our fast non-reentrant lock
+    fProcessing: boolean;
+    fTaskStatus: (taskNotStarted,taskStarted);
     fName: RawUtf8;
   public
     /// initialize the instance nested class properties
@@ -7734,7 +7736,7 @@ begin
   {$endif FPC}
     rkLString: // PT_INFO[ptRawUtf8/ptRawJson] have been found above
       begin
-        cp := Info^.AnsiStringCodePage;
+        cp := Info^.AnsiStringCodePage; // use TypeInfo() on Delphi 7/2007
         if cp = CP_UTF8 then
           result := ptRawUtf8
         else if cp = CP_WINANSI then
@@ -7755,10 +7757,10 @@ begin
     rkUString:
       result := ptUnicodeString;
   {$endif HASVARUSTRING}
-  {$ifdef FPC_OR_UNICODE}
-    {$ifdef UNICODE}
+  {$ifdef ISDELPHIUNICODE}
     rkProcedure,
-    {$endif UNICODE}
+  {$endif ISDELPHIUNICODE}
+  {$ifdef FPC_OR_UNICODE}
     rkClassRef,
     rkPointer:
       result := ptPtrInt;
@@ -9789,20 +9791,14 @@ begin
       // rec: { a,b: integer }
       pt := ptRecord;
       ee := eeCurly;
-      repeat
-        inc(P)
-      until (P^ > ' ') or
-            (P^ = #0);
+      P := IgnoreAndGotoNextNotSpace(P);
     end
     else if P^ = '[' then
     begin
       // arr: [ a,b:integer ]
       pt := ptDynArray;
       ee := eeSquare;
-      repeat
-        inc(P)
-      until (P^ > ' ') or
-            (P^ = #0);
+      P := IgnoreAndGotoNextNotSpace(P);
     end
     else
     begin

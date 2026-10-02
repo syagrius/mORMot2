@@ -493,6 +493,7 @@ procedure SetEndOfFile;               external kernel32;
 procedure FlushFileBuffers;           external kernel32;
 function  GetLastError;               external kernel32;
 procedure SetLastError;               external kernel32;
+function  LocalFree;                  external kernel32;
 function  IocpCreate;                 external kernel32 name 'CreateIoCompletionPort';
 function  IocpGetQueuedStatus;        external kernel32 name 'GetQueuedCompletionStatus';
 function  IocpPostQueuedStatus;       external kernel32 name 'PostQueuedCompletionStatus';
@@ -837,7 +838,7 @@ end;
 
 // some definitions missing on oldest Delphi
 const
-  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink
+  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink = faSymbolicLink
 
 function FindFirstFileExW(lpfilename: PWideChar; fInfoLevelId: FINDEX_INFO_LEVELS;
    lpFindFileData: pointer; fSearchOp: FINDEX_SEARCH_OPS;
@@ -1104,6 +1105,21 @@ function IsCurrentExecutable(aAddress: pointer): boolean;
 begin
   result := GetExecutableBase(aAddress) = PtrUInt(HInstance); // current exe/dll
 end;
+
+{$ifdef ISDELPHI} // FPC pre-loads all its resources in memory
+procedure _OsLoadResString(Rec: PResStringRec; var Res: string);
+var
+  tmp: array[0 .. 4095] of Char;
+begin
+  Res := '';
+  if Rec <> nil then
+    if Rec^.Identifier < 64 shl 10 then
+      SetString(Res, tmp, LoadString(FindResourceHInstance(Rec^.Module^),
+        Rec^.Identifier, @tmp, SizeOf(tmp))) // proper WinAPI call
+    else
+      Res := PChar(Rec^.Identifier);
+end;
+{$endif ISDELPHI}
 
 function FileIsWritable(const FileName: TFileName): boolean;
 var
@@ -1480,19 +1496,19 @@ begin
   result := p^.V;
 end; // warning: FPC's GetTickCount64 doesn't handle 49.7 days wrap on XP :(
 
-procedure InitializeSRWLockForXP(var P: TOSLightMutex); stdcall;
+procedure InitializeSRWLockForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).Init; // our TLightLock is good enough on XP
+  PLightLock(@P)^.Init; // our TLightLock is good enough on XP
 end;
 
-procedure AcquireSRWLockExclusiveForXP(var P: TOSLightMutex); stdcall;
+procedure AcquireSRWLockExclusiveForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).Lock;
+  PLightLock(@P)^.Lock;
 end;
 
-procedure ReleaseSRWLockExclusiveForXP(var P: TOSLightMutex); stdcall;
+procedure ReleaseSRWLockExclusiveForXP(var P: pointer); stdcall;
 begin
-  TLightLock(P).UnLock;
+  PLightLock(@P)^.UnLock;
 end;
 
 function GetTickSec: cardinal;
@@ -1514,65 +1530,51 @@ begin
 end;
 
 
-{ TOSLightLock }
+// Win8+ WaitOnAddress/WakeByAddressSingle futex-like efficient API
+// see also warnings at https://devblogs.microsoft.com/oldnewthing/20160826-00
+var
+  // function returns when Address^ differs from the value at CompareAddress^
+  WaitOnAddress: function(Address, CompareAddress: pointer;
+    AddressSize, dwMilliseconds: PtrUInt): BOOL; stdcall;
+  WakeByAddressSingle, WakeByAddressAll: procedure(Address: pointer); stdcall;
 
-procedure TOSLightLock.Init;
+procedure _OsWaitOnValue(Value: PCardinal; Expected, TimeoutMS: cardinal);
 begin
-  fMutex := nil;
-  InitializeSRWLock(fMutex); // fallback to TLightLock on XP
+  WaitOnAddress(Value, @Expected, SizeOf(Expected), TimeOutMS); // Win8+ API
 end;
 
-procedure TOSLightLock.Done;
-begin // nothing needed
+// used only on XP/Vista/7 as fallback - follow FPC RTL PRTLEvent syntax
+type
+  PRTLEvent = pointer;
+
+function RTLEventCreate: PRTLEvent;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := pointer(Windows.CreateEvent(nil, false, false, nil));
 end;
 
-procedure TOSLightLock.Lock;
+procedure RTLEventDestroy(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  AcquireSRWLockExclusive(fMutex);
+  Windows.CloseHandle(THandle(state));
 end;
 
-procedure TOSLightLock.UnLock;
+procedure RTLEventSetEvent(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  ReleaseSRWLockExclusive(fMutex);
+  Windows.SetEvent(THandle(state));
 end;
 
-
-{ TSynEvent }
-
-constructor TSynEvent.Create;
+procedure RTLEventResetEvent(state: PRTLEvent);
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  fHandle := pointer(CreateEvent(nil, false, false, nil));
+  Windows.ResetEvent(THandle(state));
 end;
 
-destructor TSynEvent.Destroy;
-begin
-  CloseHandle(THandle(fHandle));
-  inherited Destroy;
-end;
-
-procedure TSynEvent.ResetEvent;
-begin
-  fNotified := false;
-  Windows.ResetEvent(THandle(fHandle));
-end;
-
-procedure TSynEvent.SetEvent;
-begin
-  fNotified := true; // should be set before notification
-  Windows.SetEvent(THandle(fHandle));
-end;
-
-function TSynEvent.WaitFor(TimeoutMS: cardinal): boolean;
-begin
-  fWaiting := true;
-  WaitForSingleObject(THandle(fHandle), TimeoutMS);
-  fWaiting := false;
-  result := fNotified;
-end;
-
-function TSynEvent.IsEventFD: boolean;
-begin
-  result := false;
+function RtlWaitFor(state: PRTLEvent; timeout: cardinal; notif: boolean): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin // Windows API returns true if it was signaled
+  result := WaitForSingleObject(THandle(state), timeout) = WAIT_OBJECT_0;
 end;
 
 // thread naming and "int 3" debug opcode only validated on Delphi Wintel
@@ -1905,26 +1907,30 @@ end;
 var
   _RawLogException: TOnRawLogException;
 
-{$ifdef FPC}
-  {$ifdef WIN64}
-    {$define WITH_VECTOREXCEPT} // use AddVectoredExceptionHandler Win64 API
-  {$else}
-    {$ifdef FPC_USE_WIN32_SEH}
-      {$define WITH_VECTOREXCEPT} // new since FPC 3.2
-    {$else}
-      // Win32, Linux: intercept via the RaiseProc global variable
-      {$define WITH_RAISEPROC} // RaiseProc is set in main mormot.core.os.pas
-    {$endif FPC_USE_WIN32_SEH}
-  {$endif WIN64}
+{$ifdef CPU64}
+  {$define WITH_VECTOREXCEPT}     // Win64 SEH AddVectoredExceptionHandler API
 {$else}
-  {$ifdef CPU64}
-    {$define WITH_VECTOREXCEPT}
+  {$ifdef FPC}
+    {$ifdef FPC_USE_WIN32_SEH}
+      {$define WITH_VECTOREXCEPT} // Win32 SEH since FPC 3.2
+    {$else}                       // Win32 < FPC 3.2, Linux/POSIX
+      {$define WITH_RAISEPROC}    // RaiseProc is set in main mormot.core.os.pas
+    {$endif FPC_USE_WIN32_SEH}
   {$else}
-    {$define WITH_RTLUNWINDPROC} //  use x86_64 asm -> Win32 only
-  {$endif CPU64}
-{$endif FPC}
+    {$define WITH_RTLUNWINDPROC}  // global raw i386 asm on Delphi Win32
+  {$endif FPC}
+{$endif CPU64}
+{$ifdef HASRAISEEXCEPTOBJPROC}    // Delphi 2009+ new global variable
+  {$define WITH_RAISEEXCEPTOBJPROC} // direct support of Delphi exceptions
+{$endif HASRAISEEXCEPTOBJPROC}      // (also with WITH_VECTOREXCEPT)
 
-{$ifndef WITH_RAISEPROC}
+{$ifndef KEEP_STACKFRAMES}
+{$STACKFRAMES ON} // we need {$W+} stack frame for the backtrace API calls below
+{$endif KEEP_STACKFRAMES}
+
+{$ifdef WITH_RAISEPROC}
+  // RaiseProc redirection is implemented in the main mormot.core.os.pas
+{$else}
 
 type
   PExceptionRecord = ^TExceptionRecord;
@@ -1936,65 +1942,77 @@ type
     NumberParameters: integer;
     case {IsOsException:} boolean of
       true:
-        (ExceptionInformation: array[0..14] of PtrUInt);
+        (ExceptionInformation: array[0 .. 14] of PtrUInt);
       false: // ExceptionCode = cRtlException
         (ExceptAddr: PtrUInt;
          ExceptObject: Exception);
   end;
-  GetExceptionClass = function(const P: TExceptionRecord): ExceptClass;
+  TOnGetExceptionClass = function(const P: TExceptionRecord): ExceptClass;
 
 const
   {$ifdef FPC}
-  cRtlException = $E0465043; // $E0 F P C
+  cRtlException  = $E0465043; // $E0 F P C
   {$else}
-  cRtlException = $0EEDFADE; // Delphi exception
+  cRtlException  = $0EEDFADE; // Delphi exception
+  cLastException = $0EEDFAE5; // Delphi last fake exception (cDelphiExitFinally)
   {$endif FPC}
 
 procedure LogExcept(stack: PPtrUInt; const Exc: TExceptionRecord);
 var
   ctxt: TSynLogExceptionContext;
   backuplasterror: DWord;
-  backuphandler: TOnRawLogException;
 begin
-  if Exc.ExceptionCode = cSetThreadNameException then
+  if (Exc.ExceptionCode = cSetThreadNameException) or
+     {$ifdef ISDELPHI}
+     ((Exc.ExceptionCode > cRtlException) and
+      (Exc.ExceptionCode <= cLastException)) or
+     {$endif ISDELPHI}
+     not Assigned(_RawLogException) then
     exit;
   backuplasterror := GetLastError;
-  backuphandler := _RawLogException;
-  if Assigned(backuphandler) then // paranoid check (tested before calling)
-    try
-      _RawLogException := nil; // disable nested exception at API level
-      ctxt.ECode := Exc.ExceptionCode;
-      if (Exc.ExceptionCode = cRtlException) and
-         (Exc.ExceptObject <> nil) then
+  try
+    ctxt.EStack := pointer(stack); // for manual unwinding on Delphi x86
+    ctxt.EStackCount := 0;
+    ctxt.ECode := Exc.ExceptionCode;
+    if (Exc.ExceptionCode = cRtlException) and
+       (Exc.ExceptObject <> nil) then
+    begin
+      if Exc.ExceptObject.InheritsFrom(Exception) then
       begin
-        if Exc.ExceptObject.InheritsFrom(Exception) then
-          ctxt.EClass := PPointer(Exc.ExceptObject)^
-        else
-          ctxt.EClass := EExternalException;
-        ctxt.EInstance := Exc.ExceptObject;
-        ctxt.ELevel := sllException;
-        ctxt.EAddr := Exc.ExceptAddr;
+        ctxt.EClass := PPointer(Exc.ExceptObject)^;
+        {$ifdef FPC} // fpc_RaiseException() calls GetBacktrace() as needed
+        if (Exc.NumberParameters >= 4) and
+           (Exc.ExceptionInformation[2] < 63) and
+           (Exc.ExceptionInformation[3] <> 0) then
+        begin
+          ctxt.EStackCount := Exc.ExceptionInformation[2];
+          ctxt.EStack := pointer(Exc.ExceptionInformation[3]);
+        end;
+        {$endif FPC}
       end
       else
-      begin
-        {$ifndef LLVM}
-        if Assigned(ExceptClsProc) then
-          ctxt.EClass := GetExceptionClass(ExceptClsProc)(Exc)
-        else
-        {$endif LLVM}
-          ctxt.EClass := EExternal;
-        ctxt.EInstance := nil;
-        ctxt.ELevel := sllExceptionOS;
-        ctxt.EAddr := Exc.ExceptionAddress;
-      end;
-      ctxt.EStack := pointer(stack);
-      ctxt.EStackCount := 0;
-      ctxt.ETimestamp := UnixTimeUtc; // fast API call
-      backuphandler(ctxt);
-    except
-      { ignore any nested exception }
+        ctxt.EClass := EExternalException;
+      ctxt.EInstance := Exc.ExceptObject;
+      ctxt.ELevel := sllException;
+      ctxt.EAddr := Exc.ExceptAddr;
+    end
+    else
+    begin
+      {$ifndef LLVM}
+      if Assigned(ExceptClsProc) then
+        ctxt.EClass := TOnGetExceptionClass(ExceptClsProc)(Exc)
+      else
+      {$endif LLVM}
+        ctxt.EClass := EExternal;
+      ctxt.EInstance := nil;
+      ctxt.ELevel := sllExceptionOS;
+      ctxt.EAddr := Exc.ExceptionAddress;
     end;
-  _RawLogException := backuphandler;
+    ctxt.ETimestamp := UnixTimeUtc; // the fastest API call possible
+    _RawLogException(ctxt);
+  except
+    { ignore any nested exception }
+  end;
   SetLastError(backuplasterror); // code above could have changed this
 end;
 
@@ -2007,6 +2025,9 @@ type
     ContextRecord: pointer;
   end;
 
+const
+  EXCEPTION_CONTINUE_SEARCH = 0;
+
 var // to register SynLogVectoredHandler once
   AddVectoredExceptionHandlerCalled: boolean;
   // RemoveVectoredContinueHandler() is available under 64 bit editions only
@@ -2015,17 +2036,22 @@ function AddVectoredExceptionHandler(FirstHandler: cardinal;
   VectoredHandler: pointer): PtrInt; stdcall; external kernel32;
 
 function SynLogVectoredHandler(ExceptionInfo: PExceptionInfo): PtrInt; stdcall;
-const
-  EXCEPTION_CONTINUE_SEARCH = 0;
 begin
   if Assigned(_RawLogException) then
-    LogExcept(nil, ExceptionInfo^.ExceptionRecord^);
+    {$ifdef WITH_RAISEEXCEPTOBJPROC}
+    if ExceptionInfo^.ExceptionRecord^.ExceptionCode <> cRtlException then
+    {$endif WITH_RAISEEXCEPTOBJPROC}
+      LogExcept(nil, ExceptionInfo^.ExceptionRecord^);
   result := EXCEPTION_CONTINUE_SEARCH;
 end;
 
 {$endif WITH_VECTOREXCEPT}
 
-{$ifdef WITH_RTLUNWINDPROC}
+{$ifndef KEEP_STACKFRAMES}
+{$STACKFRAMES OFF} // back to {$W-} normal state, as in mormot.defines.inc
+{$endif KEEP_STACKFRAMES}
+
+{$ifdef WITH_RTLUNWINDPROC} // Delphi Win32 general exception interceptor
 
 var
   OldUnWindProc: pointer;
@@ -2036,11 +2062,21 @@ asm
         cmp     dword ptr _RawLogException, 0
         jz      @old
         pushad
+        mov     edx, ExceptionRecord
+        test    edx, edx
+        jz      @done
+        {$ifdef WITH_RAISEEXCEPTOBJPROC} // duplicate no RaiseExceptObjProc
+        mov     eax, dword ptr [edx].TExceptionRecord.ExceptionCode
+        cmp     eax, cRtlException
+        jb      @ok
+        cmp     eax, cLastException
+        jbe     @done                    // internal Delphi fake exceptions
+@ok:    {$endif WITH_RAISEEXCEPTOBJPROC}
         mov     eax, TargetFrame
         mov     edx, ExceptionRecord
         call    LogExcept
-        popad
-@old:   pop     ebp // hidden push ebp at asm level
+@done:  popad
+@old:   pop     ebp                      // hidden push ebp at asm level
         jmp     OldUnWindProc
 end;
 
@@ -2049,6 +2085,7 @@ end;
 {$endif WITH_RAISEPROC}
 
 {$endif NOEXCEPTIONINTERCEPT}
+
 
 { TMemoryMap }
 
@@ -2201,7 +2238,7 @@ function EnumProcessName(PID: cardinal): RawUtf8;
 var
   h: THandle;
   len: DWord;
-  name: array[0..4095] of WideChar;
+  name: TWide4K;
 begin
   FastAssignNew(result);
   if PID = 0 then
@@ -2523,7 +2560,7 @@ begin
   if (Buffer = nil) or
      (Len <= 0) then
     exit;
-  // try the newest per-processor ProcessPrng() AES-CTR-DRBG first
+  // try the Win8+ per-processor ProcessPrng() AES-CTR-DRBG first
   if (OSVersion >= wEight) and
      DelayedProc(ProcessPrng, BCryptPrimitives, 'BCryptPrimitives.dll', 'ProcessPrng') then
     result := ProcessPrng(Buffer, Len);
@@ -2557,6 +2594,7 @@ type
     freeswap: cardinal;                  // swap space still available
     mem_unit: cardinal;                  // Memory unit size in bytes
   end;
+  PSysInfo = ^TSysInfo;
 
 function _RetrieveSysInfo(var si: TSysInfo): boolean;
 var
@@ -2806,7 +2844,7 @@ begin
   ConsoleHandleCtrlCPressed := true;
 end;
 
-function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit: boolean): TWinWaitFor;
+function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit, checkSync: boolean): TWinWaitFor;
 var
   mainthread: boolean;
   msg: TMsg;
@@ -2828,17 +2866,17 @@ begin
       if msg.Message = WM_QUIT then
         exit;
   // proper Sleep/WaitForSingleObject call
-  mainthread := mainthread and IsMultiThread;
+  checkSync := checkSync and mainthread and IsMultiThread;
   if h = 0 then
   begin
-    if mainthread then
+    if checkSync then
       CheckSynchronize(ms) // call any Synchronize() event at full speed
     else
       Windows.Sleep(ms);
     result := wwfTimeout;
     exit;
   end;
-  if mainthread then
+  if checkSync then
     CheckSynchronize(0);
   case WaitForSingleObject(h, ms) of
     WAIT_TIMEOUT:
@@ -2848,16 +2886,17 @@ begin
   else
     result := wwfFailed;
   end;
-  if mainthread then
+  if checkSync then
     CheckSynchronize(0);
 end;
 
-procedure ConsoleWaitForEnterKey;
+procedure ConsoleWaitForEnterKey(doCheckSynchronize: boolean);
 begin
   ConsoleHandleCtrlCPressed := false;
   HandleCtrlC(TConsoleHandleCtrlC.HandleCtrlC);
   try
-    while (WinWaitFor({ms=}100, {handle=}0, {wm_quit=}true) = wwfTimeout) and
+    while (WinWaitFor({ms=}500, {handle=}0, {wm_quit=}true,
+             doCheckSynchronize) = wwfTimeout) and
           not ConsoleKeyPressed(VK_RETURN) and
           not ConsoleHandleCtrlCPressed do ;
   finally
@@ -3160,6 +3199,19 @@ end;
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 begin
   // nothing to be done on Windows: PAGE_EXECUTE_READWRITE always work
+end;
+
+function _GetmemDualAccessPages: pointer;
+var
+  s: PtrUInt;
+  ignore: DWord;
+begin
+  s := SystemInfo.dwPageSize;
+  result := VirtualAlloc(nil, s * 2, MEM_COMMIT, PAGE_READWRITE);
+  if result = nil then
+    exit;
+  inc(PByte(result), s);
+  VirtualProtect(result, s, PAGE_NOACCESS, ignore);
 end;
 
 function _GetLargeMem(BigSize: PtrUInt): pointer;
@@ -3523,9 +3575,9 @@ type
   UNICODE_STRING = packed record
     Length: word;
     MaximumLength: word;
-    {$ifdef CPUX64}
+    {$ifdef CPU64}
     _align: array[0..3] of byte;
-    {$endif CPUX64}
+    {$endif CPU64}
     Buffer: PWideChar;
   end;
 
@@ -4543,7 +4595,7 @@ begin
   result := false;
 end;
 
-function ChangeRoot(const FolderName: RawUtf8): boolean;
+function ChangeRoot(const FolderName: TFileName): boolean;
 begin
   result := false;
 end;
@@ -4786,7 +4838,7 @@ var
   begin
     repeat
       // note: WaitForMultipleObjects() with rd burns 100% of one core :(
-      case WinWaitFor({ms=}50, processinfo.hProcess) of
+      case WinWaitFor({ms=}500, processinfo.hProcess, roWinCheckSynchronize in options) of
         wwfSignaled:
           break;
         wwfFailed, wwfQuit:
@@ -5103,7 +5155,6 @@ var
   process, machine: word;
   P: pointer;
   Vers: TWindowsVersion;
-  cpu: RawUtf8;
   reg: TWinRegistry;
   rnd: PHash128;
   proc: array of TSystemLogicalProcessorInformation;
@@ -5271,6 +5322,21 @@ begin
   OSVersion32.os := osWindows;
   OSVersion32.win := Vers;
   OSVersion32.winbuild := OSVersionInfo.dwBuildNumber;
+  if OSVersion >= wEight then
+  begin
+    h := Windows.LoadLibrary('API-MS-Win-Core-Synch-l1-2-0.dll'); // Win8+
+    WaitOnAddress       := LibraryResolve(h, 'WaitOnAddress');
+    WakeByAddressSingle := LibraryResolve(h, 'WakeByAddressSingle');
+    WakeByAddressAll    := LibraryResolve(h, 'WakeByAddressAll');
+    if Assigned(WaitOnAddress) and
+       Assigned(WakeByAddressSingle) and
+       Assigned(WakeByAddressAll) then
+    begin
+      OsWaitOnValue    := @_OsWaitOnValue;
+      OsWakeOnValue    := @WakeByAddressSingle; // defined as stdcall
+      OsWakeAllOnValue := @WakeByAddressAll;    // defined as stdcall
+    end;
+  end;
   h := GetModuleHandle(ntdll); // late binding over unstable / altered API
   if h > 0 then
   begin
@@ -5279,7 +5345,8 @@ begin
     begin
       OSVersionInfoEx := wine_get_version;
       OSVersionInfoEx := TrimU(Join(['Wine ', TrimU(OSVersionInfoEx)]));
-      WindowsSpecs := WindowsSpecs + [wsWine, wsWeakDpAPI, wsWeakHttpApi];
+      WindowsSpecs := WindowsSpecs +
+        [wsWine, wsWeakDpAPI, wsWeakHttpApi, wsWeakHttpSys, wsWeakCng];
     end
     {$ifdef CPUINTEL}
     else if IsWow64Emulation then
@@ -5310,18 +5377,20 @@ begin
   if OSVersionInfoEx <> '' then
     OSVersionText := Join([OSVersionText, ' - ', OSVersionInfoEx]);
   {$ifdef ASMINTEL}  // from CPUID
-  cpu := IntelBrand;
-  if cpu = '' then
+  CpuInfoText := IntelBrand;
+  if CpuInfoText = '' then
   {$endif ASMINTEL}
     if reg.ReadOpen(wrLocalMachine,
       'Hardware\Description\System\CentralProcessor\0', {close=}true) then
     begin
-      cpu := reg.ReadString('ProcessorNameString');
-      if cpu = '' then
-        cpu := reg.ReadString('Identifier');
+      {$ifdef CPUINTEL} // too vague on WinArm - e.g. 'virt-10.0'
+      CpuInfoText := reg.ReadString('ProcessorNameString');
+      if CpuInfoText = '' then
+      {$endif CPUINTEL}
+        CpuInfoText := reg.ReadString('Identifier');
     end;
-  if {%H-}cpu = '' then
-    cpu := GetSystemEnv('PROCESSOR_IDENTIFIER');
+  if {%H-}CpuInfoText = '' then
+    CpuInfoText := GetSystemEnv('PROCESSOR_IDENTIFIER');
   if reg.ReadOpen(wrLocalMachine, 'Hardware\Description\System\BIOS', true) then
   begin
     _Smbios[sbiManufacturer]      := reg.ReadString('SystemManufacturer');

@@ -2386,8 +2386,7 @@ begin
     case fKeyAlgo of
       ckaRsa,
       ckaRsaPss:
-        result := fPrivKey.RsaOpen(
-                    EVP_get_cipherbyname(pointer(Cipher)), Message);
+        result := fPrivKey.RsaOpen(EVP_get_cipherbyname(pointer(Cipher)), Message);
       ckaEcc256:
         if GetEs256Private(fPrivKey, priv) then
         try
@@ -2475,7 +2474,7 @@ type
     function IsAuthorizedBy(const Authority: ICryptCert): boolean; override;
     function GetNotBefore: TDateTime; override;
     function GetNotAfter: TDateTime; override;
-    function GetUsage: TCryptCertUsages; override;
+    function GetUsage(PathLen: PInteger): TCryptCertUsages; override;
     function GetPeerInfo: RawUtf8; override;
     function GetSignatureInfo: RawUtf8; override;
     function Load(const Saved: RawByteString; Content: TCryptCertContent;
@@ -2913,9 +2912,9 @@ begin
   // may return 0 if ASN1_TIME_to_tm() is not supported by an oldest OpenSSL
 end;
 
-function TCryptCertOpenSsl.GetUsage: TCryptCertUsages;
+function TCryptCertOpenSsl.GetUsage(PathLen: PInteger): TCryptCertUsages;
 begin
-  result := TCryptCertUsages(word(fX509.GetUsage));
+  result := TCryptCertUsages(word(fX509.GetUsage(PathLen)));
 end;
 
 function TCryptCertOpenSsl.GetPeerInfo: RawUtf8;
@@ -3730,7 +3729,7 @@ begin
       Info.PubAlg := x.GetPublicKey.AlgoName;
       Info.PubKey := x.GetPublicKey.PublicToDer;
       Info.PeerInfo := x.PeerInfo; // call X509_print()
-      TX509Usages(Info.Usage) := x.GetUsage; // match TX509Usages 16-bit
+      TX509Usages(Info.Usage) := x.GetUsage(nil); // match TX509Usages 16-bit
       Info.NotBefore := x.NotBefore;
       Info.NotAfter := x.NotAfter;
       Info.SubjectAltNames :=

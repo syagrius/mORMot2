@@ -80,7 +80,7 @@ type
     // so may be nil if the instance was created outside the SOA context
     property Factory: TServiceFactoryServer
       read fFactory;
-    /// access ot the associated REST Server, e.g. to its ORM methods
+    /// access of the associated REST Server, e.g. to its ORM methods
     // - slightly faster than Factory.RestServer
     // - this value will be injected by TServiceFactoryServer.CreateInstance,
     // so may be nil if the instance was created outside the SOA context
@@ -1148,24 +1148,16 @@ begin
   begin
     // non-blocking regular retrieval of any existing TInterfacedObject
     fInstances.Safe.ReadLock;
-    {$ifdef HASFASTTRYFINALLY}
-    try
-    {$else}
+    if fInstances.DynArray.FastLocateSorted(Inst.InstanceID, ndx) then
     begin
-    {$endif HASFASTTRYFINALLY}
-      if fInstances.DynArray.FastLocateSorted(Inst.InstanceID, ndx) then
-      begin
-        P := @fInstance[ndx];
-        P^.LastAccessTix10 := Inst.LastAccessTix10;
-        Inst.Instance := P^.Instance;
-        result := aMethodIndex; // notify caller
-        exit;
-      end;
-    {$ifdef HASFASTTRYFINALLY}
-    finally
-    {$endif HASFASTTRYFINALLY}
-      fInstances.Safe.ReadUnLock;
+      P := @fInstance[ndx];
+      P^.LastAccessTix10 := Inst.LastAccessTix10;
+      Inst.Instance := P^.Instance;
+      result := aMethodIndex; // notify caller
     end;
+    fInstances.Safe.ReadUnLock;
+    if result >= 0 then
+      exit;
   end;
   // new TInterfacedObject corresponding to this session/user/group/thread
   if (InstanceCreation <> sicClientDriven) and

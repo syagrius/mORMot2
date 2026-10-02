@@ -60,10 +60,6 @@ uses
 
 { ****************** Core POSIX Operating Systems API for Delphi }
 
-// in the code below, PChar = PWideChar so those wrapper functions could make the
-// proper temporary conversion from UTF-16 to UTF-8 before calling the POSIX API
-// from regular pointer(aFileName) parameters
-
 type
   cint8   = shortint;
   cuchar  = byte;
@@ -85,7 +81,7 @@ type
   TPid    = cint;
   dl_info = Posix.Dlfcn.dl_info;
 
-function dlopen(Name: PWideChar; Flags: cint): pointer;
+function dlopen(Name: PAnsiChar; Flags: cint): pointer;
 function dlsym(Lib: pointer; Name: PAnsiChar): pointer;
 function dlclose(Lib: pointer): cint;
 function dlerror: UnicodeString;
@@ -152,7 +148,11 @@ const
   O_NONBLOCK        = O_NONBLOCK;
   SEEK_CUR          = SEEK_CUR;
   FIONREAD          = FIONREAD;
+  {$ifdef OSANDROID}
+  FIONBIO           = $5421; // not defined by the Delphi Android RTL
+  {$else}
   FIONBIO           = FIONBIO;
+  {$endif OSANDROID}
   F_OK              = F_OK;
 
   CLOCK_MONOTONIC_RAW = 4;
@@ -182,7 +182,9 @@ type
   TTimeSpec = timespec;
   TStat     = _stat;
   TUtimBuf  = utimbuf;
+  putimbuf  = ^utimbuf;
   UtsName   = TUtsName;
+  mode_t    = cint;
 
 function fpgeterrno: cint;
 procedure fpseterrno(err: cint);
@@ -198,24 +200,22 @@ function ToUtcTime(const local: TDateTime): TDateTime;
 function EpochToLocal(I64: TUnixTime): TUnixTime;
 function fpuname(var uts: UtsName): cint;
 
-function fpstat(path: PWideChar; var buf: _stat): cint;
-function fplstat(path: PWideChar; var buf: _stat): cint;
+function fpstat(path: PAnsiChar; var buf: _stat): cint;
+function fplstat(path: PAnsiChar; var buf: _stat): cint;
 function fpfstat(fd: cint; var buf: _stat): cint;
 function fplseek(fd: cint; off: Int64; orig: cint): Int64;
 function fpftruncate(fd: cint; off: Int64): Int64;
 function fpfsync(fd: cint): cint;
 function fpclose(fd: cint): cint;
-function fputime(path: PWideChar; times: putimbuf): cint;
-function fpaccess(path: PWideChar; mode: cint): cint;
-function fpunlink(path: PWideChar): cint;
-function fpunlinka(path: PAnsiChar): cint; // when the path is already UTF-8
-function fpchdir(path: PWideChar): cint;
-function fprename(old, new: PWideChar): cint;
-function fpsymlink(old, new: PWideChar): cint;
-function fprmdir(path: PWideChar): cint;
-function fpchmod(path: PWideChar; mode: cint): cint;
-function fpopen(path: PWideChar; mode: cint): cint;
-function fpopena(path: PAnsiChar; mode: cint): cint;
+function fputime(path: PAnsiChar; times: putimbuf): cint;
+function fpaccess(path: PAnsiChar; mode: cint): cint;
+function fpunlink(path: PAnsiChar): cint;
+function fpchdir(path: PAnsiChar): cint;
+function fprename(old, new: PAnsiChar): cint;
+function fpsymlink(old, new: PAnsiChar): cint;
+function fprmdir(path: PAnsiChar): cint;
+function fpchmod(path: PAnsiChar; mode: cint): cint;
+function fpopen(path: PAnsiChar; mode: cint): cint;
 function fpwrite(fd: cint; buf: pointer; n: PtrInt): PtrInt;
 function fpread(fd: cint; buf: pointer; n: PtrInt): PtrInt;
 function fpioctl(fd, ndx: cint; data: pointer): cint;
@@ -278,11 +278,11 @@ type
   pDir    = Posix.DirEnt.pDir;
   pDirent = Posix.DirEnt.pDirent;
 
-function fpopendir(path: PWideChar): pDir;
+function fpopendir(path: PAnsiChar): pDir;
 function fpreaddir(var dirp: Dir): pDirent;
 function fpclosedir(var dirp: Dir): cint;
 
-{$ifdef OSLINUX}
+{$ifdef OSLINUXANDROID} // bionic exports the same libc API as glibc
 
 type
   TStatfs = record
@@ -291,6 +291,7 @@ type
     namelen, frsize, flags: clong;
     spare: array[0..3] of clong; { For later use }
   end;
+  PStatfs = ^TStatfs;
 
   TSysInfo = record
     uptime: clong;                     // Seconds since boot
@@ -308,7 +309,7 @@ type
     mem_unit: cuint;                   // Memory unit size in bytes
 {$ifndef cpu64}
     { the upper bound of the array below is negative for 64 bit cpus }
-    _f: array[0..19-2*sizeof(clong)-sizeof(cint)] of cChar;  // Padding as libc5
+    _f: array[0..19-2*sizeof(clong)-sizeof(cint)] of cint8;  // Padding as libc5
 {$endif cpu64}
   end;
   PSysInfo = ^TSysInfo;
@@ -320,10 +321,17 @@ function sched_getaffinity(pid: integer;
     cpusetsize: PtrUInt; cpuset: pointer): integer; cdecl
   external clib name 'sched_getaffinity';
 
-{$endif OSLINUX}
+{$endif OSLINUXANDROID}
 
-function fpstatfs(path: PWideChar; nfo: pointer): cint;
+{$ifdef OSANDROID}
+/// retrieve an Android system property, as the FPC Android RTL does
+function GetSystemProperty(Name: PAnsiChar): RawUtf8;
+{$endif OSANDROID}
+
+function fpstatfs(path: PAnsiChar; nfo: pointer): cint;
 function IsAtty(fd: cint): cint;
+
+procedure _OsLoadResString(Rec: PResStringRec; var Res: string);
 
 
 { ****************** Network POSIX Operating Systems API for Delphi }
@@ -354,6 +362,7 @@ const
   AF_PACKET     = 17; // Linux specific
   SOMAXCONN     = Posix.SysSocket.SOMAXCONN;
   SOL_SOCKET    = Posix.SysSocket.SOL_SOCKET;
+  SO_ERROR      = Posix.SysSocket.SO_ERROR;
   SO_SNDTIMEO   = Posix.SysSocket.SO_SNDTIMEO;
   SO_RCVTIMEO   = Posix.SysSocket.SO_RCVTIMEO;
   SO_REUSEADDR  = Posix.SysSocket.SO_REUSEADDR;
@@ -362,9 +371,13 @@ const
   SO_SNDBUF     = Posix.SysSocket.SO_SNDBUF;
   SO_RCVBUF     = Posix.SysSocket.SO_RCVBUF;
   SO_BROADCAST  = Posix.SysSocket.SO_BROADCAST;
+  {$ifdef OSANDROID}
+  SO_PRIORITY   = 12; // not defined by the Delphi Android RTL
+  {$else}
   {$ifdef OSLINUXANDROID}
   SO_PRIORITY   = Posix.SysSocket.SO_PRIORITY;
   {$endif OSLINUXANDROID}
+  {$endif OSANDROID}
 
 
 type
@@ -387,7 +400,7 @@ type
 function fppoll(fds: PPollFD; nfds, timeout: cint): cint; cdecl;
   external clib name 'poll';
 
-{$ifdef OSLINUX}
+{$ifdef OSLINUXANDROID} // bionic exports epoll as glibc does
 
 const
   EPOLLIN      = $01;
@@ -427,7 +440,7 @@ function epoll_wait(epfd: cint; events: PEPoll_Event;
     maxevents, timeout: cint): cint; cdecl;
   external clib name 'epoll_wait';
 
-{$endif OSLINUX}
+{$endif OSLINUXANDROID}
 
 
 
@@ -439,12 +452,9 @@ uses
 
 { ****************** Core POSIX Operating Systems API for Delphi }
 
-function dlopen(Name: PWideChar; Flags: integer): pointer;
-var
-  tmp: TSynTempBuffer;
+function dlopen(Name: PAnsiChar; Flags: integer): pointer;
 begin
-  result := pointer(Posix.Dlfcn.dlopen(Unicode_ToUtf8(Name, tmp), Flags));
-  tmp.Done;
+  result := pointer(Posix.Dlfcn.dlopen(Name, Flags));
 end;
 
 function dlsym(Lib: pointer; Name: PAnsiChar): pointer;
@@ -487,6 +497,7 @@ begin
   sched_yield();
 end;
 
+// this TEvent is only used as TSynEvent fallback on Darwin and very old Linux
 
 function RTLEventCreate: TEvent;
 begin
@@ -583,20 +594,14 @@ begin
   result := uname(uts);
 end;
 
-function fpstat(path: PWideChar; var buf: _stat): cint;
-var
-  tmp: TSynTempBuffer;
+function fpstat(path: PAnsiChar; var buf: _stat): cint;
 begin
-  result := stat(Unicode_ToUtf8(path, tmp), buf);
-  tmp.Done;
+  result := stat(path, buf);
 end;
 
-function fplstat(path: PWideChar; var buf: _stat): cint;
-var
-  tmp: TSynTempBuffer;
+function fplstat(path: PAnsiChar; var buf: _stat): cint;
 begin
-  result := lstat(Unicode_ToUtf8(path, tmp), buf);
-  tmp.Done;
+  result := lstat(path, buf);
 end;
 
 function fpfstat(fd: cint; var buf: _stat): cint;
@@ -624,86 +629,47 @@ begin
   result := __close(fd);
 end;
 
-function fputime(path: PWideChar; times: putimbuf): cint;
-var
-  tmp: TSynTempBuffer;
+function fputime(path: PAnsiChar; times: putimbuf): cint;
 begin
-  result := utime(Unicode_ToUtf8(path, tmp), times^);
-  tmp.Done;
+  result := utime(path, times^);
 end;
 
-function fpaccess(path: PWideChar; mode: cint): cint;
-var
-  tmp: TSynTempBuffer;
+function fpaccess(path: PAnsiChar; mode: cint): cint;
 begin
-  result := access(Unicode_ToUtf8(path, tmp), mode);
-  tmp.Done;
+  result := access(path, mode);
 end;
 
-function fpunlink(path: PWideChar): cint;
-var
-  tmp: TSynTempBuffer;
+function fpunlink(path: PAnsiChar): cint;
 begin
-  result := unlink(Unicode_ToUtf8(path, tmp));
-  tmp.Done;
+  result := unlink(path);
 end;
 
-function fpunlinka(path: PAnsiChar): cint;
+function fpchdir(path: PAnsiChar): cint;
 begin
-  result := unlink(path); // path is already UTF-8: no conversion needed
+  result := __chdir(path);
 end;
 
-function fpchdir(path: PWideChar): cint;
-var
-  tmp: TSynTempBuffer;
+function fprename(old, new: PAnsiChar): cint;
 begin
-  result := __chdir(Unicode_ToUtf8(path, tmp));
-  tmp.Done;
+  result := __rename(old, new);
 end;
 
-function fprename(old, new: PWideChar): cint;
-var
-  o, n: TSynTempBuffer;
+function fpsymlink(old, new: PAnsiChar): cint;
 begin
-  result := __rename(Unicode_ToUtf8(old, o), Unicode_ToUtf8(new, n));
-  o.Done;
-  n.Done;
+  result := symlink(old, new);
 end;
 
-function fpsymlink(old, new: PWideChar): cint;
-var
-  o, n: TSynTempBuffer;
+function fprmdir(path: PAnsiChar): cint;
 begin
-  result := symlink(Unicode_ToUtf8(old, o), Unicode_ToUtf8(new, n));
-  o.Done;
-  n.Done;
+  result := __rmdir(path);
 end;
 
-function fprmdir(path: PWideChar): cint;
-var
-  tmp: TSynTempBuffer;
+function fpchmod(path: PAnsiChar; mode: cint): cint;
 begin
-  result := __rmdir(Unicode_ToUtf8(path, tmp));
-  tmp.Done;
+  result := chmod(path, mode);
 end;
 
-function fpchmod(path: PWideChar; mode: cint): cint;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := chmod(Unicode_ToUtf8(path, tmp), mode);
-  tmp.Done;
-end;
-
-function fpopen(path: PWideChar; mode: cint): cint;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := __open(Unicode_ToUtf8(path, tmp), mode);
-  tmp.Done;
-end;
-
-function fpopena(path: PAnsiChar; mode: cint): cint;
+function fpopen(path: PAnsiChar; mode: cint): cint;
 begin
   result := __open(path, mode);
 end;
@@ -828,12 +794,9 @@ begin
   result := munmap(start, len);
 end;
 
-function fpopendir(path: PWideChar): pDir;
-var
-  tmp: TSynTempBuffer;
+function fpopendir(path: PAnsiChar): pDir;
 begin
-  result := opendir(Unicode_ToUtf8(path, tmp));
-  tmp.Done;
+  result := opendir(path);
 end;
 
 function fpreaddir(var dirp: Dir): pDirent;
@@ -849,13 +812,24 @@ end;
 function statfs(path: PAnsiChar; nfo: pointer): cint; cdecl;
   external clib name 'statfs';
 
-function fpstatfs(path: PWideChar; nfo: pointer): cint;
-var
-  tmp: TSynTempBuffer;
+function fpstatfs(path: PAnsiChar; nfo: pointer): cint;
 begin
-  result := statfs(Unicode_ToUtf8(path, tmp), nfo);
-  tmp.Done;
+  result := statfs(path, nfo);
 end;
+
+{$ifdef OSANDROID}
+
+function __system_property_get(name, value: PAnsiChar): cint; cdecl;
+  external clib name '__system_property_get';
+
+function GetSystemProperty(Name: PAnsiChar): RawUtf8;
+var
+  tmp: array[0 .. 91] of AnsiChar; // PROP_VALUE_MAX = 92
+begin
+  SetString(result, tmp, __system_property_get(Name, @tmp));
+end;
+
+{$endif OSANDROID}
 
 function IsAtty(fd: cint): cint;
 var
@@ -863,6 +837,31 @@ var
 begin
   result := ord(tcgetattr(fd, t) = 0);
 end;
+
+type // main exe-only cut-down version of LLVM POSIX LoadResString() system.pas
+  TResStringResource = packed record
+    ShortLen: word;
+    case integer of
+    0: ( ShortW: TWide4K );
+    1: ( LongLen: cardinal;
+         LongW: TWide4K );
+  end;
+
+procedure _OsLoadResString(Rec: PResStringRec; var Res: string);
+var
+  p: ^TResStringResource;
+begin
+  Res := '';
+  if Rec = nil then
+    exit;
+  p := Posix.Dlfcn.dlsym(FindResourceHInstance(HInstance), Rec^.Key); // main exe only
+  if p <> nil then
+    if p^.ShortLen <> $ffff then // $ffff marks the long layout, as in system.pas
+      SetString(Res, p^.ShortW, p^.ShortLen)
+    else
+      SetString(Res, p^.LongW, p^.LongLen);
+end;
+
 
 {****************** Network POSIX Operating Systems API for Delphi }
 

@@ -223,7 +223,7 @@ type
     fEngineClass: TThreadSafeEngineClass;
     fEngineExpireTimeOutTix: Int64;
     fEngines: TSynObjectListLightLocked; // of TThreadSafeEngine
-    fEngineID: TThreadIDDynArray;
+    fEngineID: array of TThreadID;
     fMaxEngines: integer;
     fDebugMainThread: boolean;
     fMainEngine: TThreadSafeEngine;
@@ -587,7 +587,7 @@ end;
 
 procedure TThreadSafeManager.SetEngineExpireTimeOutMinutes(Value: cardinal);
 begin
-  fEngineExpireTimeOutTix := Value * MilliSecsPerMin;
+  fEngineExpireTimeOutTix := Int64(Value) * MilliSecsPerMin;
 end;
 
 function TThreadSafeManager.NewDebugger(const port: RawUtF8): IRemoteDebugger;

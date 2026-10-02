@@ -1912,11 +1912,12 @@ type
   TSynTimeZone = class(TObjectRWLightLock)
   protected
     fZone: TTimeZoneDataDynArray;
-    fZoneCount: integer;
     fZones: TDynArrayHashed;
     fLastZone: TTimeZoneID;
     fLastIndex: integer;
+    fLastZoneSafe: TLightLock; // protect fLastZone/fLastIndex
     fCurrentIndex, fUtcIndex: integer;
+    fZoneCount: integer;
     fIds: TStringList;
     fDisplays: TStringList;
     procedure SetIDs;
@@ -2100,7 +2101,7 @@ begin
       {%H-}parser.Init({strict=}false, nil);
       repeat
         inc(P);
-      until not (P^ in [#1..' ']);
+      until not (P^ in [#1 .. ' ']);
       if P^ <> ']' then
         repeat
           if Index <= 0 then
@@ -2148,15 +2149,14 @@ begin
   if P^ = '{' then
     repeat
       inc(P);
-    until not (P^ in [#1..' ']);
+    until not (P^ in [#1 .. ' ']);
   if P^ = '}' then
     exit;
   repeat
     name := GetJsonPropName(P, @namelen, {NoJsonUnescapeNorEnding0=}true);
     if name = nil then
       exit;
-    while (P^ <= ' ') and
-          (P^ <> #0) do
+    while P^ in [#1 .. ' '] do
       inc(P);
     if (namelen >= PropNameLen) and
        (bystart or
@@ -2364,15 +2364,13 @@ begin
   Init(aCaseSensitive);
   if Json = nil then
     exit;
-  while (Json^ <= ' ') and
-        (Json^ <> #0) do
+  while Json^ in [#1 .. ' '] do
     inc(Json);
   if Json^ <> '{' then
     exit;
   repeat
     inc(Json)
-  until (Json^ = #0) or
-        (Json^ > ' ');
+  until not (Json^ in [#1, ' ']);
   info.Json := Json;
   c := JsonObjectPropCount(Json); // fast GB/s parsing
   if c <= 0 then
@@ -2769,7 +2767,8 @@ begin
   if fTimeoutSeconds = 0 then
     exit;
   tix := GetTickSec;
-  if fTimeoutTix > tix then
+  if (fTimeoutTix <> 0) and
+     (tix >= fTimeoutTix) then
     Reset;
   fTimeoutTix := tix + fTimeoutSeconds;
 end;
@@ -2956,7 +2955,7 @@ end;
 procedure FindFilesRtl(const Directory, Mask, IgnoreFileName: TFileName;
   Options: TFindFilesOptions; out Files: TFindFilesDynArray);
 var
-  count: integer;
+  count: integer; // not PtrInt
   m: PChar;
   dir, onemask: TFileName;
   da: TDynArray;
@@ -3088,7 +3087,7 @@ begin
     {$endif UNICODE}
     if FileInfoByName(dir + d^.Name, d^.Size, ts, @d^.Attr) then // = fpStat()
     begin
-      d^.Timestamp := UnixTimeToLocal(ts div MSecsPerSec);
+      d^.Timestamp := UnixTimeToLocal(ts div MilliSecsPerSec);
       inc(d); // will leave d^.Attr = 0
       inc(r);
     end;
@@ -3388,17 +3387,14 @@ begin
   PEnd := P + PLen;
   for v := 0 to high(values) do
     repeat
-      if (P^ <= ' ') and
-         (P^ <> #0) then
+      if P^ in [#1 .. ' '] then
         // ignore any whitespace char in text
         repeat
           inc(P);
           if P = PEnd then
             exit;
-        until (P^ > ' ') or
-              (P^ = #0);
-      while (F^ <= ' ') and
-            (F^ <> #0) do
+        until not (P^ in [#1 .. ' ']);
+      while F^ in [#1 .. ' '] do
       begin
         // ignore any whitespace char in fmt
         inc(F);
@@ -3441,8 +3437,7 @@ begin
               else
                 FastSetString(PRawUtf8(values[v])^, P, w);
               inc(P, w);
-              while (P^ <= ' ') and
-                    (P^ <> #0) and
+              while (P^ in [#1 .. ' ']) and
                     (P <= PEnd) do
                 inc(P);
             end;
@@ -5514,7 +5509,7 @@ begin
   P := fCurrent;
   if P = nil then
     exit;
-  while P^ in [#1..' '] do
+  while P^ in [#1 .. ' '] do
     inc(P);
   if P^ = #0 then
     exit;
@@ -7745,16 +7740,20 @@ end;
 
 function TSynTimeZone.LockedSearch(const TzId: TTimeZoneID): PtrInt;
 begin
+  result := -1;
   if TzId = '' then
-    result := -1
-  else if TzId = fLastZone then
-    result := fLastIndex
-  else
-  begin
-    result := fZones.FindHashed(TzId);
-    fLastZone := TzId;
-    flastIndex := result;
-  end;
+    exit;
+  fLastZoneSafe.Lock; // protect fLastZone/fLastIndex within concurrent ReadLock
+  if TzId = fLastZone then
+    result := fLastIndex;
+  fLastZoneSafe.UnLock;
+  if result >= 0 then
+    exit;
+  result := fZones.FindHashed(TzId);
+  fLastZoneSafe.Lock;
+  fLastZone := TzId;
+  flastIndex := result;
+  fLastZoneSafe.UnLock;
 end;
 
 procedure TSynTimeZone.LockedAfterLoad;

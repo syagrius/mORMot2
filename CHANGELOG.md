@@ -5,16 +5,19 @@ Details are available [on out GitHub repository](https://github.com/synopse/mORM
 
 ## [2.5.stable] - trunk
 ### Added 
-- new `mormot.core.fmt.pas` unit
+- Preliminary compatibility with Delphi 13.1+ Linux MacOS Android iOS
+- Native CNG support on Windows via `mormot.crypt.win.pas`
+- new `mormot.core.fmt.pas` and `mormot.core.i18n.pas` units
+- XML pull/SAX/DOM Parser
 - YAML 1.2 Read and Write Support
-- Preliminary compatibility to Delphi for Linux and Delphi for MacOS
 - HTTP Proxy Cache
 - HTTP over TFTP proxy
+- SChannel rewrite with full server-side support
 ### Changed
 - refactored main units to reduce their size: you may need to explicitly add `mormot.core.fmt`, `mormot.core.datetime` or `mormot.core.search` to your uses clause now
 - refactored cross-platform and cross-cpu conditionals (e.g. new internal `ASM*` definitions)
-- breaking change: deprecated GetExecutableVersion
-- Lots other bug fixes, optimisations and enhancements.
+- breaking change: deprecated GetExecutableVersion and TSynLog format as RawUtf8
+- Lots of bug fixes, optimisations and enhancements.
 
 ## [2.4.stable] - 2026-01-13
 This is the latest stable release of *mORMot* v2.

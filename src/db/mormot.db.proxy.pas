@@ -160,7 +160,7 @@ type
     fTransactionRetryTimeout: Int64;
     fTransactionActiveTimeout: Int64;
     fTransactionActiveAutoReleaseTicks: Int64;
-    fSafe: TOSLock;
+    fSafe: TOSLightLock; // = TOSLightMutex = futex on Linux and Win8+
     function GetAuthenticate: TSynAuthenticationAbstract;
     /// default Handle*() will just return the incoming value
     function HandleInput(const input: RawByteString): RawByteString; virtual;
@@ -505,7 +505,7 @@ type
   // TSqlDBServerSockets - this abstract class won't set any HTTP server
   TSqlDBServerAbstract = class
   protected
-    fSafe: TOSLightLock; // = TOSLightMutex = SRW lock or direct pthread mutex
+    fSafe: TOSLightLock; // = TOSLightMutex = futex on Linux and Win8+
     fServer: THttpServerGeneric;
     fThreadPoolCount: integer;
     fPort, fDatabaseName: RawUtf8;
@@ -700,6 +700,22 @@ type
 
   {$endif USELIBCURL}
 
+  {$ifdef USEDELPHINETHTTP}
+
+  /// implements a HTTP client via the Delphi RTL System.Net.HttpClient, able
+  // to access remotely any mormot.db.sql
+  TSqlDBDelphiNetConnectionProperties = class(TSqlDBHttpRequestConnectionProperties)
+  public
+    /// initialize the properties for remote access via HTTP using Delphi RTL
+    // - aServerName should be the HTTP server address as 'server:port'
+    // - aDatabaseName would be used to compute the URI as in TSqlDBServerAbstract
+    // - the user/password credential should match server-side authentication
+    constructor Create(const aServerName,aDatabaseName, aUserID,aPassWord: RawUtf8); override;
+  end;
+
+  {$endif USEDELPHINETHTTP}
+
+
   {$ifdef USEWININET}
 
   /// implements a HTTP client via WinHttp API, able to access remotely
@@ -729,6 +745,11 @@ type
 
 
 implementation
+
+
+{$ifdef FPC} // already part of mormot.defines.inc but seems needed with -O2
+  {$WARN 5093 off} // function result variable of a managed uninitialized 1
+{$endif FPC}
 
 
 { ************ Shared Proxy Information }
@@ -2147,6 +2168,20 @@ end;
 
 {$endif USELIBCURL}
 
+{$ifdef USEDELPHINETHTTP}
+
+{ TSqlDBDelphiNetConnectionProperties }
+
+constructor TSqlDBDelphiNetConnectionProperties.Create(
+  const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
+begin
+  SetServerName(aServerName);
+  fClient := TDelphiNetHttp.Create(Server, Port, fUri.Https);
+  inherited;
+end;
+
+{$endif USEDELPHINETHTTP}
+
 
 initialization
   TSqlDBSocketConnectionProperties.RegisterClassNameForDefinition;
@@ -2157,5 +2192,8 @@ initialization
   {$ifdef USELIBCURL}
   TSqlDBCurlConnectionProperties.RegisterClassNameForDefinition;
   {$endif USELIBCURL}
+  {$ifdef USEDELPHINETHTTP}
+  TSqlDBDelphiNetConnectionProperties.RegisterClassNameForDefinition;
+  {$endif USEDELPHINETHTTP}
 
 end.

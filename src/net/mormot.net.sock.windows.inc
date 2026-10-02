@@ -673,6 +673,73 @@ begin
     (v = SocketPriorityHintVeryLow);
 end;
 
+// no POSIX signals interception needed for Send/Recv/SendTo/RecvFrom on WinAPI
+
+function TNetSocketWrap.Send(Buf: pointer; var len: integer;
+  rawError: PNetErrorInt): TNetResult;
+begin
+  if @self = nil then
+    result := nrNoSocket
+  else
+  begin
+    len := mormot.net.sock.send(TSocket(@self), Buf, len, MSG_NOSIGNAL);
+    // man send: Upon success, send() returns the number of bytes sent.
+    // Otherwise, -1 is returned and errno set to indicate the error.
+    if len < 0 then
+      result := NetLastError(NO_ERROR, rawError)
+    else
+      result := nrOK;
+  end;
+end;
+
+function TNetSocketWrap.Recv(Buf: pointer; var len: integer;
+  rawError: PNetErrorInt): TNetResult;
+begin
+  if @self = nil then
+    result := nrNoSocket
+  else
+  begin
+    len := mormot.net.sock.recv(TSocket(@self), Buf, len, 0);
+    // man recv: Upon successful completion, recv() shall return the length of
+    // the message in bytes. If no messages are available to be received and the
+    // peer has performed an orderly shutdown, recv() shall return 0.
+    // Otherwise, -1 shall be returned and errno set to indicate the error,
+    // which may be nrRetry if no data is available.
+    if len <= 0 then
+      if len = 0 then
+        result := nrClosed
+      else
+        result := NetLastError(NO_ERROR, rawError)
+    else
+      result := nrOK;
+  end;
+end;
+
+function TNetSocketWrap.SendTo(Buf: pointer; len: integer;
+  const addr: TNetAddr): TNetResult;
+begin
+  if @self = nil then
+    result := nrNoSocket
+  else if mormot.net.sock.sendto(TSocket(@self), Buf, len, 0, @addr, addr.Size) < 0 then
+    result := NetLastError
+  else
+    result := nrOk;
+end;
+
+function TNetSocketWrap.RecvFrom(Buf: pointer; len: integer;
+  out addr: TNetAddr): integer;
+var
+  addrlen: integer;
+begin
+  if @self = nil then
+    result := -1
+  else
+  begin
+    addrlen := SizeOf(addr);
+    result := mormot.net.sock.recvfrom(TSocket(@self), Buf, len, 0, @addr, @addrlen);
+  end;
+end;
+
 procedure SetTimeVal(ms: cardinal; out tv: TTimeVal);
   {$ifdef HASINLINE} inline; {$endif}
 begin
@@ -766,6 +833,31 @@ begin
      ({%H-}er.fd_count = 1) and
      (er.fd_array[0] = sock) then
     include(result, neError);
+end;
+
+function TNetSocketWrap.Available(loerr: PNetErrorInt; nowait: boolean): boolean;
+var
+  events: TNetEvents;
+  dummy: integer;
+begin
+  result := true;
+  if loerr <> nil then
+    loerr^ := 0;
+  if nowait then
+    events := [neRead] // just MSG_PEEK
+  else
+    events := WaitFor(0, [neRead, neError], loerr); // select() or poll()
+  if events = [] then
+    exit; // the socket seems stable with no pending input
+  if neRead in events then
+    // - on Windows, may be WSACONNRESET (nrClosed), with recv() returning 0
+    // - no need to MakeAsync: recv() should not block after neRead
+    // - may be [neRead, neClosed] on gracefully closed HTTP/1.0 response
+    // - expected recv() result: -1=error, 0=closed, 1=success
+    if (mormot.net.sock.recv(TSocket(@self), @dummy, 1, MSG_PEEK) = 1) or
+       (NetLastError(NO_ERROR, loerr) = nrRetry) then
+      exit;
+  result := false; // e.g. neError or neClosed with no neRead
 end;
 
 
@@ -1521,7 +1613,7 @@ end;
 constructor TWinIocp.Create(processing: integer; options: TWinIocpOptions);
 begin
   if processing = 0 then
-    processing := CpuThreads;
+    processing := SystemInfo.dwNumberOfProcessors; // = CpuThreads
   fIocp := IocpCreate(INVALID_HANDLE_VALUE, 0, nil, processing);
   if fIocp <= 0 then
     RaiseLastError('TWinIocp: CreateIoCompletionPort', EWinIocp);
@@ -1915,6 +2007,7 @@ function TWinIocp.GetNextAccept(one: PWinIocpSubscription;
 var
   l, r: PSockAddr;
   llen, rlen: integer;
+  lsock: TSocket;
 begin
   result := false;
   if (self = nil) or
@@ -1945,6 +2038,16 @@ begin
   MoveFast(r^, Remote, rlen);
   Socket := fAcceptSocket;
   fAcceptSocket := nil;
+  // AcceptEx() sockets need SO_UPDATE_ACCEPT_CONTEXT to inherit the listening
+  // socket properties, and before shutdown() getsockname() getpeername() are
+  // used - otherwise shutdown(SD_SEND) in Unsubscribe() fails with WSAENOTCONN
+  // and no FIN is ever sent to the client on a server-side close
+  lsock := TSocket(one^.socket);
+  if (setsockopt(TSocket(Socket), SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+        @lsock, SizeOf(lsock)) <> NO_ERROR) and
+     Assigned(fOnLog) then
+    fOnLog(sllWarning, 'GetNextAccept(%): SO_UPDATE_ACCEPT_CONTEXT failed as %',
+      [pointer(one^.socket), WinErrorShort(RawSocketErrNo)], self);
   fAcceptExUsed.UnLock;
   result := true;
   if Assigned(fOnLog) then
@@ -1955,12 +2058,14 @@ end;
 function TWinIocp.Unsubscribe(var one: PWinIocpSubscription): boolean;
 var
   res: TNetResult;
-  o: PIocpSubscription absolute one;
+  o: PIocpSubscription;
 begin
   result := false;
+  o := pointer(one); // local copy
   if (self = nil) or
-     (one = nil) or
-     fTerminated then
+     fTerminated or
+     (o = nil) or
+     not LockedExc(PPtrUInt(@one)^, 0, PtrUInt(o)) then // CAS one := nil
     exit;
   res := nrOK;
   if Assigned(fOnLog) then
@@ -1977,50 +2082,151 @@ begin
     // - follow documented pattern: shutdown(SD_SEND) + recv()=0 + closesocket
     shutdown(o^.socket, SHUT_WR); // = SD_SEND
     o^.recvclosing := true; // flag for GetNext() to call closesocket()
-    if PrepareNext('unsub', one, wieRecv) then
+    if PrepareNext('unsub', pointer(o), wieRecv) then
     begin
       // started async WSARecv() until the function completes with success
       result := true;
-      one := nil;
       exit;
     end
     else // if failed, graceful disconnect is not possible (already closed)
       closesocket(o^.socket);
   end;
-  result := fOne.Free(one); // one^.sequence will avoid ABA problem in GetNext()
-  one := nil;
+  result := fOne.Free(o); // one^.sequence will avoid ABA problem in GetNext()
 end;
 
 
 { ******************** TLS / HTTPS Encryption Abstract Layer }
 
+// TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
+// Enabling TLS 1.3 on earlier versions of Windows is possible through the
+// registry, but is explictly documented as unsafe by Microsoft.
+// https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
+
+procedure CredInit(var cred: TSChannelCred; const ctx: TNetTlsContext;
+  dwFlags: cardinal; paServCred: pointer; RootStore: HCERTSTORE);
+begin
+  FillCharFast(cred, SizeOf(cred), 0);
+  // request Schannel to reject known weak ciphers whenever possible
+  if not ctx.AllowDeprecatedTls and
+     (OSVersion >= wSeven) then
+    dwFlags := dwFlags or SCH_USE_STRONG_CRYPTO;
+  if SChannelEnableTls13 and
+     ((OSVersion in [wEleven, wEleven_64]) or
+      (OSVersion >= wServer2022_64)) and
+     not ctx.DisableTls13 then
+  begin
+    // new SCH_CREDENTIALS structure is required in order to enable TLS 1.3
+    cred.New.dwVersion := SCH_CREDENTIALS_VERSION;
+    if not ctx.AllowDeprecatedTLS then
+    begin
+      cred.New.cTlsParameters := 1;
+      cred.New.pTlsParameters := @cred.Tls;
+      // disable SSL/TLS versions older than TLS 1.2
+      cred.Tls.grbitDisabledProtocols := SP_PROT_TLS_UNSAFE;
+    end;
+    cred.New.dwFlags := dwFlags;
+    cred.New.hRootStore := RootStore;
+    if paServCred <> nil then
+    begin
+      cred.New.cCreds := 1;
+      cred.New.paCred := paServCred;
+    end;
+  end
+  else
+  begin
+    // legacy SCHANNEL_CRED path: never enable TLS 1.3 here
+    cred.Old.dwVersion := SCHANNEL_CRED_VERSION;
+    cred.Old.dwFlags := dwFlags;
+    cred.Old.hRootStore := RootStore;
+    if OSVersion < wSeven then
+      // TLS 1.0 is the only realistic choice on these old systems
+      cred.Old.grbitEnabledProtocols := SP_PROT_TLS1_0
+    else
+    begin
+      // TLS 1.2 only unless deprecated protocols were explicitly requested
+      cred.Old.grbitEnabledProtocols := SP_PROT_TLS1_2;
+      if ctx.AllowDeprecatedTLS then
+        cred.Old.grbitEnabledProtocols := cred.Old.grbitEnabledProtocols or
+          SP_PROT_TLS1_0 or SP_PROT_TLS1_1;
+    end;
+    if paServCred <> nil then
+    begin
+      cred.Old.cCreds := 1;
+      cred.Old.paCred := paServCred;
+    end;
+  end;
+end;
+
 type
-  ESChannel = class(Exception);
+  ESChannel = class(ExceptionWithProps);
+
+  // reference-counted management of shared credentials for the HTTPS server
+  // - SSPI requires all CtxtHandles to be deleted before freeing their CredHandle
+  TSChannelServerContext = class(TInterfacedObject)
+  private
+    fCertificate: pointer; // PCCERT_CONTEXT from RTL Windows or mormot.core
+    fStore: HCERTSTORE;
+    fClientRootStore: HCERTSTORE;
+    fChainEngine: HCERTCHAINENGINE;
+    fCred: TCredHandle;
+    fCredAcquired: boolean;
+    fClientCACount: integer;
+    fParameters: TSChannelCred;
+    procedure CheckRes(const api: ShortString; res: integer;
+      var Context: TNetTlsContext);
+    procedure CheckBool(const api: ShortString; success: BOOL;
+      var Context: TNetTlsContext);
+    procedure AcceptError(const msg: RawUtf8; var context: TNetTlsContext);
+    procedure LoadCertificate(Socket: TNetSocket; var Context: TNetTlsContext);
+    procedure LoadClientTrust(const Context: TNetTlsContext);
+    procedure AddClientCa(const Encoded: RawByteString); overload;
+    procedure AddClientCa(Cert: pointer; const Origin: ShortString); overload;
+    procedure ValidateClientCertificate(Socket: TNetSocket;
+      var Context: TNetTlsContext; Ctxt: PSecHandle; CallAfter: boolean);
+  public
+    constructor Create(Socket: TNetSocket; var Context: TNetTlsContext);
+    destructor Destroy; override;
+  end;
 
   TSChannelNetTls = class(TInterfacedObject, INetTls)
   private
+    fSspiSafe: TOSLightLock; // protect Recv() SEC_I_RENEGOTIATE vs Send()
     fSocket: TNetSocket;
     fCipherName: RawUtf8;
     fServerAddressW: SynUnicode;
     fCred: TCredHandle;
     fCtxt: TCtxtHandle;
     fFlags: cardinal;
-    fLastCheckSecError: cardinal;
+    fSizeMaxRecord: integer;
     fSizes: TSecPkgContext_StreamSizes;
-    fData, fInput: AnsiString;
-    fInputSize, fDataPos, fDataCount, fInputCount: integer;
+    fInput: RawByteString;  // encrypted TLS input records
+    fOutput: RawByteString; // encrypted TLS output records
+    fData: RawByteString;   // decrypted application bytes
+    fInputCount, fDataPos, fDataCount: integer;
+    fOutputPos, fOutputCount, fOutputPlainCount: integer;
     fSessionClosed: boolean;
     fAccept: boolean;
-    fAcceptCert: mormot.core.os.security.PCCERT_CONTEXT;
-    fAcceptCertStore: HCERTSTORE;
+    fAcceptFirst: boolean;
+    fServerContext: TSChannelServerContext;
+    fServerContextRef: IInterface; // thread-safe shared sever-side credentials
+    fAcceptContext: TNetTlsContext; // private mTLS policy for SEC_I_RENEGOTIATE
     fPeerInfo: TWinCertInfo;
-    procedure ESChannelRaiseLastError(const ctx: ShortString; res: cardinal);
-    function CheckSEC_E_OK(const ctx: ShortString; res: integer): cardinal;
-    function FreeAndCheckSocket(const ctx: ShortString; res: integer;
-      tofree: pointer): cardinal;
+    procedure ESChannelRaiseError(const ctx: ShortString; res: cardinal);
+    procedure CheckOK(const ctx: ShortString; res: integer);
+      {$ifdef HASINLINE} inline; {$endif}
+    procedure ResetState(Socket: TNetSocket);
+    procedure WaitRawRetry(const ctx: ShortString; events: TNetEvents;
+      var endtix: Int64; timeout: integer);
+    function SendOutput: TNetResult;
+    function SendRawAll(const ctx: ShortString; buf: PByte;
+      len, timeout: integer): TNetResult;
+    function RecvRaw(const ctx: ShortString; buf: PByte; len: integer): integer;
     function HandshakeStep(buf: PByteArray; var len: integer): cardinal;
-    procedure HandshakeLoop;
+    procedure HandshakeLoop(NeedRecv: boolean = true);
+    function CompleteHandshakeToken(const ctx: ShortString;
+      res: cardinal; output: PSecBufferDesc): cardinal;
     procedure FinalizeCredCtxt;
+    procedure CleanShutdown;
   public
     destructor Destroy; override;
     // INetTls methods
@@ -2036,57 +2242,568 @@ type
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function ReceivePending: integer;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
+    function ReleaseBuffers: PtrInt;
   end;
+
+
+{ TSChannelServerContext }
+
+procedure TSChannelServerContext.CheckRes(const api: ShortString; res: integer;
+  var Context: TNetTlsContext);
+begin
+  if res = NO_ERROR then
+    exit;
+  Context.LastError := GetErrorText(res);
+  raise ESChannel.CreateFmt('%s returned %s', [api, Context.LastError]);
+end;
+
+procedure TSChannelServerContext.CheckBool(const api: ShortString; success: BOOL;
+  var Context: TNetTlsContext);
+begin
+  if not success then
+    CheckRes(api, GetLastError, Context);
+end;
+
+procedure TSChannelServerContext.LoadCertificate(Socket: TNetSocket;
+  var Context: TNetTlsContext);
+var
+  pfx: RawByteString;
+  password: RawUtf8;
+  err, flags, keyspec: cardinal;
+  prov: HCRYPTPROV;
+  freeprov: BOOL;
+begin
+  if Context.CertificateRaw <> nil then
+  begin
+    // retain a reference independent of the caller's certificate lifetime
+    fCertificate := CertDuplicateCertificateContext(Context.CertificateRaw);
+    if fCertificate = nil then
+      RaiseLastError('AfterBind: CertDuplicateCertificateContext', ESChannel);
+  end;
+  pfx := '';
+  if Context.CertificateRaw = nil then
+    pfx := Context.CertificateBin;
+  if (Context.CertificateRaw = nil) and
+     (pfx = '') and
+     (Context.CertificateFile <> '') then
+    // try to load from .PFX file
+    pfx := StringFromFile(TFileName(Context.CertificateFile));
+  if (pfx = '') and
+     (fCertificate = nil) then
+  begin
+    // fallback to first certificate and private key from personal Windows store
+    fStore := CertOpenSystemStoreW(nil, 'MY');
+    if fStore = nil then
+      RaiseLastError('AfterBind: CertOpenSystemStoreW', ESChannel);
+  end
+  else if pfx <> '' then
+  begin
+    // expecting e.g. a Let's Encrypt certificate, converted to PFX:
+    //   openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
+    // or using mormot.crypt.openssl:
+    //   c := Cert('x509-rs256');
+    //   c.Generate([cuTlsServer], 'toto.com', nil, 3650);
+    //   FileFromString(c.Save('3des=pass', ccfBinary), WorkDir + 'privkeycert.pfx');
+    password := Context.PrivatePassword;
+    if Assigned(Context.OnPrivatePassword) then
+      password := Context.OnPrivatePassword(Socket, @Context, nil);
+    flags := PKCS12_INCLUDE_EXTENDED_PROPERTIES;
+    if (OSVersion < wVista) or
+       (wsWine in WindowsSpecs) then
+      flags := 0;
+    err := WinCertStoreImportPfx(pfx, password, fStore, flags);
+    FillZero(RawByteString(password)); // wipe UTF-8
+    CheckRes('AfterBind: PFXImportCertStore', err, Context);
+  end;
+  // find first certificate in store with private key
+  flags := 0;
+  if OSVersion >= wVista then
+    flags := flags or CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG; // enable CNG
+  if fCertificate = nil then
+    repeat
+      fCertificate := mormot.lib.sspi.CertFindCertificateInStore(
+        fStore, 0, 0, CERT_FIND_ANY, nil, fCertificate);
+      if fCertificate = nil then
+        RaiseLastError('AfterBind: CertFindCertificateInStore', ESChannel);
+      freeprov := false;
+      keyspec := 0;
+    until CryptAcquireCertificatePrivateKey(
+           fCertificate, flags, nil, prov, keyspec, freeprov)
+  else
+  begin
+    // a native certificate must have an accessible CAPI/CNG private key
+    freeprov := false;
+    keyspec := 0;
+    if not CryptAcquireCertificatePrivateKey(
+             fCertificate, flags, nil, prov, keyspec, freeprov) then
+      RaiseLastError('AfterBind: CertificateRaw private key', ESChannel);
+  end;
+  if freeprov then
+    if keyspec = CERT_NCRYPT_KEY_SPEC then
+      NCrypt.FreeSafe(prov)              // CNG API
+    else if CryptoApi.Available then
+      CryptoApi.ReleaseContext(prov, 0); // old API
+end;
+
+
+procedure TSChannelServerContext.AddClientCa(const Encoded: RawByteString);
+begin
+  if Encoded = '' then
+    raise ESChannel.Create('AfterBind: empty client CA certificate');
+  if not CertAddEncodedCertificateToStore(fClientRootStore,
+       X509_ASN_ENCODING or PKCS_7_ASN_ENCODING,
+       pointer(Encoded), length(Encoded), CERT_STORE_ADD_USE_EXISTING, nil) then
+    RaiseLastError('AfterBind: add client CA certificate', ESChannel);
+  inc(fClientCACount);
+end;
+
+procedure TSChannelServerContext.AddClientCa(Cert: pointer; const Origin: ShortString);
+begin
+  if not CertAddCertificateContextToStore(fClientRootStore,
+       Cert, CERT_STORE_ADD_USE_EXISTING, nil) then
+    RaiseLastError(Origin, ESChannel);
+  inc(fClientCACount);
+end;
+
+procedure TSChannelServerContext.LoadClientTrust(
+  const Context: TNetTlsContext);
+const
+  PEM_BEGIN = '-----BEGIN CERTIFICATE-----';
+  PEM_END   = '-----END CERTIFICATE-----';
+var
+  content, der: RawByteString;
+  pem: RawUtf8;
+  config: CERT_CHAIN_ENGINE_CONFIG;
+  store: TWinCertStore;
+  kind: TSystemCertificateStore;
+  i, first, last: PtrInt;
+begin
+  // nil chain engine means the normal Windows trust defaults, any explicit
+  // CA source below creates an immutable exclusive-root engine shared by all
+  // accepted connections; CryptoAPI chain engines support concurrent builds
+  if (Context.CACertificatesFile = '') and
+     (Context.CASystemStores = []) and
+     (Context.CACertificatesRaw = nil) then
+    exit;
+  fClientRootStore := CertOpenStore(PAnsiChar(CERT_STORE_PROV_MEMORY),
+    X509_ASN_ENCODING or PKCS_7_ASN_ENCODING, nil, 0, nil);
+  if fClientRootStore = nil then
+    RaiseLastError('AfterBind: client CA memory store', ESChannel);
+  fClientCACount := 0;
+  if Context.CACertificatesFile <> '' then
+  begin
+    content := StringFromFile(TFileName(Context.CACertificatesFile));
+    if content = '' then
+      raise ESChannel.CreateFmt('AfterBind: empty client CA file %s',
+        [Context.CACertificatesFile]);
+    first := PosEx(PEM_BEGIN, content);
+    if first = 0 then
+      AddClientCa(content) // expects a single DER X.509 certificate
+    else
+      repeat
+        last := PosEx(PEM_END, content, first + length(PEM_BEGIN));
+        if last = 0 then
+          raise ESChannel.CreateFmt('AfterBind: invalid PEM client CA file %s',
+            [Context.CACertificatesFile]);
+        pem := copy(content, first, last + length(PEM_END) - first);
+        der := WinCryptTextToBinary(pem);
+        if der = '' then
+          raise ESChannel.Create('AfterBind: error decoding PEM client CA');
+        AddClientCa(der);
+        first := PosEx(PEM_BEGIN, content, last + length(PEM_END));
+      until first = 0;
+  end
+  else if Context.CASystemStores <> [] then
+  begin
+    for kind := low(kind) to high(kind) do
+      if kind in Context.CASystemStores then
+      begin
+        store := TWinCertStore.Create(kind);
+        try
+          if store.Handle = nil then
+            RaiseLastError('AfterBind: open client CA system store', ESChannel);
+          while store.Next do
+            AddClientCa(store.Context, 'AfterBind: copy client CA system store');
+        finally
+          store.Free;
+        end;
+      end
+  end
+  else
+    for i := 0 to high(Context.CACertificatesRaw) do
+      if Context.CACertificatesRaw[i] <> nil then
+        AddClientCa(pointer(Context.CACertificatesRaw[i]),
+          'AfterBind: copy client supplied CACertificatesRaw');
+  if fClientCACount = 0 then
+    raise ESChannel.Create('AfterBind: no client CA certificate available');
+  FillCharFast(config, SizeOf(config), 0);
+  if OSVersion < wEight then
+    // Windows 7 / Server 2008 R2 structure ends before dwExclusiveFlags
+    config.cbSize := PtrUInt(@config.dwExclusiveFlags) - PtrUInt(@config)
+  else
+  begin
+    config.cbSize := SizeOf(config);
+    // Windows 8+ may also use a non-self-signed CA as the trust anchor
+    config.dwExclusiveFlags := CERT_CHAIN_EXCLUSIVE_ENABLE_CA_FLAG;
+  end;
+  config.hExclusiveRoot := fClientRootStore;
+  if not CertCreateCertificateChainEngine(config, fChainEngine) then
+    RaiseLastError('AfterBind: CertCreateCertificateChainEngine', ESChannel);
+end;
+
+procedure TSChannelServerContext.AcceptError(const msg: RawUtf8;
+  var context: TNetTlsContext);
+begin
+  context.LastError := msg;
+  raise ESChannel.CreateFmt('AfterAccept: %s', [msg]);
+end;
+
+procedure TSChannelServerContext.ValidateClientCertificate(Socket: TNetSocket;
+  var Context: TNetTlsContext; Ctxt: PSecHandle; CallAfter: boolean);
+var
+  res: cardinal;
+  peer: mormot.core.os.security.PCCERT_CONTEXT;
+  chain: PCERT_CHAIN_CONTEXT;
+  para: CERT_CHAIN_PARA;
+  policypara: CERT_CHAIN_POLICY_PARA;
+  policy: CERT_CHAIN_POLICY_STATUS;
+  ssl: SSL_EXTRA_CERT_CHAIN_POLICY_PARA;
+  usage: array[0..0] of PAnsiChar;
+  simple: PCERT_SIMPLE_CHAIN;
+  element: PCERT_CHAIN_ELEMENT;
+  info: TWinCertInfo;
+  callback: TNetTlsContext;
+  i, j: PtrInt;
+  wasok, accepted: boolean;
+begin
+  peer := nil;
+  chain := nil;
+  res := QueryContextAttributesW(Ctxt, SECPKG_ATTR_REMOTE_CERT_CONTEXT, @peer);
+  if res = SEC_E_NO_CREDENTIALS then
+    AcceptError('Missing required client certificate', Context);
+  if res <> SEC_E_OK then
+    CheckRes('AfterAccept: QueryContextAttributesW', res, Context);
+  if peer = nil then
+    AcceptError('Missing required client certificate', Context);
+  try
+    FillCharFast(para, SizeOf(para), 0);
+    para.cbSize := SizeOf(para);
+    usage[0] := szOID_PKIX_KP_CLIENT_AUTH;
+    para.RequestedUsage.dwType := USAGE_MATCH_TYPE_AND;
+    para.RequestedUsage.Usage.cUsageIdentifier := 1;
+    para.RequestedUsage.Usage.rgpszUsageIdentifier := @usage;
+    CheckBool('AfterAccept: CertGetCertificateChain',
+      CertGetCertificateChain(fChainEngine, peer, nil, peer^.hCertStore, para,
+      CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, nil, chain), Context);
+    FillCharFast(ssl, SizeOf(ssl), 0);
+    ssl.cbSize := SizeOf(ssl);
+    ssl.dwAuthType := AUTHTYPE_CLIENT;
+    FillCharFast(policypara, SizeOf(policypara), 0);
+    policypara.cbSize := SizeOf(policypara);
+    // match the SChannel client policy: check revocation when available, but
+    // do not fail solely because an issuer publishes no reachable CRL/OCSP
+    policypara.dwFlags := CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS;
+    policypara.pvExtraPolicyPara := @ssl;
+    FillCharFast(policy, SizeOf(policy), 0);
+    policy.cbSize := SizeOf(policy);
+    CheckBool('AfterAccept: CertVerifyCertificateChainPolicy',
+      CertVerifyCertificateChainPolicy(PAnsiChar(CERT_CHAIN_POLICY_SSL),
+        chain, policypara, policy), Context);
+    if policy.dwError <> 0 then
+      Context.LastError := GetErrorText(policy.dwError);
+    if (chain = nil) or
+       (chain^.cChain = 0) or
+       (chain^.rgpChain = nil) then
+      AcceptError('Windows returned an empty client certificate chain', Context);
+    if WinCertCtxtDecode(peer, info) then
+    begin
+      Context.PeerIssuer := info.IssuerName;
+      Context.PeerSubject := info.SubjectName;
+      if (Context.WithPeerInfo or
+          (policy.dwError <> 0)) and
+         Assigned(WinCertInfoToText) then
+        Context.PeerInfo := WinCertInfoToText(info);
+    end;
+    accepted := true;
+    if Assigned(Context.OnEachPeerVerify) then
+      // Windows supplies the selected chain after validation: report its
+      // elements deterministically from leaf to root, callback result
+      // overriding any Windows error, matching OpenSSL's verification path
+      for i := 0 to chain^.cChain - 1 do
+      if accepted then
+      begin
+        simple := chain^.rgpChain^[i];
+        if (simple = nil) or
+           (simple^.cElement = 0) or
+           (simple^.rgpElement = nil) then
+        begin
+          accepted := false;
+          Context.LastError :=
+            'Windows returned an invalid client certificate chain';
+          break;
+        end;
+        for j := 0 to PtrInt(simple^.cElement) - 1 do
+        begin
+          element := simple^.rgpElement^[j];
+          if (element = nil) or
+             (element^.pCertContext = nil) then
+          begin
+            accepted := false;
+            Context.LastError :=
+              'Windows returned an invalid client certificate element';
+            break;
+          end;
+          wasok := element^.TrustStatus.dwErrorStatus = 0;
+          if (policy.dwError <> 0) and
+             ((policy.lChainIndex < 0) or
+              (policy.lElementIndex < 0) or
+              ((policy.lChainIndex = i) and
+               (policy.lElementIndex = j))) then
+            wasok := false;
+          callback := Context; // transient, like OpenSSL server callbacks
+          ResetNetTlsContext(callback);
+          if WinCertCtxtDecode(element^.pCertContext, info) then
+          begin
+            callback.PeerIssuer := info.IssuerName;
+            callback.PeerSubject := info.SubjectName;
+            if (callback.WithPeerInfo or
+                (policy.dwError <> 0)) and
+               Assigned(WinCertInfoToText) then
+              callback.PeerInfo := WinCertInfoToText(info);
+          end;
+          callback.PeerCert := element^.pCertContext;
+          try
+            try
+              accepted := callback.OnEachPeerVerify(Socket, @callback,
+                wasok, Ctxt, element^.pCertContext);
+            except
+              accepted := false;
+            end;
+          finally
+            callback.PeerCert := nil;
+          end;
+          if not accepted then
+            break;
+        end;
+      end;
+    if not accepted then
+    begin
+      if Context.LastError = '' then
+        Context.LastError := 'client certificate rejected by OnEachPeerVerify';
+      raise ESChannel.Create('AfterAccept: client certificate callback rejected');
+    end;
+    if (policy.dwError <> 0) and
+       not Assigned(Context.OnEachPeerVerify) then
+      raise ESChannel.CreateFmt('AfterAccept: invalid client certificate (%s)',
+        [Context.LastError]);
+    if CallAfter and
+       Assigned(Context.OnAfterPeerValidate) then
+    begin
+      callback := Context; // keep callback state transient
+      callback.PeerCert := peer;
+      try
+        callback.OnAfterPeerValidate(Socket, @callback, Ctxt, peer);
+      finally
+        callback.PeerCert := nil;
+      end;
+    end;
+  finally
+    if chain <> nil then
+      CertFreeCertificateChain(chain);
+    CertFreeCertificateContext(peer); // returned by QueryContextAttributesW
+    Context.PeerCert := nil;
+  end;
+end;
+
+constructor TSChannelServerContext.Create(Socket: TNetSocket;
+  var Context: TNetTlsContext);
+var
+  flags: cardinal;
+begin
+  inherited Create;
+  if Context.ClientCertificateAuthentication and
+     (OSVersion < wSeven) then // no TLS 1.2 available before Windows Seven
+  begin
+    Context.LastError := 'SChannel mTLS requires Windows 7 or later';
+    raise ESChannel.CreateFmt('AfterBind: %s', [Context.LastError]);
+  end;
+  LoadCertificate(Socket, Context);
+  // keep both credential layouts and their referenced TLS_PARAMETERS stable
+  if Context.ClientCertificateAuthentication then
+    LoadClientTrust(Context);
+  flags := SCH_CRED_CACHE_ONLY_URL_RETRIEVAL_ON_CREATE; // no blocking OS calls
+  if Context.ClientCertificateAuthentication then
+    flags := flags or SCH_CRED_NO_SYSTEM_MAPPER;
+  CredInit(fParameters, Context, flags, @fCertificate, fClientRootStore);
+  CheckRes('AfterBind: AcquireCredentialsHandleW',
+    AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
+      nil, @fParameters, nil, nil, @fCred, nil), Context);
+  fCredAcquired := true;
+end;
+
+destructor TSChannelServerContext.Destroy;
+begin
+  // all accepted CtxtHandles have already been deleted by their owners
+  if fCredAcquired then
+    FreeCredentialsHandle(@fCred);
+  if fChainEngine <> nil then
+    CertFreeCertificateChainEngine(fChainEngine);
+  if fClientRootStore <> nil then
+    CertCloseStore(fClientRootStore, CERT_CLOSE_STORE_DEFAULT);
+  if fCertificate <> nil then
+    CertFreeCertificateContext(fCertificate);
+  if fStore <> nil then
+    CertCloseStore(fStore, CERT_CLOSE_STORE_DEFAULT);
+  inherited Destroy;
+end;
 
 
 { TSChannelNetTls }
 
-procedure TSChannelNetTls.ESChannelRaiseLastError(
-  const ctx: ShortString; res: cardinal);
-var
-  sys: integer;
-  msg: string;
+procedure TSChannelNetTls.ESChannelRaiseError(const ctx: ShortString;
+  res: cardinal);
 begin
-  sys := GetLastError;
-  msg := format('<%s>: %s returned %s, System Error %d [%s]',
-    [fServerAddressW, ctx, OsErrorShort(res), sys, GetErrorShort(sys)]);
-  //writeln(fSocket.Socket,' ',msg);
-  raise ESChannel.Create(msg);
+  raise ESChannel.CreateFmt('<%s>: %s returned %s',
+    [fServerAddressW, ctx, OsErrorShort(res)]);
 end;
 
-function TSChannelNetTls.CheckSEC_E_OK(
-  const ctx: ShortString; res: integer): cardinal;
+procedure TSChannelNetTls.CheckOK(const ctx: ShortString; res: integer);
 begin
-  fLastCheckSecError := res;
+  // SSPI does not use GetLastError but directly returns the error code
   if res <> SEC_E_OK then
-    ESChannelRaiseLastError(ctx, res);
-  result := res;
+    ESChannelRaiseError(ctx, res);
 end;
 
-function TSChannelNetTls.FreeAndCheckSocket(const ctx: ShortString;
-  res: integer; tofree: pointer): cardinal;
+procedure TSChannelNetTls.WaitRawRetry(const ctx: ShortString;
+  events: TNetEvents; var endtix: Int64; timeout: integer);
+var
+  tix: Int64;
 begin
-  //writeln(fSocket.Socket,' ',ctx,'=',res);
-  if tofree <> nil then
-    CheckSEC_E_OK(ctx, FreeContextBuffer(tofree)); // avoid leak id raised
-  if res = SOCKET_ERROR then
-    raise ESChannel.CreateFmt('%s: Socket Error %s',
-      [ctx, WinErrorShort(RawSocketErrNo)]);
-  if res = 0 then
-    raise ESChannel.CreateFmt('%s: Handshake aborted', [ctx]);
-  result := res;
+  tix := GetTickCount64;
+  if endtix = 0 then
+    endtix := tix + timeout // never loop forever
+  else if tix > endtix then
+    raise ESChannel.CreateFmt('%s timeout', [ctx]);
+  fSocket.WaitFor(100, events);
+end;
+
+function TSChannelNetTls.SendOutput: TNetResult;
+var
+  sent, err: integer;
+begin
+  result := nrOK;
+  while fOutputCount > 0 do
+  begin
+    sent := mormot.net.sock.Send(fSocket.Socket,
+      @PByteArray(fOutput)[fOutputPos], fOutputCount, MSG_NOSIGNAL);
+    if sent > 0 then
+    begin
+      inc(fOutputPos, sent);
+      dec(fOutputCount, sent);
+      continue; // another immediate send() is harmless
+    end;
+    if sent = 0 then
+    begin
+      result := nrClosed;
+      exit;
+    end;
+    result := NetLastError(NO_ERROR, @err);
+    if result = nrOK then
+      result := nrUnknownError;
+    exit; // especially nrRetry: no WaitFor() loop here
+  end;
+  fOutputPos := 0;
+end;
+
+function TSChannelNetTls.SendRawAll(const ctx: ShortString;
+  buf: PByte; len, timeout: integer): TNetResult;
+var
+  sent, err: integer;
+  endtix: Int64;
+begin
+  result := nrInvalidParameter;
+  if buf = nil then
+    exit;
+  endtix := 0;
+  while len > 0 do
+  begin
+    sent := mormot.net.sock.Send(fSocket.Socket, buf, len, MSG_NOSIGNAL);
+    if sent > 0 then
+    begin
+      inc(buf, sent);
+      dec(len, sent);
+      continue;
+    end;
+    result := nrClosed;
+    if sent = 0 then // graceful disconnection
+      exit;
+    result := NetLastError(NO_ERROR, @err);
+    case result of
+      nrRetry:
+        WaitRawRetry(ctx, [neWrite, neError], endtix, timeout); // asynch socket
+      nrClosed:
+        exit;
+    else
+      raise ESChannel.CreateFmt('%s: %s %s', [ctx, _NR[result], WinErrorShort(err)]);
+    end;
+  end;
+  result := nrOk;
+end;
+
+function TSChannelNetTls.RecvRaw(const ctx: ShortString;
+  buf: PByte; len: integer): integer;
+var
+  res: TNetResult;
+  err: integer;
+  endtix: Int64;
+begin
+  endtix := 0;
+  repeat
+    result := mormot.net.sock.recv(fSocket.Socket, buf, len, 0);
+    if result > 0 then
+      exit;
+    if result = 0 then
+      raise ESChannel.CreateFmt('%s: connection closed', [ctx]);
+    res := NetLastError(NO_ERROR, @err);
+    if res <> nrRetry then
+      raise ESChannel.CreateFmt('%s: %s %s', [ctx, _NR[res], WinErrorShort(err)]);
+    WaitRawRetry(ctx, [neRead, neError], endtix, 5000); // asynchronous socket
+  until false;
 end;
 
 procedure TSChannelNetTls.FinalizeCredCtxt;
 begin
-  DeleteSecurityContext(@fCtxt);
-  FreeCredentialsHandle(@fCred);
+  DeleteSecurityContext(@fCtxt); // should be called first
+  if not fAccept then // clients own their per-connection credential instance
+    FreeCredentialsHandle(@fCred);
+  fServerContext := nil;
+  fServerContextRef := nil;      // thread-safe shared sever-side credentials
   FillCharFast(fCtxt, SizeOf(fCtxt), 0);
   FillCharFast(fCred, SizeOf(fCred), 0);
 end;
 
 const
-  TLSRECMAXSIZE = 19000; // buffers for TSChannelNetTls.Receive/Send
+  // automatic adaptation of TSChannelNetTls.Receive/Send buffers size
+  TLS_IN_MIN  = 4096;
+  TLS_OUT_MIN = 2048;
+
+procedure EnsureLength(var buf: RawByteString; need, min, max: PtrInt);
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  cap: PtrInt;
+begin // reserve 25% more space up to max
+  cap := length(buf);
+  if need < cap then
+    exit;
+  need := MaxPtrInt(min, need + (need shr 2));
+  if (max <> 0) and // max = 0 means no cap (void branch when inlined)
+     (need > max) then
+    if max <= cap then
+      exit
+    else
+      need := max;
+  SetLength(buf, need);
+end;
 
 type
   THandshakeBuf = record
@@ -2110,120 +2827,86 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
-procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS, DisableTls13: boolean;
-  dwFlags: cardinal; paServCred: PPCCERT_CONTEXT);
+procedure HandshakeBufFree(var buf: THandshakeBuf);
+var
+  i: integer;
+  b: PSecBuffer;
 begin
-  FillCharFast(cred, SizeOf(cred), 0);
-  if SChannelEnableTls13 and // should be explicitly enabled
-     ((OSVersion in [wEleven, wEleven_64]) or
-      (OSVersion >= wServer2022_64)) and
-     not DisableTls13 then
-  // TLS 1.3 is officially supported starting in Windows 11 and Server 2022.
-  // Enabling TLS 1.3 on earlier versions of Windows is possible through the
-  // registry, but is explictly documented as unsafe by Microsoft.
-  // https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
+  b := @buf.buf[2];
+  for i := 2 to 4 do
   begin
-    // require new SCH_CREDENTIALS structure in order to enable TLS 1.3
-    cred.New.dwVersion := SCH_CREDENTIALS_VERSION;
-    if not AllowDeprecatedTLS then
+    if b^.pvBuffer <> nil then
     begin
-      dwFlags := dwFlags or SCH_USE_STRONG_CRYPTO;
-      cred.New.cTlsParameters := 1;
-      cred.New.pTlsParameters := @cred.Tls;
-      cred.Tls.grbitDisabledProtocols := SP_PROT_TLS_UNSAFE;
+      FreeContextBuffer(b^.pvBuffer); // no exception here
+      b^.pvBuffer := nil;
     end;
-    cred.New.dwFlags := dwFlags;
-    if paServCred <> nil then
-    begin
-      cred.New.cCreds := 1;
-      cred.New.paCred := paServCred;
-    end;
-  end
-  else
-  begin
-    // legacy SCHANNEL_CRED structure - deprecated since Windows 10, 1809
-    cred.Old.dwVersion := SCHANNEL_CRED_VERSION;
-    cred.Old.dwFlags := dwFlags;
-    cred.Old.grbitEnabledProtocols := SP_PROT_TLS_SAFE;
-    if (OSVersion < wSeven) or // XP and Vista only support TLS 1.0 anyway :(
-       AllowDeprecatedTls then
-      cred.Old.grbitEnabledProtocols := cred.Old.grbitEnabledProtocols or
-        SP_PROT_TLS1_0 or SP_PROT_TLS1_1;
-    if paServCred <> nil then
-    begin
-      cred.Old.cCreds := 1;
-      cred.Old.paCred := paServCred;
-    end;
+    inc(b);
   end;
+end;
+
+procedure TSChannelNetTls.ResetState(Socket: TNetSocket);
+begin
+  fSocket := Socket;
+  fSessionClosed := false;
+  fAcceptFirst := true;
+  fSizeMaxRecord := 0;
+  fCipherName := '';
+  fInputCount := 0;
+  fOutputPos := 0;
+  fOutputCount := 0;
+  fOutputPlainCount := 0;
+  fDataPos := 0;
+  fDataCount := 0;
+  fSspiSafe.Init; // on Windows, just reset flags to 0
 end;
 
 procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
   var Context: TNetTlsContext; const ServerAddress: RawUtf8);
 var
   cred: TSChannelCred;
-  buf: THandshakeBuf;
-  res, f, trial: cardinal;
+  b: THandshakeBuf;
+  res, f: cardinal;
 begin
   // reset output information
   ResetNetTlsContext(Context);
   // method called once to attach the socket from the client side
-  fSocket := Socket;
+  ResetState(Socket);
   fServerAddressW := SynUnicode(ServerAddress);
-  SetLength(fData, TLSRECMAXSIZE);
   fAccept := false;
-  trial := 0;
-  while true do
-    try
-      // prepare execution context
-      if Context.IgnoreCertificateErrors then
-        f := SCH_CRED_MANUAL_CRED_VALIDATION or
-             SCH_CRED_NO_DEFAULT_CREDS
-      else
-        f := SCH_CRED_REVOCATION_CHECK_CHAIN or
-             SCH_CRED_IGNORE_REVOCATION_OFFLINE;
-      CredInit(cred, Context.AllowDeprecatedTLS, Context.DisableTls13, f, nil);
-      CheckSEC_E_OK('AcquireCredentialsHandleW', AcquireCredentialsHandleW(
-        nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
-      fDataPos := 0;
-      fDataCount := 0;
-      fFlags := ISC_REQ_FLAGS;
-      if Context.IgnoreCertificateErrors then
-        // prevent SEC_E_UNTRUSTED_ROOT result in HandshakeLoop
-        fFlags := fFlags or
-          ISC_REQ_MANUAL_CRED_VALIDATION or // no WinVerifyTrust() call
-          ISC_REQ_USE_SUPPLIED_CREDS; // send no client certificate to the server
-      // initiate a ClientHello TLS message and a new fCtxt
-      HandshakeBufInit(buf);
-      res := InitializeSecurityContextW(
-        @fCred, nil, pointer(fServerAddressW), fFlags, 0, 0,
-        nil, 0, @fCtxt, @buf.output, f, nil);
-      if res <> SEC_I_CONTINUE_NEEDED then
-        ESChannelRaiseLastError('InitializeSecurityContextW', res);
-      if (buf.buf[2].cbBuffer = 0) or // SECBUFFER_TOKEN
-         (buf.buf[2].pvBuffer = nil) then
-        raise ESChannel.CreateFmt('Void Hello answer to %s', [ServerAddress]);
-      FreeAndCheckSocket('send', mormot.net.sock.Send(
-        fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0),
-        buf.buf[2].pvBuffer);
-      // make TLS handshake and prepare for process
-      HandshakeLoop;
-      break; // we are connected
-    except
-      // circumvent Windows 7/8 random bug identified on TLS 1.2 and
-      // TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 TLS_DHE_RSA_WITH_AES_256_GCM_SHA384
-      // https://github.com/Waffle/waffle/pull/128#issuecomment-163342222
-      on E: ESChannel do
-        if (trial = 0) and
-           ((fLastCheckSecError = SEC_E_BUFFER_TOO_SMALL) or
-            (fLastCheckSecError = SEC_E_MESSAGE_ALTERED)) then
-        begin
-          // just retry once
-          FinalizeCredCtxt;
-          inc(trial);
-        end
-        else
-          raise;
-    end;
+  // prepare execution context
+  f := SCH_CRED_NO_DEFAULT_CREDS;
+  if Context.IgnoreCertificateErrors then
+    f := f or SCH_CRED_MANUAL_CRED_VALIDATION
+  else
+    f := f or SCH_CRED_REVOCATION_CHECK_CHAIN or
+              SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+  CredInit(cred, Context, f, nil, nil);
+  CheckOK('AfterConnection AcquireCredentialsHandleW',
+    AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_OUTBOUND,
+      nil, @cred, nil, nil, @fCred, nil));
+  fFlags := ISC_REQ_FLAGS;
+  // initiate a ClientHello TLS message and a new fCtxt
+  HandshakeBufInit(b);
+  try
+    res := InitializeSecurityContextW(
+      @fCred, nil, pointer(fServerAddressW), fFlags, 0, 0,
+      nil, 0, @fCtxt, @b.output, f, nil);
+    res := CompleteHandshakeToken(
+      'AfterConnection CompleteAuthToken', res, @b.output);
+    if res <> SEC_I_CONTINUE_NEEDED then
+      ESChannelRaiseError('InitializeSecurityContextW', res);
+    if (b.buf[2].cbBuffer = 0) or // SECBUFFER_TOKEN
+       (b.buf[2].pvBuffer = nil) then
+      raise ESChannel.CreateFmt(
+        'AfterConnection: void Hello answer for %s', [ServerAddress]);
+    if SendRawAll('AfterConnection send',
+         b.buf[2].pvBuffer, b.buf[2].cbBuffer, {timeoutms=}5000) <> nrOk then
+      raise ESChannel.Create('AfterConnection: connection closed');
+  finally
+    HandshakeBufFree(b);
+  end;
+  // make initial TLS handshake and prepare for process
+  HandshakeLoop;
   Context.CipherName := GetCipherName;
   if TlsCertInfo(fCtxt, fPeerInfo) then
   begin
@@ -2238,85 +2921,60 @@ end;
 
 procedure TSChannelNetTls.AfterBind(Socket: TNetSocket;
   var Context: TNetTlsContext; const ServerAddress: RawUtf8);
-var
-  pfx: RawByteString;
-  blob: TCryptDataBlob;
-  pass: SynUnicode;
-  flags: integer;
-  keyspec: cardinal;
-  prov: HCRYPTPROV;
-  freeprov: BOOL;
 begin
-  // method called once the socket has been bound on server side
-  if ServerAddress <> '' then
-    fServerAddressW := SynUnicode(ServerAddress); // for exceptions
-  pfx := Context.CertificateBin;
-  if (pfx = '') and
-     (Context.CertificateFile <> '') then
-    // try to load from .PFX file
-    pfx := StringFromFile(TFileName(Context.CertificateFile));
-  if pfx = '' then
-    // fallback to first certificate and private key from personal Windows store
-    fAcceptCertStore := CertOpenSystemStoreW(nil, 'MY')
-  else
-  begin
-    // expecting e.g. a Let's Encrypt certificate, converted to PFX:
-    //   openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
-    // or using mormot.crypt.openssl:
-    //   c := Cert('x509-rs256');
-    //   c.Generate([cuTlsServer], 'toto.com', nil, 3650);
-    //   FileFromString(c.Save('3des=pass', ccfBinary), WorkDir + 'privkeycert.pfx');
-    blob.cbData := Length(pfx);
-    blob.pbData := pointer(pfx);
-    pass := SynUnicode(Context.PrivatePassword);
-    flags := PKCS12_INCLUDE_EXTENDED_PROPERTIES;
-    if OSVersion < wVista then
-      flags := 0;
-    fAcceptCertStore := PFXImportCertStore(@blob, pointer(pass), flags);
-    if pass <> '' then
-      FillCharFast(pointer(pass)^, length(pass) * 2, 0); // anti forensic
-    if fAcceptCertStore = nil then
-      ESChannelRaiseLastError('AfterBind: PFXImportCertStore', SEC_E_CERT_UNKNOWN);
-  end;
-  // find first certificate in store with private key
-  repeat
-    fAcceptCert := mormot.lib.sspi.CertFindCertificateInStore(
-      fAcceptCertStore, 0, 0, CERT_FIND_ANY, nil, fAcceptCert);
-    if fAcceptCert = nil then
-      raise ESChannel.Create('AfterBind: no Certificate available');
-  until CryptAcquireCertificatePrivateKey(
-         fAcceptCert, 0, nil, prov, keyspec, freeprov);
-  if freeprov and
-     CryptoApi.Available then
-    CryptoApi.ReleaseContext(prov, 0);
-  // this global certificate and its private key will be used by AfterAccept()
-  Context.AcceptCert := fAcceptCert;
+  Context.AcceptCert := nil;
+  fServerAddressW := SynUnicode(ServerAddress);
+  fServerContext := TSChannelServerContext.Create(Socket, Context);
+  fServerContextRef := fServerContext; // initiate ref-counting lifetime
+  // this TSChannelServerContext instance will be shared for all connections
+  Context.AcceptCert := fServerContext;
 end;
 
 procedure TSChannelNetTls.AfterAccept(Socket: TNetSocket;
   const BoundContext: TNetTlsContext; LastError, CipherName: PRawUtf8);
 var
-  cred: TSChannelCred;
+  ctx: TObject;
 begin
   // prepare execution context
-  fSocket := Socket;
+  ResetState(Socket);
   fAccept := true;
-  // prepare TLS connection properties from AfterBind() global certificate
-  if BoundContext.AcceptCert = nil then
+  // reuse the inbound credential; only fCtxt belongs to this connection
+  ctx := BoundContext.AcceptCert;
+  if ctx = nil then
     raise ESChannel.Create('AfterAccept: missing AfterBind');
-  CredInit(cred, BoundContext.AllowDeprecatedTls, BoundContext.DisableTls13,
-    0, @BoundContext.AcceptCert);
-  CheckSEC_E_OK('AcquireCredentialsHandleW',
-    AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
-      nil, @cred, nil, nil, @fCred, nil));
-  fDataPos := 0;
-  fDataCount := 0;
+  fServerContext := ctx as TSChannelServerContext;
+  fServerContextRef := fServerContext; // increment RefCount
   fFlags := ASC_REQ_FLAGS;
-  // make TLS handshake and prepare for process
-  SetLength(fData, TLSRECMAXSIZE);
-  HandshakeLoop;
-  if CipherName <> nil then
-    CipherName^ := GetCipherName;
+  if not BoundContext.ClientCertificateAuthentication then
+  begin
+    // preserve the lightweight historical path for ordinary TLS/HTTPS
+    HandshakeLoop;
+    if CipherName <> nil then
+      CipherName^ := GetCipherName;
+    exit;
+  end;
+  // mTLS validation uses a private connection copy of the server context
+  fAcceptContext := BoundContext; // may be reused during SEC_I_RENEGOTIATE
+  ResetNetTlsContext(fAcceptContext);
+  fFlags := fFlags or ASC_REQ_MUTUAL_AUTH;
+  try
+    HandshakeLoop;
+    fAcceptContext.CipherName := GetCipherName;
+    fServerContext.ValidateClientCertificate(
+      Socket, fAcceptContext, @fCtxt, {callafter=}true);
+    if fAcceptContext.ClientVerifyOnce then
+      // keep the authenticated identity without requesting a replacement
+      // certificate during later renegotiation/post-handshake processing
+      fFlags := fFlags and not ASC_REQ_MUTUAL_AUTH;
+  finally
+    // preserve the INetTls output-pointer contract on validation failures
+    if (LastError <> nil) and
+       (fAcceptContext.LastError <> '') then
+      LastError^ := fAcceptContext.LastError;
+    if (CipherName <> nil) and
+       (fAcceptContext.CipherName <> '') then
+      CipherName^ := fAcceptContext.CipherName;
+  end;
 end;
 
 function TSChannelNetTls.GetCipherName: RawUtf8;
@@ -2346,40 +3004,46 @@ var
   b: THandshakeBuf;
   LInCtxPtr: PSecHandle;
 begin
-  //writeln(fSocket.Socket,' Handshake STEP ', len);
   HandshakeBufInit(b);
-  b.buf[0].pvBuffer := buf; // SECBUFFER_TOKEN
-  b.buf[0].cbBuffer := len;
-  f := 0;
-  if fAccept then // server side
-  begin
-    if (fCtxt.dwLower = 0) and
-       (fCtxt.dwUpper = 0) then
-      LInCtxPtr := nil
-    else
-      LInCtxPtr := @fCtxt;
-    result := AcceptSecurityContext(
-      @fCred, LInCtxPtr, @b.input, fFlags, 0, @fCtxt, @b.output, f, nil);
-  end
-  else // client side
-    result := InitializeSecurityContextW(
-      @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
-      @b.input, 0, nil, @b.output, f, nil);
-  //writeln(fSocket.Socket,' ',SspiResToText(result),' tosend=',b.buf[2].cbBuffer);
-  if (result = SEC_E_OK) or
-     (result = SEC_I_CONTINUE_NEEDED) or
-     ((f and ISC_REQ_EXTENDED_ERROR) <> 0) then
-    if (b.buf[2].cbBuffer <> 0) and
-       (b.buf[2].pvBuffer <> nil) then
-      // need to send back something to the server
-      FreeAndCheckSocket('send', mormot.net.sock.Send(
-        fSocket.Socket, b.buf[2].pvBuffer, b.buf[2].cbBuffer, 0),
-        b.buf[2].pvBuffer);
+  try
+    // initialize the proper security context
+    b.buf[0].pvBuffer := buf; // SECBUFFER_TOKEN
+    b.buf[0].cbBuffer := len;
+    f := 0;
+    if fAccept then // server side
+    begin
+      if fAcceptFirst then
+        LInCtxPtr := nil
+      else
+        LInCtxPtr := @fCtxt;
+      result := AcceptSecurityContext(@fServerContext.fCred, LInCtxPtr,
+        @b.input, fFlags, 0, @fCtxt, @b.output, f, nil);
+    end
+    else // client side
+      result := InitializeSecurityContextW(
+        @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
+        @b.input, 0, @fCtxt, @b.output, f, nil);
+    // SSPI may ask the caller to finalize the generated token
+    result := CompleteHandshakeToken(
+      'HandshakeStep CompleteAuthToken', result, @b.output);
+    if fAccept and
+       fAcceptFirst and
+       ((result = SEC_E_OK) or
+        (result = SEC_I_CONTINUE_NEEDED)) then
+      fAcceptFirst := false;
+    // An output token may be generated even together with SEC_E_OK
+    if (b.buf[2].pvBuffer <> nil) and
+       (b.buf[2].cbBuffer <> 0) then
+      if SendRawAll('HandshakeStep send',
+           b.buf[2].pvBuffer, b.buf[2].cbBuffer, {timeoutms=}5000) <> nrOk then
+        raise ESChannel.Create('HandshakeStep: connection closed');
+  finally
+    HandshakeBufFree(b);
+  end;
   if (b.buf[1].BufferType = SECBUFFER_EXTRA) and
      (b.buf[1].cbBuffer <> 0) then
   begin
     // reuse pending bytes - avoid unexpected SEC_E_INVALID_TOKEN
-    //writeln(fSocket.Socket,' SECBUFFER_EXTRA=',b.buf[1].cbBuffer,'/',len);
     MoveFast(buf[cardinal(len) - b.buf[1].cbBuffer], buf[0], b.buf[1].cbBuffer);
     len := b.buf[1].cbBuffer;
   end
@@ -2387,94 +3051,139 @@ begin
     len := 0;
 end;
 
-procedure TSChannelNetTls.HandshakeLoop;
+procedure TSChannelNetTls.HandshakeLoop(NeedRecv: boolean);
 var
   res: cardinal;
 begin
-  //writeln(fSocket.Socket,' Handshake IN');
+  // NeedRecv=true for initial handshake - wait for the peer before ISC/ASC
+  // NeedRecv=false for SEC_I_RENEGOTIATE/post-handshake processing
   repeat
-    inc(fDataCount, FreeAndCheckSocket('recv',
-      recv(fSocket.Socket,
-        @PByteArray(fData)[fDataCount], length(fData) - fDataCount, 0), nil));
-    res := HandshakeStep(pointer(fData), fDataCount);
-    if res = SEC_I_INCOMPLETE_CREDENTIALS then
-      // check https://stackoverflow.com/a/47479968/458259
-      // run twice to let the handshake pass
-      res := HandshakeStep(pointer(fData), fDataCount);
+    if NeedRecv then
+    begin
+      EnsureLength(fInput, fInputCount, TLS_IN_MIN, 0);
+      inc(fInputCount, RecvRaw('recv', @PByteArray(fInput)[fInputCount],
+                               length(fInput) - fInputCount));
+    end;
+    res := HandshakeStep(pointer(fInput), fInputCount);
+    if (res = SEC_I_INCOMPLETE_CREDENTIALS) and
+       (not fAccept) and
+       ((fFlags and ISC_REQ_USE_SUPPLIED_CREDS) = 0) then
+    begin
+      // Server requested a client certificate: since we don't supply one here,
+      // tell SChannel to continue without automatically selected credentials
+      fFlags := fFlags or ISC_REQ_USE_SUPPLIED_CREDS;
+      res := HandshakeStep(pointer(fInput), fInputCount);
+    end;
+    case res of
+      SEC_E_INCOMPLETE_MESSAGE:
+        // Keep existing bytes and append more TCP data
+        NeedRecv := true;
+      SEC_I_CONTINUE_NEEDED:
+        // SECBUFFER_EXTRA may already contain the next handshake message -
+        // consume it immediately instead of blocking in recv()
+        NeedRecv := fInputCount = 0;
+    else
+      NeedRecv := false;
+    end;
   until (res <> SEC_I_CONTINUE_NEEDED) and
         (res <> SEC_E_INCOMPLETE_MESSAGE);
-  CheckSEC_E_OK('HandshakeStep', res);
-  // note: fDataCount trailing content may come from SECBUFFER_EXTRA bytes
-  fCipherName := ''; // will be retrieved if needed
-  if fInputSize = 0 then
-  begin
-    // retrieve the TLS field sizes during first handshake
-    CheckSEC_E_OK('QueryContextAttributesW',
-      QueryContextAttributesW(@fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
-    fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
-    if (fInputSize = 0) or
-       (fInputSize > TLSRECMAXSIZE) then
-      raise ESChannel.CreateFmt('InputSize=%d>%d', [fInputSize, TLSRECMAXSIZE]);
-    SetLength(fInput, fInputSize);
-    fInputCount := 0;
-  end;
-  //writeln(fSocket.Socket,' Handshake OUT inputsize=',fInputSize);
+  // fInputCount is intentionally NOT reset here
+  CheckOK('HandshakeStep', res);
+  // On SEC_E_OK, SChannel may return SECBUFFER_EXTRA containing
+  // application records already received together with the final
+  // handshake message. Receive() must decrypt those bytes first.
+  fCipherName := '';
+  CheckOK('QueryContextAttributesW',
+    QueryContextAttributesW(
+      @fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
+  fSizeMaxRecord := fSizes.cbHeader + fSizes.cbMaximumMessage +  fSizes.cbTrailer;
+  if fSizeMaxRecord <= 0 then
+    raise ESChannel.CreateFmt('Invalid TLS record size %d', [fSizeMaxRecord]);
 end;
 
-destructor TSChannelNetTls.Destroy;
+function TSChannelNetTls.CompleteHandshakeToken(const ctx: ShortString;
+  res: cardinal; output: PSecBufferDesc): cardinal;
+begin
+  result := res;
+  case res of
+    SEC_I_COMPLETE_NEEDED:
+      begin
+        CheckOK(ctx, CompleteAuthToken(@fCtxt, output));
+        result := SEC_E_OK;
+      end;
+    SEC_I_COMPLETE_AND_CONTINUE:
+      begin
+        CheckOK(ctx, CompleteAuthToken(@fCtxt, output));
+        result := SEC_I_CONTINUE_NEEDED;
+      end;
+  end;
+end;
+
+procedure TSChannelNetTls.CleanShutdown;
 var
   desc: TSecBufferDesc;
   buf: TSecBuffer;
-  dt, f, res: cardinal;
+  dt, f: cardinal;
 begin
   try
-    if {%H-}PtrInt(fSocket.Socket) > 0 then
+    // flush pending EncryptMessage() pending buffer
+    if fOutputCount <> 0 then
+      if SendOutput <> nrOK then
+        exit; // can't preserve TLS record ordering: just close the TCP socket
+    // Generate the TLS close_notify alert
+    desc.ulVersion := SECBUFFER_VERSION;
+    desc.cBuffers := 1;
+    desc.pBuffers := @buf;
+    dt := SCHANNEL_SHUTDOWN;
+    buf.cbBuffer := SizeOf(dt);
+    buf.BufferType := SECBUFFER_TOKEN;
+    buf.pvBuffer := @dt;
+    if ApplyControlToken(@fCtxt, @desc) = SEC_E_OK then
     begin
-      // notify the other end with proper TLS shutdown frames
-      desc.ulVersion := SECBUFFER_VERSION;
-      desc.cBuffers := 1;
-      desc.pBuffers := @buf;
-      buf.cbBuffer := 4;
+      buf.cbBuffer := 0;
       buf.BufferType := SECBUFFER_TOKEN;
-      dt := SCHANNEL_SHUTDOWN;
-      buf.pvBuffer := @dt;
-      if ApplyControlToken(@fCtxt, @desc) = SEC_E_OK then
-      begin
-        buf.cbBuffer := 0;
-        buf.BufferType := SECBUFFER_TOKEN;
-        buf.pvBuffer := nil;
-        if fAccept then
-          res := AcceptSecurityContext(
-            @fCred, @fCtxt, nil, fFlags, 0, nil, @desc, f, nil)
-        else
-          res := InitializeSecurityContextW(
-            @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
-            nil, 0, @fCtxt, @desc, f, nil);
-        if res = SEC_E_OK then
-        begin
-          mormot.net.sock.Send(fSocket.Socket, buf.pvBuffer, buf.cbBuffer, 0);
-          FreeContextBuffer(buf.pvBuffer);
-        end;
+      buf.pvBuffer := nil;
+      f := 0;
+      if fAccept then
+        AcceptSecurityContext(@fServerContext.fCred, @fCtxt, nil, fFlags, 0,
+          @fCtxt, @desc, f, nil)
+      else
+        InitializeSecurityContextW(@fCred, @fCtxt,
+          pointer(fServerAddressW), fFlags, 0, 0, nil, 0, @fCtxt, @desc, f, nil);
+      // best effort: any generated token is worth sending even if
+      // SChannel reports an informational/final shutdown status
+      if buf.pvBuffer <> nil then
+      try
+        SendRawAll('shutdown', buf.pvBuffer, buf.cbBuffer, {timeoutms=}500);
+      finally
+        FreeContextBuffer(buf.pvBuffer);
       end;
+      // no CheckOK(res): shutdown from a destructor is best effort
     end;
-    // finalize TLS context for this connection
-    FinalizeCredCtxt;
-  finally
-    // release AfterBind() certificates information
-    if fAcceptCert <> nil then
-      CertFreeCertificateContext(fAcceptCert);
-    if fAcceptCertStore <> nil then
-      CertCloseStore(fAcceptCertStore, CERT_CLOSE_STORE_DEFAULT);
-    inherited Destroy;
+  except
+    // absorb any failed close_notify
   end;
 end;
 
+destructor TSChannelNetTls.Destroy;
+begin
+  // ensure shutdown robustness
+  if {%H-}PtrInt(fSocket.Socket) > 0 then
+    CleanShutdown;
+  // finalize TLS context for this connection
+  FinalizeCredCtxt;
+  fSspiSafe.Done; // do nothing on Windows - for API clarity
+  inherited Destroy;
+end; // will finalize fServerContextRef field to decrement its RefCount
+
 function TSChannelNetTls.ReceivePending: integer;
 begin
-  if fSessionClosed then
+  if fDataCount <> 0 then
+    result := fDataCount
+  else if fSessionClosed then
     result := -1
   else
-    result := fDataCount;
+    result := 0;
 end;
 
 function TSChannelNetTls.Receive(Buffer: pointer; var Length: integer): TNetResult;
@@ -2482,7 +3191,8 @@ var
   desc: TSecBufferDesc;
   buf: array[0..3] of TSecBuffer;
   res: cardinal;
-  read, i, newlen: integer;
+  read: integer;
+  needrecv: boolean;
 
   function DecryptInput: cardinal;
   var
@@ -2500,7 +3210,36 @@ var
     buf[3].cbBuffer := 0;
     buf[3].BufferType := SECBUFFER_EMPTY;
     buf[3].pvBuffer := nil;
+    fSspiSafe.Lock; // protect with concurrent Send() - paranoid
     result := DecryptMessage(@fCtxt, @desc, 0, qop);
+    if result <> SEC_I_RENEGOTIATE then
+      fSspiSafe.UnLock; // delayed unlock until handshake is done
+  end;
+
+  procedure ProcessBuffers;
+  var
+    i: integer;
+    b: PSecBuffer;
+  begin
+    fInputCount := 0;
+    b := @buf[1]; // buf[0] = SECBUFFER_DATA input
+    for i := 1 to 3 do
+    begin
+      case b^.BufferType of
+        SECBUFFER_DATA:
+          begin
+            EnsureLength(fData, fDataCount + integer(b^.cbBuffer), TLS_OUT_MIN, 0);
+            MoveFast(b^.pvBuffer^, PByteArray(fData)[fDataCount], b^.cbBuffer);
+            inc(fDataCount, b^.cbBuffer);
+          end;
+        SECBUFFER_EXTRA:
+          begin
+            MoveFast(b^.pvBuffer^, pointer(fInput)^, b^.cbBuffer);
+            fInputCount := b^.cbBuffer;
+          end;
+      end;
+      inc(b);
+    end;
   end;
 
 begin
@@ -2510,70 +3249,99 @@ begin
     result := nrClosed;
     exit;
   end;
+  result := nrFatalError; // default to error on exit
   while fDataCount = 0 do
   try
     fDataPos := 0;
     desc.ulVersion := SECBUFFER_VERSION;
     desc.cBuffers := 4;
     desc.pBuffers := @buf[0];
+    // There may already be encrypted input left by the handshake,
+    // or SECBUFFER_EXTRA left by a previous DecryptMessage()
+    needrecv := fInputCount = 0;
     repeat
-      read := recv(fSocket.Socket,
-                @PByteArray(fInput)[fInputCount], fInputSize - fInputCount, 0);
-      if read <= 0 then
+      if needrecv then
       begin
-        if read = 0 then
-          result := nrClosed
-        else
+        EnsureLength(fInput, fInputCount, TLS_IN_MIN, fSizeMaxRecord);
+        read := recv(fSocket.Socket, @PByteArray(fInput)[fInputCount],
+                  system.length(fInput) - fInputCount, 0);
+        if read <= 0 then
         begin
-          result := NetLastError; // may be nrRetry for WSATRY_AGAIN
-          if result = nrOK then
-            result := nrUnknownError;
+          if read = 0 then
+            result := nrClosed
+          else
+          begin
+            result := NetLastError; // may be nrRetry for WSATRY_AGAIN
+            if result = nrOK then
+              result := nrUnknownError;
+          end;
+          exit;
         end;
-        exit;
+        inc(fInputCount, read);
       end;
-      inc(fInputCount, read);
       res := DecryptInput;
-    until res <> SEC_E_INCOMPLETE_MESSAGE;
+      if res = SEC_E_INCOMPLETE_MESSAGE then
+      begin
+        if (buf[1].BufferType = SECBUFFER_MISSING) and
+           (buf[1].cbBuffer <> 0) then
+          EnsureLength(fInput, fSizeMaxRecord, TLS_IN_MIN, fSizeMaxRecord);
+        needrecv := true;
+      end
+      else
+        needrecv := false;
+    until not needrecv;
     repeat
-//if res <> SEC_E_OK then writeln(fSocket.Socket,' res=',SspiResToText(res));
       case res of
-        SEC_I_RENEGOTIATE:
-          ; // appears with TLS 1.3
-        SEC_I_CONTEXT_EXPIRED:
-          fSessionClosed := true;
+        SEC_E_OK:
+          // nominal case
+          ProcessBuffers;
         SEC_E_INCOMPLETE_MESSAGE:
+          // will call back Receive() again with new data from the socket
           break;
-        else
-          CheckSEC_E_OK('DecryptInput', res);
+        SEC_I_RENEGOTIATE: // within fSspiSafe.Lock
+          try
+            // TLS 1.3 uses SEC_I_RENEGOTIATE for post-handshake messages
+            ProcessBuffers;
+            if fOutputCount <> 0 then
+              // there is some pending output data from Send(): would require
+              // more state logic for little gain so is not supported yet
+              exit; // return nrFatalError
+            HandshakeLoop({NeedRecv=}false);
+            if fAccept and
+               ((fFlags and ASC_REQ_MUTUAL_AUTH) <> 0) then
+            begin
+              ResetNetTlsContext(fAcceptContext); // new validation round
+              fAcceptContext.CipherName := GetCipherName;
+              fServerContext.ValidateClientCertificate(
+                fSocket, fAcceptContext, @fCtxt, {CallAfter=}false);
+            end;
+          finally
+            fSspiSafe.UnLock; // Lock was done in DecryptInput
+          end;
+        SEC_I_CONTEXT_EXPIRED:
+          begin
+            fSessionClosed := true;
+            ProcessBuffers;
+            // close_notify terminated the TLS input stream
+            fInputCount := 0;
+            if fDataCount = 0 then
+            begin
+              Length := 0;
+              result := nrClosed;
+              exit;
+            end;
+            break;
+          end;
+      else
+        ESChannelRaiseError('Receive: DecryptInput', res);
       end;
-      fInputCount := 0;
-      for i := 1 to 3 do // i=0 for SECBUFFER_DATA input
-        case buf[i].BufferType of
-          SECBUFFER_DATA:
-            begin
-              newlen := fDataCount + integer(buf[i].cbBuffer);
-              if newlen > system.Length(fData) then
-                SetLength(fData, newlen);
-              MoveFast(buf[i].pvBuffer^, PByteArray(fData)[fDataCount], buf[i].cbBuffer);
-              inc(fDataCount, buf[i].cbBuffer);
-            end;
-          SECBUFFER_EXTRA:
-            begin
-              MoveFast(buf[i].pvBuffer^, pointer(fInput)^, buf[i].cbBuffer);
-              fInputCount := buf[i].cbBuffer;
-            end;
-        end;
-      if res = SEC_I_RENEGOTIATE then
-// https://learn.microsoft.com/en-us/windows/win32/secauthn/decryptmessage--schannel#remarks
-        HandshakeStep(pointer(fInput), fInputCount);
       if fInputCount = 0 then
         break;
       res := DecryptInput;
     until false;
   except
     // catch any socket/SChannel exception for the caller to shutdown the socket
-    result := nrFatalError;
-    exit;
+    exit; // return nrFatalError
   end;
   read := fDataCount;
   if Length < read then
@@ -2589,61 +3357,90 @@ function TSChannelNetTls.Send(Buffer: pointer; var Length: integer): TNetResult;
 var
   desc: TSecBufferDesc;
   buf: array[0..3] of TSecBuffer;
-  sent, s, len, trailer, pending, templen: cardinal;
-  temp: array[0..TLSRECMAXSIZE] of byte;
+  plain, trailer, encrypted: integer;
 begin
-  result := nrFatalError;
-  desc.ulVersion := SECBUFFER_VERSION;
-  desc.cBuffers := 4;
-  desc.pBuffers := @buf[0];
-  pending := Length;
-  while pending > 0 do
+  plain := Length;
+  Length := 0; // nothing consumed unless we explicitly return it below
+  if fSessionClosed then
   begin
-    templen := pending;
-    if templen > fSizes.cbMaximumMessage then
-      templen := fSizes.cbMaximumMessage;
-    MoveFast(Buffer^, temp[fSizes.cbHeader], templen);
-    inc(PByte(Buffer), templen);
-    dec(pending, templen);
-    trailer := fSizes.cbHeader + templen;
+    result := nrClosed;
+    exit;
+  end;
+  if plain <= 0 then
+  begin
+    result := nrOK;
+    exit;
+  end;
+  if fSspiSafe.TryLock then // protect SEC_I_RENEGOTIATE in Recv() - paranoid
+  try
+    // a previous call already encrypted this same plaintext record but could
+    // not completely write its ciphertext: flush it before doing anything else
+    if fOutputCount <> 0 then
+    begin
+      result := SendOutput;
+      if result <> nrOK then
+        exit; // nrRetry -> caller retries the same plaintext
+      // the buffered TLS record is now completely on the socket
+      Length := fOutputPlainCount;
+      fOutputPlainCount := 0;
+      exit;
+    end;
+    if plain > integer(fSizes.cbMaximumMessage) then
+      plain := fSizes.cbMaximumMessage;
+    encrypted := integer(fSizes.cbHeader) + plain + integer(fSizes.cbTrailer);
+    EnsureLength(fOutput, encrypted, TLS_OUT_MIN, fSizeMaxRecord);
+    MoveFast(Buffer^, PByteArray(fOutput)[fSizes.cbHeader], plain);
+    desc.ulVersion := SECBUFFER_VERSION;
+    desc.cBuffers := 4;
+    desc.pBuffers := @buf[0];
     buf[0].cbBuffer := fSizes.cbHeader;
     buf[0].BufferType := SECBUFFER_STREAM_HEADER;
-    buf[0].pvBuffer := @temp;
-    buf[1].cbBuffer := templen;
+    buf[0].pvBuffer := pointer(fOutput);
+    buf[1].cbBuffer := plain;
     buf[1].BufferType := SECBUFFER_DATA;
-    buf[1].pvBuffer := @temp[fSizes.cbHeader];
+    buf[1].pvBuffer := @PByteArray(fOutput)[fSizes.cbHeader];
+    trailer := integer(fSizes.cbHeader) + plain;
     buf[2].cbBuffer := fSizes.cbTrailer;
     buf[2].BufferType := SECBUFFER_STREAM_TRAILER;
-    buf[2].pvBuffer := @temp[trailer];
+    buf[2].pvBuffer := @PByteArray(fOutput)[trailer];
     buf[3].cbBuffer := 0;
     buf[3].BufferType := SECBUFFER_EMPTY;
     buf[3].pvBuffer := nil;
+    result := nrFatalError;
     if EncryptMessage(@fCtxt, 0, @desc, 0) <> SEC_E_OK then
-      exit; // caller would shutdown the connection on SChannel error
-    len := buf[0].cbBuffer + buf[1].cbBuffer + buf[2].cbBuffer;
-    sent := 0;
-    repeat
-      s := mormot.net.sock.Send(fSocket.Socket, @temp[sent], len, MSG_NOSIGNAL);
-      if s = len then
-        break; // whole message sent
-      if s = 0 then
-        exit;  // report connection closed
-      if integer(s) < 0 then
-      begin
-        result := NetLastError;
-        if result <> nrRetry then
-          exit; // report socket fatal error
-      end
-      else
-      begin
-        dec(len, s);
-        inc(sent, s);
-      end;
-      SleepHiRes(0); // warning: Sleep(1) waits typically 1-15 ms on Windows
-      // loop to try again
-    until false;
-  end;
-  result := nrOK;
+      exit;
+    encrypted := buf[0].cbBuffer + buf[1].cbBuffer + buf[2].cbBuffer;
+    fOutputPos := 0;
+    fOutputCount := encrypted;
+    fOutputPlainCount := plain;
+    result := SendOutput; // nrOk means fOutputCount = 0
+    if result <> nrOK then
+      // on nrRetry (or error), Length = zero and fOutput keeps partial record
+      exit;
+    // ciphertext was completely accepted by the socket
+    Length := fOutputPlainCount;
+    fOutputPlainCount := 0;
+  finally
+    fSspiSafe.UnLock;
+  end
+  else
+    result := nrRetry; // Recv() is handling SEC_I_RENEGOTIATE
+end;
+
+function TSChannelNetTls.ReleaseBuffers: PtrInt;
+begin
+  result := 0;
+  if (fInputCount <> 0) or
+     (fDataCount <> 0) or
+     (fOutputCount <> 0) or
+     (fOutputPlainCount <> 0) then
+    exit; // still some pending data in buffers
+  result := length(fInput) + length(fData) + length(fOutput);
+  fInput := '';
+  fData := '';
+  fOutput := '';
+  fDataPos := 0;
+  fOutputPos := 0;
 end;
 
 

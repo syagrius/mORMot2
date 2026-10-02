@@ -620,7 +620,7 @@ asm
         cmp     eax, 100
         jb      @2
         mov     ecx, eax
-        mov     edx, 1374389535 // use power of two reciprocal to avoid division
+        mov     edx, DIV100_INV
         mul     edx
         shr     edx, 5          // now edx=eax div 100
         mov     eax, edx
@@ -667,9 +667,9 @@ asm
         cmp     eax, 100
         jb      @2
         mov     ecx, eax
-        mov     edx, 1374389535 // use power of two reciprocal to avoid division
+        mov     edx, DIV100_INV
         mul     edx
-        shr     edx, 5          // now edx=eax div 100
+        shr     edx, 5 // now edx=eax div 100
         mov     eax, edx
         imul    edx, -200
         movzx   edx, word ptr [TwoDigitLookup + ecx * 2 + edx]
@@ -698,9 +698,9 @@ asm
         // eax=Y, edx=P
         push    edx
         mov     ecx, eax
-        mov     edx, 1374389535 // use power of two reciprocal to avoid division
+        mov     edx, DIV100_INV
         mul     edx
-        shr     edx, 5          // now edx=Y div 100
+        shr     edx, 5 // now edx=Y div 100
         movzx   eax, word ptr [TwoDigitLookup + edx * 2]
         imul    edx, -200
         movzx   edx, word ptr [TwoDigitLookup + ecx * 2 + edx]
@@ -1165,7 +1165,7 @@ asm
         jnz     @fnd2
         cmp     edx, ecx
         ja      @by16
-@no:    mov     eax, -1
+@no:    or      eax, -1
         pop     ebx
         ret
 @fnd:   bsf     eax, eax
@@ -1219,7 +1219,7 @@ asm
         jnz     @fnd
 @nxt:   cmp     edx, ecx
         ja      @by16
-@no:    mov     eax, -1
+@no:    or      eax, -1
         pop     ebx
         ret
         // 16bit-unaligned loop (hardly called)
@@ -1278,7 +1278,7 @@ asm
         jnz     @fnd
 @nxt:   cmp     edx, ecx
         ja      @by16
-@no:    mov     eax, -1
+@no:    or      eax, -1
         pop     ebx
         ret
         // 32bit-unaligned loop (hardly called)
@@ -1728,7 +1728,7 @@ asm
         cmp     ecx, [edx]
         jz      @0
         jnb     @p
-@n:     mov     eax, -1
+@n:     or      eax, -1
         ret
 @0:     xor     eax, eax
         ret
@@ -1747,7 +1747,7 @@ asm
         cmp     ecx, [edx]
         jz      @0
 @nz:    jnb     @p
-        mov     eax, -1
+        or      eax, -1
         ret
 @0:     xor     eax, eax
         ret
@@ -1821,7 +1821,7 @@ asm
         sahf
         jz      @0
 @nz:    jnb     @p
-        mov     eax, -1
+        or      eax, -1
         ret
 @0:     xor     eax, eax
         ret
@@ -1837,7 +1837,7 @@ asm
         sahf
         jz      @0
 @nz:    jnb     @p
-        mov     eax, -1
+        or      eax, -1
         ret
 @0:     xor     eax, eax
         ret
@@ -2551,6 +2551,14 @@ asm
         setz    al
 end;
 
+function LockedExc32(var Target: cardinal; NewValue, Comperand: cardinal): boolean;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        xchg    eax, ecx
+   lock cmpxchg dword ptr [ecx], edx
+        setz    al
+end;
+
 procedure LockedAdd(var Target: PtrUInt; Increment: PtrUInt);
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
@@ -2576,6 +2584,16 @@ asm // see https://software.intel.com/en-us/blogs/2011/04/14/is-avx-enabled
         db  $0f, $01, $d0 // XGETBV reads XCR0 into EDX:EAX
         and     eax, 6    // check OS enabled both XMM (bit 1) and YMM (bit 2)
         cmp     al, 6
+        sete    al
+end;
+
+function IsZmmOSEnabled: boolean;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm // AVX-512 requires the OS to save opmask and ZMM registers
+        xor     ecx, ecx  // get control register XCR0 = XFEATURE_ENABLED_MASK
+        db  $0f, $01, $d0 // XGETBV reads XCR0 into EDX:EAX
+        and     eax, $e6  // XMM+YMM (bits 1-2) + opmask/ZMM_Hi256/Hi16_ZMM (5-7)
+        cmp     al, $e6
         sete    al
 end;
 
@@ -2779,7 +2797,7 @@ asm
         mov     dword ptr [edx].TDiv100Rec.M, eax
         mov     ecx, edx
         mov     edx, eax
-        mov     eax, 1374389535
+        mov     eax, DIV100_INV
         mul     edx
         shr     edx, 5
         mov     dword ptr [ecx].TDiv100Rec.D, edx

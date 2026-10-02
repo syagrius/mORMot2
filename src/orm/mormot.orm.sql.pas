@@ -152,7 +152,7 @@ type
     // overridden methods calling the external engine with SQL via Execute
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
     function EngineExecute(const aSql: RawUtf8): boolean; override;
-    function EngineLockedNextID: TID; virtual;
+    function EngineLockedNextID: TID; virtual; // returns 0 on error
     function EngineAdd(TableModelIndex: integer; const SentData: RawUtf8): TID; override;
     function EngineUpdate(TableModelIndex: integer; ID: TID; const
        SentData: RawUtf8): boolean; override;
@@ -813,7 +813,7 @@ begin
       if limit.Position = posNone then
       begin
         fRest.InternalLog('AdaptSqlForEngineList: unknown % LIMIT syntax for [%]',
-          [ToText(fProperties.Dbms)^, SQL], sllWarning);
+          [DBDEF_TXT[fProperties.Dbms], SQL], sllWarning);
         exit;
       end;
       if limit.Position = posOuter then
@@ -965,39 +965,43 @@ end;
 
 function TRestStorageExternal.EngineLockedNextID: TID;
 
-  procedure RetrieveFromDB;
+  function RetrieveFromDB: boolean;
   // fProperties.SqlCreate: ID Int64 PRIMARY KEY -> compute unique RowID
   // (not all DB engines handle autoincrement feature - e.g. Oracle does not)
   var
     rows: ISqlDBRows;
   begin
+    result := false;
     fEngineLockedMaxID := 0;
     rows := ExecuteDirect('select max(%) from %',
       [fStoredClassMapping^.RowIDFieldName, fTableName], [], true);
     if rows = nil then
-      exit;
+      exit; // e.g. lost connection: max(ID) is unknown, not 0
     if rows.Step then
-      fEngineLockedMaxID := rows.ColumnInt(0);
+      fEngineLockedMaxID := rows.ColumnInt(0); // max()=NULL on void table -> 0
     rows.ReleaseRows;
+    result := true;
   end;
 
 var
   handled: boolean;
 begin
-  if fEngineAddForcedID <> 0 then
-  begin
-    result := fEngineAddForcedID;
+  result := fEngineAddForcedID;
+  if result <> 0 then
     exit;
-  end;
   if Assigned(fOnEngineAddComputeID) then
   begin
     result := fOnEngineAddComputeID(self, handled);
     if handled then
       exit;
   end;
+  result := 0;
   if (fEngineLockedMaxID = 0) or
      EngineAddUseSelectMaxID then
-    RetrieveFromDB;
+    if not RetrieveFromDB then
+      // 'select max(ID)' failed: never return ID=1 which may already exist
+      // - keep fEngineLockedMaxID=0 so that next call will retry the select
+      exit;
   inc(fEngineLockedMaxID);
   result := fEngineLockedMaxID;
 end;
@@ -1258,7 +1262,11 @@ begin
       else
       begin
         if not JsonGetID(pointer(SentData), result) then
-          result := EngineLockedNextID
+        begin
+          result := EngineLockedNextID;
+          if result = 0 then
+            exit; // no valid ID available (e.g. connection lost)
+        end
         else if result > fEngineLockedMaxID then
           fEngineLockedMaxID := result;
         InternalBatchAppend(SentData, result);
@@ -1924,11 +1932,17 @@ end;
 function TRestStorageExternal.TransactionBegin(aTable: TOrmClass;
   SessionID: cardinal): boolean;
 begin
-  if (aTable = fStoredClass) and
-     inherited TransactionBegin(aTable, SessionID) then
-    result := fProperties.SharedTransaction(SessionID, transBegin) <> nil
-  else
-    result := false;
+  result := false;
+  if (aTable <> fStoredClass) or
+     not inherited TransactionBegin(aTable, SessionID) then
+    exit;
+  // inherited has already set fTransactionActiveSession - if the actual
+  // StartTransaction fails (e.g. the connection died), we MUST release it,
+  // otherwise every future TransactionBegin() is refused by the inherited
+  // check and the storage stays locked until the process restarts
+  result := fProperties.SharedTransaction(SessionID, transBegin) <> nil;
+  if not result then
+    inherited RollBack(SessionID); // reset fTransactionActiveSession
 end;
 
 procedure TRestStorageExternal.Commit(SessionID: cardinal;
@@ -2089,8 +2103,12 @@ begin
     case Occasion of
       ooInsert:
         if not JsonGetID(pointer(SentData), InsertedID) then
+        begin
           // no specified "ID":... field value -> compute next
-          InsertedID := EngineLockedNextID
+          InsertedID := EngineLockedNextID;
+          if InsertedID = 0 then
+            exit; // leave result=0 (e.g. connection lost)
+        end
         else if InsertedID > fEngineLockedMaxID then
           fEngineLockedMaxID := InsertedID;
       ooUpdate:
@@ -2541,11 +2559,12 @@ begin
       // lock to avoid race condition against max(RowID)
       try
         insertedRowID := EngineLockedNextID;
-        with fStoredClassMapping^ do
-          result := ExecuteDirectSqlVar('insert into % (%,%) values (%,?)',
-            [fTableName, Sql.InsertSet, RowIDFieldName,
-             CsvOfValue('?', length(Values))],
-            Values, insertedRowID, true);
+        if insertedRowID <> 0 then // leave result=false on error
+          with fStoredClassMapping^ do
+            result := ExecuteDirectSqlVar('insert into % (%,%) values (%,?)',
+              [fTableName, Sql.InsertSet, RowIDFieldName,
+               CsvOfValue('?', length(Values))],
+              Values, insertedRowID, true);
       finally
         StorageUnLock;
       end;

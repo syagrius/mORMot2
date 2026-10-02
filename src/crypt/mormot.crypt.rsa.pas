@@ -338,14 +338,16 @@ const
   // - TBigInt.FillPrime will ensure FIPS 186-5 minimum iteration is always used
   RSA_DEFAULT_GENERATION_ITERATIONS = 0;
 
-  /// generates RSA keypairs in a time-coherent fashion
-  {$ifdef CPUARM}
+  /// generates RSA keypairs in a time-coherent fashion - for RSA-2048 size
+  {$ifdef CPUARM3264}
   // - we have seen some weak Raspberry PI timeout so 30 seconds seems fair
+  // - CPUARM3264 and not CPUARM, which FPC only defines on 32-bit ARM: aarch64
+  // needs the same margin, e.g. when several keys are generated in parallel
   RSA_DEFAULT_GENERATION_TIMEOUTMS = 30000;
   {$else}
   // - allow 10 seconds: typical time is around (or less) 1 second on Intel/AMD
   RSA_DEFAULT_GENERATION_TIMEOUTMS = 10000;
-  {$endif CPUARM}
+  {$endif CPUARM3264}
 
   /// runtime-computed 4KB table of all known 2, 3, 5, 7, ... 17989 prime numbers
   // - as used by TBigInt.MatchKnownPrime
@@ -813,6 +815,19 @@ type
     // - this method is thread-safe but blocking from several threads
     function Sign(Hash: PHash512; HashAlgo: THashAlgo): RawByteString; override;
   end;
+
+  /// callback used by RsaOpen() to decrypt one PKCS#1 v1.5 RSA block
+  // - Input points to ModulusLen bytes
+  // - returns the unpadded binary value, or '' on error
+  // - allows external/private-key providers to reuse the same RSA envelope
+  // decoding as TRsa.Open()
+  TRsaPkcs1Decrypt = function(Input: pointer): RawByteString of object;
+
+/// decrypt a message encoded by TRsa.Seal() using an external RSA private key
+// - shares the exact same EVP_SealInit/EVP_OpenInit compatible envelope as
+// TRsa.Open(), but delegates the PKCS#1 private operation to Decrypt
+function RsaOpen(Cipher: TAesAbstractClass; AesBits, ModulusLen: integer;
+  const Message: RawByteString; const Decrypt: TRsaPkcs1Decrypt): RawByteString;
 
 /// low-level computation of the ASN.1 sequence of a hash signature
 // - following RSASSA-PKCS1-v1_5 signature scheme RFC 8017 #9.2 steps 1 and 2
@@ -1608,7 +1623,6 @@ function TBigInt.IsPrime(Extend: TBigIntSimplePrime; Iterations: integer;
 var
   r, a, w: PBigInt;
   s, n, bak: integer;
-  rnd: TLecuyer;
 begin
   // first check if not a factor of a well-known small prime
   result := (Size = (32 div HALF_BITS)) and
@@ -1619,8 +1633,8 @@ begin
      MatchKnownPrime(Extend) then // detect most of the composite integers
     exit;
   // validate is a prime number using Miller-Rabin iterative tests (HAC 4.24)
-  if Lecuyer = nil then    // 88-bit CSPRNG seed - if not supplied by caller
-    Lecuyer := RandomLecuyer(rnd); // new gsl_rng_taus2 uniform distribution
+  if Lecuyer = nil then      // gsl_rng_taus2 CSPRNG 88-bit uniform distribution
+    Lecuyer := ThreadRandom; // if not supplied by caller
   bak := RefCnt;
   RefCnt := -1; // make permanent for use as modulo below
   w := Clone.IntSub(1); // w = value - 1
@@ -1707,7 +1721,7 @@ var
   min, bytes: integer;
   last32: PCardinal;
   rnd: RawByteString;
-  lecuyer: TLecuyer; // convenient local thread-safe randomness for Miller-Rabin
+  lecuyer: PLecuyer;
 begin
   // ensure it is worth searching (paranoid)
   if Size <= 2 then
@@ -1734,15 +1748,13 @@ begin
   // xor Value original trusted sources with our CSPRNG until we get enough bits
   last32 := @Value[Size - 1 {$ifdef CPU32} - 1 {$endif}];
   XorStrongRandom(last32);
-  // setup a 88-bit gsl_rng_taus2 uniform distribution from these rnd bytes
-  DefaultHasher128(@lecuyer, pointer(rnd), bytes); // may be AesNiHash128
-  lecuyer.SeedGenerator;
   FillZero(rnd); // anti-forensic counter measure
   // brute force search for the next prime starting at this point
+  lecuyer := ThreadRandom; // retrieve once
   result := false; // timeout
   min := 0;
   repeat
-    if IsPrime(Extend, Iterations, @lecuyer) then // small primes + Miller-Rabin
+    if IsPrime(Extend, Iterations, lecuyer) then // small primes + Miller-Rabin
     begin
       result := true; // we got lucky
       exit;
@@ -2282,11 +2294,50 @@ begin
             ]);
 end;
 
+function RsaOpen(Cipher: TAesAbstractClass; AesBits, ModulusLen: integer;
+  const Message: RawByteString; const Decrypt: TRsaPkcs1Decrypt): RawByteString;
+var
+  msgpos, msglen: PtrInt;
+  a: TAesAbstract;
+  key: RawByteString;
+  head: PRsaSealHeader absolute Message;
+  input: PByteArray absolute Message;
+begin
+  FastAssignNew(result);
+  msglen := length(Message);
+  if not Assigned(Decrypt) or
+     (Cipher = nil) or
+     (ModulusLen <= 0) or
+     (msglen < SizeOf(head^)) or
+     (head^.plainlen <= 0) or
+     (head^.plainlen > 128 shl 20) or
+     (head^.encryptedkeylen <> ModulusLen) then
+    exit;
+  msgpos := SizeOf(head^) + head^.encryptedkeylen;
+  if msglen < msgpos + head^.plainlen then
+    exit;
+  key := Decrypt(@input[SizeOf(head^)]); // using the actual private key
+  if key <> '' then
+    try
+      if length(key) <> AesBits shr 3 then
+        exit;
+      a := Cipher.Create(pointer(key)^, AesBits);
+      try
+        a.IV := head^.iv;
+        a.DecryptPkcs7Var(
+          @input[msgpos], msglen - msgpos, {iv=}false, result);
+      finally
+        a.Free;
+      end;
+    finally
+      FillZero(key);
+    end;
+end;
+
 function ToText(res: TRsaGenerateResult): PShortString;
 begin
   result := GetEnumName(TypeInfo(TRsaGenerateResult), ord(res));
 end;
-
 
 
 { TRsaPublicKey }
@@ -2571,8 +2622,18 @@ begin
       (Bits <> 8192)) then
     exit;                  // see https://stackoverflow.com/a/589850/458259
   // setup the timeout period
-  if TimeOutMS <= 0 then
+  if {$ifdef OSWINDOWS}
+     (wsPrism in WindowsSpecs) or // relax for PRISM translation layer
+     {$endif OSWINDOWS}
+     (TimeOutMS <= 0) then
     TimeOutMS := MilliSecsPerMin; // blocking 1 minute seems fair enough
+  if TimeoutMS = RSA_DEFAULT_GENERATION_TIMEOUTMS then // calibrated for 2048
+    if Bits >= 7680 then
+      TimeoutMS := TimeoutMS * 64
+    else if Bits >= 4096 then
+      TimeoutMS := TimeoutMS * 16
+    else if Bits >= 3072 then
+      TimeoutMS := TimeoutMS * 4;
   endtix := GetTickCount64 + TimeOutMS;
   // setup local variables
   fModulusBits := Bits;
@@ -3093,29 +3154,13 @@ begin
     FastAssignNew(result);
 end;
 
-type
-  // extra header for IV and plain text / key size storage
-  // - should match the very same record definition in EVP_PKEY.RsaSeal/RsaOpen
-  // from mormot.lib.openssl11.pas, which is fully compatible with this unit
-  TRsaSealHeader = packed record
-    iv: TAesBlock;
-    plainlen: integer;
-    encryptedkeylen: word; // typically 256 bytes for RSA-2048
-    // followed by the encrypted key then the encrypted message
-  end;
-  PRsaSealHeader = ^TRsaSealHeader;
-
-// this code follows OpenSSL EVP_SealInit/EVP_SealFinal from crypto/evp/p_seal.c
-// algorithm, so that RSA Message encoding would stay compatible
-// - see also the matching python code as comment in mormot.crypt.openssl
-
 function TRsa.Seal(Cipher: TAesAbstractClass; AesBits: integer;
   const Message: RawByteString): RawByteString;
 var
   msgpos: PtrInt;
   a: TAesAbstract;
   key: THash256;
-  head: TRsaSealHeader;
+  head: TRsaSealHeader; // follows RsaOpen() algorithm above
   enckey, encmsg: RawByteString;
 begin
   FastAssignNew(result);
@@ -3154,42 +3199,11 @@ end;
 
 function TRsa.Open(Cipher: TAesAbstractClass; AesBits: integer;
   const Message: RawByteString): RawByteString;
-var
-  msgpos, msglen: PtrInt;
-  a: TAesAbstract;
-  key: RawByteString;
-  head: PRsaSealHeader absolute Message;
-  input: PByteArray absolute Message;
 begin
-  FastAssignNew(result);
-  // decode and validate the header
-  msglen := length(Message);
-  if not HasPrivateKey or
-     (Cipher = nil) or
-     (msglen < SizeOf(head^)) or
-     (head^.plainlen <= 0) or
-     (head^.plainlen > 128 shl 20) or
-     (head^.encryptedkeylen <> fModulusLen) then
-    exit;
-  msgpos := SizeOf(head^) + head^.encryptedkeylen;
-  if msglen < msgpos + head^.plainlen then
-    exit; // avoid buffer overflow on malformatted/forged input
-  // decrypt the ephemeral key, then the message
-  key := Pkcs1Decrypt(@input[SizeOf(head^)]);
-  if key <> '' then
-    try
-      if length(key) <> AesBits shr 3 then
-        exit;
-      a := Cipher.Create(pointer(key)^, AesBits);
-      try
-        a.IV := head^.iv;
-        a.DecryptPkcs7Var(@input[msgpos], msglen - msgpos, {iv=}false, result);
-      finally
-        a.Free;
-      end;
-    finally
-      FillZero(key); // anti-forensic
-    end;
+  if HasPrivateKey then
+    result := RsaOpen(Cipher, AesBits, fModulusLen, Message, Pkcs1Decrypt)
+  else
+    FastAssignNew(result);
 end;
 
 

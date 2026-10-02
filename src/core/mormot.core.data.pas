@@ -154,6 +154,10 @@ type
     function Exists(item: pointer): boolean; virtual;
     /// fast delete one item in the list
     function Remove(item: pointer): PtrInt; virtual;
+    /// add one or several items to the list
+    procedure AddSeveral(const item: array of pointer);
+    /// fast delete one or several items in the list
+    procedure RemoveSeveral(const item: array of pointer);
     {$ifdef HASITERATORS}
     /// an enumerator able to compile "for .. in list do" statements
     function GetEnumerator: TPointerEnumerator;
@@ -343,11 +347,11 @@ type
   TObjectStore = class(TObjectRWLock)
   protected
     fName: RawUtf8;
-    fReader: TFastReader;
+    fReader: PFastReader;        // = nil outside of LoadFromReader
     fReaderTemp: PRawByteString; // could be pre-assigned to reuse a big buffer
     fLoadFromLastUncompressed, fSaveToLastUncompressed: integer;
     fLoadFromLastAlgo: TAlgoCompress;
-    /// low-level virtual methods implementing the persistence reading
+    /// low-level virtual methods implementing the persistence reading/writing
     procedure LoadFromReader; virtual;
     procedure SaveToWriter(aWriter: TBufferWriter); virtual;
   public
@@ -365,6 +369,10 @@ type
     // - raise a EFastReader exception on decoding error
     constructor CreateFromFile(const aFileName: TFileName;
       aLoad: TAlgoCompressLoad = aclNormal);
+    /// initialize a storage from a SaveTo persisted resource in this executable
+    // - raise a EFastReader exception on decoding error
+    constructor CreateFromResource(aResourceName, aResType: PChar;
+      aInstance: TLibHandle = 0; aLoad: TAlgoCompressLoad = aclNormal);
     /// fill the storage from a SaveTo persisted buffer
     // - actually call the LoadFromReader() virtual method for persistence
     // - raise a EFastReader exception on decoding error
@@ -1731,6 +1739,8 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// returns position in array, or next void index in HashTable[] as -(index+1)
     function FindOrNew(aHashCode: cardinal; Item: pointer; aHashTableIndex: PPtrInt = nil): PtrInt;
+    /// returns pointer to matching value in array, or nil
+    function FindValue(aHashCode: PtrUInt; Item: pointer): pointer;
     /// returns position in array or -1 if not found, with an optional custom comparer
     // - will use Compare() or supplied Comp() or but won't support EventCompare()
     function FindIndex(aHashCode: cardinal; Item: pointer; Comp: TDynArraySortCompare = nil): PtrInt;
@@ -2205,7 +2215,7 @@ type
     Values: TDynArrayHashed;
     /// alternative to Values.Hasher.HashOne() using PUtf8Char + Length
     FromBuffer: TUtf8Hasher;
-    /// alternative to Values.Compare() using PUtf8Char + Length
+    /// alternative to Values.Compare() using // = StrComp/StrIComp(PUtf8Char)
     CompFromBuffer: TDynArraySortCompare;
     /// initialize the RawUtf8 dynamic array and hasher
     procedure Init(CaseInsensitive: boolean);
@@ -2687,7 +2697,7 @@ type
   TBinDictionary = class(TSynPersistent)
   protected
     fValue: TRawByteStringDynArray;
-    fCount: integer;
+    fCount: integer; // not PtrInt
     fHash: TDynArrayHashed;
   public
     /// initialize the data structure
@@ -3039,6 +3049,23 @@ begin
     Delete(result);
 end;
 
+procedure TSynList.AddSeveral(const item: array of pointer);
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(item) do
+    Add(item[i]);
+end;
+
+procedure TSynList.RemoveSeveral(const item: array of pointer);
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(item) do
+    Remove(item[i]);
+end;
+
+
 {$ifdef HASITERATORS}
 
 function TSynList.GetEnumerator: TPointerEnumerator;
@@ -3305,6 +3332,21 @@ begin
   LoadFromFile(aFileName, aLoad);
 end;
 
+constructor TObjectStore.CreateFromResource(aResourceName, aResType: PChar;
+  aInstance: TLibHandle; aLoad: TAlgoCompressLoad);
+var
+  res: TExecutableResource; // cross-platform access to the resource
+begin
+  inherited Create; // may have been overriden
+  if not res.Open(aResourceName, aResType, aInstance) then
+    fReader.ErrorData('resource not found');
+  try
+    LoadFrom(res.Buffer, res.Size, aLoad);
+  finally
+    res.Close;
+  end;
+end;
+
 procedure TObjectStore.LoadFromReader;
 begin
   fReader.VarUtf8(fName);
@@ -3328,6 +3370,7 @@ var
   localtemp: RawByteString;
   p: pointer;
   temp: PRawByteString;
+  rdr: TFastReader;
 begin
   if (aBuffer = nil) or
      (aBufferLen <= 0) then
@@ -3344,8 +3387,13 @@ begin
   if p = nil then
     fReader.ErrorData('%.LoadFrom %.Decompress failed',
       [self, fLoadFromLastAlgo]);
-  fReader.Init(p, fLoadFromLastUncompressed);
-  LoadFromReader;
+  rdr.Init(p, fLoadFromLastUncompressed);
+  fReader := @rdr;
+  try
+    LoadFromReader;
+  finally
+    fReader := nil;
+  end;
 end;
 
 function TObjectStore.LoadFromFile(const aFileName: TFileName;
@@ -3436,7 +3484,7 @@ const
   HASH_INTERN: array[{CaseInsensitive:}boolean] of TUtf8Hasher = (
     HashIntern, HashInternI);
   COMP_PUTF8CHAR: array[{CaseInsensitive:}boolean] of TDynArraySortCompare = (
-    SortDynArrayPUtf8Char, SortDynArrayPUtf8CharI);
+    SortDynArrayPUtf8Char, SortDynArrayPUtf8CharI); // = StrComp, StrIComp
 
 { TRawUtf8Hashed }
 
@@ -3489,40 +3537,46 @@ end;
 procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
   aText: PUtf8Char; aTextLen: PtrInt; aTextHash: cardinal);
 var
-  c: AnsiChar;
+  p: PUtf8Char;
   added: boolean;
   i: PtrInt;
   bak: TDynArraySortCompare;
+  temp: TBuffer1K;
 begin
-  if not fSafe.TryReadLock then
+  p := nil; // for direct allocation
+  if (aText <> nil) and
+     (aTextLen > 0) then
+    if aText[aTextLen] = #0 then // nothing to be done if already #0 ended
+      p := aText
+    else if aTextLen < SizeOf(temp) then
+    begin
+      MoveFast(aText^, temp, aTextLen); // make #0 terminated local copy
+      temp[aTextLen] := #0;
+      p := @temp;
+    end;
+  if (p = nil) or
+     not fSafe.TryReadLock then // no wait on (unlikely) WriteLock contention
   begin
-    FastSetString(aResult, aText, aTextLen); // avoid waiting on contention
+    FastSetString(aResult, aText, aTextLen); // direct allocation
     exit;
   end;
-  c := aText[aTextLen];
-  if c <> #0 then // write only if needed - avoid GPF from constant string
-    aText[aTextLen] := #0; // input buffer may not be #0 terminated
-  i := fHash.Values.Hasher.FindIndex(aTextHash, @aText, fHash.CompFromBuffer);
+  i := fHash.Values.Hasher.FindIndex(aTextHash, @p, fHash.CompFromBuffer);
   if i >= 0 then
   begin
     aResult := fHash.Value[i]; // return the interned value
     fSafe.ReadUnLock;
-    if c <> #0 then
-      aText[aTextLen] := c;
     exit;
   end;
   fSafe.ReadUnLock;
   fSafe.WriteLock; // need to be added in exclusive mode
   bak := fHash.Values.Hasher.Compare; // (RawUtf8,RawUtf8) -> (RawUtf8,PUtf8Char)
   PDynArrayHasher(@fHash.Values.Hasher)^.fCompare := fHash.CompFromBuffer;
-  i := fHash.Values.FindHashedForAdding(aText, added, aTextHash);
+  i := fHash.Values.FindHashedForAdding(p, added, aTextHash);
   PDynArrayHasher(@fHash.Values.Hasher)^.fCompare := bak;
   if added then
-    FastSetString(fHash.Value[i], aText, aTextLen); // new value to the pool
+    FastSetString(fHash.Value[i], p, aTextLen); // new value to the pool
   aResult := fHash.Value[i]; // return the interned value
   fSafe.WriteUnLock;
-  if c <> #0 then
-    aText[aTextLen] := c;
 end;
 
 procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
@@ -4048,10 +4102,10 @@ end;
 
 procedure _GlobalInfoCpu(Sender: TBinDictionary);
 begin
-  Sender.UpdateText( 'cpu:name',         CpuInfoText);
-  Sender.UpdateText(['cpu:threads'],    [CpuThreads]);
-  Sender.UpdateText(['cpu:cores'],      [CpuCores]);
-  Sender.UpdateText(['cpu:sockets'],    [CpuSockets]);
+  Sender.UpdateText( 'cpu:name',      CpuInfoText);
+  Sender.UpdateText(['cpu:threads'], [CpuThreads]); // sched_getaffinity syscall
+  Sender.UpdateText(['cpu:cores'],   [CpuCores]);
+  Sender.UpdateText(['cpu:sockets'], [CpuSockets]);
   if HasHWAes then
     Sender.UpdateText('cpu:aes',  'true');
   {$ifdef ASMINTEL}
@@ -5269,13 +5323,13 @@ end;
 
 function _BC_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
-  compared := StrComp(A^, B^);
+  compared := mormot.core.base.StrComp(A^, B^);
   result := SizeOf(pointer);
 end;
 
 function _BCI_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
-  compared := StrIComp(A^, B^);
+  compared := mormot.core.unicode.StrIComp(A^, B^);
   result := SizeOf(pointer);
 end;
 
@@ -9119,6 +9173,37 @@ begin
   result := RaiseFatalCollision('FindOrNew', aHashCode);
 end;
 
+function TDynArrayHasher.FindValue(aHashCode: PtrUInt; Item: pointer): pointer;
+var
+  first, last: PtrUInt;
+begin
+  aHashCode := HashTableIndex(aHashCode);
+  first := aHashCode;
+  last := fHashTableSize;
+  repeat
+    result := pointer(HashTableIndexToIndex(aHashCode)); // Index+1 was stored
+    if result = nil then
+      exit; // Index=0 -> result=nil if not found
+    with fDynArray^ do
+      result := PAnsiChar(Value^) + (PtrUInt(result) - 1) * PtrUInt(fInfo.Cache.ItemSize);
+    if not Assigned(fEventCompare) then
+    begin
+      if fCompare(result^, Item^) = 0 then
+        exit;
+    end
+    else if fEventCompare(result^, Item^) = 0 then
+      exit;
+    inc(aHashCode); // hash or slot collision -> search next item
+    if aHashCode <> last then
+      continue;
+    if aHashCode = first then
+      break;
+    aHashCode := 0;
+    last := first;
+  until false;
+  RaiseFatalCollision('FindValue', aHashCode);
+end;
+
 function TDynArrayHasher.FindIndex(aHashCode: cardinal; Item: pointer;
   Comp: TDynArraySortCompare): PtrInt;
 var
@@ -10730,12 +10815,12 @@ begin
     f := Flags;
     if rtfParamInteger in f then // <int:name> or rtoIntegerParams
     begin
-      if (P^ < '0') or (P^ > '9') then
+      if not (P^ in ['0' .. '9']) then
         exit; // void <integer> is not allowed
       repeat
         inc(P);
-        a := P^;
-      until (a < '0') or (a > '9');
+      until not (P^ in ['0' .. '9']);
+      a := P^;
       if (a <> #0) and (a <> '?') and (a <> '/') then
         exit; // not an integer
     end

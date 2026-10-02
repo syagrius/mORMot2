@@ -33,7 +33,8 @@ uses
   mormot.crypt.jwt,
   mormot.crypt.ecc,
   mormot.crypt.rsa,
-  mormot.crypt.x509;
+  mormot.crypt.x509,
+  mormot.crypt.win;
 
 type
   /// regression tests for mormot.crypt.core and mormot.crypt.jwt features
@@ -730,6 +731,33 @@ end;
 
 procedure TTestCoreCrypto._SHA3;
 
+  procedure Keccak(const data, expected: RawByteString);
+  var
+    instance: TSha3;
+    dig: THash256;
+    split, i: PtrInt;
+  begin
+    CheckEqual(Keccak256(data), expected);
+    Keccak256Full(pointer(data), length(data), dig);
+    CheckEqual(Sha256DigestToString(dig), expected);
+    CheckEqual(instance.FullStr(KECCAK_256, pointer(data), length(data)), UpperCase(expected));
+    for split := 0 to length(data) do
+    begin
+      instance.Init(KECCAK_256);
+      Check(instance.Algorithm = KECCAK_256);
+      instance.Update(pointer(data), split);
+      instance.Update(nil, 0);
+      instance.Update(PAnsiChar(pointer(data)) + split, length(data) - split);
+      instance.Final(dig);
+      CheckEqual(Sha256DigestToString(dig), expected);
+    end;
+    instance.Init(KECCAK_256);
+    for i := 1 to length(data) do
+      instance.Update(@data[i], 1);
+    instance.Final(dig);
+    CheckEqual(Sha256DigestToString(dig), expected);
+  end;
+
   procedure DoTest;
   const
     HASH1 = '79f38adec5c20307a98ef76e8324afbfd46cfd81b22e3973c65fa1bd9de31787';
@@ -743,6 +771,18 @@ procedure TTestCoreCrypto._SHA3;
     s, i: PtrInt;
     sign: TSynSigner;
   begin
+    // Original Keccak-256 vectors, independently checked with PyCryptodome
+    Keccak('', 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470');
+    Keccak('abc', '4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45');
+    SetLength(data, 1024);
+    for i := 1 to length(data) do
+      data[i] := AnsiChar((i - 1) and 255);
+    // One less than, exactly, and one more than the 136-byte absorption rate.
+    Keccak(copy(data, 1, 135), 'cbdfd9dee5faad3818d6b06f95a219fd290b0e1706f6a82e5a595b9ce9faca62');
+    Keccak(copy(data, 1, 136), '7ce759f1ab7f9ce437719970c26b0a66ff11fe3e38e17df89cf5d29c7d7f807e');
+    Keccak(copy(data, 1, 137), 'ac73d4fae68b8453f764007c1a20ce95994187861f0c3227a3a8e99a73a3b1db');
+    Keccak(copy(data, 1, 272), 'fdf2ec49e749960d3c8521a0219af8d03e30e2b3bf19bd16150ee0eaf133d66e');
+    Keccak(data, '5902e53903be0d0f9656bdbd5b9f0d8c2d815f865645d629eef77f5185f6cd7f');
     // validate against official NIST vectors
     // taken from http://csrc.nist.gov/groups/ST/toolkit/examples.html#aHashing
     // see also https://www.di-mgt.com.au/sha_testvectors.html
@@ -849,7 +889,7 @@ procedure TTestCoreCrypto._SHA3;
 begin
   DoTest;
   {$ifdef ASMX64AVX1}
-  if cpuAVX2 in X64CpuFeatures then // validate without KeccakPermutationAvx2()
+  if HasKeccakAvx2 then // validate without KeccakPermutationAvx2()
   begin
     Exclude(X64CpuFeatures, cpuAVX2);
     DoTest;
@@ -863,6 +903,7 @@ var
   timer: TPrecisionTimer;
   i: integer;
   big: RawByteString;
+  gen: PLecuyer;
 begin
   SetLength(big, 100000);
   // validate TAesPrgn (+ TAesPrngOsl) generators
@@ -873,18 +914,19 @@ begin
   Prng(TAesPrngOsl, 'OpenSSL', big);
   {$endif USE_OPENSSL}
   // include Lecuyer for comparison, with same benchmarks as in Prng()
+  gen := ThreadRandom;
   timer.Start;
-  CheckEqual(Random32(0), 0);
-  CheckEqual(Random32(1), 0);
+  CheckEqual(gen.Next(0), 0);
+  CheckEqual(gen.Next(1), 0);
   for i := 1 to 50000 do
-    Check(Random32(i) < cardinal(i));
+    Check(gen.Next(i) < cardinal(i));
   for i := 0 to 50000 do
-    Check(Random32(maxInt - i) < cardinal(maxInt - i));
+    Check(gen.Next(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('Lecuyer Random32', [], 100003, 100003 * 4, @timer);
   timer.Start;
   for i := 1 to 100 do
-    RandomBytes(pointer(big), length(big));
-  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 10, @timer);
+    gen.Fill(pointer(big), length(big));
+  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 100, @timer);
 end;
 
 procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name, big: RawUtf8);
@@ -1949,6 +1991,9 @@ var
   clientsig: THash256;
   hasher: TSynHasher;
   timer: TPrecisionTimer;
+  {$ifdef USE_OPENSSL}
+  e: TRawUtf8DynArray;
+  {$endif USE_OPENSSL}
 begin
   // validate THashAlgo and TSignAlgo recognition
   for h := low(h) to high(h) do
@@ -2418,6 +2463,28 @@ begin
     CheckEqual(BigNumHexFromDecimal('65535'), 'ffff');
     CheckEqual(BigNumHexFromDecimal('12345678901234567890'), 'ab54a98ceb1f0ad2');
   end;
+  CheckEqual(length(e), 0);
+  CsvToRawUtf8DynArray('OpenSSL-4.0-OpenSSLProject', e);
+  CheckEqual(length(e), 1);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), e[0]);
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-3.1-OpenSSLProject', e);
+  CheckEqual(length(e), 2, 'append to e[]');
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), e[0]);
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-3.1-OpenSSLProject,Open-SSL-5.2-OpenSSLProject,' +
+    'OpenSSL-4.2-OpenSSLProject,OpenSSL-4.3-OpenSSLProjet', e);
+  CheckEqual(length(e), 6);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), 'OpenSSL-4.2-OpenSSLProject');
+  CheckEqual(n, 4);
+  CsvToRawUtf8DynArray('OpenSSL-4.10-OpenSSLProject', e);
+  CheckEqual(length(e), 7);
+  n := 0;
+  CheckEqual(OpenSslWinLocateEntry(e, n), 'OpenSSL-4.10-OpenSSLProject');
+  CheckEqual(n, 4);
   {$endif USE_OPENSSL}
 end;
 
@@ -3392,7 +3459,7 @@ const
     avx: boolean;
     pt, ct: array[0..511] of byte;
   begin
-    for avx := false to true do
+    for avx := false to HasAesGcmAvx do
     begin
       FillCharFast(pt, SizeOf(pt), 0);
       CheckUtf8(ctxt.FullDecryptAndVerify(key, kbits, pIV, pAAD, ctp, @pt, ptag,
@@ -3403,26 +3470,24 @@ const
         IV_Len, aLen, cLen, tag, avx), 'FullEncryptAndAuthenticate #%', [tn]);
       CheckUtf8(CompareMem(@tag, ptag, tlen), 'Tag #%', [tn]);
       CheckUtf8(CompareMem(@ct, ctp, cLen), 'Encoded #%', [tn]);
-      {$ifndef ASMX64AVX0}
-      break;
-      {$endif ASMX64AVX0}
     end;
   end;
 
 var
   ctxt: TAesGcmEngine;
   key, tag: TAesBlock;
-  buf: THash512;
+  buf, cipher, plain: THash512;
+  aad: THash256;
   n: integer;
   avx: boolean;
 begin
-  for avx := false to true do
+  for avx := false to HasAesGcmAvx do
   begin
     key := PAesBlock(@hex32)^;
     FillZero(buf);
     FillZero(tag);
-    check(ctxt.FullEncryptAndAuthenticate(key, 128,
-      @hex32, nil, @buf, @buf, 12, 0, SizeOf(buf), tag, avx));
+    check(ctxt.FullEncryptAndAuthenticate(key, 128, @hex32, nil,
+      @buf, @buf, 12, 0, SizeOf(buf), tag, avx));
     CheckEqual(CardinalToHex(crc32c(0, @buf, SizeOf(buf))), 'AC3DDD17');
     CheckEqual(Md5DigestToString(tag), '0332c40f9926bd3cdadf33148912c672');
   end;
@@ -3457,6 +3522,49 @@ begin
        @C10, SizeOf(C10), @P10, 10);
   test(@T11, 16, K11, 8 * SizeOf(K11), @I11, SizeOf(I11), @H11, SizeOf(H11),
        @C11, SizeOf(C11), @P11, 11);
+  for n := 1 to SizeOf(buf) do // 64 bytes - AVX is used only if n mod 16 = 0
+    for avx := false to HasAesGcmAvx do
+    begin
+      FillZero(cipher);
+      Check(ctxt.FullEncryptAndAuthenticate(key, 128, @hex32, @hex32,
+        @buf, @cipher, 12, 16, n, tag, avx));
+      FillZero(plain);
+      CheckUtf8(ctxt.FullDecryptAndVerify(key, 128, @hex32, @hex32,
+        @cipher, @plain, @tag, 12, 16, n, 16, avx),
+        'verify n=% avx=%', [n, avx]);
+      Check(CompareMem(@buf, @plain, n));
+      inc(cipher[0]); // should detect a forged ciphertext, tag or AAD
+      CheckUtf8(not ctxt.FullDecryptAndVerify(key, 128, @hex32, @hex32,
+        @cipher, @plain, @tag, 12, 16, n, 16, avx),
+        'forged ctp n=% avx=%', [n, avx]);
+      dec(cipher[0]);
+      inc(tag[15]);
+      CheckUtf8(not ctxt.FullDecryptAndVerify(key, 128, @hex32, @hex32,
+        @cipher, @plain, @tag, 12, 16, n, 16, avx),
+        'forged tag n=% avx=%', [n, avx]);
+      dec(tag[15]);
+      CheckUtf8(not ctxt.FullDecryptAndVerify(key, 128, @hex32, @hex32,
+        @cipher, @plain, @tag, 12, 15, n, 16, avx),
+        'truncated aad n=% avx=%', [n, avx]);
+      FillZero(plain);
+      aad := hex32;
+      CheckUtf8(ctxt.FullDecryptAndVerify(key, 128, @hex32, @aad,
+        @cipher, @plain, @tag, 12, 16, n, 16, avx),
+        'verify again n=% avx=%', [n, avx]);
+      Check(CompareMem(@buf, @plain, n));
+      inc(aad[15]);
+      CheckUtf8(not ctxt.FullDecryptAndVerify(key, 128, @hex32, @aad,
+        @cipher, @plain, @tag, 12, 16, n, 16, avx),
+        'forged aad n=% avx=%', [n, avx]);
+      FillZero(cipher);
+      Check(ctxt.FullEncryptAndAuthenticate(key, 128, @hex32, @hex32,
+        @buf, @cipher, 12, 10, n, tag, avx));
+      FillZero(plain);
+      CheckUtf8(ctxt.FullDecryptAndVerify(key, 128, @hex32, @hex32,
+        @cipher, @plain, @tag, 12, 10, n, 16, avx),
+        'trunc aad n=% avx=%', [n, avx]);
+      Check(CompareMem(@buf, @plain, n));
+    end;
 end;
 
 {$ifndef PUREMORMOT2}
@@ -4423,7 +4531,8 @@ begin
     check(not c2.IsSelfSigned, 'csr self2');
     CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey, 'csr auth2');
   end;
-  NotifyTestSpeed('% %', [c2.Instance, crt.AlgoName], 1, 0, @timer, {onlylog=}true);
+  if c2 <> nil then // may be nil if the key generation failed above
+    NotifyTestSpeed('% %', [c2.Instance, crt.AlgoName], 1, 0, @timer, {onlylog=}true);
 end;
 
 procedure TTestCoreCrypto.CatalogRunStore(Context: TObject);
@@ -5797,7 +5906,7 @@ begin
     CheckEqual(x.Extension[xeAuthorityKeyIdentifier],
       '14:2e:b3:17:b7:58:56:cb:ae:50:09:40:e6:1f:af:9d:8b:14:c2:c6');
     CheckEqual(x.Extension[xeAuthorityInformationAccess],
-      'ocsp=http://r3.o.lencr.org,caIssuers=http://r3.i.lencr.org/');
+      'ocsp=(http://r3.o.lencr.org) caIssuers=(http://r3.i.lencr.org/)');
     if Check(x.Signed.CaIssuers <> nil) then
       CheckEqual(x.Signed.CaIssuers[0], 'http://r3.i.lencr.org/');
     if Check(x.Signed.Ocsp <> nil) then
@@ -5846,9 +5955,11 @@ begin
         cuCrlSign, cuTlsServer, cuTlsClient]);
       Check(a.Signed.ExtensionOther = nil);
       CheckEqual(a.Extension[xeAuthorityInformationAccess],
-        'caIssuers=http://x1.i.lencr.org/');
+        'caIssuers=(http://x1.i.lencr.org/)');
       CheckEqual(a.Extension[xeCertificatePolicies],
         '2.23.140.1.2.1,1.3.6.1.4.1.44947.1.1.1');
+      CheckEqual(a.Extension[xeCrlDistributionPoints],
+        'http://x1.c.lencr.org/');
       for i := 1 to 1000 do // will use TX509.fLastVerifyAuthPublicKey cache
         Check(x.Verify(a, [], _synopse_date) = cvValidSigned, 'verify 1000');
       bin := x.Signed.ToDer;
@@ -5976,8 +6087,8 @@ begin
     Check(c[cu].Verify(cint) = cvValidSigned);
   end;
   SetLength(chain, 3); // create an unordered chain - should be consolidated
-  chain[1] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint1', cint);
-  chain[2] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint2', chain[1]);
+  chain[1] := ca.CertAlgo.Generate([cuCA, cuKeyCertSign], 'cint1', cint); // cA mandatory
+  chain[2] := ca.CertAlgo.Generate([cuCA], 'cint2', chain[1]); // no KeyUsage = OK
   chain[0] := ca.CertAlgo.Generate([cuTlsClient], 'www.toto.com', chain[2]);
   // validate a X.509 CRL generation and signature with a temporay authority
   crl := TX509Crl.Create;

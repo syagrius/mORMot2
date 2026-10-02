@@ -62,7 +62,6 @@ uses
 
 
 
-
 { ************ TOrm TOrmModel TOrmTable IRestOrm Core Definitions }
 
 // most types are defined as a single "type" statement due to classes coupling
@@ -2848,10 +2847,10 @@ type
   public
     /// ensure the current thread will be taken into account during process
     // - this abstract method won't do anything, but overriden versions may
-    procedure BeginCurrentThread(Sender: TThread); virtual;
+    procedure BeginCurrentThread(Sender: TThreadAbstract); virtual;
     /// called when thread is finished to ensure
     // - this abstract method won't do anything, but overriden versions may
-    procedure EndCurrentThread(Sender: TThread); virtual;
+    procedure EndCurrentThread(Sender: TThreadAbstract); virtual;
   end;
 
 
@@ -4960,7 +4959,7 @@ type
   // - you may inherit from this class to ensure any text field will use the
   // faster and SQLite3 built-in NOCASE collation, handling only 7-bit A-Z chars
   // - inherit from TOrmNoCase or TOrmCaseSensitive if you expect
-  // your text fields to contain only basic (un)accentued ASCCI characters, and
+  // your text fields to contain only basic (un)accentued ASCII characters, and
   // to be opened by any standard/ SQLite3 library or tool (outside of
   // mormot.db.raw.sqlite3.pas/SynDBExplorer)
   TOrmNoCase = class(TOrm)
@@ -4978,7 +4977,7 @@ type
   // - you may inherit from this class to ensure any text field will use the
   // faster and SQLite3 built-in BINARY collation, which is case-sensitive
   // - inherit from TOrmNoCase or TOrmCaseSensitive if you expect
-  // your text fields to contain only basic (un)accentued ASCCI characters, and
+  // your text fields to contain only basic (un)accentued ASCII characters, and
   // to be opened by any standard/ SQLite3 library or tool (outside of
   // mormot.db.raw.sqlite3.pas/SynDBExplorer)
   TOrmCaseSensitive = class(TOrm)
@@ -4996,7 +4995,7 @@ type
   // - you may inherit from this class to ensure any text field will use our
   // Utf8ILCompReference() function which handles Unicode 10.0
   // - inherit from TOrmNoCase or TOrmCaseSensitive if you expect
-  // your text fields to contain only basic (un)accentued ASCCI characters, and
+  // your text fields to contain only basic (un)accentued ASCII characters, and
   // to be opened by any standard/ SQLite3 library or tool (outside of
   // mormot.db.raw.sqlite3.pas/SynDBExplorer)
   TOrmUnicodeNoCase = class(TOrm)
@@ -7423,10 +7422,6 @@ begin
   end;
 end;
 
-{$ifdef ISDELPHI20062007} // circumvent a Delphi 2007 compiler paranoid warning
-  {$warnings off}
-{$endif ISDELPHI20062007}
-
 class function TOrm.GetSqlCreate(aModel: TOrmModel): RawUtf8;
 // not implemented in TOrmProperties since has been made virtual
 var
@@ -7541,21 +7536,16 @@ begin
       for i := 0 to fields.Count - 1 do
         with fields.List[i] do
         begin
-          SQL := OrmFieldTypeToSql(i); // = '' for field with no matching DB column
-          if SQL <> '' then
-          begin
-            Append(result, Name, SQL);
-            if FieldBitGet(IsUniqueFieldsBits, i) then
-              insert(' UNIQUE', result, length(result) - 1);
-          end;
+          SQL := OrmFieldTypeToSql(i);
+          if SQL = '' then
+            continue; // field with no matching DB column
+          Append(result, Name, SQL);
+          if FieldBitGet(IsUniqueFieldsBits, i) then
+            insert(' UNIQUE', result, length(result) - 1);
         end;
     PWord(@result[length(result) - 1])^ := ord(')') + ord(';') shl 8;
   end;
 end;
-
-{$ifdef ISDELPHI20062007} // circumvent a Delphi 2007 compiler paranoid warning
-  {$warnings on}
-{$endif ISDELPHI20062007}
 
 function TOrm.GetSqlSet: RawUtf8;
 var
@@ -7903,10 +7893,6 @@ begin
       '%.CreateAndFillPrepareMany(): FillPrepareMany() failure', [self]);
 end;
 
-{$ifdef ISDELPHI20062007}
-  {$warnings off} // avoid paranoid Delphi 2007 warning
-{$endif ISDELPHI20062007}
-
 procedure TOrm.EnginePrepareMany(const aClient: IRestOrm;
   const aFormatSQLJoin: RawUtf8; const aParamsSQLJoin, aBoundsSQLJoin: array of const;
   out ObjectsClass: TOrmClassDynArray; out SQL, Json: RawUtf8);
@@ -8152,10 +8138,6 @@ begin
       with SqlFields[i] do
         fFill.AddMap(Instance, prop, i);
 end;
-
-{$ifdef ISDELPHI20062007}
-  {$warnings on} // avoid paranoid Delphi 2007 warning
-{$endif ISDELPHI20062007}
 
 function TOrm.FillPrepareMany(const aClient: IRestOrm;
   const aFormatSQLJoin: RawUtf8;
@@ -8841,12 +8823,12 @@ end;
 
 { TRestOrmParent }
 
-procedure TRestOrmParent.BeginCurrentThread(Sender: TThread);
+procedure TRestOrmParent.BeginCurrentThread(Sender: TThreadAbstract);
 begin
   // nothing do to at this level -> see e.g. TRestOrmServer.BeginCurrentThread
 end;
 
-procedure TRestOrmParent.EndCurrentThread(Sender: TThread);
+procedure TRestOrmParent.EndCurrentThread(Sender: TThreadAbstract);
 begin
   // nothing do to at this level -> see e.g. TRestOrmServer.EndCurrentThread
 end;
@@ -9692,7 +9674,7 @@ begin
   fSortedTablesNameIndex[aIndex] := aIndex;
   fields := Props.Props.Fields;
   for f := 0 to fields.Count - 1 do
-    case fields.List[f].OrmFieldType of
+    {%H-}case fields.List[f].OrmFieldType of
       oftRecord:
         RegisterTableForRecordReference(fields.List[f], Table); // Table not used
       oftID:
@@ -10551,7 +10533,7 @@ var
   f: PtrInt;
   expected: TOrmFieldType;
 begin
-  case Value of // validates virtual table fields expectations
+  {%H-}case Value of // validates virtual table fields expectations
     ovkFts3,
     ovkFts4,
     ovkFts5:
@@ -11537,7 +11519,7 @@ begin
   Encode(POrmClass(Value)^, encoding, @fields);
   if SendData then
   begin
-    case encoding of
+    {%H-}case encoding of
       encPost:
         begin
           SetExpandedJsonWriter(props, not fPreviousTableMatch, ForceID, fields);
